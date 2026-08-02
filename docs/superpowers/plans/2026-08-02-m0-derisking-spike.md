@@ -159,9 +159,14 @@ export default defineConfig({
 `spike/public/_headers`:
 
 ```
+/
+  Cache-Control: no-store, must-revalidate
+
 /index.html
   Cache-Control: no-store, must-revalidate
 ```
+
+Both paths are needed: `_headers` rules match the **request path**, and Telegram opens the Mini App at the bare root `/`. A rule on `/index.html` alone never fires on the request that matters. `/assets/*` is deliberately left cacheable — those filenames are content-hashed.
 
 `spike/index.html`:
 
@@ -203,7 +208,7 @@ export default defineConfig({
 
 ```ts
 import { describe, it, expect, afterEach } from 'vitest'
-import { atLeast, platformName, stableHeight, contentSafeAreaTop } from '../src/telegram'
+import { boot, atLeast, platformName, stableHeight, contentSafeAreaTop } from '../src/telegram'
 
 function install(webApp: unknown): void {
   ;(globalThis as Record<string, unknown>).Telegram = { WebApp: webApp }
@@ -252,7 +257,61 @@ describe('telegram adapter', () => {
     expect(contentSafeAreaTop()).toBe(0)
   })
 })
+
+describe('boot', () => {
+  function spyWebApp(version: string): string[] {
+    const calls: string[] = []
+    const rec = (name: string) => () => { calls.push(name) }
+    install({
+      isVersionAtLeast: (v: string) => parseFloat(v) <= parseFloat(version),
+      ready: rec('ready'),
+      expand: rec('expand'),
+      disableVerticalSwipes: rec('disableVerticalSwipes'),
+      requestFullscreen: rec('requestFullscreen'),
+      lockOrientation: rec('lockOrientation'),
+    })
+    return calls
+  }
+
+  it('calls ready, expand, swipes, fullscreen, lock in exact order on a modern client', () => {
+    const calls = spyWebApp('8.0')
+    boot()
+    expect(calls).toEqual(['ready', 'expand', 'disableVerticalSwipes', 'requestFullscreen', 'lockOrientation'])
+  })
+
+  it('gates disableVerticalSwipes behind 7.7', () => {
+    const calls = spyWebApp('7.6')
+    boot()
+    expect(calls).toEqual(['ready', 'expand'])
+  })
+
+  it('skips fullscreen and orientation lock below 8.0', () => {
+    const calls = spyWebApp('7.7')
+    boot()
+    expect(calls).toEqual(['ready', 'expand', 'disableVerticalSwipes'])
+  })
+
+  it('continues booting when a lifecycle method throws', () => {
+    const calls: string[] = []
+    install({
+      isVersionAtLeast: () => true,
+      ready: () => { calls.push('ready') },
+      expand: () => { throw new Error('unsupported on this client') },
+      disableVerticalSwipes: () => { calls.push('disableVerticalSwipes') },
+      requestFullscreen: () => { calls.push('requestFullscreen') },
+      lockOrientation: () => { calls.push('lockOrientation') },
+    })
+    expect(() => boot()).not.toThrow()
+    expect(calls).toEqual(['ready', 'disableVerticalSwipes', 'requestFullscreen', 'lockOrientation'])
+  })
+
+  it('is a no-op outside Telegram', () => {
+    expect(() => boot()).not.toThrow()
+  })
+})
 ```
+
+`boot()` is the exact, load-bearing Telegram sequence and Tasks 5-7 size a canvas on top of it. Testing only the pure accessors would let a reordering regression surface as a mystery layout bug on a phone instead of a red test.
 
 - [ ] **Step 4: Run the test to verify it fails**
 
@@ -349,7 +408,7 @@ export function boot(): void {
 - [ ] **Step 6: Run the test to verify it passes**
 
 Run: `pnpm test`
-Expected: PASS, 8 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 7: Write the Worker and entry point**
 
