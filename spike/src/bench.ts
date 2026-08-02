@@ -16,9 +16,13 @@ export interface BenchResult {
   tilePx: number
   frame: Stats
   draw: Stats
-  /** Per-draw cost from a batched pass with a forced GPU sync. Resolvable
+  /** Median per-draw cost across DRAW_BATCH_SAMPLES batched passes. Resolvable
    *  where the per-frame `draw` percentiles are not: see DRAW_BATCH. */
   drawBatchMs: number
+  /** Min and max of those passes. A wide spread means a stall landed in one
+   *  of them and the median should be treated with suspicion. */
+  drawBatchMinMs: number
+  drawBatchMaxMs: number
 }
 
 const CONFIGS: readonly BenchConfig[] = [
@@ -34,6 +38,7 @@ const GRID_H = 40
 const WARMUP_FRAMES = 30
 const MEASURE_FRAMES = 180
 const DRAW_BATCH = 20
+const DRAW_BATCH_SAMPLES = 3
 const SPRITE_COLORS = ['#f2b544', '#e5544f', '#54b8e5', '#4a6fa8', '#5cc47f']
 
 function nextFrame(): Promise<number> {
@@ -116,12 +121,22 @@ export async function runBenchSuite(
     // than the cost of merely enqueuing commands. Sprites deliberately do not
     // move between iterations: this measures draw cost, not simulation, and
     // holding them still keeps the batch identical to the per-frame work.
-    const b0 = performance.now()
-    for (let k = 0; k < DRAW_BATCH; k++) {
-      drawFrame(ctx, baked, cfg.baked, atlas, masks, tilePx, sprites, cssW, cssH)
+    //
+    // Three batched samples, median reported. A single sample has no way to
+    // reveal a GC pause or thermal stall landing inside its ~20 ms window, and
+    // collecting more data costs a physical device round trip. The median of
+    // three discards one outlier outright, which a mean would not.
+    const batches: number[] = []
+    for (let s = 0; s < DRAW_BATCH_SAMPLES; s++) {
+      const b0 = performance.now()
+      for (let k = 0; k < DRAW_BATCH; k++) {
+        drawFrame(ctx, baked, cfg.baked, atlas, masks, tilePx, sprites, cssW, cssH)
+      }
+      ctx.getImageData(0, 0, 1, 1)
+      batches.push((performance.now() - b0) / DRAW_BATCH)
     }
-    ctx.getImageData(0, 0, 1, 1)
-    const drawBatchMs = (performance.now() - b0) / DRAW_BATCH
+    batches.sort((a, b) => a - b)
+    const drawBatchMs = batches[1] as number
 
     results.push({
       sprites: cfg.sprites,
@@ -133,6 +148,8 @@ export async function runBenchSuite(
       frame: frame.stats(),
       draw: draw.stats(),
       drawBatchMs,
+      drawBatchMinMs: batches[0] as number,
+      drawBatchMaxMs: batches[batches.length - 1] as number,
     })
   }
 
