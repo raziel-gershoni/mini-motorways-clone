@@ -334,7 +334,7 @@ export * from './constants'
 - [ ] **Step 5: Run the test to verify it passes**
 
 Run: `pnpm --filter @laneways/shared test`
-Expected: PASS, 8 tests.
+Expected: PASS, 9 tests.
 
 - [ ] **Step 6: Commit**
 
