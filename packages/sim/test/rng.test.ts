@@ -46,12 +46,28 @@ describe('nextRandom', () => {
 
   it('restores its sequence when the state is restored', () => {
     const s = store(777)
-    const first = [nextRandom(s, 0), nextRandom(s, 0), nextRandom(s, 0)]
+    // Advance off the initial state first, so what is saved and restored is a
+    // mid-stream position rather than the seed.
+    for (let i = 0; i < 3; i++) nextRandom(s, 0)
     const saved = s[0] as number
     const afterSave = [nextRandom(s, 0), nextRandom(s, 0)]
     s[0] = saved
     expect([nextRandom(s, 0), nextRandom(s, 0)]).toEqual(afterSave)
-    expect(first).toHaveLength(3)
+  })
+
+  it('throws on an index outside the store rather than returning 0 forever', () => {
+    // `store[i]` out of range is undefined, undefined + 0x6d2b79f5 is NaN, and
+    // NaN | 0 is 0 — so without the guard the stream returns 0 for every
+    // subsequent call, silently, and presents as a balance mystery.
+    const s = store(1)
+    expect(() => nextRandom(s, 1)).toThrow(RangeError)
+    expect(() => nextRandom(s, 1)).toThrow(/stream index 1 out of range \(length 1\)/)
+    expect(() => nextRandom(s, -1)).toThrow(RangeError)
+    expect(() => nextRandom(new Uint32Array(2), 2)).toThrow(RangeError)
+  })
+
+  it('throws on a non-integer index, which fails the same way', () => {
+    expect(() => nextRandom(new Uint32Array(4), 1.5)).toThrow(RangeError)
   })
 
   it('always returns a uint32', () => {
@@ -101,7 +117,7 @@ describe('randomBelow', () => {
     //   B = 0xA0000000, r = 2^32 - B = 0x60000000
     // Uniform over [0, B):        P(x < r) = r/B      = 0.60
     // Naive `next() % B`:         P(x < r) = 2r/2^32  = 0.75
-    // ~40 standard errors apart at N = 20000, so this cannot pass by chance.
+    // ~43 standard errors apart at N = 20000, so this cannot pass by chance.
     // The earlier version of this test used bound = 3, where 2^32 % 3 = 1 and
     // the bias touches one value in 4.29 billion — undetectable, and therefore
     // decorative. Do not lower this bound.

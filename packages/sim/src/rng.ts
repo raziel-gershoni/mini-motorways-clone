@@ -22,8 +22,20 @@ export function seedFromString(s: string): number {
   return (h ^ (h >>> 16)) >>> 0
 }
 
-/** Advances the stream at `store[i]` and returns the next uint32. */
+/**
+ * Advances the stream at `store[i]` and returns the next uint32.
+ *
+ * The bounds check is not defensive padding. Without it an out-of-range index
+ * reads `undefined`, `undefined + 0x6d2b79f5` is `NaN`, `NaN | 0` is `0`, and
+ * the stream returns 0 forever — `randomBelow` with it. A permanently dead
+ * generator presents as a balance mystery, never as a crash, and M1c wires
+ * several streams by hand-computed index. A non-integer index fails the same
+ * way, so it is rejected here too.
+ */
 export function nextRandom(store: Uint32Array, i: number): number {
+  if (!Number.isInteger(i) || i < 0 || i >= store.length) {
+    throw new RangeError(`nextRandom: stream index ${i} out of range (length ${store.length})`)
+  }
   let t = (store[i] = (((store[i] as number) + 0x6d2b79f5) | 0) >>> 0)
   t = Math.imul(t ^ (t >>> 15), t | 1)
   t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
