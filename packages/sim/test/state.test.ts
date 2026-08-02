@@ -56,6 +56,32 @@ describe('snapshot and restore', () => {
     const c = restore(snapshot(b))
     expect(hashState(c)).toBe(hashState(a))
   })
+
+  it('does not alias — two restores from one snapshot are independent', () => {
+    const s = createState('alias')
+    s.header[H_TICK] = 100
+    const snap = snapshot(s)
+    const a = restore(snap)
+    const b = restore(snap)
+    a.header[H_TICK] = 999
+    expect(b.header[H_TICK]).toBe(100)
+    expect(hashState(b)).not.toBe(hashState(a))
+  })
+
+  it('can restore the same snapshot again after the first restore diverges', () => {
+    // The rollback case the single-buffer design exists for: checkpoint, play
+    // forward, roll back to the same checkpoint. If restore aliased its input,
+    // the second rollback would return the mutated state rather than the
+    // checkpoint, and the run would continue from a position that never
+    // existed — showing up later as an unreproducible replay divergence.
+    const s = createState('rollback')
+    s.header[H_TICK] = 50
+    const checkpoint = snapshot(s)
+    const first = restore(checkpoint)
+    first.header[H_TICK] = 5000
+    const second = restore(checkpoint)
+    expect(second.header[H_TICK]).toBe(50)
+  })
 })
 
 describe('hashState', () => {

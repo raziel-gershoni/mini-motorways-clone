@@ -16,8 +16,7 @@ import { hashBytes } from './hash'
 export const H_TICK = 0
 export const H_SCORE = 1
 export const H_WEEK = 2
-export const H_RNG_DRAWS = 3
-export const HEADER_LENGTH = 4
+export const HEADER_LENGTH = 3
 
 const RNG_LENGTH = 1
 const RNG_BYTES = RNG_LENGTH * 4
