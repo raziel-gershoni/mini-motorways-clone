@@ -10,17 +10,16 @@ import {
   PIN_CAP_SQUARE_TIMER, PIN_CAP_SQUARE_HARD, PIN_CAP_CIRCLE_TIMER, PIN_CAP_CIRCLE_HARD,
   GRID_W, GRID_H, GROUP_COUNT_DEFAULT, CARS_PER_HOUSE, MOTORWAY_CAP,
 } from '../src/index'
+import * as C from '../src/index'
 
-const ALL: Record<string, number> = {
-  DENOM, TICKS_PER_SECOND, SECONDS_PER_WEEK, DAYS_PER_WEEK,
-  TICKS_PER_WEEK, TICKS_PER_DAY, ORTHO_COST, DIAG_COST,
-  LANE_SPEED_DEFAULT, MOTORWAY_SPEED_MAX, ROUNDABOUT_SPEED_MUL,
-  RIGHT_ANGLE_SPEED_MUL, INTERSECTION_SPEED_MUL, SHARP_TURN_SPEED_MUL,
-  MAX_OVERCROWD_TIME_MS, OVERCROWD_RAMP, OVERCROWD_RETURN_MUL,
-  ARRIVAL_KNOCKBACK_PCT, ARRIVAL_KNOCKBACK_MAX_MS, OVERCROWD_GRACE_MS,
-  PIN_CAP_SQUARE_TIMER, PIN_CAP_SQUARE_HARD, PIN_CAP_CIRCLE_TIMER, PIN_CAP_CIRCLE_HARD,
-  GRID_W, GRID_H, GROUP_COUNT_DEFAULT, CARS_PER_HOUSE, MOTORWAY_CAP,
-}
+/**
+ * Derived from the module's real exports, not hand-listed. A hand-maintained
+ * registry only checks the constants somebody remembered to add; this cannot
+ * fall behind the source.
+ */
+const ALL: Record<string, number> = Object.fromEntries(
+  Object.entries(C).filter(([, v]) => typeof v === 'number'),
+) as Record<string, number>
 
 describe('rule constants', () => {
   it('are every one an integer', () => {
@@ -33,6 +32,13 @@ describe('rule constants', () => {
     for (const [name, v] of Object.entries(ALL)) {
       expect(Number.isFinite(v), `${name} is not finite`).toBe(true)
       expect(v, `${name} is negative`).toBeGreaterThanOrEqual(0)
+    }
+  })
+
+  it('checks every numeric export, not a hand-picked subset', () => {
+    expect(Object.keys(ALL).length).toBeGreaterThanOrEqual(29)
+    for (const name of ['DENOM', 'GRID_W', 'OVERCROWD_RAMP', 'MOTORWAY_CAP']) {
+      expect(Object.keys(ALL)).toContain(name)
     }
   })
 
@@ -86,5 +92,32 @@ describe('rule constants', () => {
     expect(GROUP_COUNT_DEFAULT).toBe(5)
     expect(CARS_PER_HOUSE).toBe(2)
     expect(MOTORWAY_CAP).toBe(9)
+  })
+
+  it('encodes the failure constants at the right scale', () => {
+    // Spec §5.8. MAX_OVERCROWD_TIME_MS is the spec's bare "90" read as seconds
+    // and converted to ms; OVERCROWD_RAMP and OVERCROWD_RETURN_MUL are ratios
+    // scaled by DENOM; ARRIVAL_KNOCKBACK_PCT is 10% expressed the same way.
+    expect(MAX_OVERCROWD_TIME_MS).toBe(90000)
+    expect(OVERCROWD_RAMP).toBe(20)
+    expect(OVERCROWD_RETURN_MUL).toBe(2000)
+    expect(ARRIVAL_KNOCKBACK_PCT).toBe(100)
+    expect(ARRIVAL_KNOCKBACK_MAX_MS).toBe(3000)
+    expect(OVERCROWD_GRACE_MS).toBe(2000)
+  })
+
+  it('keeps the overcrowd ramp consistent with the derived time-to-death', () => {
+    // Spec §5.8 works this through: timer speed s(t) = min(1, ramp*t), so with
+    // zero arrivals the meter fills in 115 s — 50 s ramping up while
+    // accumulating 25 of the 90, then 65 s at full rate. This asserts the two
+    // constants still produce that, so a change to either is caught here rather
+    // than discovered as a balance mystery.
+    const ramp = OVERCROWD_RAMP / DENOM       // test-only: reading the scaled value
+    const rampSeconds = 1 / ramp              // time to reach full speed
+    const accruedWhileRamping = (rampSeconds * 1) / 2
+    const remaining = MAX_OVERCROWD_TIME_MS / 1000 - accruedWhileRamping
+    expect(rampSeconds).toBeCloseTo(50, 6)
+    expect(accruedWhileRamping).toBeCloseTo(25, 6)
+    expect(rampSeconds + remaining).toBeCloseTo(115, 6)
   })
 })

@@ -5,7 +5,7 @@
  */
 export const DENOM = 1000
 
-// --- Clock (spec §5.10) ---
+// --- Clock (spec §3 decision 10, §5.10) ---
 export const TICKS_PER_SECOND = 30
 export const SECONDS_PER_WEEK = 150
 export const DAYS_PER_WEEK = 7
@@ -36,6 +36,12 @@ export const INTERSECTION_SPEED_MUL = 500
 export const SHARP_TURN_SPEED_MUL = 333
 
 // --- Failure (spec §5.8) ---
+/**
+ * The spec states this as a bare "90" — a threshold on the integrated
+ * overcrowd meter, in seconds-equivalent, not a duration by itself. Stored
+ * here already converted to ms so downstream code never multiplies by 1000
+ * at the call site and risks doing it twice, or not at all.
+ */
 export const MAX_OVERCROWD_TIME_MS = 90000
 export const OVERCROWD_RAMP = 20          // 0.02 x DENOM
 export const OVERCROWD_RETURN_MUL = 2000  // 2.0 x DENOM
@@ -49,7 +55,7 @@ export const PIN_CAP_SQUARE_HARD = 10
 export const PIN_CAP_CIRCLE_TIMER = 8
 export const PIN_CAP_CIRCLE_HARD = 14
 
-// --- Board and agents (spec §3, §5.1, §5.2, §5.7) ---
+// --- Board and agents (spec §2.2, §3, §5.1, §5.2, §5.7) ---
 export const GRID_W = 24
 export const GRID_H = 40
 export const GROUP_COUNT_DEFAULT = 5
