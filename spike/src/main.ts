@@ -3,6 +3,7 @@ import { collectDeviceInfo } from './deviceInfo'
 import { show, status, submit } from './report'
 import { runBenchSuite } from './bench'
 import { probeFlowFields } from './flowfield'
+import { runProbe } from './storageProbe'
 
 boot()
 
@@ -11,6 +12,10 @@ if (app) app.textContent = ''
 
 const device = collectDeviceInfo()
 show('device', device)
+
+const storage = runProbe(window.localStorage, Date.now())
+show('storage', storage)
+void submit({ kind: 'storage', device, storage })
 
 const canvas = document.createElement('canvas')
 // Reserve the top band: Telegram's header stays drag-to-dismiss and its close
