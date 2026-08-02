@@ -1789,7 +1789,9 @@ import { runProbe, makePayload, PROBE_KEY, PAYLOAD_BYTES, type KVLike } from '..
 class MemStore implements KVLike {
   readonly map = new Map<string, string>()
   failWrites = false
+  failReads = false
   getItem(k: string): string | null {
+    if (this.failReads) throw new Error('SecurityError')
     return this.map.get(k) ?? null
   }
   setItem(k: string, v: string): void {
@@ -1941,11 +1943,21 @@ function parse(raw: string | null): Record_ | null {
 
 /**
  * Call once per launch. Returns whether a prior launch's data survived.
- * Never throws — a storage backend that rejects writes reports writeFailed.
+ *
+ * Never throws. Both the read and the write are guarded: restricted-storage
+ * WebViews can throw on getItem as well as setItem, and a probe that crashes
+ * on the exact configuration it exists to detect reports nothing at all.
  */
 export function runProbe(store: KVLike, nowMs: number): ProbeResult {
   const expected = makePayload(PAYLOAD_BYTES)
-  const prior = parse(store.getItem(PROBE_KEY))
+
+  let raw: string | null = null
+  try {
+    raw = store.getItem(PROBE_KEY)
+  } catch {
+    // Storage access restricted. Treat exactly as "no prior record".
+  }
+  const prior = parse(raw)
 
   const survived = prior !== null
   const payloadIntact = prior === null ? true : prior.payload === expected
@@ -1973,7 +1985,7 @@ export function runProbe(store: KVLike, nowMs: number): ProbeResult {
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `pnpm test storageProbe`
-Expected: PASS, 11 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 5: Run the whole suite**
 
@@ -1991,10 +2003,23 @@ import { runProbe } from './storageProbe'
 and immediately after `show('device', device)`:
 
 ```ts
-const storage = runProbe(window.localStorage, Date.now())
+// window.localStorage property access itself throws SecurityError when storage
+// is blocked — before any method is called. Unguarded, that aborts the whole
+// module and costs us the render benchmark too.
+let store: KVLike | null = null
+try {
+  store = window.localStorage
+} catch {
+  store = null
+}
+const storage = store
+  ? runProbe(store, Date.now())
+  : { unavailable: true as const }
 show('storage', storage)
 void submit({ kind: 'storage', device, storage })
 ```
+
+`{ unavailable: true }` is deliberately a different shape from a `ProbeResult`. "Storage is entirely inaccessible" is a real and interesting M0 result, and it must never be confusable with "storage worked and nothing survived."
 
 - [ ] **Step 7: Commit**
 
