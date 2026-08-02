@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { runProbe, makePayload, PROBE_KEY, PAYLOAD_BYTES, type KVLike } from '../src/storageProbe'
+import { runProbe, checkFreshContext, makePayload, PROBE_KEY, PAYLOAD_BYTES, type KVLike } from '../src/storageProbe'
 
 class MemStore implements KVLike {
   readonly map = new Map<string, string>()
@@ -109,5 +109,33 @@ describe('runProbe', () => {
     const r = runProbe(s, 1000)
     expect(r.survived).toBe(false)
     expect(r.launches).toBe(1)
+  })
+})
+
+describe('checkFreshContext', () => {
+  it('reports a fresh context on first call', () => {
+    expect(checkFreshContext(new MemStore())).toBe('yes')
+  })
+
+  it('reports a reused context on the second call against the same store', () => {
+    const s = new MemStore()
+    checkFreshContext(s)
+    expect(checkFreshContext(s)).toBe('no')
+  })
+
+  it('reports unavailable when there is no store', () => {
+    expect(checkFreshContext(null)).toBe('unavailable')
+  })
+
+  it('reports unavailable when the store throws on read', () => {
+    const s = new MemStore()
+    s.failReads = true
+    expect(checkFreshContext(s)).toBe('unavailable')
+  })
+
+  it('reports unavailable when the store throws on write', () => {
+    const s = new MemStore()
+    s.failWrites = true
+    expect(checkFreshContext(s)).toBe('unavailable')
   })
 })

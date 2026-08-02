@@ -57,6 +57,9 @@ export async function runBenchSuite(
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
   const tilePx = Math.floor(Math.min(cssW / GRID_W, cssH / GRID_H))
+  // A 0px tile makes drawImage from a 0x0 atlas tile throw an opaque
+  // InvalidStateError; fail with something a reader can act on instead.
+  if (tilePx < 1) throw new Error(`bench: canvas too small for a ${GRID_W}x${GRID_H} grid (${cssW}x${cssH})`)
   const masks = randomRoadMasks(GRID_W * GRID_H, 1234)
   const atlas = buildRoadAtlas(tilePx, dpr, '#f4f2ee')
 

@@ -47,22 +47,23 @@ export function buildRoadAtlas(tilePx: number, dpr: number, road: string): HTMLC
     c.width = px
     c.height = px
     const g = c.getContext('2d')
-    if (g) {
-      g.scale(dpr, dpr)
-      g.strokeStyle = road
-      g.lineWidth = tilePx * 0.6
-      g.lineCap = 'round'
-      g.lineJoin = 'round'
-      const half = tilePx / 2
-      const dirs = dirsOf(mask)
-      if (dirs.length > 0) {
-        g.beginPath()
-        for (const [dx, dy] of dirs) {
-          g.moveTo(half, half)
-          g.lineTo(half + dx * half, half + dy * half)
-        }
-        g.stroke()
+    // A blank atlas would make the per-frame road config report a fast,
+    // meaningless number, and silently blanks the baked layer built from it.
+    if (!g) throw new Error(`roadAtlas: no 2d context for mask ${mask}`)
+    g.scale(dpr, dpr)
+    g.strokeStyle = road
+    g.lineWidth = tilePx * 0.6
+    g.lineCap = 'round'
+    g.lineJoin = 'round'
+    const half = tilePx / 2
+    const dirs = dirsOf(mask)
+    if (dirs.length > 0) {
+      g.beginPath()
+      for (const [dx, dy] of dirs) {
+        g.moveTo(half, half)
+        g.lineTo(half + dx * half, half + dy * half)
       }
+      g.stroke()
     }
     atlas[mask] = c
   }

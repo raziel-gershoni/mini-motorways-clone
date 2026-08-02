@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { performanceClass } from '../src/deviceInfo'
+import { performanceClass, timerGranularityMs } from '../src/deviceInfo'
 
 const TELEGRAM_ANDROID_UA =
   'Mozilla/5.0 (Linux; Android 11; Redmi Note 8) AppleWebKit/537.36 (KHTML, like Gecko) ' +
@@ -35,5 +35,18 @@ describe('performanceClass', () => {
 
   it('does not match the words inside unrelated tokens', () => {
     expect(performanceClass('Mozilla/5.0 SLOWPOKE/1.0 HIGHLANDER/2')).toBeNull()
+  })
+})
+
+describe('timerGranularityMs', () => {
+  it('returns a positive granularity or -1 when it cannot be measured', () => {
+    const g = timerGranularityMs()
+    expect(g === -1 || g > 0).toBe(true)
+  })
+
+  it('completes well within its time bound', () => {
+    const t0 = performance.now()
+    timerGranularityMs()
+    expect(performance.now() - t0).toBeLessThan(200)
   })
 })

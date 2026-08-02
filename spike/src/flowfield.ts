@@ -108,15 +108,25 @@ export function computeFlowField(
 }
 
 /**
- * Measures a realistic per-tick pathfinding load: five colour fields over a
- * 24x40 grid, exactly as the production sim would rebuild them on a dirty tick.
- * Returns per-full-rebuild timings in milliseconds.
+ * Times a realistic per-tick pathfinding load: five colour fields over a 24x40
+ * grid, exactly as the production sim would rebuild them on a dirty tick.
+ *
+ * Each sample times REPEAT full rebuilds and divides. One rebuild is ~0.2-0.7 ms,
+ * which is at or below the timer granularity of some WebViews (WebKit commonly
+ * clamps performance.now() to 1 ms) — timing one at a time would record
+ * quantization noise, not a measurement. Batching lifts each sample well above
+ * any plausible clock floor. The discarded warmup batches keep JIT compilation
+ * out of the reported tail.
+ *
+ * Returns milliseconds per single 5-colour rebuild.
  */
-export function probeFlowFields(iterations: number): Stats {
+export function probeFlowFields(samples: number): Stats {
   const W = 24
   const H = 40
   const cells = W * H
   const COLOURS = 5
+  const REPEAT = 50
+  const WARMUP_BATCHES = 3
 
   const passable = new Uint8Array(cells).fill(1)
   // Scatter some impassable terrain so the search is not trivially uniform.
@@ -128,13 +138,16 @@ export function probeFlowFields(iterations: number): Stats {
     [3 + c * 7, cells - 40 - c * 11, (cells >> 1) + c * 5].filter((s) => passable[s] === 1),
   )
 
-  const sampler = new Sampler(iterations)
-  for (let it = 0; it < iterations; it++) {
+  const sampler = new Sampler(samples)
+  for (let b = 0; b < WARMUP_BATCHES + samples; b++) {
     const t0 = performance.now()
-    for (let c = 0; c < COLOURS; c++) {
-      computeFlowField(W, H, passable, sources[c] as number[], fields[c] as FlowField, scratch)
+    for (let r = 0; r < REPEAT; r++) {
+      for (let c = 0; c < COLOURS; c++) {
+        computeFlowField(W, H, passable, sources[c] as number[], fields[c] as FlowField, scratch)
+      }
     }
-    sampler.push(performance.now() - t0)
+    const perRebuild = (performance.now() - t0) / REPEAT
+    if (b >= WARMUP_BATCHES) sampler.push(perRebuild)
   }
   return sampler.stats()
 }

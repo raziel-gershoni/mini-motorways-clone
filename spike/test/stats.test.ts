@@ -62,4 +62,14 @@ describe('Sampler', () => {
     s.reset()
     expect(s.length).toBe(0)
   })
+
+  it('ignores the unfilled tail of its buffer', () => {
+    const s = new Sampler(5)
+    s.push(10)
+    s.push(20)
+    const st = s.stats()
+    expect(st.count).toBe(2)
+    expect(st.mean).toBe(15)
+    expect(st.max).toBe(20)
+  })
 })

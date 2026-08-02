@@ -1,7 +1,7 @@
 {
   "name": "laneways-spike",
   "main": "worker/index.ts",
-  "compatibility_date": "2026-08-02",
+  "compatibility_date": "2026-07-30",
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS"

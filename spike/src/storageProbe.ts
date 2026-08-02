@@ -1,9 +1,30 @@
 export const PROBE_KEY = 'laneways.m0.probe'
+export const CONTEXT_KEY = 'laneways.m0.context'
 export const PAYLOAD_BYTES = 4096
 
 export interface KVLike {
   getItem(key: string): string | null
   setItem(key: string, value: string): void
+}
+
+/**
+ * 'yes'  — this is a brand-new browsing context. Combined with survived:true it
+ *          proves prior-session data was read from disk, which is the reading
+ *          the crash-safety architecture actually depends on.
+ * 'no'   — the WebView was reused. survived:true here proves nothing.
+ * 'unavailable' — sessionStorage inaccessible; the row cannot discriminate.
+ */
+export type FreshContext = 'yes' | 'no' | 'unavailable'
+
+export function checkFreshContext(store: KVLike | null): FreshContext {
+  if (store === null) return 'unavailable'
+  try {
+    const seen = store.getItem(CONTEXT_KEY)
+    store.setItem(CONTEXT_KEY, '1')
+    return seen === null ? 'yes' : 'no'
+  } catch {
+    return 'unavailable'
+  }
 }
 
 export interface ProbeResult {

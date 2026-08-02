@@ -61,10 +61,6 @@ export function contentSafeAreaTop(): number {
   return webApp()?.contentSafeAreaInset?.top ?? 0
 }
 
-export function safeAreaTop(): number {
-  return webApp()?.safeAreaInset?.top ?? 0
-}
-
 /**
  * Exact boot order from the spec. Safe to call outside Telegram.
  * Callers MUST NOT size any canvas before this returns.

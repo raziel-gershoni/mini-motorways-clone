@@ -10,8 +10,6 @@ export function show(title: string, data: unknown): void {
 }
 
 export function status(text: string): void {
-  const app = document.getElementById('app')
-  if (app && app.textContent === 'booting…') app.textContent = ''
   show('status', text)
 }
 
