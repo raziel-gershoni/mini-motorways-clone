@@ -2029,6 +2029,295 @@ cd .. && git add spike && git commit -m "spike(m0): cross-session localstorage p
 
 ---
 
+## Task 9: Durable result storage in D1
+
+**Why this exists and why it is not optional.** The original design read results off `wrangler tail`, which is a *live* stream. That only works if a human and the agent are at the same desk at the same moment. The actual operating mode is the opposite: the device owner runs the probe sequence on a phone whenever they like, possibly hours before anyone looks. With `tail` alone those numbers are simply gone, and the sequence has to be redone.
+
+D1 makes the results durable and queryable after the fact. It is also the same plumbing M4 needs for the leaderboard, so it is not throwaway.
+
+The database already exists — created by the controller, since it is a real resource on the user's Cloudflare account:
+
+- name: `laneways-spike-results`
+- id: `c3d2da3a-0308-4adf-9658-927891ff9115`
+- region: WEUR
+
+**Files:**
+- Create: `spike/migrations/0001_results.sql`
+- Create: `spike/worker/extract.ts`
+- Create: `spike/test/extract.test.ts`
+- Modify: `spike/worker/index.ts`
+- Modify: `spike/wrangler.jsonc`, `spike/package.json`
+
+**Interfaces:**
+- Consumes: nothing from earlier tasks
+- Produces:
+  - `interface ResultRow { receivedAt: number; kind: string; platform: string | null; perfClass: string | null; dpr: number | null; ua: string | null; body: string }`
+  - `MAX_BODY_BYTES = 65536`
+  - `extractRow(body: string, nowMs: number): ResultRow`
+
+The parsing is split into a pure `extractRow` precisely so it can be unit-tested without a Worker runtime. The Worker itself stays a thin shell around it.
+
+- [ ] **Step 1: Write the failing test**
+
+`spike/test/extract.test.ts`:
+
+```ts
+import { describe, it, expect } from 'vitest'
+import { extractRow, MAX_BODY_BYTES } from '../worker/extract'
+
+const FULL = JSON.stringify({
+  kind: 'bench',
+  device: { platform: 'ios', performanceClass: null, dpr: 3, ua: 'Mozilla/5.0 iPhone' },
+  results: [{ sprites: 400 }],
+})
+
+describe('extractRow', () => {
+  it('pulls the indexed columns out of a well-formed payload', () => {
+    const r = extractRow(FULL, 1000)
+    expect(r.receivedAt).toBe(1000)
+    expect(r.kind).toBe('bench')
+    expect(r.platform).toBe('ios')
+    expect(r.perfClass).toBeNull()
+    expect(r.dpr).toBe(3)
+    expect(r.ua).toBe('Mozilla/5.0 iPhone')
+  })
+
+  it('preserves the original body verbatim', () => {
+    expect(extractRow(FULL, 1000).body).toBe(FULL)
+  })
+
+  it('falls back to kind "unknown" when kind is absent', () => {
+    expect(extractRow('{"device":{}}', 1).kind).toBe('unknown')
+  })
+
+  it('falls back to kind "unknown" when kind is not a string', () => {
+    expect(extractRow('{"kind":42}', 1).kind).toBe('unknown')
+  })
+
+  it('nulls every device column when device is absent', () => {
+    const r = extractRow('{"kind":"storage"}', 1)
+    expect(r.kind).toBe('storage')
+    expect(r.platform).toBeNull()
+    expect(r.perfClass).toBeNull()
+    expect(r.dpr).toBeNull()
+    expect(r.ua).toBeNull()
+  })
+
+  it('nulls device columns of the wrong type rather than coercing', () => {
+    const r = extractRow('{"kind":"x","device":{"platform":7,"dpr":"3","ua":null}}', 1)
+    expect(r.platform).toBeNull()
+    expect(r.dpr).toBeNull()
+    expect(r.ua).toBeNull()
+  })
+
+  it('survives malformed JSON, still storing the raw body', () => {
+    const r = extractRow('not json {{{', 5)
+    expect(r.kind).toBe('unmarshalled')
+    expect(r.body).toBe('not json {{{')
+    expect(r.receivedAt).toBe(5)
+  })
+
+  it('survives a JSON scalar rather than an object', () => {
+    const r = extractRow('42', 5)
+    expect(r.kind).toBe('unknown')
+    expect(r.platform).toBeNull()
+  })
+
+  it('survives JSON null without throwing', () => {
+    expect(() => extractRow('null', 5)).not.toThrow()
+    expect(extractRow('null', 5).kind).toBe('unknown')
+  })
+
+  it('truncates a body over the size cap and marks it', () => {
+    const huge = JSON.stringify({ kind: 'bench', pad: 'x'.repeat(MAX_BODY_BYTES) })
+    const r = extractRow(huge, 1)
+    expect(r.body.length).toBeLessThanOrEqual(MAX_BODY_BYTES)
+    expect(r.kind).toBe('oversized')
+  })
+})
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `pnpm test extract`
+Expected: FAIL — cannot resolve `../worker/extract`.
+
+- [ ] **Step 3: Implement the extractor**
+
+`spike/worker/extract.ts`:
+
+```ts
+export const MAX_BODY_BYTES = 65536
+
+export interface ResultRow {
+  receivedAt: number
+  kind: string
+  platform: string | null
+  perfClass: string | null
+  dpr: number | null
+  ua: string | null
+  body: string
+}
+
+function str(v: unknown): string | null {
+  return typeof v === 'string' ? v : null
+}
+
+function num(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
+/**
+ * Pulls the handful of columns worth indexing out of a submission, keeping the
+ * full body alongside. Never throws: a probe result that cannot be parsed is
+ * still evidence, and losing it would defeat the point of durable storage.
+ */
+export function extractRow(body: string, nowMs: number): ResultRow {
+  if (body.length > MAX_BODY_BYTES) {
+    return {
+      receivedAt: nowMs,
+      kind: 'oversized',
+      platform: null, perfClass: null, dpr: null, ua: null,
+      body: body.slice(0, MAX_BODY_BYTES),
+    }
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body)
+  } catch {
+    return {
+      receivedAt: nowMs,
+      kind: 'unmarshalled',
+      platform: null, perfClass: null, dpr: null, ua: null,
+      body,
+    }
+  }
+
+  const obj = (typeof parsed === 'object' && parsed !== null ? parsed : {}) as Record<string, unknown>
+  const d = (typeof obj.device === 'object' && obj.device !== null ? obj.device : {}) as Record<string, unknown>
+
+  return {
+    receivedAt: nowMs,
+    kind: str(obj.kind) ?? 'unknown',
+    platform: str(d.platform),
+    perfClass: str(d.performanceClass),
+    dpr: num(d.dpr),
+    ua: str(d.ua),
+    body,
+  }
+}
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `pnpm test extract`
+Expected: PASS, 10 tests.
+
+- [ ] **Step 5: Write the migration**
+
+`spike/migrations/0001_results.sql`:
+
+```sql
+CREATE TABLE IF NOT EXISTS results (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  received_at INTEGER NOT NULL,
+  kind        TEXT    NOT NULL,
+  platform    TEXT,
+  perf_class  TEXT,
+  dpr         REAL,
+  ua          TEXT,
+  body        TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_results_received_at ON results (received_at DESC);
+```
+
+- [ ] **Step 6: Bind D1 and wire the Worker**
+
+Add to `spike/wrangler.jsonc`, as a sibling of `assets`:
+
+```jsonc
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "laneways-spike-results",
+      "database_id": "c3d2da3a-0308-4adf-9658-927891ff9115"
+    }
+  ]
+```
+
+Replace `spike/worker/index.ts` with:
+
+```ts
+import { extractRow } from './extract'
+
+/** Structural subset of D1Database — avoids pulling in a types package for a spike. */
+interface D1Like {
+  prepare(query: string): {
+    bind(...values: unknown[]): { run(): Promise<unknown> }
+  }
+}
+
+interface Env {
+  ASSETS: { fetch: (req: Request) => Promise<Response> }
+  DB: D1Like
+}
+
+const INSERT =
+  `INSERT INTO results (received_at, kind, platform, perf_class, dpr, ua, body)
+   VALUES (?, ?, ?, ?, ?, ?, ?)`
+
+export default {
+  async fetch(req: Request, env: Env): Promise<Response> {
+    const url = new URL(req.url)
+    if (url.pathname === '/api/result' && req.method === 'POST') {
+      const body = await req.text()
+      // Logged as well as stored: `wrangler tail` stays useful when someone is
+      // watching live, and it is the fallback record if the insert fails.
+      console.log('M0-RESULT', body)
+
+      const row = extractRow(body, Date.now())
+      try {
+        await env.DB.prepare(INSERT)
+          .bind(row.receivedAt, row.kind, row.platform, row.perfClass, row.dpr, row.ua, row.body)
+          .run()
+      } catch (err) {
+        console.log('M0-RESULT-DB-ERROR', String(err))
+        // Deliberately still 200. A failure here must not make the phone show a
+        // failed submit — the person holding it would redo the whole sequence,
+        // and the console log above already preserves the data.
+      }
+
+      return new Response('ok', { status: 200, headers: { 'cache-control': 'no-store' } })
+    }
+    return env.ASSETS.fetch(req)
+  },
+}
+```
+
+- [ ] **Step 7: Add the query scripts**
+
+Add to `spike/package.json` scripts:
+
+```json
+    "migrate": "wrangler d1 execute laneways-spike-results --remote --file=./migrations/0001_results.sql",
+    "results": "wrangler d1 execute laneways-spike-results --remote --command \"SELECT id, datetime(received_at/1000,'unixepoch') AS at, kind, platform, perf_class, dpr FROM results ORDER BY id DESC LIMIT 30\""
+```
+
+- [ ] **Step 8: Verify and commit**
+
+Run: `pnpm test && pnpm typecheck && pnpm build`
+Expected: all previous tests plus 10 new ones pass; no type errors; build clean.
+
+Do **not** run `pnpm migrate` — it touches the live database and is the controller's to run at deploy time.
+
+```bash
+cd .. && git add spike && git commit -m "spike(m0): durable result storage in d1"
+```
+
+---
+
 ## Task 8: Device runs and findings
 
 The measurement itself. No code — this is the task that produces M0's actual deliverable.
