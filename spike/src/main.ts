@@ -2,6 +2,7 @@ import { boot, stableHeight, contentSafeAreaTop } from './telegram'
 import { collectDeviceInfo } from './deviceInfo'
 import { show, status, submit } from './report'
 import { runBenchSuite } from './bench'
+import { probeFlowFields } from './flowfield'
 
 boot()
 
@@ -22,7 +23,9 @@ void (async () => {
   try {
     const results = await runBenchSuite(canvas, status)
     show('bench', results)
-    const ok = await submit({ kind: 'bench', device, results })
+    const flow = probeFlowFields(200)
+    show('flowfield (ms per 5-colour full rebuild)', flow)
+    const ok = await submit({ kind: 'bench', device, results, flow })
     show('submit', ok ? 'sent' : 'FAILED — screenshot the bench block above')
   } catch (err) {
     show('bench ERROR', String(err))
