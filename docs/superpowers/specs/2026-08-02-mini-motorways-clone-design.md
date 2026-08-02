@@ -51,13 +51,13 @@ We clone mechanics, not identity. Game rules are not copyrightable; the original
 
 ## 3. Decisions of record
 
-Facts below are tagged by evidence tier, matching the research dossier: **[DPC]** official developer material, **[MOD]** constants from a decompile-based mod (field names compile-verified, values possibly stale), **[FAN]** community sources, **[OURS]** our own decision where no public answer exists.
+Facts below are tagged by evidence tier, matching the research dossier: **[DPC]** official developer material, **[MOD]** constants from a decompile-based mod (field names compile-verified, values possibly stale), **[FAN]** community sources, **[OURS]** our own decision where no public answer exists, **[M0]** measured on real hardware in the M0 spike — one iPhone, Telegram iOS Mini App, 2026-08-02, and nothing wider than that.
 
 | # | Decision | Rationale |
 |---|---|---|
 | 1 | Faithful mechanics first; Telegram is the shell | Social and meta features are phase 2. Avoids shipping something that is neither a good clone nor a good Telegram game |
 | 2 | Own visual identity, same genre | Safe to publish; better work; costs one round of art direction |
-| 3 | Classic (unbounded) is the default and only v1 mode | User decision. Makes crash-safe resume a launch blocker rather than a nice-to-have — see §8 |
+| 3 | Classic (unbounded) is the default and only v1 mode | User decision. Makes crash-safe resume a launch blocker rather than a nice-to-have — see §9 |
 | 4 | Portrait-native, ~24×40 grid revealed from 14×22 | The Telegram viewport is portrait. Forced rotation is hostile on every launch and `lockOrientation` can return `UNSUPPORTED` on desktop |
 | 5 | Cars path once at departure, never re-route | [FAN, corroborated by `VehicleModel.repathUrgency` existing with `NotRequired` as the normal case] |
 | 6 | No congestion term in path cost | Load-bearing omission. See §1 |
@@ -73,6 +73,7 @@ Facts below are tagged by evidence tier, matching the research dossier: **[DPC]*
 | 16 | Glyphs on buildings off by default, prominent HUD toggle | [OURS] See §7.4. Colour-only is the original's acknowledged weakest area |
 | 17 | Cloudflare Workers + static assets + D1, R2 for share images | Best cold start; a Telegram webview opening on mobile data is this project's worst latency moment and the one thing that cannot be fixed later in code |
 | 18 | Modifiers before extra maps | 2–3 random modifiers over 5 maps generates more variety than 20 maps |
+| 19 | Telegram CloudStorage is the save store of record — not our own Worker + D1, and not `localStorage` | [M0] It is the only store measured to survive a real backgrounded gap: over the same 78-minute gap on the same device, `localStorage` lost the record and CloudStorage returned it byte-intact. It also needs no server, no schema, and no save-side auth path. See §9 |
 
 ---
 
@@ -411,21 +412,64 @@ Honour **both** inset systems: `safeAreaInset` (OS chrome — notch, home indica
 
 Because Classic runs are unbounded and a Telegram webview is backgrounded and killed constantly, **crash-safe resume is a launch blocker, not a nice-to-have.**
 
-Measured snapshot size: full binary state of a 43×35 road grid + 60 buildings + 250 cars + header = **3,809 B raw**, 492 B gzipped. That grid is larger than our 24×40, so treat it as an upper bound.
+Everything tagged **[M0]** here was measured on **one iPhone, Telegram iOS Mini App, 7 launches over ~3.7 hours, 2026-08-02** — one device, one iOS version, one Telegram build. It establishes nothing about behaviour over days, across devices, or on Android. Full data: [`docs/research/2026-08-02-m0-spike-findings.md`](../../research/2026-08-02-m0-spike-findings.md) §5.
 
-**Tier 1 — crash safety.** Synchronous binary write to `localStorage` every ~2 s of sim time and on `visibilitychange`. It is the only storage API that can complete inside a teardown handler.
+### 9.1 CloudStorage is the store of record
 
-**Tier 2 — cross-device.** Mirror to CloudStorage on `visibilitychange` and `deactivated`. **Design the save as one key**: CloudStorage writes are one MTProto round-trip per key with no local cache, no batching, and no write coalescing. Reads and deletes can batch; writes cannot. Limits are 1024 keys × 4096 chars, key charset `A-Za-z0-9_-` only.
+**The save lives in Telegram CloudStorage, and resume must work from it alone.** A player returning after any nontrivial gap gets their run back from CloudStorage or not at all. Nothing in the resume path may require a second store to be present.
 
-**Triggers.** Listen to `document.visibilitychange`, `window.pagehide`, **and** Telegram's `deactivated`, all routed through one debounced, dirty-flagged save. You cannot rely on `beforeunload` or `unload` on mobile, and even `visibilitychange` occasionally fails to fire on Safari. `isActive` plus the `activated`/`deactivated` events are the correct pause signal — Telegram's minimize-to-app-bar does not consistently drive the web visibility event.
+Measured [M0]: a record written at 16:50 came back **byte-intact 78.5 minutes later**, on a launch that started from a destroyed browsing context — `survived` true, `payloadIntact` true. Read 155–187 ms, write 194–282 ms (~240 ms typical). No errors, no timeouts, no `stored:false` rejections across either launch that exercised it. The L6→L7 pair is a controlled comparison — same device, same 78-minute gap, same launch pair — and **`localStorage` lost the record while CloudStorage kept it byte-intact.**
 
-**Never compress in a teardown handler** — `CompressionStream` is stream-based and async. Write the raw 3.8 KB; localStorage has megabytes.
+**Durability is confirmed to 78.5 minutes, on one device, one iOS version, one Telegram build, across one launch pair.** State it that way wherever it is repeated. It is the best evidence we have and it is not evidence about days.
 
-**Save the input log alongside the snapshot.** Resume restores the snapshot for instant play, but a leaderboard submission needs the log from tick 0. A session resumed without its log is **unranked**, and the UI must say so rather than silently dropping the score.
+**Design the save as one key.** Writes are one MTProto round trip *per key*, with no local cache, no batching, and no write coalescing — reads and deletes batch, writes do not. One key is therefore load-bearing, not a stylistic preference: every extra key is another ~240 ms round trip on the same teardown-adjacent path. Limits are 1024 keys × 4096 chars per value, key charset `A-Za-z0-9_-` only.
+
+**No rate limit is documented, and none was probed** — the spike issued two writes in total. Writes must therefore stay bounded by construction (§9.3) and every write must be able to fail silently without affecting the frame or the run.
+
+### 9.2 `localStorage` is a best-effort last-seconds layer, not a tier
+
+Measured across the same 7 launches [M0]:
+
+| Gap since previous launch | Outcome |
+|---|---|
+| 41 s | survived |
+| 69 s, force-quit from the app switcher | survived, 4096-char payload byte-identical |
+| 19 min | **gone** |
+| 25 min | **gone** |
+| 96 min | survived |
+| 78 min | **gone** |
+
+`writeFailed` and `readFailed` were false on all 7 launches, so storage access itself always worked — the records were written and the reads ran; the data was simply not there. `freshContext` was `yes` on all 7, so Telegram iOS destroys the browsing context on **every** close, including a plain close-and-reopen; every launch is a cold boot from disk.
+
+**Surviving 96 minutes once and dying at 19 minutes rules out a time-based eviction. This is not a TTL — it is nondeterministic loss**, with the signature of OS memory-pressure reclamation: unpredictable, unbounded, and not something a shorter save cadence can outrun.
+
+`localStorage` keeps exactly one job, and it is a real one: **it is the only synchronous storage API**, so it is the only thing that can complete inside a teardown handler. That covers the few seconds of play between the last CloudStorage write and an abrupt kill. **Nothing may depend on it.** A missing `localStorage` save is normal operation, never an error, never a log line at warning level, never a message to the player.
+
+### 9.3 Write and read strategy
+
+Neither store is usable the way the old two-tier design assumed. CloudStorage is **async**, so it cannot complete in a teardown handler. `localStorage` is **synchronous but unreliable**. So both are written, on the same triggers, carrying the same snapshot bytes.
+
+**Writes.**
+
+- **CloudStorage** — fire-and-forget on `visibilitychange` → `hidden` and on Telegram's `deactivated`, plus a **periodic autosave every 30 s of wall clock while the run is active and the state is dirty.** The ~240 ms measured write is network latency on a background round trip, not main-thread cost, so cadence is limited by prudence about an undocumented rate limit rather than by CPU: 30 s dirty-gated is 2 autosaves/min on one key, plus one write per lifecycle transition, a ~1% duty cycle. Skip the tick entirely when nothing changed.
+  - **What the cadence bounds, and what it does not.** 30 s is the *exposure window we choose*, not a guarantee: it bounds loss to 30 s of play **only when the write actually lands**, and §9.1 requires every write to be able to fail silently against an unprobed rate limit. Thirty seconds is exactly one fifth of a 150 s in-game week at 1× and two fifths under fast-forward (§5.10) — a meaningful amount of a run, which is why the `localStorage` last-seconds layer in §9.2 is worth keeping despite being unreliable.
+- **`localStorage`** — written synchronously on the same two triggers **and** in the teardown path (`pagehide`), carrying the identical snapshot. It costs nothing and is the only write that can land after the async one is cut off.
+
+**Reads.** On resume, read **both**, and **prefer whichever snapshot carries the higher tick count.** `localStorage` may hold a few seconds CloudStorage never received; usually CloudStorage will be the only one present, and that is the expected case, not a degraded one.
+
+**Pre-compress on a timer.** `CompressionStream` is stream-based and async and **cannot run in a teardown handler**, so the payload must already be compressed and base64-encoded before any handler fires. Recompress on the same 30 s autosave tick and on the visibility trigger ahead of the write, hold the encoded string in a variable, and let the teardown path do nothing but one `setItem` of an already-built string.
+
+Measured sizes: full binary state of a 43×35 road grid + 60 buildings + 250 cars + header = **3,809 B raw, 492 B gzipped ≈ 656 chars base64**, against CloudStorage's **4,096-char** per-value cap — about **6× headroom**. That grid is larger than our 24×40, so treat it as an upper bound. The headroom is comfortable, not unlimited, and it is why the snapshot stays binary and compressed rather than JSON.
+
+**Triggers.** Listen to `document.visibilitychange`, `window.pagehide`, **and** Telegram's `deactivated`, all routed through one debounced, dirty-flagged save that drives both writes. You cannot rely on `beforeunload` or `unload` on mobile, and even `visibilitychange` occasionally fails to fire on Safari. `isActive` plus the `activated`/`deactivated` events are the correct pause signal — Telegram's minimize-to-app-bar does not consistently drive the web visibility event.
 
 Use `enableClosingConfirmation()` during an active run, but note it does not give an awaitable `beforeunload` — persist continuously, not on close.
 
-> **Open risk, blocking.** Nobody could verify whether Telegram's iOS WKWebView persists `localStorage` across sessions. The entire tier-1 design depends on it. **This is tested on a real iPhone in M0, before anything is built on top of it.** If it fails, tier 1 becomes an IndexedDB write with a synchronous localStorage fallback for the teardown path only, and the save cadence tightens.
+### 9.4 The input log and unranked resumes
+
+**Save the input log alongside the snapshot.** Resume restores the snapshot for instant play, but a leaderboard submission needs the log from tick 0. A session resumed without its log is **unranked**, and the UI must say so rather than silently dropping the score.
+
+The 6× headroom above is the snapshot alone. The log grows without bound in a Classic run (~8 B per action, ~2.4 KB at 300 actions before compression), so a long session's snapshot + log will not fit one 4,096-char value. Resolve it in M3 with measured numbers, not now; the two options are a second key — another round trip, against §9.1's one-key rule — or dropping the log and marking the resume unranked. Whichever is chosen, **the snapshot is never the thing that gets dropped.**
 
 ---
 
@@ -502,14 +546,14 @@ Each milestone gets its own implementation plan. This spec is the design of reco
 
 | | Deliverable | Exit criteria |
 |---|---|---|
-| **M0** | De-risking spike | 400 animated sprites measured in Telegram's Android WebView on a `performanceClass: LOW` device; `localStorage` persistence across sessions verified on a real iPhone. **Decides renderer and tick rate.** Throwaway code |
+| **M0** | De-risking spike | 400 animated sprites measured in Telegram's Android WebView on a `performanceClass: LOW` device; client-side save persistence across sessions verified on a real iPhone. **Decides renderer and tick rate.** Throwaway code. **Outcome:** the iOS persistence half ran and inverted this spec's two tiers (§9); the Android half did not run and its risk stays open (§13) |
 | **M1** | Headless `sim` + `shared` | Full rule set, no rendering. Determinism test green across Node and browser. Telemetry overlay data available |
 | **M2** | Playable in a browser | Canvas2D renderer, input, HUD, one map, Classic mode, weekly upgrade modal |
-| **M3** | Playable in Telegram | Boot sequence, viewport and safe areas, both persistence tiers, haptics, `initData` auth |
+| **M3** | Playable in Telegram | Boot sequence, viewport and safe areas, CloudStorage save and resume plus the `localStorage` last-seconds write (§9), haptics, `initData` auth |
 | **M4** | Leaderboard | Worker + D1, replay verification, submission flow, unranked-resume handling |
 | **M5** | Content and polish | More maps, modifiers, generative audio, share cards, daily challenge |
 
-M0 is genuinely first. Both questions it answers — renderer viability and whether tier-1 saves work at all — invalidate downstream design if answered wrong, and both are cheap to test.
+M0 is genuinely first. Both questions it answers — renderer viability and whether the save path works at all — invalidate downstream design if answered wrong, and both are cheap to test. The storage half came back the opposite of the way §9 was originally written, which is exactly why it was tested before anything was built on it.
 
 ---
 
@@ -517,10 +561,13 @@ M0 is genuinely first. Both questions it answers — renderer viability and whet
 
 | Risk | Mitigation |
 |---|---|
-| iOS WKWebView may not persist `localStorage` across Telegram sessions | M0 tests it on real hardware before anything depends on it. Fallback: IndexedDB primary, localStorage for teardown only |
+| iOS `localStorage` **is** unreliable — measured, not suspected: gone after 19 min and 25 min, survived 96 min, on a stable origin with reads and writes both succeeding [M0] | The risk is confirmed and stays open; the mitigation changed rather than the risk closing. CloudStorage is the store of record and resume works from it alone; `localStorage` is demoted to a best-effort synchronous last-seconds write that nothing depends on (§9.2). The old IndexedDB-primary fallback is dead — IndexedDB is async and cannot run in a teardown handler either |
+| CloudStorage durability is confirmed only to **78.5 minutes, on one iPhone, one iOS version, one Telegram build, one launch pair** [M0]. Nothing establishes days, other devices, or Android | Re-probe over ≥24 h and on Android before M3 ships on it. Until then, treat "no save found" as an ordinary outcome: the resume path must start a fresh run cleanly, never a crash, a blank screen, or a lost-progress dialog |
+| CloudStorage has no documented rate limit, and none was probed — the spike issued two writes in total [M0]. It is now the only durable store, so throttling degrades from an annoyance to save loss | One key, dirty-gated, ≤2 writes/min (§9.3), fire-and-forget. Treat undocumented throttling as live. A rejected or timed-out write must be silent and non-blocking, and must not stall the frame or the run |
+| CloudStorage requires Bot API 6.9+; older clients have no durable store at all, only the unreliable `localStorage` | `isVersionAtLeast('6.9')` gates it like every other Telegram surface (§8). Below it, the run is playable but explicitly not saved — say so once, do not pretend otherwise |
 | All renderer throughput evidence is from desktop | M0 measures on a real low-end Android |
 | The weekly demand ramp is our invention and unvalidated | Telemetry overlay from M1; expect several tuning passes |
 | `[MOD]` constants are from a 2021–22 decompile of a game now several balance patches ahead | Treat every one as a starting point, not truth. They are all in one constants file for exactly this reason |
-| Classic's unbounded run length is hostile to a chat-app session | Accepted deliberately. Persistence tier is the mitigation, which is why it is a launch blocker |
-| CloudStorage has no documented rate limit | One key, debounced writes, and treat undocumented throttling as live |
+| Classic's unbounded run length is hostile to a chat-app session | Accepted deliberately. Persistence is the mitigation, which is why it is a launch blocker — and `freshContext: yes` on 7/7 launches [M0] means every reopen is a cold boot, so it is the *only* mitigation |
+| A long run's snapshot + input log will not fit one 4,096-char CloudStorage value | Measure in M3 and choose: a second key (another round trip) or dropping the log and marking the resume unranked (§9.4). The snapshot is never what gets dropped |
 | A balance patch invalidates every stored replay | `rulesVersion` on every row; keep old sim versions importable |

@@ -4,7 +4,7 @@
 **Spike:** `spike/` (throwaway; see plan [`2026-08-02-m0-derisking-spike.md`](../superpowers/plans/2026-08-02-m0-derisking-spike.md))
 **Spec under test:** [`2026-08-02-mini-motorways-clone-design.md`](../superpowers/specs/2026-08-02-mini-motorways-clone-design.md) §6, §9, §13
 
-**In one line:** the iOS half of M0 is answered and clean; the Android half was not run and remains fully open; the spec's baked-road-layer optimisation is refuted and must be deleted.
+**In one line:** the iOS half of M0 is answered; the Android half was not run and remains fully open; the spec's baked-road-layer optimisation is refuted and must be deleted; and the spec's two persistence tiers are inverted — `localStorage` lost data nondeterministically across four of six gaps, while CloudStorage returned it byte-intact over the one 78-minute gap measured, so CloudStorage becomes the save store of record.
 
 ---
 
@@ -166,40 +166,58 @@ Spec §5.4's desktop figures (21.5 µs for one field, 31.5 µs for four sources)
 
 ## 5. Storage persistence
 
-4 launches across 2 sessions. `writeFailed = false` throughout. Payload 4096 chars, byte-identical on every survival.
+**7 launches over ~3.7 hours**, one iPhone, Telegram iOS Mini App, 2026-08-02. `writeFailed = false` and `readFailed = false` on every launch. `freshContext = yes` on every launch. `localStorage` payload 4096 chars, byte-identical on every survival.
 
-| Launch | Action | `freshContext` | `survived` | `payloadIntact` | `ageMs` |
-|---|---|---|---|---|---|
-| 1 | First open | **yes** | false | true | 0 |
-| 2 | Closed and reopened the Mini App | **yes** | **true** | **true** | 40,458 |
-| 3 | **Force-quit Telegram from the app switcher** | **yes** | **true** | **true** | 109,682 |
-| 4 | Later session, after a redeploy | **yes** | **false** | — | 0 |
+### 5.1 `localStorage` — nondeterministic, not a TTL
 
-### 5.1 What is established
+| Launch pair | Gap | Outcome |
+|---|---|---|
+| L1→L2 | 41 s (closed and reopened the Mini App) | survived |
+| L2→L3 | 69 s (**force-quit Telegram from the app switcher**) | survived, 4096 chars byte-identical, 110 s since first write |
+| L3→L4 | 19 min | **gone** |
+| L4→L5 | 25 min | **gone** |
+| L5→L6 | 96 min | **survived** |
+| L6→L7 | 78 min | **gone** |
 
-**Yes — `localStorage` survived a force-quit of Telegram from the iOS app switcher, with a 4 KB payload byte-identical after 110 seconds.** That is the reading spec §9's tier-1 design depends on, and it holds at the horizons tested.
+`writeFailed` and `readFailed` were false throughout, so storage access itself always worked: the writes were made, the reads ran, the data was simply not there. `freshContext = yes` on 7 of 7 — including plain close-and-reopen — so Telegram iOS destroys the WebView browsing context on **every** close. No in-memory state ever survives, every launch is a cold boot from disk, and the `survived = true` results are meaningful precisely because the context was provably new (see §6).
 
-**`freshContext = yes` on 4 of 4 launches, including a plain close-and-reopen.** Telegram iOS destroys the WebView browsing context every time. Two consequences:
+**Surviving 96 minutes once and dying at 19 minutes rules out a time-based eviction.** There is no horizon at which `localStorage` is safe on this platform, and no save cadence that outruns it. The signature — successful reads and writes, whole-origin data absent, no relationship to elapsed time — points to **OS memory-pressure reclamation: unpredictable and unbounded.**
 
-- **No in-memory state ever survives a close.** Spec §9's "backgrounded and killed constantly" is now measured, not assumed. Every launch is a cold boot from disk.
-- **`survived = true` on launches 2–3 is meaningful**, because the context was provably new. Without the `freshContext` sentinel it would have been unfalsifiable — see §6.
+### 5.2 What happened at launch 4: nothing special
 
-### 5.2 Launch 4 is an unexplained loss, and the stated explanation does not hold
-
-The run notes attribute launch 4's `survived = false` to a key-namespacing bug — the redeploy changing the asset hash, with the hash forming part of the storage key. **That is not what the shipped code does.** `spike/src/storageProbe.ts` defines:
+The earlier 4-launch reading of this data treated launch 4 as a single unexplained loss and went looking for a per-event cause. The run notes had blamed a key-namespacing bug (a redeploy changing an asset hash embedded in the storage key); that was correctly refuted then and remains refuted — `spike/src/storageProbe.ts` hard-codes:
 
 ```ts
 export const PROBE_KEY = 'laneways.m0.probe'
 export const CONTEXT_KEY = 'laneways.m0.context'
 ```
 
-Both are hard-coded constants with no build hash, and `localStorage` is namespaced by origin, which the redeploy did not change (`wrangler.jsonc` pins `name: "laneways-spike"`, so the Worker URL is stable). **A redeploy cannot move this key.**
+no build hash, `localStorage` is origin-scoped, and `wrangler.jsonc` pins `name: "laneways-spike"` so the Worker URL never moved. What was left standing was a time-based eviction as the leading candidate, and a note that this was the one reading that would invalidate tier 1.
 
-Launch 4 therefore shows **both `localStorage` and `sessionStorage` empty on a stable origin**. Candidate causes, none confirmed: WebKit or Telegram evicting the origin's storage between sessions (the exact hazard §9 was written against); a manual Telegram "Clear Cache"; or a different origin/entry point than assumed. **This is the one reading that would invalidate tier 1, and we cannot currently rule it out.**
+**The full 7-launch series settles it, and launch 4 needs no cause of its own.** It is one of three losses in a series that also contains a 96-minute survival at a *longer* gap. A TTL cannot produce loss at 19 min and survival at 96 min on the same device in the same afternoon. Launch 4 was not an anomaly in an otherwise reliable store; it was the first visible instance of the store's normal behaviour. The question "what happened at launch 4" was the wrong shape of question.
 
-### 5.3 Limits of the evidence
+The follow-up that reading recommended — re-run over a ≥1 h gap to catch a time-based eviction — has now been run twice (96 min, 78 min). There is no time-based eviction to catch. Tier 1, as spec §9 originally defined it, is invalidated.
 
-n = 4 launches, 2 sessions, **maximum observed survival age 110 seconds**. Plan Task 8 Step 3.4 — *"wait at least an hour with Telegram closed, then repeat"* — **was not performed.** This data says nothing about survival across hours or days, OS-level storage eviction, or low-memory purges. **Do not claim durability beyond ~2 minutes.**
+### 5.3 CloudStorage — works
+
+| Launch | Operation | Result |
+|---|---|---|
+| L6, 16:50 | first write | read ok **187 ms**, write ok **194 ms** |
+| L7, 18:08 | read back after **78.5 min** | `survived` **true**, `payloadIntact` **true**, `launches` 2, read ok **155 ms**, write ok **282 ms** |
+
+No errors, no timeouts, no `stored:false` rejections across either launch. Read 155–187 ms, write 194–282 ms (~240 ms typical). One MTProto round trip per key, no batching on writes, no local cache.
+
+**L6→L7 is a controlled comparison** — same device, same 78-minute gap, same launch pair. **`localStorage` lost the record; CloudStorage returned it byte-intact.** That single pairing is the whole basis of the store-of-record decision, and it is worth more than the other six launches combined because nothing else differs between the two arms.
+
+**Fit against the 4096-char cap.** The snapshot sizing measured earlier in this spike — full binary game state **3,809 B raw, 492 B gzipped ≈ 656 chars base64** — leaves about **6× headroom** in one CloudStorage value. The benchmark grid was 43×35; ours is 24×40, so the real snapshot is smaller. The save fits comfortably in a single key, which matters because writes do not batch.
+
+### 5.4 Limits of the evidence
+
+n = 7 launches, **one device, one iOS version, one Telegram build**, one afternoon. **Maximum CloudStorage durability observed: 78.5 minutes, across one launch pair.** Nothing here establishes behaviour over days, across devices, or on Android — including whether `localStorage`'s reclamation behaviour is iOS-specific.
+
+The rate-limit question is entirely unprobed: **two CloudStorage writes were issued in the whole spike.** Nothing was learned about throttling, and no rate limit is documented.
+
+Client version coverage is one build. CloudStorage requires Bot API 6.9+; behaviour on older clients was not tested and must be version-gated rather than assumed.
 
 ---
 
@@ -226,18 +244,19 @@ Two were caught by review before the real run; a third of the same class was cau
 | **Canvas2D or escalate to Pixi/WebGL** | **Canvas2D.** Keep the ~10-method interface so WebGL stays a later option | 400 sprites at 10.5% of frame; ~7,900-sprite ceiling. WebGL attacks draw-call submission (~0.16 µs/call, 41% of a road layer that is 1% of the frame) and leaves the dominant pixel term identical — the same texels, the same blend, the same DRAM traffic. Costs 100–140 KB gzip, shader compile on entry GPUs, and a SwiftShader-fallback risk on exactly the LOW tier | **Confirmed on iOS; provisional pending Android** |
 | **Sim tick 30 Hz or 60 Hz** | **30 Hz stands** (spec §3 decision 10 unchanged) | Nothing measured forces 60 Hz. The flow field costs 0.54% of a 30 Hz tick here and an estimated 4–8% on a LOW Android — the halving matters precisely on the device we could not test. Rendering interpolates | **Preserved default, not a resolved question** |
 | **Max viable simultaneous cars** | **iOS: not a constraint** (~7,900 draw-limited, range 8k–14k). **Android: unknown.** Design target stays 200–400 | 800 sprites drew in 2.200 ms with zero dropped frames. Android extrapolation puts 400 sprites at ~5 ms central (range 3.3–10.6) *with DPR capped at 2*, and 800 at 8–10 ms — clearing at 400, marginal at 800 | **Provisional** |
-| **Tier-1 storage: `localStorage` or IndexedDB** | **`localStorage`, provisionally.** Do not switch to IndexedDB on this evidence — but do not treat a save as guaranteed either | Survived close-reopen (40 s) and force-quit (110 s) from a provably fresh context, 4096 chars byte-identical. Counterweight: launch 4's unexplained loss (§5.2) and no data past 110 s | **Provisional — conditions below** |
+| **Save store of record** *(originally framed as "tier 1: `localStorage` or IndexedDB")* | **Telegram CloudStorage.** Project owner's decision, not ours to relitigate. Resume works from CloudStorage alone; `localStorage` is demoted from a tier to a best-effort synchronous last-seconds write that nothing depends on. IndexedDB is *not* the fallback — it is async and cannot run in a teardown handler either | L6→L7 controlled comparison: same device, same 78-minute gap — `localStorage` lost the record, CloudStorage returned it byte-intact (§5.3). `localStorage` loss is nondeterministic, not a TTL (§5.1). CloudStorage read 155–187 ms, write 194–282 ms, zero errors | **Decided. Durability confirmed only to 78.5 min, one device, one iOS version, one Telegram build** |
 | **`performanceClass`-gated degradation** | **Yes, and the lever is DPR, not sprite count.** Cap `devicePixelRatio` at **2 universally**, **1.5 on `performanceClass === 'LOW'`** | Fill is the dominant term. A 1080p LOW device at uncapped dpr 2.625 composites 1.96× the pixels of the same device capped at 2 — ~5 ms vs ~8.5 ms at 400 sprites, the difference between clearing and blowing the budget. Zero bytes, largest single lever available | **Adopt now** |
 | **Bake the road network** *(not in the original decision list; forced by the data)* | **No. Delete it from spec §6** | §3 | **Decided** |
 | **Sprite batching / pre-rotated atlas frames** | **Not now.** ~96% of sprite cost is CPU-side path work, so it is the available lever if sprite count ever binds — but it does not bind at 20–35× the design load | §2 | **Deferred** |
 
-### Conditions attached to the `localStorage` decision
+### Conditions attached to the store-of-record decision
 
-1. **Storage key must be a stable, build-independent constant, and the payload explicitly versioned.** The launch-4 hash theory turned out not to describe this code, but the practice is correct regardless: a build-derived key would wipe every player's save on every deploy.
-2. **Re-run the storage probe over a ≥1 hour and a ≥24 hour gap before M3 builds on tier 1.** Plan Task 8 Step 3.4 was skipped and is the step that would have caught a time-based eviction.
-3. **Identify what happened at launch 4** before treating tier 1 as settled.
-4. **Design the resume path to tolerate a missing save** — start a fresh run cleanly, never a crash or a blank screen. This is correct engineering independent of the eviction question.
-5. Spec §9's fallback (IndexedDB primary, `localStorage` for the synchronous teardown write only) stays on the shelf, unbuilt, ready.
+1. **The storage key must be a stable, build-independent constant, and the payload explicitly versioned** — in both stores. The launch-4 hash theory never described this code, but the practice is correct regardless: a build-derived key would wipe every player's save on every deploy.
+2. **Re-probe CloudStorage over a ≥24 hour gap, and on Android, before M3 ships on it.** The ≥1 hour condition has been discharged (96 min and 78 min gaps); 78.5 minutes remains the longest confirmed CloudStorage survival, on one device.
+3. **Probe the write path under load before relying on the autosave cadence.** Two writes total were issued; nothing is known about throttling and no rate limit is documented.
+4. **Design the resume path to tolerate a missing save** — start a fresh run cleanly, never a crash or a blank screen. For `localStorage` this is now the *expected* case, not an edge case.
+5. **Never treat a missing or stale `localStorage` record as an error.** No warning log, no player-facing message; it is a bonus when present.
+6. Spec §9's old fallback (IndexedDB primary, `localStorage` for the synchronous teardown write only) is retired, not shelved: it solves the wrong problem, since IndexedDB is as unusable in a teardown handler as CloudStorage is.
 
 ---
 
@@ -245,15 +264,17 @@ Two were caught by review before the real run; a third of the same class was cau
 
 | Risk (spec §13) | Disposition | Note |
 |---|---|---|
-| iOS WKWebView may not persist `localStorage` across Telegram sessions | **Partially resolved** | Survives close-reopen and force-quit at ≤110 s from a provably fresh context. Unresolved past 110 s, and one unexplained loss (§5.2). Tier 1 proceeds with conditions |
+| iOS WKWebView may not persist `localStorage` across Telegram sessions | **Resolved — negatively** | It does not, reliably. Gone at 19 and 25 min, survived at 96 min, on a stable origin with reads and writes succeeding (§5.1). Not a TTL; nondeterministic. Spec §9's tier 1 is invalidated and rewritten: CloudStorage is the store of record, `localStorage` is a best-effort last-seconds write |
 | All renderer throughput evidence is from desktop | **Still open** | Upgraded from desktop-only to one mobile WebKit device. The stated mitigation — "M0 measures on a real low-end Android" — did not happen |
 | Weekly demand ramp is unvalidated | **Untouched** | Out of M0 scope; telemetry overlay from M1 as planned |
 | `[MOD]` constants are from a 2021–22 decompile | **Untouched** | Out of M0 scope |
-| Classic's unbounded run length is hostile to a chat-app session | **Still open, now quantified** | `freshContext: yes` on 4/4 launches — Telegram iOS destroys the browsing context on *every* close, not just on memory pressure. Every launch is a cold boot. Raises the stakes on persistence rather than lowering them |
-| CloudStorage has no documented rate limit | **Untouched** | Tier 2, M3 |
+| Classic's unbounded run length is hostile to a chat-app session | **Still open, now quantified** | `freshContext: yes` on 7/7 launches — Telegram iOS destroys the browsing context on *every* close, not just on memory pressure. Every launch is a cold boot. Raises the stakes on persistence rather than lowering them |
+| CloudStorage has no documented rate limit | **Still open, and now load-bearing** | Two writes were issued in the entire spike, so throttling was never exercised. CloudStorage is now the only durable store, which promotes throttling from an annoyance to save loss. Bound writes by construction: one key, dirty-gated, ≤2/min |
 | A balance patch invalidates every stored replay | **Untouched** | `rulesVersion` plan unchanged |
 | **NEW — Spec §6's baked road layer is a pessimisation** | **Newly discovered, resolved** | §3. Spec edit required |
-| **NEW — Unexplained `localStorage` loss at launch 4** | **Newly discovered, open** | §5.2. Blocks declaring tier 1 settled |
+| **NEW — `localStorage` loss on Telegram iOS is nondeterministic, not time-based** | **Newly discovered, resolved — supersedes "unexplained loss at launch 4"** | §5.1–5.2. Worse than a TTL: a TTL can be designed around, this cannot. Nothing may depend on `localStorage`. Spec §9 rewritten |
+| **NEW — CloudStorage durability confirmed only to 78.5 min, one device, one iOS version, one Telegram build** | **Newly discovered, open** | §5.3–5.4. It is now the store of record, and it is backed by a single 78-minute observation. Re-probe over ≥24 h and on Android before M3 ships on it |
+| **NEW — CloudStorage is unavailable below Bot API 6.9, and untested on any other client** | **Newly discovered, open** | §5.4. Version-gate it like every other Telegram surface; below 6.9 there is no durable store at all |
 | **NEW — WebKit's 1 ms timer clamp makes sub-ms work unmeasurable per frame** | **Newly discovered, mitigated** | §6. Constrains the M1 telemetry overlay design |
 | **NEW — `getImageData` in a harness disables GPU rasterization on Chromium** | **Newly discovered, open** | §6. Must be removed before the Android run or that run is invalid |
 | **NEW — Telegram's `LOW` class is far below "budget Android 2025"** | **Newly discovered, open** | §7 note below. Affects what "degrade on LOW" should mean |
@@ -274,9 +295,9 @@ Two were caught by review before the real run; a third of the same class was cau
 
 5. **60 Hz, not 120.** `frame.p50` = 17.000 ms in all 15 runs. Whatever ProMotion the device has is not reaching this WebView. Budget against 16.67 ms.
 
-6. **Telegram iOS destroys the browsing context on a plain close-and-reopen**, not just under memory pressure. `freshContext: yes` on 4/4. There is no warm-resume path to design for on iOS.
+6. **Telegram iOS destroys the browsing context on a plain close-and-reopen**, not just under memory pressure. `freshContext: yes` on 7/7. There is no warm-resume path to design for on iOS.
 
-7. **The reported cause of launch 4 does not match the code.** The run notes blame a build-hash-derived storage key; `PROBE_KEY` is a hard-coded constant on a stable origin. The most reassuring available explanation for the one data-loss event is not available. §5.2.
+7. **`localStorage` on Telegram iOS behaves like a cache, not like storage — and the spec had the tiers backwards.** It survived 96 minutes once and was gone after 19, with reads and writes succeeding throughout. There is no horizon at which it is safe and no cadence that outruns it. The store spec §9 called "tier 1, crash safety" is the unreliable one; the store it called "tier 2, cross-device" is the one that kept the record byte-intact over the identical 78-minute gap. §5.1–5.3.
 
 8. **The fitted ~10 Gpx/s exceeds naive DRAM bandwidth arithmetic** (~80 GB/s implied against an SoC rated near 60 GB/s), which means WebKit elides part of the compositing work. Valid for comparing two paths on this device; invalid as a hardware ratio to scale to Android.
 
