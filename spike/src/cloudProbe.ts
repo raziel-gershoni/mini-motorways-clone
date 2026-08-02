@@ -1,4 +1,8 @@
 export const CLOUD_KEY = 'laneways_m0_cloud'
+/** Throwaway key written only to measure write latency when the read fails,
+ *  so a failed read never re-seeds (and thereby destroys) the durability
+ *  record at CLOUD_KEY. */
+export const CLOUD_WRITE_PROBE_KEY = 'laneways_m0_cloud_w'
 export const CLOUD_PAYLOAD_CHARS = 3500
 export const CLOUD_TIMEOUT_MS = 10000
 /** Telegram's hard cap, applied to the whole stored value — wrapper included. */
@@ -25,6 +29,11 @@ export interface CloudProbeResult {
   launches: number
   ageMs: number
   firstSeenMs: number
+  /** True when this launch wrote the durability record. False when the read
+   *  failed and only the throwaway latency key was written, leaving the
+   *  accumulated record intact. Without this, a row after a transient read
+   *  failure is indistinguishable from real data loss. */
+  wroteDurabilityRecord: boolean
 }
 
 interface CloudRecord {
@@ -99,6 +108,7 @@ export async function runCloudProbe(
     readOutcome: 'error', readError: null, readMs: 0,
     writeOutcome: 'error', writeError: null, writeMs: 0,
     survived: false, payloadIntact: true, launches: 1, ageMs: 0, firstSeenMs: nowMs,
+    wroteDurabilityRecord: false,
   }
   if (cloud === null) return base
 
@@ -110,14 +120,22 @@ export async function runCloudProbe(
   const firstSeenMs = prior === null ? nowMs : prior.firstSeenMs
   const payloadIntact = prior === null ? true : prior.payload === expected
 
+  // A failed read must never mutate the durability record: `prior` is null
+  // whenever the read didn't succeed, so writing to CLOUD_KEY in that case
+  // would re-seed it at launches: 1 and silently destroy the accumulated
+  // evidence — indistinguishable from the data loss this probe measures.
+  // Write latency is still worth measuring on every launch, so a failed read
+  // writes a same-shaped throwaway payload to a separate key instead.
+  const wroteDurabilityRecord = read.outcome === 'ok'
+  const writeKey = wroteDurabilityRecord ? CLOUD_KEY : CLOUD_WRITE_PROBE_KEY
   const record: CloudRecord = { firstSeenMs, launches, payload: expected }
-  const write = await callOnce<boolean>(timeoutMs, (cb) => cloud.setItem(CLOUD_KEY, JSON.stringify(record), cb))
+  const write = await callOnce<boolean>(timeoutMs, (cb) => cloud.setItem(writeKey, JSON.stringify(record), cb))
 
   // Telegram's setItem callback is (err, stored). A `stored === false` carrying
   // no error is a write that did not happen, and reporting it as 'ok' would be
   // the same silent failure the timeout handling above exists to prevent.
   // Strict equality, so a client that omits the second argument is not mistaken
-  // for a rejection.
+  // for a rejection. Applies to whichever key was written above.
   const rejected = write.outcome === 'ok' && write.value === false
 
   return {
@@ -127,5 +145,6 @@ export async function runCloudProbe(
     writeError: rejected ? 'setItem reported not stored' : write.error,
     writeMs: write.ms,
     survived, payloadIntact, launches, ageMs: nowMs - firstSeenMs, firstSeenMs,
+    wroteDurabilityRecord,
   }
 }

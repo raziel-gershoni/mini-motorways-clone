@@ -3,6 +3,7 @@ import {
   runCloudProbe,
   makeCloudPayload,
   CLOUD_KEY,
+  CLOUD_WRITE_PROBE_KEY,
   CLOUD_PAYLOAD_CHARS,
   CLOUD_VALUE_LIMIT,
   type CloudLike,
@@ -83,6 +84,16 @@ describe('CLOUD_KEY', () => {
   it('does not reuse the dotted localStorage key, which the charset rejects', () => {
     expect(PROBE_KEY).not.toMatch(/^[A-Za-z0-9_-]{1,128}$/)
     expect(CLOUD_KEY).not.toContain('.')
+  })
+})
+
+describe('CLOUD_WRITE_PROBE_KEY', () => {
+  it('matches the CloudStorage key charset', () => {
+    expect(CLOUD_WRITE_PROBE_KEY).toMatch(/^[A-Za-z0-9_-]{1,128}$/)
+  })
+
+  it('is distinct from the durability record key', () => {
+    expect(CLOUD_WRITE_PROBE_KEY).not.toBe(CLOUD_KEY)
   })
 })
 
@@ -246,17 +257,66 @@ describe('runCloudProbe', () => {
     expect(r.readOutcome).toBe('ok')
   })
 
-  it('re-seeds the record when the read times out, so launches restarts at 1', async () => {
-    // Documents a real cost of writing unconditionally: a transient read failure
-    // clobbers the accumulated durability evidence. Kept deliberately, because a
-    // launch that skipped the write would report no write latency at all.
+  it('never touches the durability record when the read times out, writing the throwaway key instead', async () => {
     const c = new FakeCloud()
     await runCloudProbe(c, 1000, FAST_TIMEOUT)
+    const priorRaw = c.map.get(CLOUD_KEY)
     c.hangGet = true
     const r = await runCloudProbe(c, 2000, FAST_TIMEOUT)
-    expect(r.launches).toBe(1)
-    expect(r.survived).toBe(false)
-    expect(JSON.parse(c.map.get(CLOUD_KEY) as string).launches).toBe(1)
+    expect(r.readOutcome).toBe('timeout')
+    expect(r.wroteDurabilityRecord).toBe(false)
+    expect(c.map.get(CLOUD_KEY)).toBe(priorRaw)
+    expect(c.map.has(CLOUD_WRITE_PROBE_KEY)).toBe(true)
+  })
+
+  it('never touches the durability record when the read errors, writing the throwaway key instead', async () => {
+    const c = new FakeCloud()
+    await runCloudProbe(c, 1000, FAST_TIMEOUT)
+    const priorRaw = c.map.get(CLOUD_KEY)
+    c.getError = 'WEBAPP_DATA_INVALID'
+    const r = await runCloudProbe(c, 2000, FAST_TIMEOUT)
+    expect(r.readOutcome).toBe('error')
+    expect(r.wroteDurabilityRecord).toBe(false)
+    expect(c.map.get(CLOUD_KEY)).toBe(priorRaw)
+    expect(c.map.has(CLOUD_WRITE_PROBE_KEY)).toBe(true)
+  })
+
+  it('writes the durability record and leaves the throwaway key untouched when the read succeeds', async () => {
+    const c = new FakeCloud()
+    const r = await runCloudProbe(c, 1000, FAST_TIMEOUT)
+    expect(r.readOutcome).toBe('ok')
+    expect(r.wroteDurabilityRecord).toBe(true)
+    expect(c.map.has(CLOUD_KEY)).toBe(true)
+    expect(c.map.has(CLOUD_WRITE_PROBE_KEY)).toBe(false)
+  })
+
+  it('still measures write latency when the read fails', async () => {
+    const c = new FakeCloud()
+    c.hangGet = true
+    const r = await runCloudProbe(c, 1000, FAST_TIMEOUT)
+    expect(r.wroteDurabilityRecord).toBe(false)
+    expect(r.writeOutcome).toBe('ok')
+    expect(Number.isFinite(r.writeMs)).toBe(true)
+    expect(r.writeMs).toBeGreaterThanOrEqual(0)
+  })
+
+  it('preserves launches and firstSeenMs across a failed read followed by a successful one — the regression this fix prevents', async () => {
+    const c = new FakeCloud()
+    await runCloudProbe(c, 1000, FAST_TIMEOUT) // launches: 1, firstSeenMs: 1000
+    await runCloudProbe(c, 2000, FAST_TIMEOUT) // launches: 2
+    await runCloudProbe(c, 3000, FAST_TIMEOUT) // launches: 3
+
+    c.hangGet = true
+    const failed = await runCloudProbe(c, 4000, FAST_TIMEOUT)
+    expect(failed.readOutcome).toBe('timeout')
+    expect(failed.wroteDurabilityRecord).toBe(false)
+
+    c.hangGet = false
+    const recovered = await runCloudProbe(c, 5000, FAST_TIMEOUT)
+    expect(recovered.readOutcome).toBe('ok')
+    expect(recovered.survived).toBe(true)
+    expect(recovered.launches).toBe(4)
+    expect(recovered.firstSeenMs).toBe(1000)
   })
 
   it('settles once when a callback fires twice', async () => {
