@@ -8,7 +8,9 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "deploy": "vite build && wrangler deploy",
-    "tail": "wrangler tail --format pretty"
+    "tail": "wrangler tail --format pretty",
+    "migrate": "wrangler d1 execute laneways-spike-results --remote --file=./migrations/0001_results.sql",
+    "results": "wrangler d1 execute laneways-spike-results --remote --command \"SELECT id, datetime(received_at/1000,'unixepoch') AS at, kind, platform, perf_class, dpr FROM results ORDER BY id DESC LIMIT 30\""
   },
   "devDependencies": {
     "typescript": "^7.0.2",

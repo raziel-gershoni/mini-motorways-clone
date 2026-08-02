@@ -6,6 +6,13 @@
     "directory": "./dist",
     "binding": "ASSETS"
   },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "laneways-spike-results",
+      "database_id": "c3d2da3a-0308-4adf-9658-927891ff9115"
+    }
+  ],
   "observability": {
     "enabled": true
   }
