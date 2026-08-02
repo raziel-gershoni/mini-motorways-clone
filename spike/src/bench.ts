@@ -65,10 +65,9 @@ export async function runBenchSuite(
   baked.width = canvas.width
   baked.height = canvas.height
   const bctx = baked.getContext('2d')
-  if (bctx) {
-    bctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    drawRoads(bctx, atlas, masks, tilePx)
-  }
+  if (!bctx) throw new Error('bench: no 2d context for baked canvas')
+  bctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  drawRoads(bctx, atlas, masks, tilePx)
 
   const results: BenchResult[] = []
 
@@ -81,7 +80,13 @@ export async function runBenchSuite(
     let prev = await nextFrame()
     for (let i = 0; i < WARMUP_FRAMES + MEASURE_FRAMES; i++) {
       const now = await nextFrame()
-      const dt = Math.min(0.25, (now - prev) / 1000)
+      // rawDt feeds the frame sampler unclamped: a GC pause or thermal stall
+      // is exactly what the p95/p99/max tail exists to catch, and clamping
+      // it here would silently record any stall over 250ms as 250ms. dt is
+      // clamped only for advance(), so a stall doesn't fling sprites across
+      // the canvas — that clamp must never leak into the measurement.
+      const rawDt = (now - prev) / 1000
+      const dt = Math.min(0.25, rawDt)
       prev = now
 
       advance(sprites, dt, cssW, cssH)
@@ -99,7 +104,7 @@ export async function runBenchSuite(
 
       if (i >= WARMUP_FRAMES) {
         draw.push(t1 - t0)
-        frame.push(dt * 1000)
+        frame.push(rawDt * 1000)
       }
     }
 
