@@ -11,6 +11,20 @@ import { hashBytes } from './hash'
  * Later plans append typed-array regions for roads, buildings and cars. The
  * rule is that nothing the simulation can change may live outside this buffer:
  * that is what makes a snapshot a single byte copy and rollback free.
+ *
+ * `H_SCORE` is currently written only by tests, and is kept deliberately. That
+ * is not inconsistent with dropping the `H_RNG_DRAWS` slot in the same review:
+ * a score is certain to exist and its slot costs four bytes, whereas a draw
+ * counter was speculative — a guess at a debugging aid nothing had asked for.
+ * Retain what the design already commits to; do not retain what it merely
+ * might want.
+ *
+ * `hashState` reads the buffer as raw bytes, so the hash of a given logical
+ * state is little-endian-dependent. Every realistic target — x86, ARM in its
+ * normal configuration, and every WebAssembly and JavaScript engine — is
+ * little-endian, so this is a statement of the assumption rather than a
+ * limitation. If a big-endian replay host ever appeared, hashes would differ
+ * while the simulation itself stayed identical.
  */
 
 export const H_TICK = 0
@@ -39,6 +53,8 @@ function viewsOver(buffer: ArrayBuffer): GameState {
 
 /**
  * Forces a hashed seed away from zero, keeping every other value unchanged.
+ *
+ * @internal Exported for testing only; call `createState` instead.
  *
  * Exposed as its own function — not left inlined in `createState` — so the
  * zero path can be exercised directly. Hunting for a seed *string* that

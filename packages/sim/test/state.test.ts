@@ -32,15 +32,6 @@ describe('createState', () => {
     expect(createState('x').rng[0]).not.toBe(0)
   })
 
-  it('never seeds the rng with zero, across a wide range of seed strings', () => {
-    // None of this project's fixture strings happens to hash to 0 (see the
-    // `nonZeroSeed` tests below for the branch itself), so this sweeps a much
-    // wider set to keep the observable property — never zero — under test
-    // even though it cannot, by construction, hit the zero path.
-    for (let i = 0; i < 2000; i++) {
-      expect(createState(`seed-sweep-${i}`).rng[0]).not.toBe(0)
-    }
-  })
 })
 
 describe('nonZeroSeed', () => {
@@ -56,12 +47,19 @@ describe('nonZeroSeed', () => {
 })
 
 describe('snapshot and restore', () => {
-  it('throws on a too-small buffer', () => {
-    expect(() => restore(new ArrayBuffer(1))).toThrow()
+  it('throws its own guard on a too-small buffer', () => {
+    // Matched against the message, not bare: `new Uint32Array(buf, 0, 1)` throws
+    // a native RangeError for any byteLength below 16, so a bare `.toThrow()`
+    // passes with `restore`'s own check deleted.
+    expect(() => restore(new ArrayBuffer(1))).toThrow(
+      new RegExp(`restore: expected ${STATE_BYTES} bytes, got 1`),
+    )
   })
 
   it('throws on a too-large buffer', () => {
-    expect(() => restore(new ArrayBuffer(STATE_BYTES + 1))).toThrow()
+    expect(() => restore(new ArrayBuffer(STATE_BYTES + 1))).toThrow(
+      new RegExp(`restore: expected ${STATE_BYTES} bytes`),
+    )
   })
 
   it('round-trips to an identical hash', () => {
