@@ -2272,7 +2272,15 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url)
     if (url.pathname === '/api/result' && req.method === 'POST') {
-      const body = await req.text()
+      let body: string
+      try {
+        body = await req.text()
+      } catch {
+        // Stream error mid-read — a phone on a flaky connection. Nothing to
+        // store, but the phone must not see a failure and rerun the sequence.
+        return new Response('ok', { status: 200, headers: { 'cache-control': 'no-store' } })
+      }
+
       // Logged as well as stored: `wrangler tail` stays useful when someone is
       // watching live, and it is the fallback record if the insert fails.
       console.log('M0-RESULT', body)
@@ -2315,6 +2323,8 @@ Do **not** run `pnpm migrate` — it touches the live database and is the contro
 ```bash
 cd .. && git add spike && git commit -m "spike(m0): durable result storage in d1"
 ```
+
+(As with every commit in this plan, the message must carry the two trailer lines from Global Constraints. The `-m` form above is abbreviated for readability, not an exemption.)
 
 ---
 
