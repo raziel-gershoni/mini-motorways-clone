@@ -1,5 +1,6 @@
 export * from './rng'
 export * from './hash'
 export * from './state'
+export * from './world'
 export * from './clock'
 export * from './step'

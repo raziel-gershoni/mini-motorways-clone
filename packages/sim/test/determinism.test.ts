@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { TICKS_PER_WEEK } from '@laneways/shared'
+import { TICKS_PER_WEEK, parseMap } from '@laneways/shared'
 import { createState, hashState } from '../src/state'
 import { nextRandom } from '../src/rng'
 import { step, type TickInputs } from '../src/step'
@@ -324,6 +324,8 @@ describe('sim source obeys the determinism rules', () => {
     expect(files.map(label).sort()).toEqual([
       'shared/src/constants.ts',
       'shared/src/index.ts',
+      'shared/src/mapFormat.ts',
+      'shared/src/maps/firstCity.ts',
       'sim/src/clock.ts',
       'sim/src/hash.ts',
       'sim/src/index.ts',
@@ -331,6 +333,7 @@ describe('sim source obeys the determinism rules', () => {
       'sim/src/rng.ts',
       'sim/src/state.ts',
       'sim/src/step.ts',
+      'sim/src/world.ts',
     ])
   })
 
@@ -420,14 +423,23 @@ describe('the scan itself works', () => {
 describe('golden replay', () => {
   const NO_INPUT: TickInputs = { actions: [] }
 
+  // A small map defined here, not `firstCity()` — that fixture is level-design
+  // data that will keep changing through this milestone, and every edit to it
+  // would otherwise churn this golden for no reason connected to sim
+  // correctness. `firstCity()`'s own content hash is pinned separately, in
+  // `world.test.ts`, which is the assertion that SHOULD fire when it changes.
+  const GOLDEN_MAP = parseMap('golden-fixture-v1', ['....', '.~^.', '.T..', '....'], 12)
+
   it('reproduces a known hash', () => {
-    // What this pins, precisely: the buffer layout and byte order, the seed
-    // derivation from the seed string, tick accumulation, coarse week tracking,
-    // TICKS_PER_WEEK itself, and the rng stream's position after a known number
-    // of draws. It does not pin `dayOfWeek` — no day is stored in the buffer —
-    // and it is coarse about the clock by construction; `clock.test.ts` walks a
-    // full week tick by tick and `step.test.ts` bites on a ±1 change, which is
-    // where that coverage actually lives.
+    // What this pins, precisely: the buffer layout and byte order (now
+    // including the map-derived header slots and the roads/cleared regions
+    // Task 3 will write into), the seed derivation from the seed string, the
+    // map's content hash and dimensions, tick accumulation, coarse week
+    // tracking, TICKS_PER_WEEK itself, and the rng stream's position after a
+    // known number of draws. It does not pin `dayOfWeek` — no day is stored
+    // in the buffer — and it is coarse about the clock by construction;
+    // `clock.test.ts` walks a full week tick by tick and `step.test.ts` bites
+    // on a ±1 change, which is where that coverage actually lives.
     //
     // The run stops one tick short of a week boundary so that a change to
     // TICKS_PER_WEEK moves both the tick total and the stored week, and folds
@@ -436,12 +448,18 @@ describe('golden replay', () => {
     //
     // When a rule change makes this fail intentionally, re-bless it in the same
     // commit as the rule change, never separately.
-    const s = createState('golden-seed-v1')
+    const s = createState('golden-seed-v1', GOLDEN_MAP)
     const ticks = TICKS_PER_WEEK * 3 - 1
     for (let i = 0; i < ticks; i++) {
       step(s, NO_INPUT)
       if (i % 1000 === 0) nextRandom(s.rng, 0)
     }
-    expect(hashState(s)).toBe(917870623)
+    // Re-blessed in M1b Task 2 (was 917870623): the buffer grew by the
+    // `roads`/`cleared` regions and the header grew from 3 to 7 slots
+    // (H_MAP, H_MAP_W, H_MAP_H, H_TILES), and this replay now also pins the
+    // map's content hash and dimensions via those new header slots. This is
+    // the milestone's one deliberate golden re-bless (design decision 5) —
+    // no later M1b task should need another.
+    expect(hashState(s)).toBe(1073292924)
   })
 })
