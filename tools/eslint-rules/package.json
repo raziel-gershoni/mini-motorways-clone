@@ -1,0 +1,17 @@
+{
+  "name": "@laneways/eslint-rules",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "AST-based determinism lint rules for packages/sim/src and packages/shared/src. Not shipped sim code — kept under tools/ so the determinism scan's own file roots never grow to include them.",
+  "main": "./index.js",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "echo '@laneways/eslint-rules: plain JS, nothing to typecheck'"
+  },
+  "devDependencies": {
+    "eslint": "^10.8.0",
+    "typescript-eslint": "^8.65.0",
+    "vitest": "^3.0.0"
+  }
+}

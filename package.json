@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "pnpm -r --filter './packages/*' test",
-    "typecheck": "pnpm -r --filter './packages/*' typecheck",
+    "test": "pnpm -r --filter './packages/*' --filter './tools/*' test",
+    "typecheck": "pnpm -r --filter './packages/*' --filter './tools/*' typecheck",
     "lint": "eslint ."
   },
   "devDependencies": {

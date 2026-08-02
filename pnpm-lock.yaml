@@ -32,6 +32,18 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
+  tools/eslint-rules:
+    devDependencies:
+      eslint:
+        specifier: ^10.8.0
+        version: 10.8.0
+      typescript-eslint:
+        specifier: ^8.65.0
+        version: 8.65.0(eslint@10.8.0)(typescript@5.9.3)
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.7(@types/node@26.1.2)
+
 packages:
 
   '@esbuild/aix-ppc64@0.28.1':

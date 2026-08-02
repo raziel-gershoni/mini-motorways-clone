@@ -9,8 +9,10 @@ import {
   H_TICK,
   H_SCORE,
   H_WEEK,
+  HEADER_LENGTH,
 } from '../src/state'
 import { nextRandom } from '../src/rng'
+import { computeLayout } from '../src/layout'
 
 describe('createState', () => {
   it('is deterministic for a given seed', () => {
@@ -137,5 +139,45 @@ describe('hashState', () => {
     const before = hashState(s)
     nextRandom(s.rng, 0)
     expect(hashState(s)).not.toBe(before)
+  })
+})
+
+describe('view layout wiring', () => {
+  // `computeLayout` is exercised exhaustively in layout.test.ts — its internal
+  // consistency (no overlap, no gap, correct alignment) is guaranteed by
+  // construction and cannot fail here. What CAN fail is `viewsOver` wiring a
+  // view to the wrong entry: an off-by-one that hands `header` the `rng`
+  // entry's offset and length, say. This mirrors state.ts's own declared
+  // regions (documented at the top of state.ts: rng Uint32 x1, then header
+  // Int32 x HEADER_LENGTH) and recomputes their layout independently, then
+  // asserts every live view against it — not just the fixed byte totals.
+  const RNG_LENGTH = 1
+  const REGIONS = [
+    { name: 'rng', ctor: Uint32Array, len: RNG_LENGTH },
+    { name: 'header', ctor: Int32Array, len: HEADER_LENGTH },
+  ] as const
+
+  it('wires every view to its own layout entry, with no gap or overlap beyond declared padding', () => {
+    const { entries, totalBytes } = computeLayout(REGIONS)
+    const s = createState('layout-wiring')
+    const viewByName: Record<string, Uint32Array | Int32Array> = { rng: s.rng, header: s.header }
+
+    let sumOfViewBytes = 0
+    let expectedNextOffset = 0
+    for (const e of entries) {
+      const view = viewByName[e.name]
+      expect(view, `no view for region "${e.name}"`).toBeDefined()
+      expect(view!.byteOffset, `${e.name}.byteOffset`).toBe(e.offset)
+      expect(view!.length, `${e.name}.length`).toBe(e.len)
+      expect(e.offset, `${e.name} overlaps or precedes the previous region`).toBeGreaterThanOrEqual(
+        expectedNextOffset,
+      )
+      expectedNextOffset = e.offset + view!.byteLength
+      sumOfViewBytes += view!.byteLength
+    }
+
+    const padding = totalBytes - expectedNextOffset
+    expect(sumOfViewBytes + padding, 'declared view bytes plus padding').toBe(s.buffer.byteLength)
+    expect(totalBytes).toBe(STATE_BYTES)
   })
 })
