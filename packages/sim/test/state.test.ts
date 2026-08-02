@@ -121,6 +121,28 @@ describe('snapshot and restore', () => {
     expect(() => restore(snapshot(s), otherWorld)).toThrow(/H_MAP/)
   })
 
+  it('rejects a buffer whose H_MAP_W disagrees with the world, with H_MAP itself left correct', () => {
+    // Written directly into the header, not via a second map: every
+    // map-based construction that changes `w` also changes `mapIdHash`'s own
+    // byte recipe (it bakes `w` into the hash), so `H_MAP` would already
+    // disagree and that check alone would reject the buffer — this branch
+    // would never run. A reviewer confirmed exactly this: deleting the
+    // `H_MAP_W`/`H_MAP_H` checks entirely left the suite green, because no
+    // existing test reached them independently of `H_MAP`. Writing the
+    // header directly is the only construction that does — do not "improve"
+    // this into a second-map construction, which would silently re-merge it
+    // with the `H_MAP` case above and lose the isolation.
+    const s = createState('bad-width', MAP)
+    s.header[H_MAP_W] = MAP.w + 1
+    expect(() => restore(snapshot(s), world)).toThrow(/H_MAP_W/)
+  })
+
+  it('rejects a buffer whose H_MAP_H disagrees with the world, with H_MAP itself left correct', () => {
+    const s = createState('bad-height', MAP)
+    s.header[H_MAP_H] = MAP.h + 1
+    expect(() => restore(snapshot(s), world)).toThrow(/H_MAP_H/)
+  })
+
   it('round-trips to an identical hash', () => {
     const s = createState('round-trip', MAP)
     s.header[H_TICK] = 1234

@@ -60,11 +60,18 @@ import { assertWorldMatches, mapIdHash, type WorldData } from './world'
  *
  * This module and `world.ts` import each other: `restore` here calls
  * `assertWorldMatches` (world.ts), and `assertWorldMatches`/`mapIdHash` read
- * `GameState`/`H_MAP*` (here). Both sides reference the other only from
- * inside function bodies, never at module-evaluation time, so the circular
- * import resolves the way any two mutually-referencing modules do under
- * ESM's live bindings — by the time either function is actually called, both
- * modules have finished loading.
+ * `GameState`/`H_MAP*` (here). THE INVARIANT THIS DEPENDS ON: neither module
+ * may reference the other at module-evaluation time — only from inside a
+ * function body, where the reference isn't resolved until the function is
+ * actually called, by which point both modules have finished loading. Safe
+ * today by construction, not by luck: every cross-reference here (`H_MAP`,
+ * `H_MAP_W`, `H_MAP_H`, `mapIdHash`, `assertWorldMatches`, the `GameState`
+ * type) is read inside a function body. If a future edit hoisted one of
+ * these into a module-scope initialiser (e.g. `const X = mapIdHash(...)` at
+ * top level), the failure would not be silent drift — it would be a loud
+ * `ReferenceError: Cannot access '...' before initialization` (TDZ) the
+ * first time either module loaded, thrown at import time, not at some
+ * later call site.
  */
 
 export const H_TICK = 0

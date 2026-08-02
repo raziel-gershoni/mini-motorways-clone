@@ -66,12 +66,21 @@ describe('parseMap', () => {
     expect(() => parseMap('empty-row', [''], 5)).toThrow(/parseMap.*at least one row and one column/)
   })
 
-  it('throws on a negative startingTiles', () => {
-    expect(() => parseMap('neg-tiles', ROWS, -1)).toThrow()
+  it('throws on a negative startingTiles, naming the offending value', () => {
+    // Message-matched for consistency with the rest of this file, though not
+    // for masking safety here: the reviewer confirmed that without the
+    // guard, a negative or non-integer `startingTiles` returns successfully
+    // rather than throwing natively, so a bare `.toThrow()` would not be
+    // silently satisfied by a native error either way.
+    expect(() => parseMap('neg-tiles', ROWS, -1)).toThrow(
+      /startingTiles must be a non-negative integer, got -1/,
+    )
   })
 
-  it('throws on a non-integer startingTiles', () => {
-    expect(() => parseMap('float-tiles', ROWS, 1.5)).toThrow()
+  it('throws on a non-integer startingTiles, naming the offending value', () => {
+    expect(() => parseMap('float-tiles', ROWS, 1.5)).toThrow(
+      /startingTiles must be a non-negative integer, got 1\.5/,
+    )
   })
 
   it('freezes the returned MapData', () => {
