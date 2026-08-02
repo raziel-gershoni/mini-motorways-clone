@@ -1,0 +1,13 @@
+{
+  "name": "laneways",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "pnpm -r --filter './packages/*' test",
+    "typecheck": "pnpm -r --filter './packages/*' typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "vitest": "^3.0.0"
+  }
+}
