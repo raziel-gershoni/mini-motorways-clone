@@ -96,18 +96,33 @@ describe('randomBelow', () => {
     expect(randomBelow(s, 0, 0)).toBe(0)
   })
 
-  it('is unbiased across a bound that does not divide 2^32', () => {
-    // 2^32 % 3 !== 0, so a naive `next() % 3` over-represents 0 and 1.
-    // With 60000 draws the expected count per bucket is 20000; a naive modulo
-    // would not shift this enough to fail at 5%, so this test is a smoke check
-    // on gross skew, not a proof. The rejection loop is the actual guarantee.
+  it('is unbiased at a bound chosen so naive modulo would visibly fail', () => {
+    // Bound just above 2^31, where modulo bias is near maximal.
+    //   B = 0xA0000000, r = 2^32 - B = 0x60000000
+    // Uniform over [0, B):        P(x < r) = r/B      = 0.60
+    // Naive `next() % B`:         P(x < r) = 2r/2^32  = 0.75
+    // ~40 standard errors apart at N = 20000, so this cannot pass by chance.
+    // The earlier version of this test used bound = 3, where 2^32 % 3 = 1 and
+    // the bias touches one value in 4.29 billion — undetectable, and therefore
+    // decorative. Do not lower this bound.
+    const B = 0xa0000000
+    const r = 0x100000000 - B
     const s = store(31337)
-    const counts = [0, 0, 0]
-    const N = 60000
-    for (let i = 0; i < N; i++) counts[randomBelow(s, 0, 3)]!++
-    for (const c of counts) {
-      expect(c).toBeGreaterThan(N / 3 * 0.95)
-      expect(c).toBeLessThan(N / 3 * 1.05)
+    const N = 20000
+    let below = 0
+    for (let i = 0; i < N; i++) if (randomBelow(s, 0, B) < r) below++
+    const fraction = below / N
+    expect(fraction).toBeGreaterThan(0.58)
+    expect(fraction).toBeLessThan(0.62)
+  })
+
+  it('still respects the range at that bound', () => {
+    const B = 0xa0000000
+    const s = store(4242)
+    for (let i = 0; i < 5000; i++) {
+      const v = randomBelow(s, 0, B)
+      expect(v).toBeGreaterThanOrEqual(0)
+      expect(v).toBeLessThan(B)
     }
   })
 
