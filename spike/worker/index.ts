@@ -20,7 +20,14 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url)
     if (url.pathname === '/api/result' && req.method === 'POST') {
-      const body = await req.text()
+      let body: string
+      try {
+        body = await req.text()
+      } catch {
+        // Stream error mid-read — there is nothing to store, but the phone must not
+        // see a failure and rerun the sequence.
+        return new Response('ok', { status: 200, headers: { 'cache-control': 'no-store' } })
+      }
       // Logged as well as stored: `wrangler tail` stays useful when someone is
       // watching live, and it is the fallback record if the insert fails.
       console.log('M0-RESULT', body)
