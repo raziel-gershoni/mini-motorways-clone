@@ -159,9 +159,14 @@ export default defineConfig({
 `spike/public/_headers`:
 
 ```
+/
+  Cache-Control: no-store, must-revalidate
+
 /index.html
   Cache-Control: no-store, must-revalidate
 ```
+
+Both paths are needed: `_headers` rules match the **request path**, and Telegram opens the Mini App at the bare root `/`. A rule on `/index.html` alone never fires on the request that matters. `/assets/*` is deliberately left cacheable — those filenames are content-hashed.
 
 `spike/index.html`:
 
@@ -203,7 +208,7 @@ export default defineConfig({
 
 ```ts
 import { describe, it, expect, afterEach } from 'vitest'
-import { atLeast, platformName, stableHeight, contentSafeAreaTop } from '../src/telegram'
+import { boot, atLeast, platformName, stableHeight, contentSafeAreaTop } from '../src/telegram'
 
 function install(webApp: unknown): void {
   ;(globalThis as Record<string, unknown>).Telegram = { WebApp: webApp }
@@ -252,7 +257,61 @@ describe('telegram adapter', () => {
     expect(contentSafeAreaTop()).toBe(0)
   })
 })
+
+describe('boot', () => {
+  function spyWebApp(version: string): string[] {
+    const calls: string[] = []
+    const rec = (name: string) => () => { calls.push(name) }
+    install({
+      isVersionAtLeast: (v: string) => parseFloat(v) <= parseFloat(version),
+      ready: rec('ready'),
+      expand: rec('expand'),
+      disableVerticalSwipes: rec('disableVerticalSwipes'),
+      requestFullscreen: rec('requestFullscreen'),
+      lockOrientation: rec('lockOrientation'),
+    })
+    return calls
+  }
+
+  it('calls ready, expand, swipes, fullscreen, lock in exact order on a modern client', () => {
+    const calls = spyWebApp('8.0')
+    boot()
+    expect(calls).toEqual(['ready', 'expand', 'disableVerticalSwipes', 'requestFullscreen', 'lockOrientation'])
+  })
+
+  it('gates disableVerticalSwipes behind 7.7', () => {
+    const calls = spyWebApp('7.6')
+    boot()
+    expect(calls).toEqual(['ready', 'expand'])
+  })
+
+  it('skips fullscreen and orientation lock below 8.0', () => {
+    const calls = spyWebApp('7.7')
+    boot()
+    expect(calls).toEqual(['ready', 'expand', 'disableVerticalSwipes'])
+  })
+
+  it('continues booting when a lifecycle method throws', () => {
+    const calls: string[] = []
+    install({
+      isVersionAtLeast: () => true,
+      ready: () => { calls.push('ready') },
+      expand: () => { throw new Error('unsupported on this client') },
+      disableVerticalSwipes: () => { calls.push('disableVerticalSwipes') },
+      requestFullscreen: () => { calls.push('requestFullscreen') },
+      lockOrientation: () => { calls.push('lockOrientation') },
+    })
+    expect(() => boot()).not.toThrow()
+    expect(calls).toEqual(['ready', 'disableVerticalSwipes', 'requestFullscreen', 'lockOrientation'])
+  })
+
+  it('is a no-op outside Telegram', () => {
+    expect(() => boot()).not.toThrow()
+  })
+})
 ```
+
+`boot()` is the exact, load-bearing Telegram sequence and Tasks 5-7 size a canvas on top of it. Testing only the pure accessors would let a reordering regression surface as a mystery layout bug on a phone instead of a red test.
 
 - [ ] **Step 4: Run the test to verify it fails**
 
@@ -349,7 +408,7 @@ export function boot(): void {
 - [ ] **Step 6: Run the test to verify it passes**
 
 Run: `pnpm test`
-Expected: PASS, 8 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 7: Write the Worker and entry point**
 
@@ -1205,10 +1264,11 @@ export async function runBenchSuite(
   baked.width = canvas.width
   baked.height = canvas.height
   const bctx = baked.getContext('2d')
-  if (bctx) {
-    bctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    drawRoads(bctx, atlas, masks, tilePx)
-  }
+  // Throw rather than skip: a silently blank baked layer would make every baked
+  // config report a fast, meaningless number with no error surfaced.
+  if (!bctx) throw new Error('bench: no 2d context for the baked road layer')
+  bctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  drawRoads(bctx, atlas, masks, tilePx)
 
   const results: BenchResult[] = []
 
@@ -1221,7 +1281,13 @@ export async function runBenchSuite(
     let prev = await nextFrame()
     for (let i = 0; i < WARMUP_FRAMES + MEASURE_FRAMES; i++) {
       const now = await nextFrame()
-      const dt = Math.min(0.25, (now - prev) / 1000)
+      // Two different quantities, deliberately. rawDt is the honest frame time and
+      // is what the sampler records — clamping it would silently truncate every
+      // stall over 250 ms to exactly 250 ms, gutting the p95/p99/max that are the
+      // whole reason this reports percentiles. dt is clamped only so a stall does
+      // not teleport every sprite across the screen. Do not collapse these.
+      const rawDt = (now - prev) / 1000
+      const dt = Math.min(0.25, rawDt)
       prev = now
 
       advance(sprites, dt, cssW, cssH)
@@ -1239,7 +1305,7 @@ export async function runBenchSuite(
 
       if (i >= WARMUP_FRAMES) {
         draw.push(t1 - t0)
-        frame.push(dt * 1000)
+        frame.push(rawDt * 1000)
       }
     }
 
@@ -1723,7 +1789,9 @@ import { runProbe, makePayload, PROBE_KEY, PAYLOAD_BYTES, type KVLike } from '..
 class MemStore implements KVLike {
   readonly map = new Map<string, string>()
   failWrites = false
+  failReads = false
   getItem(k: string): string | null {
+    if (this.failReads) throw new Error('SecurityError')
     return this.map.get(k) ?? null
   }
   setItem(k: string, v: string): void {
@@ -1875,11 +1943,21 @@ function parse(raw: string | null): Record_ | null {
 
 /**
  * Call once per launch. Returns whether a prior launch's data survived.
- * Never throws — a storage backend that rejects writes reports writeFailed.
+ *
+ * Never throws. Both the read and the write are guarded: restricted-storage
+ * WebViews can throw on getItem as well as setItem, and a probe that crashes
+ * on the exact configuration it exists to detect reports nothing at all.
  */
 export function runProbe(store: KVLike, nowMs: number): ProbeResult {
   const expected = makePayload(PAYLOAD_BYTES)
-  const prior = parse(store.getItem(PROBE_KEY))
+
+  let raw: string | null = null
+  try {
+    raw = store.getItem(PROBE_KEY)
+  } catch {
+    // Storage access restricted. Treat exactly as "no prior record".
+  }
+  const prior = parse(raw)
 
   const survived = prior !== null
   const payloadIntact = prior === null ? true : prior.payload === expected
@@ -1907,12 +1985,12 @@ export function runProbe(store: KVLike, nowMs: number): ProbeResult {
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `pnpm test storageProbe`
-Expected: PASS, 12 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 5: Run the whole suite**
 
 Run: `pnpm test && pnpm typecheck`
-Expected: all tests pass across all five test files; no type errors.
+Expected: all tests pass across all seven test files; no type errors.
 
 - [ ] **Step 6: Wire into main, ahead of the benchmark**
 
@@ -1925,16 +2003,328 @@ import { runProbe } from './storageProbe'
 and immediately after `show('device', device)`:
 
 ```ts
-const storage = runProbe(window.localStorage, Date.now())
+// window.localStorage property access itself throws SecurityError when storage
+// is blocked — before any method is called. Unguarded, that aborts the whole
+// module and costs us the render benchmark too.
+let store: KVLike | null = null
+try {
+  store = window.localStorage
+} catch {
+  store = null
+}
+const storage = store
+  ? runProbe(store, Date.now())
+  : { unavailable: true as const }
 show('storage', storage)
 void submit({ kind: 'storage', device, storage })
 ```
+
+`{ unavailable: true }` is deliberately a different shape from a `ProbeResult`. "Storage is entirely inaccessible" is a real and interesting M0 result, and it must never be confusable with "storage worked and nothing survived."
 
 - [ ] **Step 7: Commit**
 
 ```bash
 cd .. && git add spike && git commit -m "spike(m0): cross-session localstorage persistence probe"
 ```
+
+---
+
+## Task 9: Durable result storage in D1
+
+**Why this exists and why it is not optional.** The original design read results off `wrangler tail`, which is a *live* stream. That only works if a human and the agent are at the same desk at the same moment. The actual operating mode is the opposite: the device owner runs the probe sequence on a phone whenever they like, possibly hours before anyone looks. With `tail` alone those numbers are simply gone, and the sequence has to be redone.
+
+D1 makes the results durable and queryable after the fact. It is also the same plumbing M4 needs for the leaderboard, so it is not throwaway.
+
+The database already exists — created by the controller, since it is a real resource on the user's Cloudflare account:
+
+- name: `laneways-spike-results`
+- id: `c3d2da3a-0308-4adf-9658-927891ff9115`
+- region: WEUR
+
+**Files:**
+- Create: `spike/migrations/0001_results.sql`
+- Create: `spike/worker/extract.ts`
+- Create: `spike/test/extract.test.ts`
+- Modify: `spike/worker/index.ts`
+- Modify: `spike/wrangler.jsonc`, `spike/package.json`
+
+**Interfaces:**
+- Consumes: nothing from earlier tasks
+- Produces:
+  - `interface ResultRow { receivedAt: number; kind: string; platform: string | null; perfClass: string | null; dpr: number | null; ua: string | null; body: string }`
+  - `MAX_BODY_BYTES = 65536`
+  - `extractRow(body: string, nowMs: number): ResultRow`
+
+The parsing is split into a pure `extractRow` precisely so it can be unit-tested without a Worker runtime. The Worker itself stays a thin shell around it.
+
+- [ ] **Step 1: Write the failing test**
+
+`spike/test/extract.test.ts`:
+
+```ts
+import { describe, it, expect } from 'vitest'
+import { extractRow, MAX_BODY_BYTES } from '../worker/extract'
+
+const FULL = JSON.stringify({
+  kind: 'bench',
+  device: { platform: 'ios', performanceClass: null, dpr: 3, ua: 'Mozilla/5.0 iPhone' },
+  results: [{ sprites: 400 }],
+})
+
+describe('extractRow', () => {
+  it('pulls the indexed columns out of a well-formed payload', () => {
+    const r = extractRow(FULL, 1000)
+    expect(r.receivedAt).toBe(1000)
+    expect(r.kind).toBe('bench')
+    expect(r.platform).toBe('ios')
+    expect(r.perfClass).toBeNull()
+    expect(r.dpr).toBe(3)
+    expect(r.ua).toBe('Mozilla/5.0 iPhone')
+  })
+
+  it('preserves the original body verbatim', () => {
+    expect(extractRow(FULL, 1000).body).toBe(FULL)
+  })
+
+  it('falls back to kind "unknown" when kind is absent', () => {
+    expect(extractRow('{"device":{}}', 1).kind).toBe('unknown')
+  })
+
+  it('falls back to kind "unknown" when kind is not a string', () => {
+    expect(extractRow('{"kind":42}', 1).kind).toBe('unknown')
+  })
+
+  it('nulls every device column when device is absent', () => {
+    const r = extractRow('{"kind":"storage"}', 1)
+    expect(r.kind).toBe('storage')
+    expect(r.platform).toBeNull()
+    expect(r.perfClass).toBeNull()
+    expect(r.dpr).toBeNull()
+    expect(r.ua).toBeNull()
+  })
+
+  it('nulls device columns of the wrong type rather than coercing', () => {
+    const r = extractRow('{"kind":"x","device":{"platform":7,"dpr":"3","ua":null}}', 1)
+    expect(r.platform).toBeNull()
+    expect(r.dpr).toBeNull()
+    expect(r.ua).toBeNull()
+  })
+
+  it('survives malformed JSON, still storing the raw body', () => {
+    const r = extractRow('not json {{{', 5)
+    expect(r.kind).toBe('unmarshalled')
+    expect(r.body).toBe('not json {{{')
+    expect(r.receivedAt).toBe(5)
+  })
+
+  it('survives a JSON scalar rather than an object', () => {
+    const r = extractRow('42', 5)
+    expect(r.kind).toBe('unknown')
+    expect(r.platform).toBeNull()
+  })
+
+  it('survives JSON null without throwing', () => {
+    expect(() => extractRow('null', 5)).not.toThrow()
+    expect(extractRow('null', 5).kind).toBe('unknown')
+  })
+
+  it('truncates a body over the size cap and marks it', () => {
+    const huge = JSON.stringify({ kind: 'bench', pad: 'x'.repeat(MAX_BODY_BYTES) })
+    const r = extractRow(huge, 1)
+    expect(r.body.length).toBeLessThanOrEqual(MAX_BODY_BYTES)
+    expect(r.kind).toBe('oversized')
+  })
+})
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `pnpm test extract`
+Expected: FAIL — cannot resolve `../worker/extract`.
+
+- [ ] **Step 3: Implement the extractor**
+
+`spike/worker/extract.ts`:
+
+```ts
+export const MAX_BODY_BYTES = 65536
+
+export interface ResultRow {
+  receivedAt: number
+  kind: string
+  platform: string | null
+  perfClass: string | null
+  dpr: number | null
+  ua: string | null
+  body: string
+}
+
+function str(v: unknown): string | null {
+  return typeof v === 'string' ? v : null
+}
+
+function num(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
+/**
+ * Pulls the handful of columns worth indexing out of a submission, keeping the
+ * full body alongside. Never throws: a probe result that cannot be parsed is
+ * still evidence, and losing it would defeat the point of durable storage.
+ */
+export function extractRow(body: string, nowMs: number): ResultRow {
+  if (body.length > MAX_BODY_BYTES) {
+    return {
+      receivedAt: nowMs,
+      kind: 'oversized',
+      platform: null, perfClass: null, dpr: null, ua: null,
+      body: body.slice(0, MAX_BODY_BYTES),
+    }
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body)
+  } catch {
+    return {
+      receivedAt: nowMs,
+      kind: 'unmarshalled',
+      platform: null, perfClass: null, dpr: null, ua: null,
+      body,
+    }
+  }
+
+  const obj = (typeof parsed === 'object' && parsed !== null ? parsed : {}) as Record<string, unknown>
+  const d = (typeof obj.device === 'object' && obj.device !== null ? obj.device : {}) as Record<string, unknown>
+
+  return {
+    receivedAt: nowMs,
+    kind: str(obj.kind) ?? 'unknown',
+    platform: str(d.platform),
+    perfClass: str(d.performanceClass),
+    dpr: num(d.dpr),
+    ua: str(d.ua),
+    body,
+  }
+}
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `pnpm test extract`
+Expected: PASS, 10 tests.
+
+- [ ] **Step 5: Write the migration**
+
+`spike/migrations/0001_results.sql`:
+
+```sql
+CREATE TABLE IF NOT EXISTS results (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  received_at INTEGER NOT NULL,
+  kind        TEXT    NOT NULL,
+  platform    TEXT,
+  perf_class  TEXT,
+  dpr         REAL,
+  ua          TEXT,
+  body        TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_results_received_at ON results (received_at DESC);
+```
+
+- [ ] **Step 6: Bind D1 and wire the Worker**
+
+Add to `spike/wrangler.jsonc`, as a sibling of `assets`:
+
+```jsonc
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "laneways-spike-results",
+      "database_id": "c3d2da3a-0308-4adf-9658-927891ff9115"
+    }
+  ]
+```
+
+Replace `spike/worker/index.ts` with:
+
+```ts
+import { extractRow } from './extract'
+
+/** Structural subset of D1Database — avoids pulling in a types package for a spike. */
+interface D1Like {
+  prepare(query: string): {
+    bind(...values: unknown[]): { run(): Promise<unknown> }
+  }
+}
+
+interface Env {
+  ASSETS: { fetch: (req: Request) => Promise<Response> }
+  DB: D1Like
+}
+
+const INSERT =
+  `INSERT INTO results (received_at, kind, platform, perf_class, dpr, ua, body)
+   VALUES (?, ?, ?, ?, ?, ?, ?)`
+
+export default {
+  async fetch(req: Request, env: Env): Promise<Response> {
+    const url = new URL(req.url)
+    if (url.pathname === '/api/result' && req.method === 'POST') {
+      let body: string
+      try {
+        body = await req.text()
+      } catch {
+        // Stream error mid-read — a phone on a flaky connection. Nothing to
+        // store, but the phone must not see a failure and rerun the sequence.
+        return new Response('ok', { status: 200, headers: { 'cache-control': 'no-store' } })
+      }
+
+      // Logged as well as stored: `wrangler tail` stays useful when someone is
+      // watching live, and it is the fallback record if the insert fails.
+      console.log('M0-RESULT', body)
+
+      const row = extractRow(body, Date.now())
+      try {
+        await env.DB.prepare(INSERT)
+          .bind(row.receivedAt, row.kind, row.platform, row.perfClass, row.dpr, row.ua, row.body)
+          .run()
+      } catch (err) {
+        console.log('M0-RESULT-DB-ERROR', String(err))
+        // Deliberately still 200. A failure here must not make the phone show a
+        // failed submit — the person holding it would redo the whole sequence,
+        // and the console log above already preserves the data.
+      }
+
+      return new Response('ok', { status: 200, headers: { 'cache-control': 'no-store' } })
+    }
+    return env.ASSETS.fetch(req)
+  },
+}
+```
+
+- [ ] **Step 7: Add the query scripts**
+
+Add to `spike/package.json` scripts:
+
+```json
+    "migrate": "wrangler d1 execute laneways-spike-results --remote --file=./migrations/0001_results.sql",
+    "results": "wrangler d1 execute laneways-spike-results --remote --command \"SELECT id, datetime(received_at/1000,'unixepoch') AS at, kind, platform, perf_class, dpr FROM results ORDER BY id DESC LIMIT 30\""
+```
+
+- [ ] **Step 8: Verify and commit**
+
+Run: `pnpm test && pnpm typecheck && pnpm build`
+Expected: all previous tests plus 10 new ones pass; no type errors; build clean.
+
+Do **not** run `pnpm migrate` — it touches the live database and is the controller's to run at deploy time.
+
+```bash
+cd .. && git add spike && git commit -m "spike(m0): durable result storage in d1"
+```
+
+(As with every commit in this plan, the message must carry the two trailer lines from Global Constraints. The `-m` form above is abbreviated for readability, not an exemption.)
 
 ---
 
