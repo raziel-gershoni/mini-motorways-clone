@@ -177,16 +177,17 @@ import {
   GRID_W, GRID_H, GROUP_COUNT_DEFAULT, CARS_PER_HOUSE, MOTORWAY_CAP,
 } from '../src/index'
 
-const ALL: Record<string, number> = {
-  DENOM, TICKS_PER_SECOND, SECONDS_PER_WEEK, DAYS_PER_WEEK,
-  TICKS_PER_WEEK, TICKS_PER_DAY, ORTHO_COST, DIAG_COST,
-  LANE_SPEED_DEFAULT, MOTORWAY_SPEED_MAX, ROUNDABOUT_SPEED_MUL,
-  RIGHT_ANGLE_SPEED_MUL, INTERSECTION_SPEED_MUL, SHARP_TURN_SPEED_MUL,
-  MAX_OVERCROWD_TIME_MS, OVERCROWD_RAMP, OVERCROWD_RETURN_MUL,
-  ARRIVAL_KNOCKBACK_PCT, ARRIVAL_KNOCKBACK_MAX_MS, OVERCROWD_GRACE_MS,
-  PIN_CAP_SQUARE_TIMER, PIN_CAP_SQUARE_HARD, PIN_CAP_CIRCLE_TIMER, PIN_CAP_CIRCLE_HARD,
-  GRID_W, GRID_H, GROUP_COUNT_DEFAULT, CARS_PER_HOUSE, MOTORWAY_CAP,
-}
+import * as C from '../src/index'
+
+/**
+ * Derived from the module's real export surface, not hand-listed. A
+ * hand-maintained registry only validates the constants somebody remembered to
+ * add to it; a constant added to the source and forgotten here would silently
+ * receive no checks at all, including no integer check. This cannot fall behind.
+ */
+const ALL: Record<string, number> = Object.fromEntries(
+  Object.entries(C).filter(([, v]) => typeof v === 'number'),
+) as Record<string, number>
 
 describe('rule constants', () => {
   it('are every one an integer', () => {
@@ -252,6 +253,43 @@ describe('rule constants', () => {
     expect(GROUP_COUNT_DEFAULT).toBe(5)
     expect(CARS_PER_HOUSE).toBe(2)
     expect(MOTORWAY_CAP).toBe(9)
+  })
+
+  it('encodes the failure constants at the right scale', () => {
+    // Spec §5.8. These drive the overcrowd timer, which is the mechanism that
+    // ends every run — OVERCROWD_RAMP written as 200 instead of 20 would make
+    // cities die ten times too fast and present as a balance problem rather
+    // than a typo. Assert them exactly.
+    expect(MAX_OVERCROWD_TIME_MS).toBe(90000)
+    expect(OVERCROWD_RAMP).toBe(20)
+    expect(OVERCROWD_RETURN_MUL).toBe(2000)
+    expect(ARRIVAL_KNOCKBACK_PCT).toBe(100)
+    expect(ARRIVAL_KNOCKBACK_MAX_MS).toBe(3000)
+    expect(OVERCROWD_GRACE_MS).toBe(2000)
+  })
+
+  it('keeps the overcrowd ramp consistent with the derived time-to-death', () => {
+    // Spec §5.8 works this through: timer speed s(t) = min(1, ramp*t), so with
+    // zero arrivals the meter fills in ~115 s — 50 s ramping up while accruing
+    // 25 of the 90, then the remaining 65 s at full rate. Asserting the derived
+    // figure catches a change to either constant here, rather than leaving it
+    // to surface as a balance mystery. Float arithmetic is fine in a test; the
+    // determinism ban applies to packages/sim source, not to assertions.
+    const ramp = OVERCROWD_RAMP / DENOM
+    const rampSeconds = 1 / ramp
+    const accruedWhileRamping = (rampSeconds * 1) / 2
+    const remaining = MAX_OVERCROWD_TIME_MS / 1000 - accruedWhileRamping
+    expect(rampSeconds).toBeCloseTo(50, 6)
+    expect(accruedWhileRamping).toBeCloseTo(25, 6)
+    expect(rampSeconds + remaining).toBeCloseTo(115, 6)
+  })
+
+  it('checks every numeric export, not a hand-picked subset', () => {
+    // Guards the derivation above against passing vacuously on an empty object.
+    expect(Object.keys(ALL).length).toBeGreaterThanOrEqual(29)
+    for (const name of ['DENOM', 'GRID_W', 'OVERCROWD_RAMP', 'MOTORWAY_CAP']) {
+      expect(Object.keys(ALL)).toContain(name)
+    }
   })
 })
 ```
