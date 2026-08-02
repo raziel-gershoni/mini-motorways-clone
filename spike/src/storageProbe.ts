@@ -31,6 +31,9 @@ export interface ProbeResult {
   launches: number
   survived: boolean
   payloadIntact: boolean
+  /** A read that threw. Without this, a restricted store and an empty store
+   *  produce byte-identical output in the one field the probe exists to report. */
+  readFailed: boolean
   writeFailed: boolean
   ageMs: number
   firstSeenMs: number
@@ -73,10 +76,13 @@ function parse(raw: string | null): Record_ | null {
 export function runProbe(store: KVLike, nowMs: number): ProbeResult {
   const expected = makePayload(PAYLOAD_BYTES)
   let raw: string | null = null
+  let readFailed = false
   try {
     raw = store.getItem(PROBE_KEY)
   } catch {
-    // Storage access restricted. Treat exactly as "no prior record".
+    // Storage access restricted. Proceed as "no prior record", but report the
+    // read failure separately so survived:false stays unambiguous.
+    readFailed = true
   }
   const prior = parse(raw)
 
@@ -96,6 +102,7 @@ export function runProbe(store: KVLike, nowMs: number): ProbeResult {
     launches,
     survived,
     payloadIntact,
+    readFailed,
     writeFailed,
     ageMs: nowMs - firstSeenMs,
     firstSeenMs,

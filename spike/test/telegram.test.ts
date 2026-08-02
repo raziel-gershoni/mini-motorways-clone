@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { atLeast, platformName, stableHeight, contentSafeAreaTop, boot } from '../src/telegram'
+import { atLeast, platformName, stableHeight, contentSafeAreaTop, boot, cloudStorage } from '../src/telegram'
 
 function install(webApp: unknown): void {
   ;(globalThis as Record<string, unknown>).Telegram = { WebApp: webApp }
@@ -46,6 +46,34 @@ describe('telegram adapter', () => {
 
   it('returns zero content safe area when absent', () => {
     expect(contentSafeAreaTop()).toBe(0)
+  })
+})
+
+describe('cloudStorage', () => {
+  const cs = { getItem: () => {}, setItem: () => {} }
+
+  it('returns null outside Telegram', () => {
+    expect(cloudStorage()).toBeNull()
+  })
+
+  it('returns the CloudStorage object on a 6.9+ client', () => {
+    install({ isVersionAtLeast: (v: string) => parseFloat(v) <= 6.9, CloudStorage: cs })
+    expect(cloudStorage()).toBe(cs)
+  })
+
+  it('returns null below 6.9 even when the object is somehow present', () => {
+    install({ isVersionAtLeast: (v: string) => parseFloat(v) <= 6.8, CloudStorage: cs })
+    expect(cloudStorage()).toBeNull()
+  })
+
+  it('returns null when a 6.9+ client does not expose CloudStorage', () => {
+    install({ isVersionAtLeast: () => true })
+    expect(cloudStorage()).toBeNull()
+  })
+
+  it('returns null when CloudStorage is present but missing a method', () => {
+    install({ isVersionAtLeast: () => true, CloudStorage: { getItem: () => {} } })
+    expect(cloudStorage()).toBeNull()
   })
 })
 

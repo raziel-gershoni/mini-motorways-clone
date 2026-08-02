@@ -1,3 +1,5 @@
+import type { CloudLike } from './cloudProbe'
+
 interface SafeAreaInset { top?: number; bottom?: number; left?: number; right?: number }
 
 interface WebAppLike {
@@ -12,6 +14,7 @@ interface WebAppLike {
   version?: string
   contentSafeAreaInset?: SafeAreaInset
   safeAreaInset?: SafeAreaInset
+  CloudStorage?: CloudLike
 }
 
 function webApp(): WebAppLike | null {
@@ -59,6 +62,17 @@ export function stableHeight(): number {
 
 export function contentSafeAreaTop(): number {
   return webApp()?.contentSafeAreaInset?.top ?? 0
+}
+
+/**
+ * CloudStorage, or null when unsupported. Requires Bot API 6.9+.
+ * The shape is re-checked at runtime: the version gate says the client claims
+ * the feature, not that this particular WebView actually exposes both methods.
+ */
+export function cloudStorage(): CloudLike | null {
+  if (!atLeast('6.9')) return null
+  const cs = webApp()?.CloudStorage
+  return cs && typeof cs.getItem === 'function' && typeof cs.setItem === 'function' ? cs : null
 }
 
 /**

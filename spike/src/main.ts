@@ -1,7 +1,8 @@
-import { boot, stableHeight, contentSafeAreaTop } from './telegram'
+import { boot, stableHeight, contentSafeAreaTop, cloudStorage } from './telegram'
 import { collectDeviceInfo } from './deviceInfo'
 import { show, status, submit } from './report'
 import { runProbe, checkFreshContext, type KVLike } from './storageProbe'
+import { runCloudProbe } from './cloudProbe'
 import { probeFlowFields } from './flowfield'
 import { runBenchSuite } from './bench'
 
@@ -50,6 +51,19 @@ function nextFrame(): Promise<number> {
 }
 
 void (async () => {
+  // --- CloudStorage probe: now the load-bearing durable store, so it goes first ---
+  // localStorage was measured surviving a force-quit at ~110s but gone across a
+  // 19-minute gap, which leaves CloudStorage as the only candidate durable save
+  // store. Nothing downstream in this IIFE may cost us that reading.
+  try {
+    const cloud = await runCloudProbe(cloudStorage(), Date.now())
+    show('cloud', cloud)
+    void submit({ kind: 'cloud', device, cloud })
+  } catch (err) {
+    show('cloud ERROR', String(err))
+    void submit({ kind: 'cloud-error', device, error: String(err) })
+  }
+
   // Let the fullscreen transition settle before doing anything timed: CPU
   // contention with an animating transition inflates the flow-field numbers in
   // the pessimistic direction, and the flow number is the input to the 30 Hz vs

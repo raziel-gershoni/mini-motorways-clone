@@ -110,6 +110,18 @@ describe('runProbe', () => {
     expect(r.survived).toBe(false)
     expect(r.launches).toBe(1)
   })
+
+  it('reports readFailed when the store throws on read, so it is not read as an empty store', () => {
+    const s = new MemStore()
+    s.failReads = true
+    expect(runProbe(s, 1000).readFailed).toBe(true)
+  })
+
+  it('reports readFailed false when the read succeeds, empty store included', () => {
+    const s = new MemStore()
+    expect(runProbe(s, 1000).readFailed).toBe(false)
+    expect(runProbe(s, 2000).readFailed).toBe(false)
+  })
 })
 
 describe('checkFreshContext', () => {
