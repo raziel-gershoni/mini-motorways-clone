@@ -654,7 +654,7 @@ git commit -m "feat(sim): seeded rng with state in caller-owned storage"
 **Interfaces:**
 - Consumes: `seedFromString`, `nextRandom` from `./rng`
 - Produces:
-  - `HEADER_LENGTH`, and the header index constants `H_TICK`, `H_SCORE`, `H_WEEK`, `H_RNG`
+  - `HEADER_LENGTH` (3), and the header index constants `H_TICK`, `H_SCORE`, `H_WEEK`
   - `interface GameState { buffer: ArrayBuffer; header: Int32Array; rng: Uint32Array }`
   - `createState(seed: string): GameState`
   - `snapshot(s: GameState): ArrayBuffer`
@@ -998,10 +998,15 @@ describe('dayOfWeek', () => {
     expect(dayOfWeek(TICKS_PER_WEEK)).toBe(0)
   })
 
-  it('does not drift across many weeks', () => {
-    // The whole reason TICKS_PER_DAY is not a stored constant: a rounded 642
-    // would put day 6 of week 20 in the wrong place. Derivation cannot drift.
-    for (let w = 0; w < 50; w++) {
+  it('is exact at both ends of a week, in any week', () => {
+    // The reason TICKS_PER_DAY is not a stored constant. `dayOfWeek` depends
+    // only on `tick % TICKS_PER_WEEK`, so iterating over fifty weeks feeds it
+    // exactly two distinct inputs — there is no drift for a long loop to
+    // accumulate. What it does pin is that the derivation is exact at both
+    // extremes: the first tick of a week is day 0 and the last is day 6. A
+    // stored 642 fails that immediately rather than progressively —
+    // 4499 / 642 | 0 is 7, out of range on week 0's final tick.
+    for (let w = 0; w < 2; w++) {
       expect(dayOfWeek(w * TICKS_PER_WEEK)).toBe(0)
       expect(dayOfWeek((w + 1) * TICKS_PER_WEEK - 1)).toBe(DAYS_PER_WEEK - 1)
     }
