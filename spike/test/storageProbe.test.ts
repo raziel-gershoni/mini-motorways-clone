@@ -4,7 +4,9 @@ import { runProbe, makePayload, PROBE_KEY, PAYLOAD_BYTES, type KVLike } from '..
 class MemStore implements KVLike {
   readonly map = new Map<string, string>()
   failWrites = false
+  failReads = false
   getItem(k: string): string | null {
+    if (this.failReads) throw new Error('SecurityError')
     return this.map.get(k) ?? null
   }
   setItem(k: string, v: string): void {
@@ -93,5 +95,19 @@ describe('runProbe', () => {
     runProbe(s, 1000)
     const rec = JSON.parse(s.getItem(PROBE_KEY) as string)
     expect(rec.payload).toHaveLength(PAYLOAD_BYTES)
+  })
+
+  it('does not throw when the store rejects reads', () => {
+    const s = new MemStore()
+    s.failReads = true
+    expect(() => runProbe(s, 1000)).not.toThrow()
+  })
+
+  it('treats a rejected read as a first launch', () => {
+    const s = new MemStore()
+    s.failReads = true
+    const r = runProbe(s, 1000)
+    expect(r.survived).toBe(false)
+    expect(r.launches).toBe(1)
   })
 })

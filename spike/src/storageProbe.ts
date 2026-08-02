@@ -47,11 +47,17 @@ function parse(raw: string | null): Record_ | null {
 
 /**
  * Call once per launch. Returns whether a prior launch's data survived.
- * Never throws — a storage backend that rejects writes reports writeFailed.
+ * Never throws — a storage backend that rejects reads or writes reports the failure safely.
  */
 export function runProbe(store: KVLike, nowMs: number): ProbeResult {
   const expected = makePayload(PAYLOAD_BYTES)
-  const prior = parse(store.getItem(PROBE_KEY))
+  let raw: string | null = null
+  try {
+    raw = store.getItem(PROBE_KEY)
+  } catch {
+    // Storage access restricted. Treat exactly as "no prior record".
+  }
+  const prior = parse(raw)
 
   const survived = prior !== null
   const payloadIntact = prior === null ? true : prior.payload === expected

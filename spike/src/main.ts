@@ -3,7 +3,7 @@ import { collectDeviceInfo } from './deviceInfo'
 import { show, status, submit } from './report'
 import { runBenchSuite } from './bench'
 import { probeFlowFields } from './flowfield'
-import { runProbe } from './storageProbe'
+import { runProbe, type KVLike } from './storageProbe'
 
 boot()
 
@@ -13,7 +13,15 @@ if (app) app.textContent = ''
 const device = collectDeviceInfo()
 show('device', device)
 
-const storage = runProbe(window.localStorage, Date.now())
+let store: KVLike | null = null
+try {
+  store = window.localStorage
+} catch {
+  store = null
+}
+const storage = store
+  ? runProbe(store, Date.now())
+  : { unavailable: true as const }
 show('storage', storage)
 void submit({ kind: 'storage', device, storage })
 
