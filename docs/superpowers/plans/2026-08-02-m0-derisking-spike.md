@@ -1973,12 +1973,12 @@ export function runProbe(store: KVLike, nowMs: number): ProbeResult {
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `pnpm test storageProbe`
-Expected: PASS, 12 tests.
+Expected: PASS, 11 tests.
 
 - [ ] **Step 5: Run the whole suite**
 
 Run: `pnpm test && pnpm typecheck`
-Expected: all tests pass across all five test files; no type errors.
+Expected: all tests pass across all seven test files; no type errors.
 
 - [ ] **Step 6: Wire into main, ahead of the benchmark**
 
