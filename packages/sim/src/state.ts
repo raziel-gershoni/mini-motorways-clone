@@ -37,13 +37,29 @@ function viewsOver(buffer: ArrayBuffer): GameState {
   }
 }
 
+/**
+ * Forces a hashed seed away from zero, keeping every other value unchanged.
+ *
+ * Exposed as its own function — not left inlined in `createState` — so the
+ * zero path can be exercised directly. Hunting for a seed *string* that
+ * happens to hash to 0 would mean an unbounded, non-deterministic search
+ * over `seedFromString`'s 2^32 output space; testing this pure integer
+ * function instead is honest and exact.
+ */
+export function nonZeroSeed(seeded: number): number {
+  return seeded === 0 ? 1 : seeded
+}
+
 export function createState(seed: string): GameState {
   const s = viewsOver(new ArrayBuffer(STATE_BYTES))
   // Seed can hash to 0; mulberry32 tolerates it, but a zero here is also the
   // value an uninitialised buffer would hold, so force it non-zero to keep
-  // "seeded" and "blank" distinguishable in a dump.
-  const seeded = seedFromString(seed)
-  s.rng[0] = seeded === 0 ? 1 : seeded
+  // "seeded" and "blank" distinguishable in a dump. Corollary: a seed string
+  // that hashes to 0 and a different one that genuinely hashes to 1 now
+  // produce byte-identical initial states — harmless (2 outcomes out of
+  // 2^32), and each seed string still maps deterministically, which is all
+  // replay needs.
+  s.rng[0] = nonZeroSeed(seedFromString(seed))
   return s
 }
 

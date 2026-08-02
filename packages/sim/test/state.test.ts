@@ -1,5 +1,15 @@
 import { describe, it, expect } from 'vitest'
-import { createState, snapshot, restore, hashState, H_TICK, H_SCORE, H_WEEK } from '../src/state'
+import {
+  createState,
+  snapshot,
+  restore,
+  hashState,
+  nonZeroSeed,
+  STATE_BYTES,
+  H_TICK,
+  H_SCORE,
+  H_WEEK,
+} from '../src/state'
 import { nextRandom } from '../src/rng'
 
 describe('createState', () => {
@@ -21,9 +31,39 @@ describe('createState', () => {
   it('seeds the rng non-zero', () => {
     expect(createState('x').rng[0]).not.toBe(0)
   })
+
+  it('never seeds the rng with zero, across a wide range of seed strings', () => {
+    // None of this project's fixture strings happens to hash to 0 (see the
+    // `nonZeroSeed` tests below for the branch itself), so this sweeps a much
+    // wider set to keep the observable property — never zero — under test
+    // even though it cannot, by construction, hit the zero path.
+    for (let i = 0; i < 2000; i++) {
+      expect(createState(`seed-sweep-${i}`).rng[0]).not.toBe(0)
+    }
+  })
+})
+
+describe('nonZeroSeed', () => {
+  it('forces zero to one', () => {
+    expect(nonZeroSeed(0)).toBe(1)
+  })
+
+  it('leaves every other value unchanged', () => {
+    for (const v of [1, 2, 42, 1000, 0x7fffffff, 0xffffffff]) {
+      expect(nonZeroSeed(v)).toBe(v)
+    }
+  })
 })
 
 describe('snapshot and restore', () => {
+  it('throws on a too-small buffer', () => {
+    expect(() => restore(new ArrayBuffer(1))).toThrow()
+  })
+
+  it('throws on a too-large buffer', () => {
+    expect(() => restore(new ArrayBuffer(STATE_BYTES + 1))).toThrow()
+  })
+
   it('round-trips to an identical hash', () => {
     const s = createState('round-trip')
     s.header[H_TICK] = 1234

@@ -4,10 +4,14 @@
   "type": "module",
   "scripts": {
     "test": "pnpm -r --filter './packages/*' test",
-    "typecheck": "pnpm -r --filter './packages/*' typecheck"
+    "typecheck": "pnpm -r --filter './packages/*' typecheck",
+    "lint": "eslint ."
   },
   "devDependencies": {
+    "@types/node": "^26.1.2",
+    "eslint": "^10.8.0",
     "typescript": "^5.9.0",
+    "typescript-eslint": "^8.65.0",
     "vitest": "^3.0.0"
   }
 }
