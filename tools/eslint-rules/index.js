@@ -201,6 +201,64 @@ function collectLiterals(node, out) {
   }
 }
 
+/**
+ * True when `node` sits directly inside a class `static { ... }` block —
+ * i.e. its ancestor chain reaches a `StaticBlock` node before crossing any
+ * function boundary. A function nested inside the static block (a callback
+ * passed to something, say) is excluded for the same reason a function
+ * nested anywhere else is: it can run again, or not at all yet, so an
+ * assignment inside it is not "the static block's one-time execution."
+ */
+function isDirectlyInStaticBlock(node) {
+  let current = node.parent
+  while (current) {
+    if (current.type === 'StaticBlock') return true
+    if (
+      current.type === 'FunctionDeclaration' ||
+      current.type === 'FunctionExpression' ||
+      current.type === 'ArrowFunctionExpression'
+    ) {
+      return false
+    }
+    current = current.parent
+  }
+  return false
+}
+
+/**
+ * THREAT MODEL — read this before adding another visitor here.
+ *
+ * This rule catches ACCIDENTAL module-scope state, not deliberate evasion.
+ * The realistic case it exists for is someone writing `let visited = new
+ * Uint8Array(960)` at the top of a pathfinding file because the code wants a
+ * reusable scratch buffer, with no intent to dodge review — and that exact
+ * shape is now caught three ways (this rule, the name-based ESLint rules,
+ * and the regex scan). `static` class fields and module-scope IIFEs were
+ * closed because they are the same accident wearing a different, equally
+ * ordinary hat: nobody reaches for either one *in order to* hide state from
+ * a linter, they reach for them because ES2022 offers them for ordinary
+ * initialisation.
+ *
+ * It does not chase every way a determined author could hide state on
+ * purpose. Two evasions are known and deliberately left open: a
+ * doubly-nested IIFE (`(() => { return (() => { let n = 0; ... })() })()`,
+ * one level deeper than the closure form this rule closes), and an
+ * assignment that reaches state through an alias this rule does not trace
+ * (some other object's property, mutated from a construct this rule does
+ * not walk). Both require the author to go out of their way; a rule that
+ * kept chasing one level deeper every time a reviewer found the next one
+ * would never stop, would get harder to reason about with every round, and
+ * — being unreadable — would eventually get disabled, at which point this
+ * codebase would have LESS protection than a simple rule plus this honest
+ * note. Someone determined enough to write a doubly-nested IIFE can also
+ * edit this rule; no amount of AST hardening reaches that person.
+ *
+ * Before adding another visitor here: would a colleague write the form
+ * being closed BY MISTAKE? If yes, close it. If the honest answer is "only
+ * someone actively trying to hide state would write this," it belongs in
+ * code review, not in another visitor — say so and leave it, the way this
+ * comment does for the two evasions above.
+ */
 const noModuleMutableState = {
   meta: {
     type: 'problem',
@@ -209,8 +267,10 @@ const noModuleMutableState = {
         'Bans module-scope mutable state: let/var declarations, `new` TypedArray/ArrayBuffer/Map/Set/' +
         'WeakMap/WeakSet, any array or object literal not itself frozen with Object.freeze (including ' +
         'every level of nesting, since Object.freeze is shallow), the same three shapes reached through a ' +
-        '`static` class field, and a module-scope IIFE whose captured state persists for the life of the ' +
-        'module — the last two are `let`/`new`/unfrozen-literal wearing a different hat, not new concepts.',
+        '`static` class field or a class `static { }` initialisation block, and a module-scope IIFE whose ' +
+        'captured state persists for the life of the module — the last three are `let`/`new`/' +
+        'unfrozen-literal wearing a different hat, not new concepts. Catches accidental module-scope state; ' +
+        'see the THREAT MODEL comment above for what it deliberately does not chase.',
     },
     schema: [],
     messages: {
@@ -269,13 +329,6 @@ const noModuleMutableState = {
       // `static rows = [[1, 2]]` is `unfrozenLiteral`, and a plain `static n
       // = 0` (no `readonly`) is `letOrVar`'s equivalent — a reassignable
       // module-scope slot, regardless of what it currently holds.
-      // Instance fields are per-instance state, created fresh for every
-      // `new` — out of scope for a rule about state that outlives any one
-      // instance. Only `static` fields are module-scope state wearing a
-      // different hat: `static instance = new Map()` is `mutableContainer`,
-      // `static rows = [[1, 2]]` is `unfrozenLiteral`, and a plain `static n
-      // = 0` (no `readonly`) is `letOrVar`'s equivalent — a reassignable
-      // module-scope slot, regardless of what it currently holds.
       PropertyDefinition(node) {
         if (!node.static) return
         if (!isEffectivelyModuleScope(node)) return
@@ -307,6 +360,47 @@ const noModuleMutableState = {
 
         if (!node.readonly) {
           context.report({ node, messageId: 'staticMutableField', data: { name } })
+        }
+      },
+
+      // `static { Foo.instance = new Map() }` is a `PropertyDefinition`-free
+      // way to reach the exact same module-scope state: no field-with-value
+      // node exists for `PropertyDefinition` to visit, so this needs its own
+      // visitor. `Foo.instance = new Map()` inside the block is not a
+      // declaration at all — it is an ordinary assignment — so it gets the
+      // container and literal checks (unconditionally, matching how those
+      // two checks already ignore `readonly`/const-ness everywhere else in
+      // this rule) but NOT the third "reassignable, so flag it regardless of
+      // content" check `PropertyDefinition` falls back to for a bare `static
+      // n = 0`: that fallback depends on the field's own `readonly` marker,
+      // which an imperative assignment does not have an equivalent of, and
+      // the two shapes this visitor exists for (both from real review
+      // findings) are both container hits. Extending to a bare-primitive
+      // assignment fallback is unrequested scope until a real accident of
+      // that shape turns up — see the THREAT MODEL comment above.
+      AssignmentExpression(node) {
+        if (node.operator !== '=') return
+        if (node.left.type !== 'MemberExpression') return
+        if (!isDirectlyInStaticBlock(node)) return
+        if (!isEffectivelyModuleScope(node)) return
+
+        const value = node.right
+
+        if (value.type === 'NewExpression' && value.callee.type === 'Identifier' && MUTABLE_CONTAINER_CTOR_NAME.test(value.callee.name)) {
+          context.report({ node, messageId: 'mutableContainer', data: { ctor: value.callee.name } })
+          return
+        }
+
+        const literals = []
+        collectLiterals(value, literals)
+        for (const literal of literals) {
+          if (!isDirectFreezeArgument(literal)) {
+            context.report({
+              node: literal,
+              messageId: 'unfrozenLiteral',
+              data: { literal: literal.type === 'ArrayExpression' ? 'array' : 'object' },
+            })
+          }
         }
       },
     }

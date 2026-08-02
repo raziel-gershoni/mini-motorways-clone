@@ -81,6 +81,29 @@ ruleTester.run('no-module-mutable-state', plugin.rules['no-module-mutable-state'
     // (the callee is an Identifier, not a function/arrow expression) — must
     // not be affected by the IIFE-descent logic.
     { code: 'export const value = computeSomething(a, b)', languageOptions },
+    // Finding 2's documented residual, pinned as a valid case on purpose (the
+    // same way finding 4's residual is pinned below): a container returned
+    // BARE from a module-scope IIFE, with no intermediate `let`/`const`
+    // binding to catch, is NOT detected. This mirrors the pre-existing blind
+    // spot where a `new Map()` nested inside an already-reported unfrozen
+    // object literal gets no separate report of its own. See collectLiterals's
+    // doc comment for why this was left open rather than closed this round.
+    { code: 'export const cache = (() => new Map())()', languageOptions },
+
+    // --- static initialisation blocks (re-review finding: PropertyDefinition
+    // is not the only way to reach a static field) ---
+    // A static block that only calls a function, no assignment at all.
+    { code: 'class C { static { setup() } }', languageOptions },
+    // A static block that assigns a fully frozen literal.
+    { code: 'class C { static { C.rows = Object.freeze([1, 2, 3]) } }', languageOptions },
+    // The static-block visitor's own gate, pinned: an otherwise-identical
+    // assignment OUTSIDE any static block is deliberately NOT this visitor's
+    // job — it is the "untraced alias" residual the THREAT MODEL comment
+    // names (a plain mutation of some object's property from ordinary module
+    // code). Mutation-tested: forcing isDirectlyInStaticBlock to always
+    // return true left every other test green and only this one would catch
+    // it, which is exactly why it is pinned here rather than left implicit.
+    { code: 'class C {}\nC.instance = new Map()', languageOptions },
   ],
   invalid: [
     { code: 'const DX = [0,1]', languageOptions, errors: [{ messageId: 'unfrozenLiteral' }] },
@@ -155,6 +178,27 @@ ruleTester.run('no-module-mutable-state', plugin.rules['no-module-mutable-state'
       code: ['export const rows = (() => {', '  return [[1, 2], [3, 4]]', '})()'].join('\n'),
       languageOptions,
       errors: [{ messageId: 'unfrozenLiteral' }, { messageId: 'unfrozenLiteral' }, { messageId: 'unfrozenLiteral' }],
+    },
+
+    // --- static initialisation blocks (re-review finding) ---
+    {
+      // No PropertyDefinition node exists at all — the property is created
+      // entirely by the assignment inside the block.
+      code: 'class Foo { static { Foo.instance = new Map() } }',
+      languageOptions,
+      errors: [{ messageId: 'mutableContainer' }],
+    },
+    {
+      // The field IS declared, and IS `readonly` — TS permits assigning a
+      // readonly static field exactly once, from within a static block. The
+      // container check fires regardless of readonly (same as everywhere
+      // else in this rule): freezing the BINDING was never the point, the
+      // Map's own mutability is. Exactly one error — the field declaration
+      // itself has no initialiser, so PropertyDefinition has nothing to
+      // report.
+      code: 'class Foo { static readonly instance; static { Foo.instance = new Map() } }',
+      languageOptions,
+      errors: [{ messageId: 'mutableContainer' }],
     },
   ],
 })
