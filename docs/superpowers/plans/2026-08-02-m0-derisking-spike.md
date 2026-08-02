@@ -1264,10 +1264,11 @@ export async function runBenchSuite(
   baked.width = canvas.width
   baked.height = canvas.height
   const bctx = baked.getContext('2d')
-  if (bctx) {
-    bctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    drawRoads(bctx, atlas, masks, tilePx)
-  }
+  // Throw rather than skip: a silently blank baked layer would make every baked
+  // config report a fast, meaningless number with no error surfaced.
+  if (!bctx) throw new Error('bench: no 2d context for the baked road layer')
+  bctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  drawRoads(bctx, atlas, masks, tilePx)
 
   const results: BenchResult[] = []
 
@@ -1280,7 +1281,13 @@ export async function runBenchSuite(
     let prev = await nextFrame()
     for (let i = 0; i < WARMUP_FRAMES + MEASURE_FRAMES; i++) {
       const now = await nextFrame()
-      const dt = Math.min(0.25, (now - prev) / 1000)
+      // Two different quantities, deliberately. rawDt is the honest frame time and
+      // is what the sampler records — clamping it would silently truncate every
+      // stall over 250 ms to exactly 250 ms, gutting the p95/p99/max that are the
+      // whole reason this reports percentiles. dt is clamped only so a stall does
+      // not teleport every sprite across the screen. Do not collapse these.
+      const rawDt = (now - prev) / 1000
+      const dt = Math.min(0.25, rawDt)
       prev = now
 
       advance(sprites, dt, cssW, cssH)
@@ -1298,7 +1305,7 @@ export async function runBenchSuite(
 
       if (i >= WARMUP_FRAMES) {
         draw.push(t1 - t0)
-        frame.push(dt * 1000)
+        frame.push(rawDt * 1000)
       }
     }
 
