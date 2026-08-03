@@ -144,6 +144,13 @@ describe('snapshot and restore', () => {
   })
 
   it('round-trips to an identical hash', () => {
+    // Also the assertion design decision 3 (Task 5's flow fields) rests on:
+    // `restore` stays a pure read of the state buffer with nothing to
+    // invalidate, because per-colour flow-field staleness is derived from
+    // content hashes of `roads`/sources rather than a dirty flag that would
+    // need a slot here to roll back correctly. If `restore` ever gained a
+    // side effect (e.g. touching a pathfinding cache), this round-trip would
+    // be the first thing to catch it moving the hash.
     const s = createState('round-trip', MAP)
     s.header[H_TICK] = 1234
     s.header[H_SCORE] = 56
