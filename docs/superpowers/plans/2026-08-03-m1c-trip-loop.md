@@ -456,12 +456,11 @@ Membership lookups use a frozen array and an indexed linear scan, never a module
 - `slotCounts: Int32Array(groupCount)`, for Task 3's accumulator.
 - `createScratch(cells, groupCount, maxDestinations, fieldInputRanges)` — **not** `createScratch(map)`, so `scratch.test.ts` can still pass a doctored huge `cells` to exercise the `cells * DIAG_COST >= INF` guard without allocating a real map.
 
-**The assembly rule, stated because the previous version left it to the implementer and it violates four existing constraints at once.** `flowfield.ts:80-86` already tells the plan the answer verbatim: *"In M1c, pins sit on destinations, which are exactly the cells that may have no road yet, so M1c must seed sources from a destination's road-adjacent access cell, not from the building cell itself."*
+**Task 1 owns the buffer shapes and the widened signatures, and nothing else.** The rule for *filling* those buffers — which destinations become sources, in what order — was originally written here, and that was a plan error: it needs the carpark geometry Task 2 defines and it belongs in the `dispatch.ts` this plan's own File Structure assigns to Task 4. Neither file is in Task 1's list. **The assembly rule now lives in Task 4**, and a Task 1 implementer should leave `sourcesFlat`/`sourceCounts` allocated and empty.
 
-- Source cell = the destination's **carpark cell**, from `destCell` + orientation.
-- Include a destination iff `destPins[d] > 0` **and** `roadMask(state, carpark) !== 0`. The road check is not decoration: `computeFlowField` silently skips a source with no road bit (`flowfield.ts:150`), so including an unconnected destination would churn `hashSources` and force rebuilds that produce an identical field. This also gives `roadMask` the production caller the carry-forward asked for.
-- Insert into the colour's slice in **ascending cell order** by explicit shift (≤ `maxDestinations` elements, so ≤ 128 comparisons per colour per tick), with duplicates dropped. `computeFlowField` **throws** unless sources are strictly ascending, duplicates included (`flowfield.ts:114-121`), for a documented reason: source order silently decides `dir` at ties while `dist` stays identical, so two engines would agree on `dist` and differ on `dir`. Pins enumerate in destination-*slot* order, which is not cell order. Bare `.sort()` is banned by the source scan.
-- **The dedupe is unreachable in M1c and that is stated rather than hidden.** Two destinations can only share a carpark cell as a "double destination" (spec §5.2), which M1c does not place, and building-on-building rejection (Task 2) forbids it otherwise. It is kept because `computeFlowField` throws on a duplicate and the cost is one comparison — and `flowfield.test.ts:750` exists specifically for this case. The placement rule that makes it unreachable is the thing that gets tested.
+Nothing about the widening depends on the assembly rule, so this costs Task 1 nothing.
+
+**Also allocation-free, not merely allocation-light.** Whatever hashes the field-input regions must not construct a view per range per call — 5 `new Uint8Array(state.buffer, offset, length)` per tick becomes 30 once Task 4's `fieldFor` calls exist, which is more per-tick allocation than the ~6/tick this subsection was written to remove. Hold one `Uint8Array` over the whole buffer where the other views are built and index into it. The global constraint is literal: **zero** allocations per tick, and Task 1 reports the measured number.
 
 ### 1e. Widen `step()`, and give the sync and `placeRoad` a production home
 
@@ -500,7 +499,9 @@ Re-bless `1073292924` and `3183850973`. **Assert `252514232` is unchanged** — 
 
 **Vacuity self-checks** (fix-list #30): the "input region change invalidates" test must first assert the poked bytes actually moved.
 
-**Mutations to attempt:** move a region from input to irrelevant and confirm a staleness test fails; classify a region but omit it from the ranges array (this is the #5 mutation — it must fail); put `header` in `FIELD_INPUT` and confirm the coalescing test fails; drop one of the three new fields from `mapIdHash`; make `step` skip the sync; make `step` apply inputs after the sync; reorder two regions so padding appears; have `hashFieldInputRegions` rebuild the ranges per call (the allocation test must fail).
+**Mutations to attempt:** move a region from input to irrelevant and confirm a staleness test fails; classify a region but omit it from the ranges array (this is the #5 mutation — it must fail); put `header` in `FIELD_INPUT` and confirm the coalescing test fails; drop one of the three new fields from `mapIdHash`; make `step` skip the sync; make `step` apply inputs after the sync; have `hashFieldInputRegions` rebuild the ranges per call — **and note the observable difference is not the allocation but which ranges table is consulted**: hand `createScratch` a doctored ranges array covering only `mapIdentity`, place a road, and assert `CT_REBUILDS` does not move.
+
+**One mutation this subsection used to ask for is not constructible and has been dropped:** "reorder two regions so padding appears". At `firstCity`'s numbers every region's byte length is already a multiple of 4, so no reordering produces padding. The zero-padding assertion at 1b is therefore unfalsifiable on this map — keep it as a tripwire for future maps, but do not record it as covered.
 
 ---
 
@@ -511,6 +512,8 @@ Writes behaviour into regions that already exist. **Asserts all three goldens un
 **Files:**
 - Create: `packages/sim/src/buildings.ts`, `packages/sim/test/buildings.test.ts`
 - Modify: `packages/sim/src/roads.ts` (the driveway rule), `packages/sim/src/state.ts` (live-prefix accessors), and their tests
+
+**Produces, and the one consumer that matters:** the carpark-cell derivation — `destCell` + orientation → the carpark's cell index — is exported from `buildings.ts` and consumed by **Task 4's source assembly (4a)**, which seeds every flow field from it. It is not a rendering detail. If it is wrong, every field is seeded from the wrong cell and every route is wrong, so the four-orientation coverage below is load-bearing for pathfinding rather than for pixels.
 
 **Placement validity for a destination**, from spec §5.2, §5.9 and dossier §1.12:
 
@@ -562,6 +565,21 @@ Capacities are `PIN_CAP_SQUARE_HARD` / `PIN_CAP_CIRCLE_HARD`, already in `@lanew
 
 **Files:**
 - Create: `packages/sim/src/dispatch.ts`, `packages/sim/test/dispatch.test.ts`
+
+### 4a. Source assembly — filling the buffers Task 1 allocated
+
+Relocated here from Task 1's 1d, which could not implement it: it needs Task 2's carpark geometry and belongs in `dispatch.ts`. Task 1 leaves `sourcesFlat` and `sourceCounts` allocated and empty; this fills them, once per tick, before the fields sync.
+
+Stated in full because the first version of this plan left it to the implementer, and it violates four existing constraints at once. `flowfield.ts:80-86` already gives the answer verbatim: *"In M1c, pins sit on destinations, which are exactly the cells that may have no road yet, so M1c must seed sources from a destination's road-adjacent access cell, not from the building cell itself."*
+
+- Source cell = the destination's **carpark cell**, from `destCell` + orientation (Task 2's geometry).
+- Include a destination iff `destPins[d] > 0` **and** `roadMask(state, carpark) !== 0`. The road check is not decoration: `computeFlowField` silently skips a source with no road bit (`flowfield.ts:150`), so including an unconnected destination would churn `hashSources` and force rebuilds that produce an identical field. This also gives `roadMask` the production caller the carry-forward asked for.
+- Insert into the colour's slice in **ascending cell order** by explicit shift (≤ `maxDestinations` elements, so ≤ 128 comparisons per colour per tick), with duplicates dropped. `computeFlowField` **throws** unless sources are strictly ascending, duplicates included (`flowfield.ts:114-121`), for a documented reason: source order silently decides `dir` at ties while `dist` stays identical, so two engines would agree on `dist` and differ on `dir`. Pins enumerate in destination-*slot* order, which is not cell order. Bare `.sort()` is banned by the source scan.
+- **The dedupe is unreachable in M1c and that is stated rather than hidden.** Two destinations can only share a carpark cell as a "double destination" (spec §5.2), which M1c does not place, and building-on-building rejection (Task 2) forbids it otherwise. It is kept because `computeFlowField` throws on a duplicate and the cost is one comparison — and `flowfield.test.ts:750` exists specifically for this case. The placement rule that makes it unreachable is the thing that gets tested.
+
+**Coverage required for 4a:** a destination with pins but no road on its carpark is excluded; the same destination becomes a source the tick a road reaches its carpark; a destination whose pins drop to zero leaves the source set; sources land in ascending cell order when pins are created in descending destination-slot order (the case a bare slot-order copy passes and this must fail); two colours fill disjoint slices; `sourceCounts` matches the number written; assembling twice in one tick is idempotent; the reserved-but-still-sourced case from 4b below.
+
+### 4b. Dispatch
 
 **The mechanism**, per decisions 2 and 4. Per colour `c`:
 
