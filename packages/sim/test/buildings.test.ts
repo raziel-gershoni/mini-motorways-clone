@@ -289,6 +289,40 @@ describe('house placement validity', () => {
     // looking untouched while H_HOUSE_COUNT itself crept past maxHouses.
     expect(state.header[H_HOUSE_COUNT]).toBe(before)
   })
+
+  /**
+   * A building's colour is validated at the placement boundary against THIS
+   * map's `groupCount` (M1c Task 4 review, I-1). Every downstream failure of
+   * an out-of-range colour is silent, so none of them can be relied on:
+   *
+   *   - `houseColour` is a `Uint8Array`, so 256 stores as 0 and the house
+   *     serves a group it was never given — confidently wrong, not absent.
+   *   - A colour-6 house on a 5-group map matches no iteration of
+   *     `runDispatch`'s per-colour loop and is skipped forever, with no error.
+   *   - A colour-6 destination indexes `slotCounts`/`sourcesFlat` past their
+   *     ends, and an out-of-range typed-array write is a silent no-op.
+   *
+   * Checked here rather than left to the per-tick guards in `demand.ts` and
+   * `dispatch.ts`: those throw from inside `step`, which poisons the run
+   * (`H_EPOCH`) for what is a caller error at placement time.
+   */
+  it('throws for a house colour outside this map’s group count, and places nothing', () => {
+    const { map, world } = fixture('house-colour-range')
+    const state = createState('s', map)
+    expect(map.groupCount).toBe(5)
+
+    expect(() => placeHouse(state, world, 0, 5)).toThrow(/colour must be an integer in \[0, 5\)/)
+    expect(() => placeHouse(state, world, 0, -1)).toThrow(/colour must be an integer in \[0, 5\)/)
+    // 256 is the witness that matters: a Uint8Array stores it as 0, so without
+    // this guard the house silently ALIASES to colour 0 and serves it.
+    expect(() => placeHouse(state, world, 0, 256)).toThrow(/colour must be an integer in \[0, 5\)/)
+    expect(state.header[H_HOUSE_COUNT]).toBe(0)
+
+    // Vacuity: the boundary value itself is accepted, so the guard is not
+    // simply rejecting everything.
+    expect(placeHouse(state, world, 0, 4)).toBe(true)
+    expect(state.houseColour[0]).toBe(4)
+  })
 })
 
 /** Cell index helper for the W=9 fixture grid above. */
@@ -509,6 +543,29 @@ describe('destination placement validity', () => {
     })
     expect(placeDestination(state, world, destCellFor(3, 3), ORIENTATION_N, 0, DEST_KIND_SQUARE)).toBe(false)
     expect(state.header[H_DEST_COUNT]).toBe(before)
+  })
+
+  it('throws for a destination colour outside this map’s group count, and places nothing', () => {
+    // The mirror of the house guard above. `packDestMeta` validates colour
+    // only against its 3-bit field [0, 7], so colours 5-7 pass it on a 5-group
+    // map and would then be dropped in silence by `computeSlotCounts` and
+    // `assembleSources` — an out-of-range typed-array write is a no-op, so
+    // that destination would never request a car and never seed a field.
+    const { map, world } = fixture('dest-colour-range')
+    const state = createState('s', map)
+    expect(map.groupCount).toBe(5)
+
+    expect(() => placeDestination(state, world, destCellFor(0, 0), ORIENTATION_S, 5, DEST_KIND_SQUARE)).toThrow(
+      /colour must be an integer in \[0, 5\)/,
+    )
+    expect(() => placeDestination(state, world, destCellFor(0, 0), ORIENTATION_S, 8, DEST_KIND_SQUARE)).toThrow(
+      /colour must be an integer in \[0, 5\)/,
+    )
+    expect(state.header[H_DEST_COUNT]).toBe(0)
+
+    // Vacuity: the boundary value itself is accepted.
+    expect(placeDestination(state, world, destCellFor(0, 0), ORIENTATION_S, 4, DEST_KIND_SQUARE)).toBe(true)
+    expect(destMetaColour(state.destMeta[0] as number)).toBe(4)
   })
 })
 

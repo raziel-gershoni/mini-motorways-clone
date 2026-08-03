@@ -712,3 +712,35 @@ describe('vacuity self-checks, summarised as their own assertions', () => {
     expect(state.rotationCursor[0]).not.toBe(0)
   })
 })
+
+describe('an out-of-range destination colour fails loudly, not silently (M1c Task 4 review, ruling 2)', () => {
+  it('computeSlotCounts throws for a colour past the map’s group count', () => {
+    // `slotCounts` is an `Int32Array(groupCount)`, and an out-of-range
+    // typed-array write is a SILENT no-op — so before this guard a
+    // destination whose packed colour exceeded `groupCount` contributed no
+    // demand, never took its turn in the rotation and never requested a car,
+    // with no error and nothing to point at.
+    //
+    // `placeDestination` now rejects such a colour at the boundary
+    // (buildings.ts), so this guard is reachable only from a hand-written
+    // `destMeta` byte — which is what it is defence-in-depth against, and the
+    // same standing as the mirror guard in `assembleSources` (dispatch.ts).
+    const { map, world } = fixture('slotcount-colour-range')
+    const { state, scratch } = rig(map, world)
+    expect(map.groupCount).toBe(5)
+    const d = placeEligibleNow(state, world, 0, 0, 0, DEST_KIND_SQUARE)
+    state.destMeta[d] = ((state.destMeta[d] as number) & ~0x7) | 6
+
+    expect(() => computeSlotCounts(state, scratch)).toThrow(/colour 6/)
+  })
+
+  it('counts the boundary colour itself, so the guard is not rejecting everything', () => {
+    const { map, world } = fixture('slotcount-colour-boundary')
+    const { state, scratch } = rig(map, world)
+    placeEligibleNow(state, world, 0, 0, 4, DEST_KIND_SQUARE)
+    state.header[H_TICK] = 1
+
+    computeSlotCounts(state, scratch)
+    expect(scratch.slotCounts[4]).toBe(1)
+  })
+})

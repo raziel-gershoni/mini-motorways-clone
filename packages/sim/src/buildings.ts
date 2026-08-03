@@ -59,6 +59,43 @@ function inBounds(cell: number, cells: number): boolean {
   return Number.isInteger(cell) && cell >= 0 && cell < cells
 }
 
+/**
+ * A building's colour must name a real colour group on THIS map.
+ *
+ * **This is a silent-drop guard, not tidiness.** Nothing downstream can
+ * recover from an out-of-range colour, and every failure it produces is
+ * silent:
+ *
+ *   - `houseColour` is a `Uint8Array`, so colour 256 stores as **0** and the
+ *     house then serves a group it was never given — confidently wrong
+ *     behaviour rather than absence.
+ *   - A house at colour 6 on a 5-group map matches no iteration of
+ *     `runDispatch`'s per-colour loop (`dispatch.ts`), so it is skipped
+ *     forever: it never dispatches a car, there is no error, and there is
+ *     nothing to point at.
+ *   - A destination at colour 6 indexes `scratch.slotCounts` /
+ *     `scratch.sourcesFlat` past their `groupCount`-sized ends, and an
+ *     out-of-range typed-array write is a **silent no-op** — that destination
+ *     never requests a car and never seeds a field.
+ *
+ * Both placement functions therefore check here, at the boundary, rather than
+ * leaving it to the per-tick guards in `demand.ts` and `dispatch.ts`: those
+ * throw from inside `step`, which under the plan's atomicity rule leaves
+ * `H_EPOCH` non-zero and makes the whole run unresumable — an unrecoverable
+ * failure for what is a caller error at placement time. The per-tick guards
+ * stay, as defence-in-depth against a hand-written or corrupted `destMeta`.
+ *
+ * Throws rather than returning a `PlaceCheck`: a bad colour is a programming
+ * error, not a placement rejection, and it is the same class `packDestMeta`
+ * already throws on for a colour outside its 3-bit field.
+ */
+function assertColourInRange(colour: number, world: WorldData, who: string): void {
+  const { groupCount } = world.map
+  if (!Number.isInteger(colour) || colour < 0 || colour >= groupCount) {
+    throw new Error(`${who}: colour must be an integer in [0, ${groupCount}) for this map, got ${colour}`)
+  }
+}
+
 function validateOrientation(orientation: number): void {
   if (!Number.isInteger(orientation) || orientation < 0 || orientation >= ORIENTATION_COUNT) {
     throw new Error(`buildings: orientation must be an integer in [0, ${ORIENTATION_COUNT}), got ${orientation}`)
@@ -292,6 +329,7 @@ export function canPlaceHouse(state: GameState, world: WorldData, cell: number):
  * `carRouteCursor` and `carRoute` are left at their already-zero default.
  */
 export function placeHouse(state: GameState, world: WorldData, cell: number, colour: number): boolean {
+  assertColourInRange(colour, world, 'placeHouse')
   const check = canPlaceHouse(state, world, cell)
   if (!check.ok) return false
 
@@ -388,6 +426,7 @@ export function placeDestination(
   colour: number,
   kind: number,
 ): boolean {
+  assertColourInRange(colour, world, 'placeDestination')
   const check = canPlaceDestination(state, world, destCell, orientation)
   if (!check.ok) return false
 

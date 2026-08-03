@@ -265,6 +265,21 @@ export function computeSlotCounts(state: GameState, scratch: Scratch): void {
     if (!isEligible(state, d, tick)) continue
     const meta = state.destMeta[d] as number
     const colour = destMetaColour(meta)
+    // `slotCounts` is an `Int32Array(groupCount)`, and an out-of-range
+    // typed-array write is a SILENT no-op — so without this a destination
+    // whose packed colour exceeds the map's group count would simply never
+    // contribute demand, never take its turn in the rotation, and never
+    // request a car, with no error and nothing to point at. `packDestMeta`
+    // validates colour only against its 3-bit field [0, 7], never against a
+    // particular map's `groupCount`. `placeDestination` (buildings.ts) now
+    // rejects it at the boundary; this stays as defence-in-depth against a
+    // hand-written or corrupted `destMeta` byte, mirroring the identical
+    // guard in `assembleSources` (dispatch.ts).
+    if (colour >= groupCount) {
+      throw new Error(
+        `computeSlotCounts: destination ${d} has colour ${colour}, outside this map's groupCount (${groupCount})`,
+      )
+    }
     const slots = destMetaKind(meta) === DEST_KIND_CIRCLE ? 2 : 1
     scratch.slotCounts[colour] = (scratch.slotCounts[colour] as number) + slots
   }

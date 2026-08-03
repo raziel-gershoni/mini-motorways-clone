@@ -221,6 +221,57 @@ function selectHouse(
   return bestH
 }
 
+/**
+ * Throws once the dispatch loop has run more iterations than its own
+ * termination argument permits.
+ *
+ * **This exists because a broken cursor is a HANG, not a failing test.** Three
+ * separable mutations of the loop (writing `lastKey` on commit rather than at
+ * selection; loosening `selectHouse`'s `h <= lastHouse` to `h < lastHouse`;
+ * deleting both length bounds at once) spin forever, and `--testTimeout`
+ * provably cannot interrupt a synchronous loop — a 4-second test timeout does
+ * not fire, and the run continues until the CI job's global kill, naming
+ * neither the test nor the line. One integer converts all three into a named
+ * assertion failure.
+ *
+ * Takes `iterations`/`bound` as parameters rather than closing over the loop's
+ * own locals, on exactly the precedent
+ * `assertBucketCountExceedsEveryEdgeCost` (scratch.ts) sets: the failure path
+ * is then testable directly, without editing a module constant or breaking the
+ * caller. The check itself is the same "cheap, independently correct,
+ * currently subsumed" shape as `hashSources`' length fold, `roads.ts`'s
+ * terrain whitelist and `selectHouse`'s `h < bestH` clause below.
+ *
+ * @internal Exported for testing only; `dispatchColour` is the real call site.
+ */
+export function assertDispatchProgress(iterations: number, bound: number, colour: number): void {
+  if (iterations > bound) {
+    throw new Error(
+      `dispatch: colour ${colour} loop exceeded its proved bound of ${bound} iterations — ` +
+        'the (dist, houseIndex) cursor no longer advances monotonically',
+    )
+  }
+}
+
+/**
+ * Throws if the dispatch loop selected a house with no free car.
+ *
+ * Proved unreachable: `selectHouse` requires a free car, and `reselect` is set
+ * only when one remained after a commit. A throw rather than a `break` because
+ * silently skipping would present a broken invariant as a missing car.
+ *
+ * Parameterised for the same reason as `assertDispatchProgress` above — the
+ * project's precedent is to make an unreachable throw reachable from a test
+ * rather than to leave it as the one branch nothing ever executes.
+ *
+ * @internal Exported for testing only; `dispatchColour` is the real call site.
+ */
+export function assertFreeCarFound(k: number, h: number, colour: number): void {
+  if (k < 0) {
+    throw new Error(`dispatch: house ${h} was selected with no free car (colour ${colour})`)
+  }
+}
+
 /** The cell one step in direction `k` from `cell`, or -1 if that leaves the grid. */
 function stepCell(cell: number, k: number, w: number, h: number): number {
   const x = (cell % w) + (DX[k] as number)
@@ -280,10 +331,20 @@ function destAtCarpark(state: GameState, world: WorldData, cell: number, colour:
  * tick. It decides which car slots receive route bytes, therefore the buffer
  * bytes, therefore `hashState`, therefore browser-vs-Worker byte identity.
  *
- * **The loop bound is the unreserved pin count.** "Lowest wins" never said
- * how many dispatches happen per tick; capping at `Sigma(destPins -
- * destReserved)` is what makes spec §5.3.6's "cars never compete" true BY
- * CONSTRUCTION rather than by hope.
+ * **The loop bound is the unreserved pin count, and it is a BOUND — it is not
+ * what makes spec §5.3.6's "cars never compete" true.** An earlier version of
+ * this comment reproduced the plan's claim that capping at `Sigma(destPins -
+ * destReserved)` makes that property true by construction. It does not, and
+ * the mutation table proves it: deleting `remaining--` entirely leaves every
+ * dispatch outcome unchanged. **What actually prevents two cars competing for
+ * one pin is the per-destination `destPins[d] - destReserved[d] <= 0` check
+ * below, evaluated after every walk, against a `destReserved` incremented
+ * inside this loop rather than after it.** `remaining` has two other jobs, one
+ * of which is state-visible: it bounds the loop, and it stops the loop reaching
+ * a farther house whose walk would bank an `H_ROUTES_REFUSED` increment that
+ * never happened — §10.3 telemetry, so a lie about the run rather than wasted
+ * work. Both halves of `remaining` (the colour filter and the decrement) have
+ * their own fixture for exactly that reason.
  */
 function dispatchColour(
   state: GameState,
@@ -311,7 +372,18 @@ function dispatchColour(
   let lastHouse: number = -1
   let reselect = false // true iff the previous winner may be picked again
 
+  // The termination argument, turned from prose into a runtime check. Each
+  // iteration either decrements `remaining` (at most `remaining` times) or
+  // clears `reselect`, and a `reselect === false` iteration must draw a key
+  // strictly greater than `lastKey` — at most `houseCount` distinct keys — so
+  // the loop cannot exceed `remaining + houseCount + 1` iterations including
+  // the terminal break. See `assertDispatchProgress` for why this is checked
+  // rather than merely argued.
+  const maxIterations = remaining + (state.header[H_HOUSE_COUNT] as number) + 1
+  let iterations = 0
+
   while (remaining > 0) {
+    assertDispatchProgress(++iterations, maxIterations, colour)
     // All three annotated because `lastHouse` is assigned from `h`, which is
     // initialised from `lastHouse`: TypeScript's control-flow analysis cannot
     // infer through that cycle (TS7022) and falls back to implicit `any`.
@@ -328,12 +400,7 @@ function dispatchColour(
     lastHouse = h
 
     const k = lowestFreeCar(state, h)
-    if (k < 0) {
-      // Proved unreachable: `selectHouse` requires a free car, and `reselect`
-      // is set only when one remained. A throw rather than a `break` because
-      // silently skipping would hide a broken invariant as a missing car.
-      throw new Error(`dispatch: house ${h} was selected with no free car (colour ${colour})`)
-    }
+    assertFreeCarFound(k, h, colour)
 
     // The walk, recorded DIRECTLY into car k's carRoute slice — there is no
     // legal staging buffer (it would be a per-tick allocation), so both
@@ -345,9 +412,19 @@ function dispatchColour(
       const kd = dirs[cell] as number
       if (kd < 0 || kd >= DIR_COUNT) break // -1 marks a source (and an unreachable cell); anything else is corrupt
       if (steps >= MAX_PATH_LEN) {
-        // Also the cycle guard: `dir` is a tree toward the sources so it
-        // cannot cycle, but a hand-corrupted `dir` can, and an unbounded walk
-        // is a hang rather than a wrong answer.
+        // Also the GRACEFUL cycle guard: `dir` is a tree toward the sources so
+        // it cannot cycle, but a hand-corrupted `dir` can, and an unbounded
+        // walk is a hang rather than a wrong answer.
+        //
+        // **Do not delete this on the grounds that `packRouteStep` already
+        // bounds the walk.** It does — `assertStepIndex` rejects step index 96
+        // and the loop cannot exceed `MAX_PATH_LEN + 1` iterations for any
+        // cycle shape, because `steps` rises by one on every non-breaking
+        // path — but the two bounds are not interchangeable. This one yields a
+        // COUNTED REFUSAL (`H_ROUTES_REFUSED`, car left idle, tick completes);
+        // that one yields a THROW, which under the plan's atomicity rule
+        // leaves `H_EPOCH` non-zero and makes the run unresumable. Deleting
+        // this converts a telemetered refusal into a poisoned run.
         walkFailed = true
         break
       }
@@ -379,7 +456,14 @@ function dispatchColour(
     // whose every pin is already spoken for is excluded from this tick's
     // loop, and does not reach past its nearest destination. It resumes when
     // the reserving car arrives.
-    if ((state.destPins[d] as number) - (state.destReserved[d] as number) === 0) {
+    //
+    // `<= 0`, not `=== 0`. The plan proves `destReserved <= destPins`, so a
+    // negative difference is unreachable on the manifold — but `=== 0` reads
+    // an already-broken invariant as "eligible" and makes it worse by
+    // committing another car, where `<= 0` refuses and leaves the corruption
+    // where it is. One character; the same fail-closed reasoning as
+    // `roads.ts`'s terrain whitelist.
+    if ((state.destPins[d] as number) - (state.destReserved[d] as number) <= 0) {
       zeroRoute(state, k)
       reselect = false
       continue

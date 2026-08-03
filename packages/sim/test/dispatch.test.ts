@@ -29,7 +29,15 @@ import {
   PHASE_OUTBOUND,
   PHASE_RETURNING,
 } from '../src/buildings'
-import { assembleSources, runDispatch, packRouteStep, routeStep, ROUTE_BYTES } from '../src/dispatch'
+import {
+  assembleSources,
+  runDispatch,
+  packRouteStep,
+  routeStep,
+  ROUTE_BYTES,
+  assertDispatchProgress,
+  assertFreeCarFound,
+} from '../src/dispatch'
 
 /**
  * Every fixture here is an all-land 20 x 12 board (`W` x `H`), so cell
@@ -322,6 +330,58 @@ describe('4a: sources land in ascending cell order', () => {
     assembleSources(r.state, r.world, r.scratch)
     expect(() => syncFields(r.state, r.world, r.fields, r.scratch)).not.toThrow()
   })
+
+  /**
+   * The pair above meets the brief's stated discriminator exactly — and is
+   * still too weak. With at most two same-colour destinations, `count - i` is
+   * never above 1, so a **single-element** shift is byte-identical to the full
+   * shift loop. Three destinations arriving in descending carpark order force
+   * the last insertion to shift TWO elements:
+   *
+   *   slot 0: origin (2,8) = 162, E -> carpark (5,8) = 165
+   *   slot 1: origin (2,5) = 102, E -> carpark (5,5) = 105
+   *   slot 2: origin (2,2) = 42,  E -> carpark (5,2) = 45
+   *
+   * correct -> [45, 105, 165];  one-element shift -> [45, 165, 165], which is
+   * non-strictly-ascending AND duplicated, i.e. `computeFlowField`'s hard
+   * throw — on the reachable manifold, since three same-colour destinations
+   * placed in descending cell order is ordinary play, and a throw out of
+   * `step` poisons the run.
+   */
+  function spanTwoRig(): Rig {
+    const r = rig('span-two')
+    expect(placeDestination(r.state, r.world, 162, ORIENTATION_E, 0, DEST_KIND_SQUARE)).toBe(true)
+    expect(placeDestination(r.state, r.world, 102, ORIENTATION_E, 0, DEST_KIND_SQUARE)).toBe(true)
+    expect(placeDestination(r.state, r.world, 42, ORIENTATION_E, 0, DEST_KIND_SQUARE)).toBe(true)
+    placeChain(r, [165, 166])
+    placeChain(r, [105, 106])
+    placeChain(r, [45, 46])
+    for (let d = 0; d < 3; d++) r.state.destPins[d] = 1
+    return r
+  }
+
+  it('emits ascending cells when the last insertion must shift two elements', () => {
+    const r = spanTwoRig()
+
+    // Vacuity, against literals: the carparks arrive strictly DESCENDING in
+    // slot order, so inserting slot 2's cell displaces both earlier entries —
+    // a shift span of 2, which a two-destination fixture cannot produce.
+    expect(r.state.header[H_DEST_COUNT]).toBe(3)
+    expect(carparkCell(r.state.destCell[0] as number, ORIENTATION_E, W, H)).toBe(165)
+    expect(carparkCell(r.state.destCell[1] as number, ORIENTATION_E, W, H)).toBe(105)
+    expect(carparkCell(r.state.destCell[2] as number, ORIENTATION_E, W, H)).toBe(45)
+    expect(165).toBeGreaterThan(105)
+    expect(105).toBeGreaterThan(45)
+
+    assembleSources(r.state, r.world, r.scratch)
+    expect(sourcesOf(r, 0)).toEqual([45, 105, 165])
+  })
+
+  it('feeds computeFlowField a three-source list it accepts', () => {
+    const r = spanTwoRig()
+    assembleSources(r.state, r.world, r.scratch)
+    expect(() => syncFields(r.state, r.world, r.fields, r.scratch)).not.toThrow()
+  })
 })
 
 describe('4a: slices, counts and idempotence', () => {
@@ -421,11 +481,13 @@ describe('4a: slices, counts and idempotence', () => {
 
   it('throws a named error for a destination whose colour exceeds the map group count', () => {
     const r = rig('bad-colour')
-    // `packDestMeta` validates colour against the 3-bit field [0, 7], never
-    // against a particular map's groupCount — so a colour-5 destination on a
-    // 5-group map is constructible, and would otherwise silently write past
-    // the end of `sourcesFlat` (an out-of-range typed-array write is a no-op).
-    expect(placeDestination(r.state, r.world, 150, ORIENTATION_S, 5, DEST_KIND_SQUARE)).toBe(true)
+    // `placeDestination` now rejects an out-of-range colour at the boundary
+    // (buildings.ts), so this guard is reachable only from a hand-written
+    // `destMeta` byte — which is exactly what it is defence-in-depth against.
+    // Left unguarded it writes past the end of `sourcesFlat`/`sourceCounts`,
+    // and an out-of-range typed-array write is a SILENT no-op.
+    expect(placeDestination(r.state, r.world, 150, ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+    r.state.destMeta[0] = ((r.state.destMeta[0] as number) & ~0x7) | 5
     placeChain(r, [210, 211])
     r.state.destPins[0] = 1
     expect(() => assembleSources(r.state, r.world, r.scratch)).toThrow(/colour 5/)
@@ -598,6 +660,73 @@ describe('4b: house selection', () => {
 
     expect(carsInPhase(r, PHASE_OUTBOUND)).toEqual([0])
     assertReservationInvariants(r)
+  })
+
+  it('selects a second house TIED on distance, once the first runs out of cars', () => {
+    // The tie test above has `destPins = 1`, so the second tied house is never
+    // needed and the cursor's `d < lastDist` boundary is never crossed at
+    // equality. Loosening it to `d <= lastDist` excludes every other house at
+    // exactly that distance — a real on-manifold under-dispatch that no
+    // one-pin fixture can see.
+    const r = corridorRig('tie-boundary', [
+      [cellFor(15, 10), 0],
+      [cellFor(5, 10), 0],
+    ])
+    r.state.destPins[0] = 4
+
+    assembleAndSync(r)
+    // Vacuity: the two houses genuinely tie, and there are more pins than one
+    // house has cars.
+    expect(r.fields[0]!.dist[cellFor(15, 10)]).toBe(50)
+    expect(r.fields[0]!.dist[cellFor(5, 10)]).toBe(50)
+    expect(r.state.destPins[0]).toBeGreaterThan(CARS_PER_HOUSE)
+
+    runDispatch(r.state, r.world, r.fields, r.scratch)
+
+    expect(carsInPhase(r, PHASE_OUTBOUND)).toEqual([0, 1, 2, 3])
+    expect(r.state.destReserved[0]).toBe(4)
+    assertReservationInvariants(r)
+  })
+
+  it('stops cleanly when the only house exhausts its cars with pins still unserved', () => {
+    // The "no free car left" half of `reselect`. Every other fixture either
+    // runs out of pins before it runs out of cars, or has a second house to
+    // fall through to. Hard-wiring `reselect = true` throws
+    // "house ... was selected with no free car" here — in ordinary play.
+    const r = corridorRig('cars-exhausted', [[cellFor(0, 10), 0]])
+    r.state.destPins[0] = 3
+
+    assembleAndSync(r)
+    // Vacuity: strictly more unserved pins than the house has cars.
+    expect(r.state.destPins[0]).toBeGreaterThan(CARS_PER_HOUSE)
+
+    expect(() => runDispatch(r.state, r.world, r.fields, r.scratch)).not.toThrow()
+
+    expect(carsInPhase(r, PHASE_OUTBOUND)).toEqual([0, 1])
+    expect(r.state.destReserved[0]).toBe(2)
+    assertReservationInvariants(r)
+  })
+
+  it('refuses to commit against a destination already over-reserved', () => {
+    // Off the reachable manifold — the plan proves `destReserved <= destPins`
+    // — so this is hardening, not a bug fix. `=== 0` reads a difference of -2
+    // as "eligible" and makes an already-broken invariant worse by committing
+    // another car; `<= 0` refuses and leaves the corruption where it is.
+    const r = corridorRig('over-reserved', [[cellFor(0, 10), 0]], true)
+    r.state.destPins[0] = 1
+    r.state.destReserved[0] = 3
+    r.state.destPins[1] = 5
+
+    assembleAndSync(r)
+    // Vacuity: the colour has work to do overall, and the house's walk
+    // genuinely terminates at the over-reserved destination A.
+    expect(r.fields[0]!.dist[cellFor(0, 10)]).toBe(100)
+
+    runDispatch(r.state, r.world, r.fields, r.scratch)
+
+    expect(carsInPhase(r, PHASE_OUTBOUND)).toEqual([])
+    expect(r.state.destReserved[0]).toBe(3)
+    expect(r.state.destReserved[1]).toBe(0)
   })
 
   it('dispatches exactly one car when one pin faces two same-colour houses', () => {
@@ -923,6 +1052,35 @@ describe('4b: MAX_PATH_LEN is a defined refusal', () => {
     expect(carsInPhase(r, PHASE_OUTBOUND)).toEqual([])
   })
 
+  it('stops at remaining = 0 rather than walking a farther house into a spurious refusal', () => {
+    // The OTHER half of `remaining`: its decrement. The colour-filter half has
+    // its own test above; this one is the decrement's, and it is the same
+    // argument — `H_ROUTES_REFUSED` is §10.3 telemetry, so an increment for a
+    // walk that should never have happened is a lie about the run.
+    //
+    // A near house serves the single pin; a far house at 97 steps would refuse
+    // if the loop ever reached it. Deleting `remaining--` reaches it.
+    const r = rig('remaining-decrement')
+    expect(placeHouse(r.state, r.world, 61, 0)).toBe(true) // snake position 1 -> dist 10
+    expect(placeHouse(r.state, r.world, 157, 0)).toBe(true) // snake position 97 -> dist 970
+    expect(placeDestination(r.state, r.world, 0, ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+    placeChain(r, snakeCells())
+    r.state.destPins[0] = 1
+
+    assembleAndSync(r)
+    // Vacuity: the far house's route genuinely exceeds MAX_PATH_LEN, so it
+    // would be loudly counted if the loop reached it.
+    expect(r.fields[0]!.dist[61]).toBe(10)
+    expect(r.fields[0]!.dist[157]).toBe(97 * ORTHO_COST)
+
+    runDispatch(r.state, r.world, r.fields, r.scratch)
+
+    expect(carsInPhase(r, PHASE_OUTBOUND)).toEqual([0])
+    expect(r.state.header[H_ROUTES_REFUSED]).toBe(0)
+    expect(r.state.destReserved[0]).toBe(1)
+    assertReservationInvariants(r)
+  })
+
   it('bounds a hand-corrupted dir cycle instead of hanging', () => {
     const r = corridorRig('dir-cycle', [[cellFor(0, 10), 0]])
     r.state.destPins[0] = 1
@@ -941,6 +1099,110 @@ describe('4b: MAX_PATH_LEN is a defined refusal', () => {
     expect(r.state.header[H_ROUTES_REFUSED]).toBe(1)
     expect(carsInPhase(r, PHASE_OUTBOUND)).toEqual([])
     expect(routeBytesOf(r, 0)).toEqual(Array.from({ length: ROUTE_BYTES }, () => 0))
+  })
+
+  /**
+   * The third refusal reason — the walk terminated on a cell that is not any
+   * colour-matching carpark — and it is the only one the other fixtures cannot
+   * reach. `bounds a hand-corrupted dir cycle` does NOT cover it: that walk
+   * exits through `steps >= MAX_PATH_LEN`, so `d` is set to -1 by the ternary,
+   * never by `destAtCarpark`.
+   *
+   * Without the `d < 0` arm: `state.destPins[-1]` is `undefined`,
+   * `undefined - undefined` is `NaN`, `NaN <= 0` is false, so the eligibility
+   * guard does not fire and the car COMMITS with `carTargetDest = -1` and
+   * `destReserved[-1] = NaN` — a silent out-of-range no-op. The conservation
+   * invariant then breaks on the NEXT tick with nothing pointing at the cause.
+   */
+  it('refuses a walk that terminates on a reachable cell that is not a carpark', () => {
+    const r = corridorRig('not-a-carpark', [[cellFor(0, 10), 0]])
+    r.state.destPins[0] = 1
+    assembleAndSync(r)
+
+    // One step north off the corridor lands on a roadless cell: `dir` there is
+    // -1 (never relaxed), so the walk terminates normally — `walkFailed` is
+    // false and `steps` is 1 — on a cell that is nobody's carpark.
+    expect(r.fields[0]!.dir[cellFor(0, 10)]).toBe(2)
+    r.fields[0]!.dir[cellFor(0, 10)] = 0 // north
+    expect(roadMask(r.state, cellFor(0, 9))).toBe(0)
+    expect(r.fields[0]!.dir[cellFor(0, 9)]).toBe(-1)
+    expect(r.fields[0]!.dist[cellFor(0, 9)]).toBe(INF)
+
+    expect(() => runDispatch(r.state, r.world, r.fields, r.scratch)).not.toThrow()
+
+    expect(r.state.header[H_ROUTES_REFUSED]).toBe(1)
+    expect(carsInPhase(r, PHASE_OUTBOUND)).toEqual([])
+    expect(r.state.destReserved[0]).toBe(0)
+    expect(routeBytesOf(r, 0)).toEqual(Array.from({ length: ROUTE_BYTES }, () => 0))
+    assertReservationInvariants(r)
+  })
+
+  /**
+   * The refusal path's own zeroing, mutated separately from the eligibility
+   * path's. Every other refusal fixture either walks the full 96 steps (where
+   * the prefix IS the whole slice) or walks zero steps into an already-clean
+   * slice, so none of them can see prefix-only zeroing on this path.
+   *
+   * Doubles as the only cover for the `next < 0` off-grid guard: without it
+   * the walk sets `cell = -1`, reads `dirs[-1]` as `undefined`, and reaches
+   * `packRouteStep` with `undefined` — a THROW, which poisons the run, in
+   * place of the counted refusal.
+   */
+  it('zeroes the whole slice after a SHORT refused walk into a dirty slice', () => {
+    const r = corridorRig('short-refusal-dirty', [[cellFor(0, 10), 0]])
+    r.state.destPins[0] = 1
+    assembleAndSync(r)
+
+    // Car 0 carries a full-length route from an earlier trip...
+    for (let i = 0; i < MAX_PATH_LEN; i++) packRouteStep(r.state, 0, i, 5)
+    expect(routeBytesOf(r, 0).every((b) => b === 0x55)).toBe(true)
+    // ...and this tick's walk leaves the grid after ONE step (west off the
+    // left edge), so the prefix is 1 byte against a 48-byte slice.
+    r.fields[0]!.dir[cellFor(0, 10)] = 6
+
+    expect(() => runDispatch(r.state, r.world, r.fields, r.scratch)).not.toThrow()
+
+    expect(r.state.header[H_ROUTES_REFUSED]).toBe(1)
+    expect(carsInPhase(r, PHASE_OUTBOUND)).toEqual([])
+    expect(routeBytesOf(r, 0)).toEqual(Array.from({ length: ROUTE_BYTES }, () => 0))
+  })
+
+  it('refuses, rather than throwing, on a dir value outside [0, DIR_COUNT)', () => {
+    const r = corridorRig('corrupt-dir-value', [[cellFor(0, 10), 0]])
+    r.state.destPins[0] = 1
+    assembleAndSync(r)
+    r.fields[0]!.dir[cellFor(0, 10)] = DIR_COUNT + 1
+
+    // Without the `kd >= DIR_COUNT` half of the guard this reaches
+    // `packRouteStep` and throws, poisoning the run under the atomicity rule
+    // instead of producing the counted refusal decision 2 asks for.
+    expect(() => runDispatch(r.state, r.world, r.fields, r.scratch)).not.toThrow()
+
+    expect(r.state.header[H_ROUTES_REFUSED]).toBe(1)
+    expect(carsInPhase(r, PHASE_OUTBOUND)).toEqual([])
+  })
+
+  it('resolves the terminating carpark within the dispatching colour', () => {
+    // Off-manifold, same `destCell` trick as the dedupe test: two destinations
+    // sharing carpark 210, the WRONG-colour one at the LOWER slot index — so
+    // an unfiltered ascending scan returns it and the colour filter is the
+    // only thing that can pick the right destination.
+    const r = rig('carpark-colour')
+    expect(placeHouse(r.state, r.world, cellFor(0, 10), 0)).toBe(true)
+    expect(placeDestination(r.state, r.world, DEST_A_ORIGIN, ORIENTATION_S, 1, DEST_KIND_SQUARE)).toBe(true)
+    expect(placeDestination(r.state, r.world, DEST_B_ORIGIN, ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+    r.state.destCell[1] = DEST_A_ORIGIN
+    placeChain(r, corridor(0, 19))
+    r.state.destPins[1] = 1
+
+    dispatchTick(r)
+
+    // Without the filter, `destAtCarpark` returns slot 0 (colour 1), whose
+    // pins are 0, so the eligibility check excludes it and nothing dispatches.
+    expect(r.state.carTargetDest[0]).toBe(1)
+    expect(r.state.destReserved[1]).toBe(1)
+    expect(r.state.destReserved[0]).toBe(0)
+    expect(carsInPhase(r, PHASE_OUTBOUND)).toEqual([0])
   })
 
   it('refuses a zero-length route', () => {
@@ -1164,6 +1426,39 @@ describe('4b: decision 4’s stated artefact', () => {
     expect(r.state.carRouteLen[0]).toBe(18)
     expect(r.state.destReserved[1]).toBe(1)
     assertReservationInvariants(r)
+  })
+})
+
+describe('4b: the loop’s two proved invariants fail loudly rather than silently', () => {
+  /**
+   * Both take their bound as a parameter, on `scratch.ts`'s
+   * `assertBucketCountExceedsEveryEdgeCost` precedent, precisely so the
+   * failure path is exercisable without editing the caller. Neither branch is
+   * reachable from a correct dispatch loop — that is what "proved" means —
+   * and the project's rule is to make such a throw reachable from a test
+   * rather than leave it as the one branch nothing ever executes.
+   */
+  it('assertDispatchProgress throws only once the proved bound is exceeded', () => {
+    expect(() => assertDispatchProgress(4, 4, 2)).not.toThrow()
+    expect(() => assertDispatchProgress(5, 4, 2)).toThrow(/colour 2 loop exceeded its proved bound of 4/)
+  })
+
+  it('assertFreeCarFound throws only for a negative car index', () => {
+    expect(() => assertFreeCarFound(0, 3, 1)).not.toThrow()
+    expect(() => assertFreeCarFound(-1, 3, 1)).toThrow(/house 3 was selected with no free car \(colour 1\)/)
+  })
+
+  it('leaves headroom under the proved bound on a fixture that fills it', () => {
+    // Four commits over two houses plus the terminal break is 5 iterations
+    // against a bound of remaining (4) + houseCount (2) + 1 = 7. If the bound
+    // were ever tightened below the real worst case this fixture would throw.
+    const r = corridorRig('bound-headroom', [
+      [cellFor(15, 10), 0],
+      [cellFor(5, 10), 0],
+    ])
+    r.state.destPins[0] = 4
+    expect(() => dispatchTick(r)).not.toThrow()
+    expect(carsInPhase(r, PHASE_OUTBOUND).length).toBe(4)
   })
 })
 
