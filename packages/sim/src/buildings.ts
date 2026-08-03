@@ -78,12 +78,13 @@ function inBounds(cell: number, cells: number): boolean {
  *     out-of-range typed-array write is a **silent no-op** — that destination
  *     never requests a car and never seeds a field.
  *
- * Both placement functions therefore check here, at the boundary, rather than
- * leaving it to the per-tick guards in `demand.ts` and `dispatch.ts`: those
- * throw from inside `step`, which under the plan's atomicity rule leaves
- * `H_EPOCH` non-zero and makes the whole run unresumable — an unrecoverable
- * failure for what is a caller error at placement time. The per-tick guards
- * stay, as defence-in-depth against a hand-written or corrupted `destMeta`.
+ * Both placement functions therefore check here, at the boundary: **validate
+ * where the caller's mistake is made, not where its consequence surfaces.** A
+ * bad colour is a caller error at placement time; discovering it later, from
+ * inside a per-tick guard several phases into a tick, names the wrong function
+ * and the wrong moment however that discovery is reported. The per-tick guards
+ * in `demand.ts` and `dispatch.ts` stay, as defence-in-depth against a
+ * hand-written or corrupted `destMeta` byte, which no placement check can see.
  *
  * Throws rather than returning a `PlaceCheck`: a bad colour is a programming
  * error, not a placement rejection, and it is the same class `packDestMeta`

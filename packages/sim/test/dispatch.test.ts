@@ -1081,6 +1081,39 @@ describe('4b: MAX_PATH_LEN is a defined refusal', () => {
     assertReservationInvariants(r)
   })
 
+  it('refuses a walk that leaves the grid FROM a carpark cell', () => {
+    // The one on-manifold-adjacent fixture that can see `walkTerminated`'s
+    // default. Every other off-grid walk stops on a cell that is not anybody's
+    // carpark, so the `d < 0` arm refuses it whatever the default is. Here the
+    // walk's last cell IS the carpark (cell is not advanced when `stepCell`
+    // returns -1), so `d` resolves — and a `walkTerminated` that defaulted to
+    // true would COMMIT a route whose final step walks off the board.
+    //
+    // Carpark 60 = (0,3) sits on the left edge, so a west `dir` there leaves
+    // the grid; the house is one cell east of it.
+    const r = rig('offgrid-from-carpark')
+    expect(placeHouse(r.state, r.world, 61, 0)).toBe(true)
+    expect(placeDestination(r.state, r.world, 0, ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+    placeChain(r, snakeCells())
+    r.state.destPins[0] = 1
+
+    assembleAndSync(r)
+    // Vacuity: the walk genuinely reaches the carpark first (one step west),
+    // and the corrupted direction genuinely leaves the board from there.
+    expect(r.fields[0]!.dir[61]).toBe(6)
+    expect(r.fields[0]!.dir[60]).toBe(-1)
+    expect(60 % W).toBe(0)
+    r.fields[0]!.dir[60] = 6 // west, off the left edge
+
+    expect(() => runDispatch(r.state, r.world, r.fields, r.scratch)).not.toThrow()
+
+    expect(r.state.header[H_ROUTES_REFUSED]).toBe(1)
+    expect(carsInPhase(r, PHASE_OUTBOUND)).toEqual([])
+    expect(r.state.destReserved[0]).toBe(0)
+    expect(routeBytesOf(r, 0)).toEqual(Array.from({ length: ROUTE_BYTES }, () => 0))
+    assertReservationInvariants(r)
+  })
+
   it('bounds a hand-corrupted dir cycle instead of hanging', () => {
     const r = corridorRig('dir-cycle', [[cellFor(0, 10), 0]])
     r.state.destPins[0] = 1

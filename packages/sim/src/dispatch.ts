@@ -47,6 +47,25 @@ import { carparkCell, destMetaColour, destMetaOrientation, PHASE_IDLE, PHASE_OUT
  */
 export const ROUTE_BYTES = MAX_PATH_LEN / 2
 
+/**
+ * A step index outside `[0, MAX_PATH_LEN)` addresses the NEXT car's slice —
+ * silent corruption of a live route, not an out-of-range no-op — so it is
+ * validated rather than masked.
+ *
+ * **This is bound 3 of the three that guard `dispatchColour`'s route walk, and
+ * it is the one that must NOT be relied on.** It throws, and under the plan's
+ * atomicity rule a throw out of `step` leaves `H_EPOCH` non-zero and makes the
+ * run unresumable — correct as a last-resort tripwire, useless as a routing
+ * outcome, where decision 2 specifies a counted refusal. The other two live in
+ * `dispatchColour`'s walk (the loop header and the `steps === MAX_PATH_LEN`
+ * break); that comment lists all three and says why none of them may go.
+ *
+ * **Do not delete this on the grounds that the walk already bounds itself, and
+ * do not delete both together as one cleanup.** They are independent
+ * mechanisms with different outcomes that happen to derive from the same
+ * constant — which is exactly what makes "these two look redundant" a tempting
+ * and wrong read.
+ */
 function assertStepIndex(i: number): void {
   if (!Number.isInteger(i) || i < 0 || i >= MAX_PATH_LEN) {
     throw new Error(`carRoute: step index must be an integer in [0, ${MAX_PATH_LEN}), got ${i}`)
@@ -407,45 +426,65 @@ function dispatchColour(
     // refusal branches below must zero the slice they just wrote into.
     let cell = houseCell
     let steps = 0
-    let walkFailed = false
-    for (;;) {
+    // `walkTerminated` is the POSITIVE fact — "the walk reached a cell with no
+    // outgoing `dir`" — deliberately, so that EVERY other way out of this loop
+    // is a refusal by default rather than by an exit branch somebody could
+    // remove. See the header's bound below for why the default matters.
+    let walkTerminated = false
+
+    // ------------------------------------------------------------------
+    // THREE INDEPENDENT BOUNDS GUARD THIS WALK. Do not remove any of them,
+    // and in particular do not remove them TOGETHER as a "cleanup" on the
+    // grounds that each looks redundant next to the others. They are not
+    // interchangeable, and only one of them is a graceful outcome:
+    //
+    //   1. This loop header (`steps <= MAX_PATH_LEN`). STRUCTURAL — the walk
+    //      cannot run more than MAX_PATH_LEN + 1 iterations whatever the
+    //      `dir` graph looks like, because `steps` rises by one on every
+    //      non-breaking path. It is the backstop that makes deleting 2 and 3
+    //      together a bounded, refused walk instead of an infinite loop, and
+    //      it is why `walkTerminated` defaults to false: exiting through the
+    //      header means the walk never reached a terminating cell, so it must
+    //      read as a refusal regardless of which cell it stopped on.
+    //   2. The `steps === MAX_PATH_LEN` break below. The GRACEFUL bound, and
+    //      the only one that produces the outcome decision 2 specifies: a
+    //      counted refusal (`H_ROUTES_REFUSED`, car left idle, tick
+    //      completes).
+    //   3. `assertStepIndex` inside `packRouteStep`. A THROW, which under the
+    //      plan's atomicity rule leaves `H_EPOCH` non-zero and makes the run
+    //      unresumable — correct as a last-resort tripwire, useless as a
+    //      routing outcome.
+    //
+    // `dir` is a tree toward the sources, so on the reachable manifold it
+    // cannot cycle at all; every one of these exists for a hand-corrupted or
+    // replayed-from-corrupt `dir`, where an unbounded walk is a hang rather
+    // than a wrong answer.
+    // ------------------------------------------------------------------
+    while (steps <= MAX_PATH_LEN) {
       const kd = dirs[cell] as number
-      if (kd < 0 || kd >= DIR_COUNT) break // -1 marks a source (and an unreachable cell); anything else is corrupt
-      if (steps >= MAX_PATH_LEN) {
-        // Also the GRACEFUL cycle guard: `dir` is a tree toward the sources so
-        // it cannot cycle, but a hand-corrupted `dir` can, and an unbounded
-        // walk is a hang rather than a wrong answer.
-        //
-        // **Do not delete this on the grounds that `packRouteStep` already
-        // bounds the walk.** It does — `assertStepIndex` rejects step index 96
-        // and the loop cannot exceed `MAX_PATH_LEN + 1` iterations for any
-        // cycle shape, because `steps` rises by one on every non-breaking
-        // path — but the two bounds are not interchangeable. This one yields a
-        // COUNTED REFUSAL (`H_ROUTES_REFUSED`, car left idle, tick completes);
-        // that one yields a THROW, which under the plan's atomicity rule
-        // leaves `H_EPOCH` non-zero and makes the run unresumable. Deleting
-        // this converts a telemetered refusal into a poisoned run.
-        walkFailed = true
+      if (kd < 0 || kd >= DIR_COUNT) {
+        // -1 marks a source (and an unreachable cell); anything else is corrupt.
+        walkTerminated = true
         break
       }
+      // Bound 2. Checked AFTER the terminator above, which is what lets a
+      // route of exactly MAX_PATH_LEN steps be accepted rather than refused.
+      if (steps === MAX_PATH_LEN) break
       packRouteStep(state, k, steps, kd)
       steps++
       const next = stepCell(cell, kd, world.w, world.h)
-      if (next < 0) {
-        walkFailed = true
-        break
-      }
+      if (next < 0) break // walked off the grid; `walkTerminated` stays false
       cell = next
     }
 
-    const d = walkFailed ? -1 : destAtCarpark(state, world, cell, colour)
+    const d = walkTerminated ? destAtCarpark(state, world, cell, colour) : -1
     // Three refusals, one path: over the length bound, a zero-length route
     // (the house cell IS a carpark — forbidden by placement, so a corrupted
     // state produces a named refusal rather than a car that completes a trip
     // without moving), and a walk that did not terminate on a colour-matching
     // carpark at all (only reachable off the manifold, e.g. a corrupted
     // `dir`).
-    if (walkFailed || steps === 0 || d < 0) {
+    if (!walkTerminated || steps === 0 || d < 0) {
       state.header[H_ROUTES_REFUSED] = (state.header[H_ROUTES_REFUSED] as number) + 1
       zeroRoute(state, k)
       reselect = false
