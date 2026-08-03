@@ -201,8 +201,10 @@ export function advanceCar(state: GameState, world: WorldData, i: number, speed:
   // The committed route, never a field and never `roads`. On the return leg
   // the car retraces step `cursor - 1` backwards; `routeStep` (dispatch.ts) is
   // the single owner of the nibble layout and is imported rather than
-  // re-derived here, because a nibble-order swap is invisible to every outcome
-  // except a per-tick cell trace.
+  // re-derived here — which is what makes a nibble-order swap unconstructible
+  // in this module rather than merely unlikely. Such a swap leaves the
+  // endpoint, the total cost and the arrival tick all unchanged (measured, not
+  // argued), so any assertion restricted to those three would pass it.
   const dir = outbound ? routeStep(state, i, cursor) : (OPPOSITE[routeStep(state, i, cursor - 1)] as number)
   // Throws for a direction outside [0, DIR_COUNT) — i.e. for a corrupted route
   // nibble, which is otherwise a plausible-looking wrong move.

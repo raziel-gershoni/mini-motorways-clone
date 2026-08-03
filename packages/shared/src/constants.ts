@@ -149,17 +149,23 @@ export const COST_UNIT_SCALE = 250
  *
  *   1. **Diagonal ratio exact.** The two thresholds are 10 * 250 = 2500 and
  *      14 * 250 = 3500 — ratio 1.40, the same figure `edgeCost` charges.
- *   2. **Neither threshold is divisible by the speed.** 2500 / 330 and 3500 /
- *      330 both leave a large remainder (130 and 140 units, about 0.39 and
- *      0.42 of a tick per cell). This is load-bearing, not cosmetic: IF THE
- *      SPEED DIVIDED A THRESHOLD, THE CARRY WOULD ALWAYS BE ZERO ON THAT EDGE
- *      TYPE and the "drop the remainder at a crossing" bug — a systematic
- *      slowdown of a fraction of a tick per cell, the classic diverges-only-
- *      after-thousands-of-ticks failure — would be unobservable at every
- *      operating point. Under `COST_UNIT_SCALE` = 250 a speed of 350 would
- *      make the diagonal carry identically zero. `constants.test.ts` asserts
- *      the indivisibility directly, so a future speed change cannot silently
- *      disarm every carry test in `cars.test.ts`.
+ *   2. **Neither threshold is divisible by the speed.** 2500 = 7 * 330 + 190
+ *      and 3500 = 10 * 330 + 200, so a car OVERSHOOTS each threshold and
+ *      carries the excess onto its next cell: 330 - 190 = **140 units on an
+ *      orthogonal** (about 0.42 of a tick) and 330 - 200 = **130 units on a
+ *      diagonal** (about 0.39). Note the two quantities and keep them apart —
+ *      the *remainders* are 190 and 200, the *carries* are 140 and 130, and
+ *      only the carries are what movement holds.
+ *
+ *      This is load-bearing, not cosmetic: IF THE SPEED DIVIDED A THRESHOLD,
+ *      THE CARRY WOULD ALWAYS BE ZERO ON THAT EDGE TYPE and the "drop the
+ *      remainder at a crossing" bug — a systematic slowdown of a fraction of a
+ *      tick per cell, the classic diverges-only-after-thousands-of-ticks
+ *      failure — would be unobservable at every operating point. Under
+ *      `COST_UNIT_SCALE` = 250 a speed of 350 would divide 3500 exactly ten
+ *      times and make the diagonal carry identically zero. `constants.test.ts`
+ *      asserts both remainders and both carries directly, so a future speed
+ *      change cannot silently disarm every carry test in `cars.test.ts`.
  *   3. **Future multiplier rounding under 1%.** The smallest multiplier is
  *      `SHARP_TURN_SPEED_MUL` = 333, and 330 * 333 / 1000 truncates to 109
  *      units — an error bounded by 1 in 109. At a sub-cell-style base of 8-10

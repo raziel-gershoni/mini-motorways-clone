@@ -122,9 +122,12 @@ describe('rule constants', () => {
     // zero and the "drop the carry at a crossing" bug — a systematic slowdown
     // of a fraction of a tick per cell — would be invisible at every operating
     // point. Every exact-tick assertion in `sim/test/cars.test.ts` is
-    // calibrated against these two remainders (130 and 140 units), so a future
-    // speed change that made either zero would silently disarm the whole file
-    // rather than fail it. This is where it fails instead.
+    // calibrated against the two CARRIES this leaves — 140 units on an
+    // orthogonal and 130 on a diagonal, which are `speed - remainder`, not the
+    // remainders themselves (190 and 200). Both forms are asserted below,
+    // because the pair is easy to transpose in prose. A future speed change
+    // that made either carry zero would silently disarm the whole file rather
+    // than fail it. This is where it fails instead.
     // 2500 = 7 * 330 + 190, so the eighth tick overshoots by 330 - 190 = 140
     // units, which is what the car carries onto its next cell.
     expect((ORTHO_COST * COST_UNIT_SCALE) % CAR_SPEED_UNITS_PER_TICK).toBe(190)

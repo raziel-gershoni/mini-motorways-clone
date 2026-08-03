@@ -147,6 +147,21 @@ function perTickCells(startCell: number, cells: readonly number[], crossingTicks
   return out
 }
 
+/**
+ * The tick on which car `car` reaches the end of its outbound route, or -1
+ * within `limit` ticks. Returns a MEASURED number so a caller can assert a
+ * hand-computed literal against real behaviour rather than against another
+ * literal.
+ */
+function arrivalTick(state: GameState, world: WorldData, car: number, limit: number): number {
+  const len = state.carRouteLen[car] as number
+  for (let t = 1; t <= limit; t++) {
+    runMovement(state, world)
+    if ((state.carRouteCursor[car] as number) === len) return t
+  }
+  return -1
+}
+
 /** Vacuity helper: the number of adjacent pairs of route steps whose directions differ. */
 function adjacentDifferingPairs(route: readonly number[]): number {
   let n = 0
@@ -277,17 +292,33 @@ describe('outbound movement', () => {
   })
 
   it('takes 1.40x as long on the diagonal as on the orthogonal, within the rounding the constants imply', () => {
+    // The ratio is computed from two MEASURED arrival ticks, never from
+    // re-typed literals. An earlier version of this test asserted `((85 * 1000)
+    // / 61) | 0 === 1393` — arithmetic on constants, which passes even when
+    // `runMovement`'s entire body is replaced by an early return. A test that
+    // is green while movement does nothing is not covering the movement ratio.
+    const orthoRig = rig('ratio-ortho')
+    commit(orthoRig.state, 0, START, ORTHO_ROUTE)
+    const orthoArrival = arrivalTick(orthoRig.state, orthoRig.world, 0, 200)
+
+    const diagRig = rig('ratio-diag')
+    commit(diagRig.state, 0, START, DIAG_ROUTE)
+    const diagArrival = arrivalTick(diagRig.state, diagRig.world, 0, 200)
+
+    expect(orthoArrival).toBe(61)
+    expect(diagArrival).toBe(85)
+
     // 85 * 1000 / 61 = 1393.44 -> 1393 at DENOM scale, against the exact 1400
     // the two thresholds imply (3500 / 2500). The 7-in-1400 gap (0.5%) is the
     // two ceilings, nothing else: the real-valued times are 20_000/330 =
     // 60.606 and 28_000/330 = 84.848, whose ratio is exactly 1.40.
-    const ratioScaled = ((85 * 1000) / 61) | 0
+    const ratioScaled = ((diagArrival * 1000) / orthoArrival) | 0
     expect(ratioScaled).toBe(1393)
     expect(Math.abs(ratioScaled - 1400)).toBeLessThanOrEqual(14) // within 1%
-    // And the two arrival ticks are genuinely different, so the ratio is not
-    // 1.00 dressed up: an implementation that charges ORTHO_COST for a
-    // diagonal arrives at 61 on both.
-    expect(85).not.toBe(61)
+    // And the two measured arrivals are genuinely different, so the ratio is
+    // not 1.00 dressed up: an implementation that charges ORTHO_COST for a
+    // diagonal arrives at 61 on both, and `ratioScaled` would read 1000.
+    expect(diagArrival).not.toBe(orthoArrival)
   })
 
   it('arrives on a mixed orthogonal/diagonal path on its own hand-computed tick, not on either pure path`s', () => {
@@ -301,12 +332,15 @@ describe('outbound movement', () => {
     // 330 * 73 - 24_000 = 24_090 - 24_000 = 90
     expect(state.carProgress[0]).toBe(90)
 
-    // Neither pure-path answer: a per-edge-normalised offset (every cell the
+    // Neither pure-path answer, asserted against the MEASURED arrival rather
+    // than against the literal 73: a per-edge-normalised offset (every cell the
     // same duration) arrives at 8 * 8 = 64, an all-ortho pricing at 61, an
     // all-diagonal pricing at 85.
-    expect(73).not.toBe(64)
-    expect(73).not.toBe(61)
-    expect(73).not.toBe(85)
+    const mixedArrival = trace.crossingTicks[7] as number
+    expect(mixedArrival).toBe(73)
+    expect(mixedArrival).not.toBe(64)
+    expect(mixedArrival).not.toBe(61)
+    expect(mixedArrival).not.toBe(85)
 
     // Vacuity: the mixed fixture really is mixed, and its steps really do
     // change direction from one to the next — a nibble swap of two EQUAL
@@ -318,14 +352,20 @@ describe('outbound movement', () => {
   })
 
   it('stands on the exact hand-computed cell on every single tick of a mixed path', () => {
-    // THE ONLY BULLET THAT SEES A NIBBLE-ORDER SWAP. Swapping the order of
-    // each pair of steps leaves the endpoint unchanged (displacement vectors
-    // commute), leaves the total cost and therefore the arrival tick unchanged
-    // (the multiset of steps is unchanged), and arrival is cursor-driven
-    // rather than position-driven, so the mutant still "arrives" — standing on
-    // the wrong cell for most of the trip. Only a cell-by-cell trace differs:
-    // the swapped route is SE,E,SE,E,... which is at cell 42 on tick 8 where
-    // the committed route is already at 43.
+    // The nibble-order swap, stated precisely rather than as the plan and the
+    // brief state it. Measured with the swap applied to `routeStep`: the
+    // ENDPOINT (130), the TOTAL COST and therefore the ARRIVAL TICK (73) are
+    // all unchanged — displacement vectors commute, the multiset of steps is
+    // unchanged, and arrival is cursor-driven rather than position-driven, so
+    // the mutant "arrives" while standing on the wrong cell for most of the
+    // trip. **Any assertion restricted to those three passes the mutant.** It
+    // does NOT follow that only a cell trace sees it: the swap reorders the
+    // costs, so the intermediate crossing ticks move too
+    // ([8,19,26,37,44,55,63,73] -> [11,19,29,37,47,55,66,73]), and Task 4's
+    // codec round-trips kill a reader-only swap outright. This trace is the
+    // sharpest observer, not the sole one. Note also that the mutation is not
+    // constructible against `cars.ts` at all — it imports `routeStep` rather
+    // than re-deriving the shift.
     const { state, world } = rig('mixed-trace')
     commit(state, 0, START, MIXED_ROUTE)
 
@@ -455,21 +495,45 @@ describe('cars that must not move', () => {
   it('leaves an exhausted, an idle, a never-created and a home car untouched while another drives', () => {
     // One state, five cars, so this also pins that movement treats cars
     // independently and in one ascending pass.
+    //
+    // **The idle and never-created cars sit MID-ROUTE, at cursor 3 on cell 45,
+    // and that is the whole point of them.** With cursor 0 they satisfy the
+    // brief's bullet ("a car in PHASE_IDLE or PHASE_NONE does not move")
+    // exactly and still cannot observe it: deleting the phase filter leaves
+    // `outbound` false for them, so they take the RETURNING arm and the
+    // EXHAUSTION guard (`cursor <= 0`) stops them instead — the assertion
+    // passes, delivered by a different mechanism. Verified: with cursor 0,
+    // deleting the phase filter is green across all 582 tests. The general
+    // rule this file now stands on: a negative assertion ("X does not move")
+    // is only meaningful if the fixture DISABLES EVERY OTHER MECHANISM that
+    // would produce the same observation. Cursor 3 disables exhaustion, so
+    // only the phase filter can be what stops them.
     const { state, world } = rig('no-move')
     commit(state, 0, START, ORTHO_ROUTE) // the driver
 
     commit(state, 1, START, ORTHO_ROUTE) // outbound but already exhausted
     state.carRouteCursor[1] = 8
 
-    commit(state, 2, START, ORTHO_ROUTE) // a full route, but idle
+    commit(state, 2, START, ORTHO_ROUTE) // a full route, mid-route, but idle
     state.carPhase[2] = PHASE_IDLE
+    state.carRouteCursor[2] = 3
+    state.carCell[2] = 45
 
-    commit(state, 3, START, ORTHO_ROUTE) // a full route, but never created
+    commit(state, 3, START, ORTHO_ROUTE) // a full route, mid-route, but never created
     state.carPhase[3] = PHASE_NONE
+    state.carRouteCursor[3] = 3
+    state.carCell[3] = 45
 
     commit(state, 4, START, ORTHO_ROUTE) // returning, already home
     state.carPhase[4] = PHASE_RETURNING
     state.carRouteCursor[4] = 0
+
+    // Vacuity, before the run: cars 2 and 3 are strictly inside their route, so
+    // neither exhaustion arm can be what holds them.
+    for (const car of [2, 3]) {
+      expect(state.carRouteCursor[car]).toBeGreaterThan(0)
+      expect(state.carRouteCursor[car]).toBeLessThan(state.carRouteLen[car] as number)
+    }
 
     for (let t = 0; t < 61; t++) runMovement(state, world)
 
@@ -481,17 +545,40 @@ describe('cars that must not move', () => {
     // else banked progress either. An exhausted car is one arrivals has not
     // collected yet; letting it accumulate would credit the next leg with time
     // it did not spend driving.
-    for (const car of [1, 2, 3, 4]) {
-      expect(state.carCell[car], `car ${car} moved`).toBe(START)
+    const parked: readonly (readonly [number, number, number])[] = [
+      // [car, expected cell, expected cursor]
+      [1, START, 8], // outbound, exhausted at the end of its route
+      [2, 45, 3], // IDLE, mid-route — only the phase filter can hold it
+      [3, 45, 3], // NONE, mid-route — likewise
+      [4, START, 0], // returning, exhausted at the start of its route
+    ]
+    for (const [car, cell, cursor] of parked) {
+      expect(state.carCell[car], `car ${car} moved`).toBe(cell)
+      expect(state.carRouteCursor[car], `car ${car} advanced its cursor`).toBe(cursor)
       expect(state.carProgress[car], `car ${car} banked progress`).toBe(0)
+      // Vacuity: each of these cars really did hold a live route, so "did not
+      // move" is a decision about its phase/cursor and not about an empty slot.
+      expect(state.carRouteLen[car]).toBe(8)
     }
-    expect(state.carRouteCursor[1]).toBe(8)
-    expect(state.carRouteCursor[2]).toBe(0)
-    expect(state.carRouteCursor[3]).toBe(0)
-    expect(state.carRouteCursor[4]).toBe(0)
-    // Vacuity: each of those cars really did hold a live route, so "did not
-    // move" is a decision about its phase/cursor and not about an empty slot.
-    for (const car of [1, 2, 3, 4]) expect(state.carRouteLen[car]).toBe(8)
+  })
+
+  it('is stopped by the exhaustion guard alone, on a car whose phase is unimpeachable', () => {
+    // The other half of the decomposition. The test above now leans on the
+    // PHASE filter for cars 2 and 3; this one leans on the EXHAUSTION guard and
+    // nothing else — the car is `PHASE_OUTBOUND`, which every phase filter
+    // admits, and is held only by `cursor >= routeLen`. Without the two
+    // separated, "delete the exhaustion guard" and "delete the phase filter"
+    // would share a single detector and a fix to one could mask the other.
+    const { state, world } = rig('exhaustion-only')
+    commit(state, 0, 50, ORTHO_ROUTE)
+    state.carRouteCursor[0] = 8
+    expect(state.carPhase[0]).toBe(PHASE_OUTBOUND) // vacuity: not held by the phase filter
+
+    for (let t = 0; t < 20; t++) runMovement(state, world)
+
+    expect(state.carCell[0]).toBe(50)
+    expect(state.carRouteCursor[0]).toBe(8)
+    expect(state.carProgress[0]).toBe(0)
   })
 })
 
@@ -630,13 +717,49 @@ describe('off-manifold guards', () => {
     // a step would leave the grid and the route is refused, never committed.
     // Reachable through a hand-written or corrupted route, where the
     // alternative is not a crash but a silent wrap onto the next row.
-    const { state, world } = rig('off-grid')
-    commit(state, 0, 39, [E]) // (19, 1): the rightmost column
+    //
+    // **All FOUR bounds, not just the eastern one.** Each half of the guard is
+    // its own mutation and three of them fail differently:
+    //   x >= w : stepping E off column 19 wraps onto the NEXT row's column 0.
+    //   x <  0 : stepping W off column 0 wraps onto the PREVIOUS row's last
+    //            column — the same row-seam false neighbour in the other
+    //            direction, and the one an eastern-only test leaves untested.
+    //   y >= h : stepping S off the last row indexes past the end of the grid.
+    //   y <  0 : stepping N off row 0 gives `y * w + x` in [-w, -1], which
+    //            `advanceCar`'s own `next < 0` arm already rejects — a genuine
+    //            equivalent mutant, exercised here for completeness rather than
+    //            because dropping that half is detectable.
+    const east = rig('off-grid-east')
+    commit(east.state, 0, 39, [E]) // (19, 1): the rightmost column
     expect(39 % W).toBe(19)
     expect(() => {
-      for (let t = 0; t < 8; t++) runMovement(state, world)
+      for (let t = 0; t < 8; t++) runMovement(east.state, east.world)
     }).toThrow(/step off the grid/)
-    expect(state.carCell[0]).toBe(39) // and it did not move onto cell 40 = (0, 2)
+    expect(east.state.carCell[0]).toBe(39) // and it did not move onto cell 40 = (0, 2)
+
+    const west = rig('off-grid-west')
+    commit(west.state, 0, 40, [W_DIR]) // (0, 2): the leftmost column
+    expect(40 % W).toBe(0)
+    expect(() => {
+      for (let t = 0; t < 8; t++) runMovement(west.state, west.world)
+    }).toThrow(/step off the grid/)
+    expect(west.state.carCell[0]).toBe(40) // and it did not move onto cell 39 = (19, 1)
+
+    const south = rig('off-grid-south')
+    commit(south.state, 0, 225, [4]) // (5, 11): the last row; DIRS index 4 is S
+    expect(((225 / W) | 0) as number).toBe(H - 1)
+    expect(() => {
+      for (let t = 0; t < 8; t++) runMovement(south.state, south.world)
+    }).toThrow(/step off the grid/)
+    expect(south.state.carCell[0]).toBe(225)
+
+    const north = rig('off-grid-north')
+    commit(north.state, 0, 5, [N]) // (5, 0): the first row
+    expect(((5 / W) | 0) as number).toBe(0)
+    expect(() => {
+      for (let t = 0; t < 8; t++) runMovement(north.state, north.world)
+    }).toThrow(/step off the grid/)
+    expect(north.state.carCell[0]).toBe(5)
   })
 
   it('throws on a corrupted route nibble rather than driving in a direction that does not exist', () => {
@@ -647,6 +770,12 @@ describe('off-manifold guards', () => {
     commit(state, 0, START, ORTHO_ROUTE)
     state.carRoute[0 * ROUTE_BYTES] = 0x0d // step 0 = direction 13
     expect(() => runMovement(state, world)).toThrow(/direction index out of range/)
+    // And the car stayed where it was, for the same reason its off-grid sibling
+    // asserts it: a throw that has already half-written the slot is a different
+    // and worse failure than a throw that has not.
+    expect(state.carCell[0]).toBe(START)
+    expect(state.carRouteCursor[0]).toBe(0)
+    expect(state.carProgress[0]).toBe(0)
   })
 
   it('names the one-crossing-per-tick invariant when the constants stop supporting it', () => {
