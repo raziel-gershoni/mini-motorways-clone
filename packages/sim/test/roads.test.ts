@@ -19,6 +19,7 @@ import {
   assertSymmetric,
   assertNoRoadOnImpassable,
 } from '../src/roads'
+import { ORIENTATION_N, DEST_KIND_SQUARE, carparkCell, isFootprintCell, placeHouse, placeDestination } from '../src/buildings'
 
 /**
  * Non-square (w=6, h=4) fixture containing all four terrain codes, each
@@ -625,5 +626,85 @@ describe('randomised whole-grid sequence', () => {
     }
 
     expect(hashExcludingCleared(state)).toBe(initialHashExCleared)
+  })
+})
+
+describe('the driveway rule (M1c decision 5)', () => {
+  // A dedicated, larger (w=8, h=6) all-LAND fixture: the module-level ROWS
+  // fixture (6x4) is deliberately small for the terrain-code coverage above
+  // and has no room left for a 2x3-or-3x2 footprint plus a carpark plus
+  // spacing from the grid edge.
+  const DW = 8
+  const DH = 6
+  const DEST_ROWS = ['........', '........', '........', '........', '........', '........']
+
+  function driveFixture(id: string): { map: MapData; world: WorldData } {
+    const map = parseMap(id, DEST_ROWS, 50, 40, 16, 5)
+    return { map, world: createWorld(map) }
+  }
+
+  it('road may be placed onto a house cell', () => {
+    const { map, world } = driveFixture('drive-house')
+    const state = createState('s', map)
+    const houseCell = 3 * DW + 5 // clear of the destination fixture below
+    expect(placeHouse(state, world, houseCell, 0)).toBe(true)
+    expect(canPlaceRoad(state, world, houseCell, houseCell + 1)).toMatchObject({ ok: true })
+    expect(placeRoad(state, world, houseCell, houseCell + 1)).toBe(true)
+  })
+
+  it('road may be placed onto a carpark cell', () => {
+    const { map, world } = driveFixture('drive-carpark')
+    const state = createState('s', map)
+    const destCell = 1 * DW + 2 // footprint (2,1)-(3,1)-(2,2)-(3,2)-(2,3)-(3,3), carpark (2,0)
+    expect(placeDestination(state, world, destCell, ORIENTATION_N, 0, DEST_KIND_SQUARE)).toBe(true)
+    const cp = carparkCell(destCell, ORIENTATION_N, DW, DH)
+    expect(canPlaceRoad(state, world, cp, cp + 1)).toMatchObject({ ok: true })
+    expect(placeRoad(state, world, cp, cp + 1)).toBe(true)
+  })
+
+  it('road onto each of the six footprint cells is rejected with reason building, both endpoints checked', () => {
+    const { map, world } = driveFixture('drive-footprint')
+    const state = createState('s', map)
+    const destX0 = 2
+    const destCell = 1 * DW + destX0 // x0=2, y0=1 -> footprint columns {2,3}, rows {1,2,3}
+    expect(placeDestination(state, world, destCell, ORIENTATION_N, 0, DEST_KIND_SQUARE)).toBe(true)
+
+    const footprintCells: number[] = []
+    for (let c = 0; c < world.cells; c++) {
+      if (isFootprintCell(destCell, ORIENTATION_N, DW, c)) footprintCells.push(c)
+    }
+    // Vacuity: the fixture's destination genuinely has 6 footprint cells.
+    expect(footprintCells.length).toBe(6)
+
+    // For every footprint cell, its west (if it is the footprint's west
+    // column, x=2) or east (if it is the east column, x=3) neighbour is
+    // guaranteed off-footprint for every row, since the footprint is
+    // exactly 2 columns wide — a genuine, hand-verified 8-adjacent pair,
+    // never a footprint-to-footprint pair that would pass vacuously.
+    for (const fc of footprintCells) {
+      const x = fc % DW
+      const outside = x === destX0 ? fc - 1 : fc + 1
+      expect(isFootprintCell(destCell, ORIENTATION_N, DW, outside), `outside cell ${outside} must be off-footprint`).toBe(false)
+
+      expect(canPlaceRoad(state, world, fc, outside)).toEqual({ ok: false, reason: 'building' })
+      expect(placeRoad(state, world, fc, outside)).toBe(false)
+      // Reversed: the footprint cell as endpoint `b`, not just `a`.
+      expect(canPlaceRoad(state, world, outside, fc)).toEqual({ ok: false, reason: 'building' })
+      expect(placeRoad(state, world, outside, fc)).toBe(false)
+    }
+
+    // No tiles were spent on any of the 24 rejected attempts above.
+    expect(tilesLeft(state)).toBe(map.startingTiles)
+  })
+
+  it('placeRoad inherits the rejection: the buffer is unchanged after a footprint-cell attempt', () => {
+    const { map, world } = driveFixture('drive-footprint-noop')
+    const state = createState('s', map)
+    const destCell = 1 * DW + 2
+    expect(placeDestination(state, world, destCell, ORIENTATION_N, 0, DEST_KIND_SQUARE)).toBe(true)
+    const before = hashState(state)
+    // (2,1) [a footprint cell] to (1,1) [off-footprint, genuinely adjacent].
+    expect(placeRoad(state, world, destCell, destCell - 1)).toBe(false)
+    expect(hashState(state)).toBe(before)
   })
 })

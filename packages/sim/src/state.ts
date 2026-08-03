@@ -369,3 +369,46 @@ export function restore(buffer: ArrayBuffer, world: WorldData): GameState {
 export function hashState(s: GameState): number {
   return hashBytes(s.bytes)
 }
+
+/**
+ * The house at live index `h`: `houseCell[h]`, valid only for `h` in
+ * `[0, H_HOUSE_COUNT)`. Throws otherwise — there is no `-1` unused marker
+ * anywhere in this milestone's region list ("Why one re-bless is now true"),
+ * so the live-prefix length (`H_HOUSE_COUNT`) is the ONLY signal that
+ * distinguishes a real house from an unused, all-zero slot. Reading past the
+ * prefix without this accessor would silently return house 0's own cell
+ * (index 0 reinterpreted) rather than an error.
+ *
+ * Returns the bare cell index, not an object: it is the one field every
+ * caller across this milestone actually needs (a caller that already holds
+ * a validated `h` reads `s.houseColour[h]` directly), and a later task may
+ * call this once per house per tick (M1c Task 4's dispatch, Task 6's
+ * arrivals) — an object literal here would be a per-tick allocation this
+ * milestone's "nothing allocates inside a tick" rule forbids.
+ *
+ * Note for M1e: destination *removal* will need an explicit hole marker for
+ * a slot in the middle of a live prefix that becomes invalid without
+ * shifting every later index. This accessor and `destAt` below are the one
+ * place that check must land, so M1e does not invent a second liveness
+ * convention at some other call site.
+ */
+export function houseAt(s: GameState, h: number): number {
+  const count = s.header[H_HOUSE_COUNT] as number
+  if (!Number.isInteger(h) || h < 0 || h >= count) {
+    throw new Error(`houseAt: index ${h} is not live (H_HOUSE_COUNT=${count})`)
+  }
+  return s.houseCell[h] as number
+}
+
+/**
+ * The destination at live index `d`: `destCell[d]`, valid only for `d` in
+ * `[0, H_DEST_COUNT)`. See `houseAt` above for why this throws instead of
+ * using a sentinel, and why it returns a bare cell rather than an object.
+ */
+export function destAt(s: GameState, d: number): number {
+  const count = s.header[H_DEST_COUNT] as number
+  if (!Number.isInteger(d) || d < 0 || d >= count) {
+    throw new Error(`destAt: index ${d} is not live (H_DEST_COUNT=${count})`)
+  }
+  return s.destCell[d] as number
+}

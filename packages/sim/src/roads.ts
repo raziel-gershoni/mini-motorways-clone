@@ -1,7 +1,8 @@
 import { TERRAIN } from '@laneways/shared'
 import type { GameState } from './state'
-import { H_TILES } from './state'
+import { H_TILES, H_DEST_COUNT } from './state'
 import type { WorldData } from './world'
+import { isFootprintCell, destMetaOrientation } from './buildings'
 
 /**
  * Road placement, erasure, the tile budget, and tree clearing — spec §5.11
@@ -73,6 +74,18 @@ import type { WorldData } from './world'
  * mutation IS invalidation, automatically, for every caller including ones
  * added after this file is written — there is no `markDirty` call to find
  * here because there is nothing for it to do.
+ *
+ * **The driveway rule (M1c decision 5).** `canPlaceRoad` rejects placement
+ * onto any of a destination's 6 non-carpark footprint cells with reason
+ * `'building'` — the house cell and the carpark cell remain placeable,
+ * which is what makes `dist[houseCell]` and the carpark-seeded field
+ * meaningful. This module imports `isFootprintCell`/`destMetaOrientation`
+ * from `buildings.ts`, which imports `hasTree` back from here — a genuine
+ * two-way cycle, safe by the same invariant `state.ts` documents for its own
+ * cycles with `world.ts`/`regions.ts`: every cross-reference is read inside
+ * a function body, never at module-evaluation time, and both modules export
+ * only `function` declarations (hoisted before any statement runs), so
+ * neither module's top level ever observes the other mid-initialisation.
  */
 
 /** 8 directions, index 0 = N, clockwise. index = y * w + x throughout. */
@@ -106,10 +119,28 @@ export function dirBetween(from: number, to: number, w: number, h: number): numb
   return -1
 }
 
-export type PlaceFailure = 'out-of-bounds' | 'not-adjacent' | 'terrain' | 'budget'
+export type PlaceFailure = 'out-of-bounds' | 'not-adjacent' | 'terrain' | 'building' | 'budget'
 export type PlaceResult =
   | { readonly ok: true; readonly cost: number } // 0, 1 or 2 tiles
   | { readonly ok: false; readonly reason: PlaceFailure }
+
+/**
+ * True iff `cell` is one of the 6 non-carpark footprint cells of any
+ * currently-placed destination — the driveway rule's whole basis. The house
+ * cell and the carpark cell are deliberately NOT checked here: they are
+ * road-legal by design (decision 5), so `canPlaceRoad` never calls this for
+ * them specifically, only for the two raw endpoints `a`/`b`, which may or
+ * may not happen to be a house/carpark cell.
+ */
+function cellIsDestinationFootprintOnly(state: GameState, world: WorldData, cell: number): boolean {
+  const destCount = state.header[H_DEST_COUNT] as number
+  for (let d = 0; d < destCount; d++) {
+    const destCell = state.destCell[d] as number
+    const orientation = destMetaOrientation(state.destMeta[d] as number)
+    if (isFootprintCell(destCell, orientation, world.w, cell)) return true
+  }
+  return false
+}
 
 /**
  * Whether placing a road between `a` and `b` would succeed, and at what
@@ -131,6 +162,13 @@ export function canPlaceRoad(state: GameState, world: WorldData, a: number, b: n
   // terrain reads here, never `undefined`.
   if (world.passable[a] !== 1 || world.passable[b] !== 1) {
     return { ok: false, reason: 'terrain' }
+  }
+
+  // The driveway rule (M1c decision 5): both endpoints are checked, and a
+  // destination's 6 non-carpark footprint cells are the only cells this
+  // rejects — the house cell and the carpark cell stay placeable.
+  if (cellIsDestinationFootprintOnly(state, world, a) || cellIsDestinationFootprintOnly(state, world, b)) {
+    return { ok: false, reason: 'building' }
   }
 
   const maskA = state.roads[a] as number
