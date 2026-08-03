@@ -33,13 +33,35 @@ import { INF, NB, ST_EXPANSIONS, ST_PUSHES, type FlowField, type Scratch } from 
  * was already applied, and every relaxation attempted from a stale entry
  * would fail `nd < dist[ni]` anyway — a reviewer verified bit-identical
  * `dist`/`dir` output across 400/400 random graphs with the check removed.
- * Bucket aliasing does not rescue a removal either: pending entries at any
- * moment differ by at most `DIAG_COST - ORTHO_COST` (4), never by `NB`
- * (15), so two genuinely different distances can never collide into the
- * same bucket index while both are still pending. The check stays because it
- * saves work (skipping a stale cell's whole neighbour scan), and because
- * `scratch.stats[ST_EXPANSIONS]` — which counts only non-stale drains — makes
- * its removal visible even though `dist`/`dir` would not.
+ * Bucket aliasing does not rescue a removal either, but the reason is
+ * tighter than it looks and is worth stating exactly, because it is what
+ * sizes `NB`. While bucket `d` is draining, every pending entry has a
+ * distance in `[d, d + DIAG_COST]`: anything below `d` was drained already,
+ * and every push made from distance `d` lands at `d + edgeCost <= d +
+ * DIAG_COST`. That interval holds exactly `DIAG_COST + 1 = NB` distinct
+ * values, so the `NB` cyclic buckets are exactly enough to give each of them
+ * its own index and no two genuinely different pending distances can ever
+ * collide.
+ *
+ * **`NB = DIAG_COST + 1` is therefore the exact minimum, with zero slack —
+ * not a comfortable margin.** (An earlier version of this comment claimed
+ * pending entries "differ by at most `DIAG_COST - ORTHO_COST` (4), never by
+ * `NB` (15)". The 4 is the spread *before* the current bucket's own pushes
+ * are made; instrumenting the queue over 200 seeded random graphs measures a
+ * true maximum spread of 14, i.e. the full interval. Reading 4 as headroom
+ * would be a 3.5x overestimate of room that does not exist.) §5.4 promises
+ * intersection and traffic-light penalties "as extra integer edge weight":
+ * **any new edge cost requires `NB` to grow with it**, since `NB` must
+ * strictly exceed the largest edge cost. `createScratch` asserts exactly
+ * that (`assertBucketCountExceedsEveryEdgeCost`), so the failure is a throw
+ * at allocation rather than a silently mis-bucketed distance — but the
+ * constant still has to be updated deliberately, in scratch.ts, alongside
+ * the new cost.
+ *
+ * The check stays because it saves work (skipping a stale cell's whole
+ * neighbour scan), and because `scratch.stats[ST_EXPANSIONS]` — which counts
+ * only non-stale drains — makes its removal visible even though `dist`/`dir`
+ * would not.
  */
 
 /**
@@ -194,6 +216,16 @@ export function hashRoadRegion(state: GameState): number {
  * list, so an order-sensitive hash is the only kind that can actually detect
  * "the caller passed a different (even if same-length, same-set) source
  * list" as a staleness trigger.
+ *
+ * **Disclosed, so it does not read as an oversight: the length fold has no
+ * constructible mutation.** Deleting `h = hashInt32(h, sources.length)`
+ * leaves every test green, because FNV chaining is already prefix-sensitive
+ * — `[1, 2]` and `[1, 2, 3]` diverge at the third element regardless of
+ * whether the length was folded in first. It is kept as genuine
+ * defence-in-depth on the staleness key rather than removed, on the same
+ * reasoning as the terrain whitelist in roads.ts: a check that is currently
+ * subsumed but independently correct is cheap, and the thing subsuming it is
+ * a property of the hash function rather than of this function's contract.
  */
 export function hashSources(sources: readonly number[]): number {
   // FNV-1a's offset basis — the same seed hashBytes starts from, hardcoded

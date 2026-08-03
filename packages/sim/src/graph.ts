@@ -79,6 +79,17 @@ export function neighbours(
  * never redeclared: they are already covered by that package's `ALL`
  * registry test, and a second copy here would be a second source of truth a
  * balance change could silently miss.
+ *
+ * **Disclosed, so it does not read as an oversight: that table-derived
+ * orthogonality test has no constructible mutation today.** Replacing
+ * `DX[dir] === 0 || DY[dir] === 0` with `dir % 2 === 0` leaves every test
+ * green, because the two are equivalent for the current DIRS table (index 0
+ * = N, clockwise, so the orthogonals land on the even indices). That
+ * equivalence is a property of this one table's ordering, not of the
+ * direction concept, and it is precisely what a reordered or extended table
+ * would break — silently, inside the cost function every relaxation calls.
+ * Reading it off the table is deliberate future-proofing, per the paragraph
+ * above, not redundancy that could be dropped.
  */
 export function edgeCost(dir: number): number {
   if (!Number.isInteger(dir) || dir < 0 || dir >= DIR_COUNT) {

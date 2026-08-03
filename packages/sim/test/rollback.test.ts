@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { parseMap, type MapData } from '@laneways/shared'
 import { createState, snapshot, restore, hashState, H_TICK, type GameState } from '../src/state'
 import { createWorld, type WorldData } from '../src/world'
-import { placeRoad, DIR_COUNT, DX, DY } from '../src/roads'
+import { placeRoad, tilesLeft, DIR_COUNT, DX, DY } from '../src/roads'
 import { seedFromString, randomBelow, nextRandom } from '../src/rng'
 import { hashBytes } from '../src/hash'
 import {
@@ -10,6 +10,7 @@ import {
   createFlowFields,
   createScratch,
   INF,
+  ST_EXPANSIONS,
   type FlowField,
   type Scratch,
 } from '../src/scratch'
@@ -31,12 +32,33 @@ import type { TickInputs } from '../src/step'
  * exists to catch.
  *
  * No source file is added by this task. Every array named in `Scratch`/
- * `FlowField` (scratch.ts) is poisoned below; every stamp-comparison branch
- * in `syncFields`/`fieldFor` (flowfield.ts) is exercised by the
- * snapshot-and-replay arm or the invalidation test. If this file needed a
- * new production function to make an assertion possible, that would itself
- * be a finding — a behaviour this task is meant to prove would have no
- * reachable call site.
+ * `FlowField` (scratch.ts) is poisoned below.
+ *
+ * **What this file establishes, listed precisely.** An earlier version of
+ * this header claimed that "every stamp-comparison branch in
+ * `syncFields`/`fieldFor` is exercised by the snapshot-and-replay arm or the
+ * invalidation test". That was true of the REJECT side only, and overstated:
+ *
+ *   - Step 1 — the fresh-vs-used invariant, in three arms.
+ *   - Step 2 — `syncFields`' reject side across a genuine snapshot/restore:
+ *     the abandoned timeline's field is rebuilt rather than reused.
+ *   - Step 2b — `fieldFor`'s reject-on-read, with no invalidation call
+ *     anywhere in the test.
+ *   - Step 2c — `syncFields`' ACCEPT side across the same restore: a field
+ *     built BEFORE a rollback is legitimately kept afterwards, unrebuilt,
+ *     when the restored content matches what it was built from. This is the
+ *     direction where a bug is silent — no throw, no rebuild, just a reused
+ *     field — and it was the one arm this file did not have.
+ *   - Step 3 — two blessed goldens, one over `s.buffer`, one over field
+ *     bytes.
+ *
+ * It does NOT establish `fieldFor`'s never-built or cell-count branches.
+ * Those live in `flowfield.test.ts`, pinned there by message rather than by
+ * a bare `.toThrow()`.
+ *
+ * If this file needed a new production function to make an assertion
+ * possible, that would itself be a finding — a behaviour this task is meant
+ * to prove would have no reachable call site.
  */
 
 // ---------------------------------------------------------------------------
@@ -461,6 +483,75 @@ describe('the invalidation nobody triggered', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Step 2c: the other direction — accept and reuse ACROSS a restore.
+// ---------------------------------------------------------------------------
+
+describe('accept-and-reuse across a restore', () => {
+  /**
+   * Every other restore in this file lands on roads that differ from what
+   * the field was built from, so `syncFields` always rebuilds and only its
+   * REJECT side is ever taken. The claim being defended here is the opposite
+   * one, and it is the one the whole derived-state design rests on: a field
+   * built before a rollback is still safe to KEEP afterwards when the
+   * restored content matches. That direction is where a bug is silent —
+   * there is no throw to catch and no rebuild to compare against, just a
+   * field that is quietly reused.
+   */
+  it('a field built before a snapshot is reused, unrebuilt, on a state restored from it — and is still correct', () => {
+    const { map, world } = landFixture('accept-across-restore', 6, 4)
+    const state = createState('accept-across-restore-seed', map)
+    const S = cellAt(6, 0, 0)
+    const A = cellAt(6, 1, 0)
+    const B = cellAt(6, 2, 0)
+    const C = cellAt(6, 3, 0)
+    expect(placeRoad(state, world, S, A)).toBe(true)
+    expect(placeRoad(state, world, A, B)).toBe(true)
+
+    const fields = createFlowFields(1, world.cells)
+    const scratch = createScratch(world.cells)
+    syncFields(state, world, [[S]], fields, scratch)
+    const distBefore = Array.from(fieldFor(state, world, fields, 0, [S]).dist)
+    const hashBefore = hashField(fieldFor(state, world, fields, 0, [S]))
+    // Vacuity: the field must hold genuine reachable content, or "reused
+    // correctly" and "reused as an empty wipe" would be the same assertion.
+    expect(distBefore.some((d) => d !== 0 && d !== INF)).toBe(true)
+
+    const snap = snapshot(state)
+
+    // The live timeline diverges with a genuinely new road bit, so the field
+    // and the live state genuinely disagree at the moment of the restore.
+    expect(placeRoad(state, world, B, C)).toBe(true)
+    expect(() => fieldFor(state, world, fields, 0, [S])).toThrow()
+
+    const restored = restore(snap, world)
+    expect(hashRoadRegion(restored)).not.toBe(hashRoadRegion(state)) // vacuity: the two timelines really differ
+
+    // The field was built before the snapshot; `restored`'s roads are what
+    // it was built from. `syncFields` must ACCEPT it and not rebuild.
+    // Sentinel first: `computeFlowField` zeroes `stats` unconditionally at
+    // entry, so -1 surviving is proof it was never called — leaving the
+    // previous nonzero count in place would pass even for a rebuild that
+    // happened to visit zero cells.
+    scratch.stats[ST_EXPANSIONS] = -1
+    syncFields(restored, world, [[S]], fields, scratch)
+    expect(scratch.stats[ST_EXPANSIONS]).toBe(-1)
+
+    // Accepted — and still the right answer, byte for byte, both against
+    // what it held before the rollback and against an independent rebuild
+    // over the restored state. Reuse alone is not the property; reuse of
+    // something still correct is.
+    const reused = fieldFor(restored, world, fields, 0, [S])
+    expect(hashField(reused)).toBe(hashBefore)
+    expect(Array.from(reused.dist)).toEqual(distBefore)
+
+    const freshFields = createFlowFields(1, world.cells)
+    const freshScratch = createScratch(world.cells)
+    syncFields(restored, world, [[S]], freshFields, freshScratch)
+    expect(hashField(fieldFor(restored, world, freshFields, 0, [S]))).toBe(hashBefore)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Step 3: two blessed goldens, labelled for what each actually pins.
 // ---------------------------------------------------------------------------
 
@@ -470,10 +561,11 @@ describe('blessed goldens', () => {
   // `cleared` region (at least one road endpoint sits on a TREE, destroying
   // it) and the tile budget (every placement spends real tiles against a
   // finite `startingTiles`), not just `roads`.
+  const GOLDEN_STARTING_TILES = 40
   const GOLDEN_MAP = parseMap(
     'rollback-golden-v1',
     ['......', '.T..T.', '..~^..', '......', '.T....'],
-    40,
+    GOLDEN_STARTING_TILES,
   )
 
   function buildGoldenNetwork(): { state: GameState; world: WorldData } {
@@ -510,7 +602,23 @@ describe('blessed goldens', () => {
     //
     // When a rule change makes this fail intentionally, re-bless it in the
     // same commit as the change, never separately.
-    const { state } = buildGoldenNetwork()
+    const { state, world } = buildGoldenNetwork()
+
+    // The two claims above about WHAT the fixture covers — a destroyed tree,
+    // real tiles spent — were prose only. Both are true today (3 of the 3
+    // trees cleared, 24 of 40 tiles spent), but nothing enforced them, and
+    // the golden cannot: a future re-bless that landed on an all-LAND,
+    // budget-intact network would simply pin a new number and keep the same
+    // confident comment. These are the assertions that fail in that
+    // situation, so they must be checked BEFORE the hash, not after.
+    let clearedCount = 0
+    for (let c = 0; c < world.cells; c++) if (state.cleared[c] === 1) clearedCount++
+    expect(clearedCount, 'the fixture must genuinely destroy a tree').toBeGreaterThan(0)
+    expect(tilesLeft(state), 'the fixture must genuinely spend tiles').toBeLessThan(
+      GOLDEN_STARTING_TILES,
+    )
+    expect(tilesLeft(state), 'and must not have overspent the budget').toBeGreaterThanOrEqual(0)
+
     expect(hashState(state)).toBe(3183850973)
   })
 
@@ -529,6 +637,24 @@ describe('blessed goldens', () => {
     const fields = createFlowFields(2, world.cells)
     const scratch = createScratch(world.cells)
     syncFields(state, world, sourcesByColour, fields, scratch)
+
+    // Same reasoning as the guards on the golden above, applied to the thing
+    // THIS golden pins. A hash over an all-INF field, or over one where
+    // every reachable cell sits at the same distance, is just as stable and
+    // just as re-blessable as this one — and would say nothing about
+    // pathfinding. Each colour's field currently holds 19 distinct `dist`
+    // values over 30 cells; the floor below is well under that and well over
+    // anything degenerate (an all-INF field has 1, a field with only its
+    // source reachable has 2).
+    for (let c = 0; c < fields.length; c++) {
+      const distinct = new Set(Array.from((fields[c] as FlowField).dist))
+      expect(distinct.size, `colour ${c} must have a real distance spread`).toBeGreaterThanOrEqual(
+        10,
+      )
+      expect(distinct.has(0), `colour ${c} must have an accepted source`).toBe(true)
+      expect(distinct.has(INF), `colour ${c} must have somewhere unreachable`).toBe(true)
+    }
+
     expect(foldedFieldsHash(fields)).toBe(252514232)
   })
 })
