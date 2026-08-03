@@ -427,7 +427,9 @@ describe('the snapshot-and-replay arm', () => {
   it('replaying from a snapshot on the SAME reused FlowField/Scratch objects reproduces the trace exactly', () => {
     const W = 8
     const H = 6
-    const map = parseMap('rollback-replay-fixture', Array.from({ length: H }, () => '.'.repeat(W)), 999, 40, 16, 5)
+    // groupCount: 2 — matches this test's 2-colour fixture exactly, so
+    // fields.length === map.groupCount (syncFields' guard).
+    const map = parseMap('rollback-replay-fixture', Array.from({ length: H }, () => '.'.repeat(W)), 999, 40, 16, 2)
     const world = createWorld(map)
     const state = createState('rollback-replay-seed', map)
     const S0 = 0
@@ -519,8 +521,8 @@ describe('the invalidation nobody triggered', () => {
     const B = cellAt(6, 2, 0)
     expect(placeRoad(state, world, S, A)).toBe(true) // S now carries a road: an accepted source
 
-    const fields = createFlowFields(1, world.cells)
-    const scratch = scratchFor(world, 1)
+    const fields = createFlowFields(world.map.groupCount, world.cells)
+    const scratch = scratchFor(world, world.map.groupCount)
     syncFieldsFromLists(state, world, [[S]], fields, scratch) // "Build a field"
     expect(() => fieldForColour(state, world, fields, 0, scratch)).not.toThrow() // sanity: valid immediately after building
 
@@ -541,8 +543,8 @@ describe('the invalidation nobody triggered', () => {
     syncFieldsFromLists(restored, world, [[S]], fields, scratch)
     const repaired = fieldForColour(restored, world, fields, 0, scratch)
 
-    const freshFields = createFlowFields(1, world.cells)
-    const freshScratch = scratchFor(world, 1)
+    const freshFields = createFlowFields(world.map.groupCount, world.cells)
+    const freshScratch = scratchFor(world, world.map.groupCount)
     syncFieldsFromLists(restored, world, [[S]], freshFields, freshScratch)
     const fresh = fieldForColour(restored, world, freshFields, 0, freshScratch)
 
@@ -576,8 +578,8 @@ describe('accept-and-reuse across a restore', () => {
     expect(placeRoad(state, world, S, A)).toBe(true)
     expect(placeRoad(state, world, A, B)).toBe(true)
 
-    const fields = createFlowFields(1, world.cells)
-    const scratch = scratchFor(world, 1)
+    const fields = createFlowFields(world.map.groupCount, world.cells)
+    const scratch = scratchFor(world, world.map.groupCount)
     syncFieldsFromLists(state, world, [[S]], fields, scratch)
     const distBefore = Array.from(fieldForColour(state, world, fields, 0, scratch).dist)
     const hashBefore = hashField(fieldForColour(state, world, fields, 0, scratch))
@@ -613,8 +615,8 @@ describe('accept-and-reuse across a restore', () => {
     expect(hashField(reused)).toBe(hashBefore)
     expect(Array.from(reused.dist)).toEqual(distBefore)
 
-    const freshFields = createFlowFields(1, world.cells)
-    const freshScratch = scratchFor(world, 1)
+    const freshFields = createFlowFields(world.map.groupCount, world.cells)
+    const freshScratch = scratchFor(world, world.map.groupCount)
     syncFieldsFromLists(restored, world, [[S]], freshFields, freshScratch)
     expect(hashField(fieldForColour(restored, world, freshFields, 0, freshScratch))).toBe(hashBefore)
   })

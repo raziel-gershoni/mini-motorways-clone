@@ -92,6 +92,19 @@ describe('step', () => {
     expect(step.length).toBe(5)
   })
 
+  it('throws when fields.length !== world.map.groupCount, rather than silently serving colours 1..N-1 as "no field" later (1a, fix-list #26)', () => {
+    // MAP.groupCount is 2 (see the module-level MAP above); a 1-element
+    // fields array is a caller wiring bug that should fail loudly at the
+    // one place that knows both numbers, not surface later as `fieldFor:
+    // no field for colour c` once a dispatch phase exists to read it.
+    expect(MAP.groupCount).toBe(2)
+    const s = createState('groupcount-mismatch', MAP)
+    const mismatchedFields = freshFields().slice(0, 1)
+    expect(mismatchedFields.length).not.toBe(MAP.groupCount) // vacuity: genuinely mismatched
+    const scratch = freshScratch()
+    expect(() => step(s, WORLD, mismatchedFields, scratch, NO_INPUT)).toThrow(/groupCount/)
+  })
+
   describe('TickAction application', () => {
     it('a place action places a road, visible via roadMask after step returns', () => {
       const s = createState('place-action', MAP)
@@ -207,6 +220,61 @@ describe('step', () => {
       const scratch = freshScratch()
       step(s, WORLD, fields, scratch, NO_INPUT)
       expect(s.header[H_EPOCH]).toBe(0)
+    })
+
+    // The two tests below close a gap review found: state.ts's Atomicity
+    // comment names THREE throw sites as the mechanism's reason for
+    // existing — "an unknown TickAction.kind, a rebuild that overflows the
+    // entry pool, a non-ascending source list" — and only the first was
+    // covered above. Both remaining sites throw from deep inside
+    // `syncFields`/`computeFlowField`, not from `step`'s own input-parsing
+    // loop, which is exactly the "throws from the middle of the drain loop
+    // with a partly relaxed field already written" case the plan's
+    // Atomicity paragraph calls out as the dangerous one.
+
+    it('a non-ascending source list (computeFlowField throwing via syncFields) leaves H_EPOCH non-zero, and the next step and restore both throw named errors', () => {
+      const s = createState('poison-sources', MAP)
+      const fields = freshFields()
+      const scratch = freshScratch()
+      // Two sources for colour 0, written descending: computeFlowField's own
+      // "strictly ascending" guard throws from inside syncFields's rebuild
+      // loop, not from step's input-application phase.
+      scratch.sourceCounts[0] = 2
+      scratch.sourcesFlat[0] = 5
+      scratch.sourcesFlat[1] = 3
+
+      expect(s.header[H_EPOCH]).toBe(0)
+      expect(() => step(s, WORLD, fields, scratch, NO_INPUT)).toThrow(/strictly ascending/)
+      expect(s.header[H_EPOCH]).not.toBe(0)
+
+      expect(() => step(s, WORLD, fields, scratch, NO_INPUT)).toThrow(/H_EPOCH/)
+      expect(() => restore(snapshot(s), WORLD)).toThrow(/H_EPOCH/)
+    })
+
+    it('an entry-pool exhaustion mid-drain (computeFlowField throwing via syncFields) leaves H_EPOCH non-zero, and the next step and restore both throw named errors', () => {
+      const s = createState('poison-pool', MAP)
+      const fields = freshFields()
+      // A pool with room for exactly 1 entry: a source push (1) succeeds,
+      // and the very next relaxation push overflows — from the middle of
+      // the drain loop, with dist/dir already partly (wrongly) relaxed.
+      const tinyPool: Scratch = {
+        ...freshScratch(),
+        entryCell: new Int32Array(1),
+        entryNext: new Int32Array(1),
+      }
+      tinyPool.sourceCounts[0] = 1
+      tinyPool.sourcesFlat[0] = 0 // will carry a road once placed below, in the same tick
+
+      expect(s.header[H_EPOCH]).toBe(0)
+      const actions: readonly TickAction[] = [
+        { kind: 'place', a: 0, b: 1 },
+        { kind: 'place', a: 1, b: 2 },
+      ]
+      expect(() => step(s, WORLD, fields, tinyPool, { actions })).toThrow(/entry pool exhausted/)
+      expect(s.header[H_EPOCH]).not.toBe(0)
+
+      expect(() => step(s, WORLD, fields, tinyPool, NO_INPUT)).toThrow(/H_EPOCH/)
+      expect(() => restore(snapshot(s), WORLD)).toThrow(/H_EPOCH/)
     })
   })
 })

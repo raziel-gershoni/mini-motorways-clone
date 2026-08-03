@@ -12,7 +12,7 @@ import {
 import { createState, type GameState } from '../src/state'
 import { createWorld } from '../src/world'
 import { hashFieldInputRegions } from '../src/flowfield'
-import { createFlowFields, createScratch } from '../src/scratch'
+import { createFlowFields, createScratch, CT_REBUILDS } from '../src/scratch'
 import { step } from '../src/step'
 
 /**
@@ -147,28 +147,41 @@ describe('the staleness hash is driven from the layout table, not a hand-written
     const isInput = isFieldInputRegion(e.name)
     const byteLength = e.len * e.ctor.BYTES_PER_ELEMENT
 
-    it(`${e.name} (${isInput ? 'FIELD_INPUT' : 'FIELD_IRRELEVANT'}, ${byteLength} B): a poked byte ${isInput ? 'moves' : 'does not move'} hashFieldInputRegions`, () => {
+    // Three positions, not one (review Minor 1): poking only `e.offset`
+    // proved nothing about the REST of a region's bytes — a hash that only
+    // ever inspected each region's first byte (mutation A in the review)
+    // left every one of these tests green when there was only a single
+    // poke position per region. First, middle and last byte together prove
+    // the whole declared byte range participates, not just its first word.
+    const pokeOffsets = Array.from(
+      new Set([e.offset, e.offset + ((byteLength - 1) >> 1), e.offset + byteLength - 1]),
+    )
+
+    it(`${e.name} (${isInput ? 'FIELD_INPUT' : 'FIELD_IRRELEVANT'}, ${byteLength} B): a poked byte at the first/middle/last position ${isInput ? 'moves' : 'does not move'} hashFieldInputRegions`, () => {
       expect(byteLength, `${e.name} has no bytes to poke`).toBeGreaterThan(0)
 
-      const s = freshState()
-      const bytes = new Uint8Array(s.buffer)
-      const before = hashFieldInputRegions(s, ranges)
+      for (const pokeOffset of pokeOffsets) {
+        const s = freshState() // fresh per position: no cross-contamination between pokes
+        const bytes = new Uint8Array(s.buffer)
+        const before = hashFieldInputRegions(s, ranges)
 
-      const pokeOffset = e.offset
-      const beforeByte = bytes[pokeOffset] as number
-      bytes[pokeOffset] = (beforeByte + 1) & 0xff
+        const beforeByte = bytes[pokeOffset] as number
+        bytes[pokeOffset] = (beforeByte + 1) & 0xff
 
-      // Vacuity self-check (fix-list #30): the poked byte must have
-      // genuinely moved before asserting anything about its effect on the
-      // hash — an aliased or out-of-range write would otherwise make either
-      // branch below pass for the wrong reason.
-      expect(bytes[pokeOffset], `${e.name}: the poked byte did not actually change`).not.toBe(beforeByte)
+        // Vacuity self-check (fix-list #30): the poked byte must have
+        // genuinely moved before asserting anything about its effect on the
+        // hash — an aliased or out-of-range write would otherwise make
+        // either branch below pass for the wrong reason.
+        expect(bytes[pokeOffset], `${e.name}@${pokeOffset}: the poked byte did not actually change`).not.toBe(
+          beforeByte,
+        )
 
-      const after = hashFieldInputRegions(s, ranges)
-      if (isInput) {
-        expect(after, `${e.name} is FIELD_INPUT but the hash did not move`).not.toBe(before)
-      } else {
-        expect(after, `${e.name} is FIELD_IRRELEVANT but the hash moved anyway`).toBe(before)
+        const after = hashFieldInputRegions(s, ranges)
+        if (isInput) {
+          expect(after, `${e.name}@${pokeOffset} is FIELD_INPUT but the hash did not move`).not.toBe(before)
+        } else {
+          expect(after, `${e.name}@${pokeOffset} is FIELD_IRRELEVANT but the hash moved anyway`).toBe(before)
+        }
       }
     })
   }
@@ -213,11 +226,12 @@ describe('createFieldInputRanges', () => {
 
 describe('fieldInputRanges is built once, not recomputed per tick', () => {
   it('the same Scratch.fieldInputRanges reference survives many step() calls unchanged', () => {
-    // A partial proxy for "nothing allocates inside a tick" (see this file's
-    // report for the honest limit of what this specific test can and cannot
-    // catch): it fails if `scratch.fieldInputRanges` is ever REASSIGNED to a
-    // freshly-built array, which is the shape a naive "just recompute it
-    // every tick" mistake would take at the call site that owns `scratch`.
+    // A partial proxy for "nothing allocates inside a tick": it fails if
+    // `scratch.fieldInputRanges` is ever REASSIGNED to a freshly-built
+    // array, which is the shape a naive "just recompute it every tick"
+    // mistake would take at the call site that owns `scratch`. It does NOT
+    // by itself prove `syncFields`/`fieldFor` actually CONSULT that table —
+    // see the next test, added on review (Important 1), for that.
     const world = createWorld(MAP)
     const state = createState('ranges-identity-seed', MAP)
     const fields = createFlowFields(MAP.groupCount, world.cells)
@@ -225,5 +239,37 @@ describe('fieldInputRanges is built once, not recomputed per tick', () => {
     const scratch = createScratch(world.cells, MAP.groupCount, MAP.maxDestinations, ranges)
     for (let i = 0; i < 50; i++) step(state, world, fields, scratch, { actions: [] })
     expect(scratch.fieldInputRanges).toBe(ranges)
+  })
+
+  it('a doctored ranges table (missing "roads") is what syncFields actually consults — proves the table is read, not merely held', () => {
+    // Review Important 1: the prior disclosed gap ("recomputing
+    // createFieldInputRanges per call is byte-identical, so this needs an
+    // allocation harness to test") was wrong about WHY it passes. The
+    // observable difference between "consult scratch.fieldInputRanges" and
+    // "silently recompute the real table every call" is not the allocation
+    // — it is WHICH table gets consulted. Hand `createScratch` a table that
+    // covers only `mapIdentity` (deliberately omitting `roads`), place a
+    // road, and the coalescing test becomes directly falsifiable: against
+    // real code CT_REBUILDS must NOT move (roads isn't in the doctored
+    // table, so a road edit is invisible to the field-input hash); against
+    // a mutation that recomputes the real, full table instead, `roads`
+    // WOULD be seen and CT_REBUILDS moves.
+    const world = createWorld(MAP)
+    const state = createState('doctored-ranges-seed', MAP)
+    const fields = createFlowFields(MAP.groupCount, world.cells)
+    const mapIdentityEntry = computeLayout(regionsFor(MAP)).entries.find((e) => e.name === 'mapIdentity')!
+    const doctored = Int32Array.from([
+      mapIdentityEntry.offset,
+      mapIdentityEntry.len * mapIdentityEntry.ctor.BYTES_PER_ELEMENT,
+    ]) // mapIdentity only; roads deliberately absent
+    const scratch = createScratch(world.cells, MAP.groupCount, MAP.maxDestinations, doctored)
+
+    step(state, world, fields, scratch, { actions: [] }) // first tick: every stamp is 0, everything rebuilds
+    const afterFirst = scratch.counters[CT_REBUILDS] as number
+    expect(afterFirst).toBeGreaterThan(0) // vacuity: the first tick genuinely rebuilt something
+
+    step(state, world, fields, scratch, { actions: [{ kind: 'place', a: 0, b: 1 }] })
+    expect(state.roads[0]).not.toBe(0) // vacuity: the road really was placed
+    expect(scratch.counters[CT_REBUILDS]).toBe(afterFirst) // roads isn't in the doctored table: invisible to the hash
   })
 })

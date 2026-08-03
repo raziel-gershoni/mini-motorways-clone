@@ -160,6 +160,14 @@ export function isFieldIrrelevantRegion(name: string): boolean {
  * `hashBytes(s.destPins)`, ... — lets a region be classified FIELD_INPUT and
  * then silently not hashed, which is exactly the failure this table-driven
  * form exists to make impossible.
+ *
+ * **The rationale above once had a sharp edge, closed on review:** the
+ * function that CONSUMES this cache every tick, `hashFieldInputRegions`
+ * (flowfield.ts), used to allocate a fresh `Uint8Array` per range per call
+ * regardless of how cheaply this table itself was produced — undercutting
+ * the very rule this comment cites. It now reads through `state.bytes`, one
+ * persistent whole-buffer view built alongside every other region view, so
+ * the boot-time cache and its one consumer are both allocation-free.
  */
 export function createFieldInputRanges(map: MapData): Int32Array {
   const { entries } = computeLayout(regionsFor(map))

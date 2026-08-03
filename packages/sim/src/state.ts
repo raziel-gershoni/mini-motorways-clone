@@ -134,6 +134,18 @@ export function stateBytesFor(map: MapData): number {
 
 export interface GameState {
   readonly buffer: ArrayBuffer
+  /**
+   * One `Uint8Array` view over the WHOLE buffer, built once here alongside
+   * every other region view — never per read. `hashFieldInputRegions`
+   * (flowfield.ts) reads through this instead of constructing
+   * `new Uint8Array(state.buffer, offset, length)` per FIELD_INPUT region
+   * per call, which the review found allocating 5-30 objects/tick against
+   * this milestone's "nothing allocates inside a tick" rule. Not one of
+   * `regionsFor`'s declared regions — it is a raw whole-buffer alias, not a
+   * region boundary — so it is deliberately absent from
+   * `REGION_FIELD_NAMES` below.
+   */
+  readonly bytes: Uint8Array
   readonly rng: Uint32Array
   readonly mapIdentity: Int32Array
   readonly header: Int32Array
@@ -250,6 +262,7 @@ function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
   }
   return {
     buffer,
+    bytes: new Uint8Array(buffer),
     rng,
     mapIdentity,
     header,
@@ -354,5 +367,5 @@ export function restore(buffer: ArrayBuffer, world: WorldData): GameState {
 }
 
 export function hashState(s: GameState): number {
-  return hashBytes(new Uint8Array(s.buffer))
+  return hashBytes(s.bytes)
 }

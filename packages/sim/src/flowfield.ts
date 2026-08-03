@@ -1,4 +1,4 @@
-import { hashBytes, hashInt32 } from './hash'
+import { hashInt32 } from './hash'
 import { nonZeroWord, type GameState } from './state'
 import type { WorldData } from './world'
 import { neighbours, edgeCost } from './graph'
@@ -221,21 +221,35 @@ export function computeFlowField(
  * that divergence structurally impossible — classification IS what gets
  * hashed, because the ranges are derived from the same partition.
  *
- * Each region's bytes are hashed with `hashBytes` (finalised) and the
- * per-region hashes are chained with `hashInt32`, in `ranges` order — the
- * same "hash of hashes, order-sensitive" shape `hashSources` already uses
- * below, reusing the two existing FNV primitives rather than adding a third.
+ * **Allocation-free, per review (Important 5 / the plan-defect ruling on
+ * it): reads `state.bytes` — the one `Uint8Array` view over the WHOLE
+ * buffer, built once in `viewsOver` alongside every other region view —
+ * instead of constructing `new Uint8Array(state.buffer, offset, length)`
+ * per range per call.** That constructor call was the brief's own
+ * prescription in 1c ("hashes `new Uint8Array(state.buffer, offset,
+ * length)` for each") and it directly contradicts this milestone's "nothing
+ * allocates inside a tick" rule: 5 views/tick today, 30/tick once Task 4's
+ * `fieldFor` calls join `syncFields`'s. `hashBytes`'s own per-byte FNV-1a
+ * step is inlined here (XOR then `Math.imul` by the same prime) so no
+ * intermediate `Uint8Array` is ever constructed; per-region hashes are
+ * still chained with `hashInt32`, in `ranges` order — the same "hash of
+ * hashes, order-sensitive" shape `hashSources` already uses below.
  * `mapIdentity` being a FIELD_INPUT region means the old `hashRoadRegion`'s
  * separate `H_MAP` fold (M1b) is subsumed here: `mapIdentity` is simply one
  * more region in `ranges`, hashed whole.
  */
 export function hashFieldInputRegions(state: GameState, ranges: Int32Array): number {
+  const bytes = state.bytes
   let h = 0x811c9dc5 // FNV-1a offset basis
   for (let i = 0; i < ranges.length; i += 2) {
     const offset = ranges[i] as number
     const length = ranges[i + 1] as number
-    const bytes = new Uint8Array(state.buffer, offset, length)
-    h = hashInt32(h, hashBytes(bytes) | 0)
+    let regionHash = 0x811c9dc5 // hashBytes' own per-region seed, inlined
+    for (let j = 0; j < length; j++) {
+      regionHash ^= bytes[offset + j] as number
+      regionHash = Math.imul(regionHash, 0x01000193)
+    }
+    h = hashInt32(h, regionHash)
   }
   return nonZeroWord(h | 0)
 }
@@ -274,21 +288,23 @@ export function hashSources(sourcesFlat: Int32Array, offset: number, count: numb
 }
 
 /**
- * Every colour's source slice in `scratch.sourcesFlat`, sized
+ * Every colour's source slice in `scratch.sourcesFlat` starts
  * `world.map.maxDestinations` apart: colour `c` occupies `[c *
  * maxDestinations, c * maxDestinations + scratch.sourceCounts[c])`. A tiny
- * shared helper rather than repeating the arithmetic in both `syncFields`
- * and `fieldFor` — those two independently re-implementing "roads AND
- * sources" staleness is exactly the kind of duplication M1b's carry-forward
- * flagged once already; the offset arithmetic gets the same treatment here.
+ * shared helper rather than repeating the multiplication in both
+ * `syncFields` and `fieldFor` — those two independently re-implementing
+ * "field inputs AND sources" staleness is exactly the kind of duplication
+ * M1b's carry-forward flagged once already; the offset arithmetic gets the
+ * same treatment here.
+ *
+ * **Returns a plain `number`, not `{ offset, count }` (review Important 5):
+ * an object literal here was one allocation per colour per tick** — 5/tick
+ * today from `syncFields`' loop alone, 10/tick once `fieldFor` joins it in
+ * Task 4. Every caller already holds `scratch.sourceCounts[c]` directly, so
+ * the count never needed to travel through this helper at all.
  */
-function colourSourceRange(
-  colour: number,
-  scratch: Scratch,
-  world: WorldData,
-): { readonly offset: number; readonly count: number } {
-  const maxDestinations = world.map.maxDestinations
-  return { offset: colour * maxDestinations, count: scratch.sourceCounts[colour] as number }
+function colourSourceOffset(colour: number, world: WorldData): number {
+  return colour * world.map.maxDestinations
 }
 
 /**
@@ -334,6 +350,13 @@ function colourSourceRange(
  * `scratch.fieldInputRanges` is the boot-time layout-derived table. This
  * keeps `syncFields`' signature stable regardless of how many FIELD_INPUT
  * regions the partition ever grows to.
+ *
+ * **`fields.length` must equal `world.map.groupCount` (1a, fix-list #26,
+ * review Important 3).** Every region sizes from `map.groupCount`; a
+ * `fields` array of any other length is a caller wiring bug — a 1-colour
+ * `fields` array on a 5-colour map would silently serve colours 1-4 as
+ * "no field for colour c" from `fieldFor` instead of failing here, at the
+ * one place that actually knows both numbers.
  */
 export function syncFields(
   state: GameState,
@@ -341,6 +364,11 @@ export function syncFields(
   fields: readonly FlowField[],
   scratch: Scratch,
 ): void {
+  if (fields.length !== world.map.groupCount) {
+    throw new Error(
+      `syncFields: fields.length (${fields.length}) !== world.map.groupCount (${world.map.groupCount})`,
+    )
+  }
   // Checked explicitly rather than left to fall through: an out-of-range
   // `scratch.sourceCounts[c]` reads `undefined`, and treating it as a count
   // would throw a raw, unnamed error from deep inside `hashSources`.
@@ -353,7 +381,8 @@ export function syncFields(
   const fieldInputHash = hashFieldInputRegions(state, scratch.fieldInputRanges)
   for (let c = 0; c < fields.length; c++) {
     const field = fields[c] as FlowField
-    const { offset, count } = colourSourceRange(c, scratch, world)
+    const offset = colourSourceOffset(c, world)
+    const count = scratch.sourceCounts[c] as number
     const sourcesHash = hashSources(scratch.sourcesFlat, offset, count)
     if (field.builtFromFieldInputs === fieldInputHash && field.builtFromSources === sourcesHash) continue
     field.builtFromFieldInputs = 0
@@ -413,7 +442,8 @@ export function fieldFor(
     throw new Error(`fieldFor: colour ${colour} field was never built`)
   }
   const fieldInputHash = hashFieldInputRegions(state, scratch.fieldInputRanges)
-  const { offset, count } = colourSourceRange(colour, scratch, world)
+  const offset = colourSourceOffset(colour, world)
+  const count = scratch.sourceCounts[colour] as number
   const sourcesHash = hashSources(scratch.sourcesFlat, offset, count)
   if (field.builtFromFieldInputs !== fieldInputHash || field.builtFromSources !== sourcesHash) {
     throw new Error(

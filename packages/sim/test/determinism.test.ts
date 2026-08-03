@@ -434,6 +434,58 @@ describe('the scan itself works', () => {
   })
 })
 
+describe('fields[ direct indexing is banned outside flowfield.ts (1e, fix-list #21)', () => {
+  // step's field-read rule: step calls fieldFor ONCE per colour per tick and
+  // holds the reference for the tick — never `fields[c].dist[cell]` directly,
+  // which passes every test today (Task 1 has no dispatch phase) and would
+  // make fieldFor's staleness guard dead code in the exact place it exists
+  // to protect once Task 4 adds one. This is deliberately NOT folded into
+  // the general `RULES` array above: `flowfield.ts` legitimately indexes
+  // `fields[colour]` inside `fieldFor`'s own definition, so a uniform ban
+  // would flag its own implementation. `SCAN_ROOTS`/`sourceFiles` are reused,
+  // filtered to exclude that one file.
+  const FIELDS_INDEXING_RULE: Rule = {
+    name: 'fields[ direct indexing',
+    re: /\bfields\s*\[/,
+    why:
+      "reading fields[c] directly bypasses fieldFor's staleness guard (fix-list #21) — " +
+      'call fieldFor(state, world, fields, colour, scratch) instead',
+    hits: ['const d = fields[c].dist[cell]', 'return fields [ colour ]'],
+    misses: ['const f = fieldFor(state, world, fields, c, scratch)', 'const x = myFields[c]'],
+  }
+
+  const allFiles = SCAN_ROOTS.flatMap(sourceFiles)
+  const filesOutsideFlowfield = allFiles.filter((f) => label(f) !== 'sim/src/flowfield.ts')
+
+  it('excludes exactly sim/src/flowfield.ts, and nothing else, from the scanned set', () => {
+    expect(filesOutsideFlowfield.some((f) => label(f) === 'sim/src/flowfield.ts')).toBe(false)
+    expect(filesOutsideFlowfield.length).toBe(allFiles.length - 1)
+  })
+
+  it('flowfield.ts itself DOES contain fields[ indexing, proving the exclusion is real and not vacuous', () => {
+    const flowfieldFile = allFiles.find((f) => label(f) === 'sim/src/flowfield.ts')
+    expect(flowfieldFile).toBeDefined()
+    const hits = scanText(readFileSync(flowfieldFile as string, 'utf8'), [FIELDS_INDEXING_RULE])
+    expect(hits.length).toBeGreaterThan(0)
+  })
+
+  it('contains no direct fields[ indexing anywhere else in sim/shared sources', () => {
+    const hits = filesOutsideFlowfield.flatMap((f) =>
+      scanText(readFileSync(f, 'utf8'), [FIELDS_INDEXING_RULE]).map((h) => `${label(f)}:${h}`),
+    )
+    expect(hits, `banned construct fields[\n${hits.join('\n')}`).toEqual([])
+  })
+
+  it('the fields[ rule fires on a real violation and leaves its counter-examples alone', () => {
+    for (const sample of FIELDS_INDEXING_RULE.hits) {
+      expect(scanText(sample, [FIELDS_INDEXING_RULE]), `not caught: ${sample}`).not.toEqual([])
+    }
+    for (const sample of FIELDS_INDEXING_RULE.misses) {
+      expect(scanText(sample, [FIELDS_INDEXING_RULE]), `false positive: ${sample}`).toEqual([])
+    }
+  })
+})
+
 describe('golden replay', () => {
   const NO_INPUT: TickInputs = { actions: [] }
 

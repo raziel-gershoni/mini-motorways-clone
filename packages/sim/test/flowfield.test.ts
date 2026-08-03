@@ -40,10 +40,22 @@ function cellAt(w: number, x: number, y: number): number {
   return y * w + x
 }
 
-/** `maxDestinations: 16, groupCount: 5` throughout — generous enough for every fixture below (max 4 sources used anywhere in this file). */
-function landFixture(id: string, w: number, h: number): { map: MapData; world: WorldData } {
+/**
+ * `maxDestinations: 16, groupCount: 5` by default — generous enough for
+ * every fixture below (max 4 sources used anywhere in this file).
+ * `groupCount` is overridable: `syncFields` now asserts `fields.length ===
+ * map.groupCount`, and a handful of tests below need a fixture sized to
+ * exactly the number of colours they exercise (e.g. a stats assertion that
+ * would otherwise be clobbered by later, unrelated colours' rebuilds).
+ */
+function landFixture(
+  id: string,
+  w: number,
+  h: number,
+  groupCount = 5,
+): { map: MapData; world: WorldData } {
   const rows = Array.from({ length: h }, () => '.'.repeat(w))
-  const map = parseMap(id, rows, 999, 40, 16, 5)
+  const map = parseMap(id, rows, 999, 40, 16, groupCount)
   const world = createWorld(map)
   return { map, world }
 }
@@ -67,8 +79,9 @@ function randomGraphFixture(
   w: number,
   h: number,
   attempts: number,
+  groupCount = 5,
 ): { state: GameState; world: WorldData } {
-  const { map, world } = landFixture(id, w, h)
+  const { map, world } = landFixture(id, w, h, groupCount)
   const state = createState(`${id}-seed`, map)
   const driver = new Uint32Array(1)
   driver[0] = seedFromString(`${id}-driver`)
@@ -857,8 +870,11 @@ describe('syncFields: a rebuild that throws must not leave the stamps describing
     return {
       state,
       world,
-      fields: createFlowFields(1, world.cells),
-      scratch: scratchFor(world, 1),
+      // fields.length must equal map.groupCount (syncFields' new guard);
+      // landFixture's maps are all groupCount: 5, and only colour 0 is
+      // exercised below — colours 1-4 stay unused, harmlessly.
+      fields: createFlowFields(world.map.groupCount, world.cells),
+      scratch: scratchFor(world, world.map.groupCount),
     }
   }
 
@@ -927,8 +943,8 @@ describe('fieldFor: staleness', () => {
     // block above), where "stale — call syncFields" is actively misleading.
     const { map, world } = landFixture('never-built', 6, 5)
     const state = createState('s', map)
-    const fields = createFlowFields(1, world.cells)
-    const scratch = scratchFor(world, 1)
+    const fields = createFlowFields(world.map.groupCount, world.cells)
+    const scratch = scratchFor(world, world.map.groupCount)
     expect(() => fieldForColour(state, world, fields, 0, scratch)).toThrow(/never built/)
   })
 
@@ -947,11 +963,11 @@ describe('fieldFor: staleness', () => {
     const { map, world } = landFixture('half-stamp', 6, 5)
     const state = createState('s', map)
     placeRoad(state, world, 0, 1)
-    const scratch = scratchFor(world, 1)
+    const scratch = scratchFor(world, world.map.groupCount)
     setSources(scratch, world, 0, [0])
 
     for (const zeroed of ['builtFromFieldInputs', 'builtFromSources'] as const) {
-      const fields = createFlowFields(1, world.cells)
+      const fields = createFlowFields(world.map.groupCount, world.cells)
       syncFields(state, world, fields, scratch)
       expect(() => fieldForColour(state, world, fields, 0, scratch)).not.toThrow() // sanity: both stamps valid
       const field = fields[0] as FlowField
@@ -1012,8 +1028,8 @@ describe('fieldFor: staleness', () => {
   it('syncFields then fieldFor returns the field', () => {
     const { state, world } = randomGraphFixture('sync-basic', 8, 6, 200)
     const sources = firstRoadedCells(state, world, 2)
-    const fields = createFlowFields(1, world.cells)
-    const scratch = scratchFor(world, 1)
+    const fields = createFlowFields(world.map.groupCount, world.cells)
+    const scratch = scratchFor(world, world.map.groupCount)
     syncFieldsFromLists(state, world, [sources], fields, scratch)
     const f = fieldForColour(state, world, fields, 0, scratch)
     expect(f.dist[sources[0] as number]).toBe(0)
@@ -1023,8 +1039,8 @@ describe('fieldFor: staleness', () => {
     const { state, world } = randomGraphFixture('sync-multi', 9, 7, 250)
     const roaded = firstRoadedCells(state, world, 3)
     const sourcesByColour: number[][] = [[roaded[0] as number], [roaded[1] as number], [roaded[2] as number]]
-    const fields = createFlowFields(3, world.cells)
-    const scratch = scratchFor(world, 3)
+    const fields = createFlowFields(world.map.groupCount, world.cells)
+    const scratch = scratchFor(world, world.map.groupCount)
     syncFieldsFromLists(state, world, sourcesByColour, fields, scratch)
     for (let c = 0; c < 3; c++) {
       const colourSources = sourcesByColour[c] as number[]
@@ -1034,10 +1050,14 @@ describe('fieldFor: staleness', () => {
   })
 
   it('syncFields does not rebuild a colour whose inputs are unchanged', () => {
-    const { state, world } = randomGraphFixture('sync-coalesce', 8, 6, 200)
+    // groupCount: 1 — this test's ST_EXPANSIONS assertion is a
+    // last-call-wins snapshot (`computeFlowField` overwrites `stats` fully
+    // on every colour it processes), so a 5-colour fixture would have
+    // colours 1-4's empty-source rebuilds clobber colour 0's real one.
+    const { state, world } = randomGraphFixture('sync-coalesce', 8, 6, 200, 1)
     const sources = firstRoadedCells(state, world, 2)
-    const fields = createFlowFields(1, world.cells)
-    const scratch = scratchFor(world, 1)
+    const fields = createFlowFields(world.map.groupCount, world.cells)
+    const scratch = scratchFor(world, world.map.groupCount)
     syncFieldsFromLists(state, world, [sources], fields, scratch)
     expect(scratch.stats[ST_EXPANSIONS]).toBeGreaterThan(0)
     // computeFlowField unconditionally zeroes stats at entry, so the ONLY way
@@ -1074,8 +1094,8 @@ describe('fieldFor: staleness', () => {
     const state = createState('s', map)
     placeRoad(state, world, 0, 1)
     placeRoad(state, world, 1, 2)
-    const fields = createFlowFields(1, world.cells)
-    const scratch = scratchFor(world, 1)
+    const fields = createFlowFields(world.map.groupCount, world.cells)
+    const scratch = scratchFor(world, world.map.groupCount)
 
     syncFieldsFromLists(state, world, [[0]], fields, scratch)
     expect(Array.from(fieldForColour(state, world, fields, 0, scratch).dist)).toEqual([0, 10, 20, INF])
@@ -1097,16 +1117,19 @@ describe('fieldFor: staleness', () => {
   it('syncFields throws when scratch.sourceCounts is shorter than fields, rather than a raw TypeError from inside hashSources', () => {
     const { map, world } = landFixture('sync-length-guard', 5, 4)
     const state = createState('s', map)
-    const fields = createFlowFields(2, world.cells)
-    const scratch = scratchFor(world, 1) // sized for 1 colour, fields has 2
+    // fields.length matches map.groupCount (5) so the NEW groupCount guard
+    // passes; scratch is deliberately sized for only 1 colour so the
+    // sourceCounts-shorter-than-fields guard is what actually fires.
+    const fields = createFlowFields(world.map.groupCount, world.cells)
+    const scratch = scratchFor(world, 1) // sized for 1 colour, fields has 5
     expect(() => syncFields(state, world, fields, scratch)).toThrow(/sourceCounts/)
   })
 
   it('after a road mutation, fieldFor throws — with no explicit invalidation call anywhere in this test', () => {
     const { state, world } = randomGraphFixture('sync-road-mut', 8, 6, 200)
     const sources = firstRoadedCells(state, world, 2)
-    const fields = createFlowFields(1, world.cells)
-    const scratch = scratchFor(world, 1)
+    const fields = createFlowFields(world.map.groupCount, world.cells)
+    const scratch = scratchFor(world, world.map.groupCount)
     syncFieldsFromLists(state, world, [sources], fields, scratch)
     expect(() => fieldForColour(state, world, fields, 0, scratch)).not.toThrow()
 
@@ -1140,8 +1163,8 @@ describe('fieldFor: staleness', () => {
     const { state, world } = randomGraphFixture('sync-source-mut', 8, 6, 200)
     const roaded = firstRoadedCells(state, world, 3)
     const sources = [roaded[0] as number]
-    const fields = createFlowFields(1, world.cells)
-    const scratch = scratchFor(world, 1)
+    const fields = createFlowFields(world.map.groupCount, world.cells)
+    const scratch = scratchFor(world, world.map.groupCount)
     syncFieldsFromLists(state, world, [sources], fields, scratch)
     expect(() => fieldForColour(state, world, fields, 0, scratch)).not.toThrow()
 
@@ -1163,8 +1186,8 @@ describe('fieldFor: staleness', () => {
     const { map, world } = landFixture('wrong-size', 8, 7)
     const state = createState('s', map)
     placeRoad(state, world, 0, 1)
-    const fields = createFlowFields(1, world.cells)
-    const scratch = scratchFor(world, 1)
+    const fields = createFlowFields(world.map.groupCount, world.cells)
+    const scratch = scratchFor(world, world.map.groupCount)
     syncFieldsFromLists(state, world, [[0]], fields, scratch)
     expect(() => fieldForColour(state, world, fields, 0, scratch)).not.toThrow() // sanity: matches today
 
