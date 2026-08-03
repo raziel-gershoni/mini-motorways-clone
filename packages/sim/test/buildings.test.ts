@@ -434,6 +434,35 @@ describe('destination placement validity', () => {
     })
   })
 
+  it('rejects the mirrored diagonal violation, where the EXISTING destination\'s carpark is the closer cell', () => {
+    // Re-review finding: the fixture above places A first (so A's cells
+    // become `otherCells` in the spacing loop) and tests candidate B (whose
+    // cells are `cells`) — its one violating pair needs index 6 (the
+    // carpark) only on the `cells` side. A compound mutation dropping the
+    // carpark from BOTH `cells` and `otherCells` is caught through that
+    // `cells` half alone; decomposed, `j < otherCells.length - 1` (dropping
+    // only the EXISTING destination's carpark) survives, because that
+    // fixture's violating `otherCells` index was never 6. This is the exact
+    // geometry above with the two destinations' roles swapped, forcing the
+    // violating pair's `otherCells` index to be the carpark instead.
+    const { map, world } = fixture('dest-spacing-diagonal-carpark-mirrored')
+    const state = createState('s', map)
+    // Existing (placed first, becomes `otherCells`): origin (3,0),
+    // orientation W -> carpark (2,0).
+    expect(placeDestination(state, world, destCellFor(3, 0), ORIENTATION_W, 0, DEST_KIND_SQUARE)).toBe(true)
+    // Candidate (becomes `cells`): origin (0,1), orientation N -> footprint
+    // includes (1,1). Closest pair: candidate's FOOTPRINT (1,1) to
+    // existing's CARPARK (2,0) — Chebyshev 1 (rejected). Candidate's own
+    // carpark (0,0) is at distance 2 from every existing cell (checked by
+    // hand: (0,0)-(2,0) is dx=2; (0,0)-(3,0) is dx=3), so this violation
+    // cannot be found without comparing against the EXISTING destination's
+    // carpark specifically.
+    expect(canPlaceDestination(state, world, destCellFor(0, 1), ORIENTATION_N)).toEqual({
+      ok: false,
+      reason: 'spacing',
+    })
+  })
+
   it('accepts a vertically-separated destination sharing a column, where an x-only metric would wrongly reject', () => {
     const { map, world } = fixture('dest-spacing-vertical-accept')
     const state = createState('s', map)
