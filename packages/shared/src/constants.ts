@@ -81,3 +81,37 @@ export const MAX_GROUP_COUNT = 6
  * sources cannot otherwise cycle through.
  */
 export const MAX_PATH_LEN = 96
+
+// --- Demand (M1c decision 1, "Demand is destination-pull, and the rotation is state") ---
+/**
+ * Ticks per pin, per rotation slot, for the drift-free per-colour demand
+ * accumulator (`packages/sim/src/demand.ts`: `acc[c] += slotCount(c); if
+ * (acc[c] >= PIN_PERIOD_TICKS) { acc[c] -= PIN_PERIOD_TICKS; fire(c) }`).
+ *
+ * Derived through the week, never through `TICKS_PER_DAY` (deliberately 0,
+ * see above — a stored per-day tick count drifts). The original's
+ * `AverageCarsPerDay = 1.55` per building [MOD] x `DemandMultiplierForBuildings
+ * = 0.8` [MOD] gives a baseline of 1.24 pins/day/square; over
+ * `DAYS_PER_WEEK` (7) days that is 8.68 pins/week; `TICKS_PER_WEEK` (4500) /
+ * 8.68 = 518.4 ticks per pin per slot, truncated down to the integer stored
+ * here — 518, not 519, because the accumulator only fires once `acc`
+ * reaches the threshold, so rounding up would UNDER-deliver relative to the
+ * 1.24 baseline while rounding down over-delivers by a smaller margin.
+ *
+ * The exact realised rate this constant produces is 4500 / 518 =
+ * 8.68726.../week = 1.24104.../day/square — not the source rule's rounded
+ * "1.24" (`demand.test.ts` hand-computes an exact integer pin count against
+ * this constant over a multi-period window rather than testing against the
+ * rounded ratio).
+ */
+export const PIN_PERIOD_TICKS = 518
+
+/**
+ * Ticks after a destination's `destSpawnTick` before it joins the demand
+ * rotation (`packages/sim/src/demand.ts`'s eligibility gate: `tick -
+ * destSpawnTick[d] >= FIRST_PIN_DELAY_TICKS`). [MOD]
+ * `DelayBeforeFirstPinOfDestination` = 4 seconds, converted here — the
+ * conversion belongs in this file and nowhere else — at `TICKS_PER_SECOND`
+ * (30): 4 * 30 = 120.
+ */
+export const FIRST_PIN_DELAY_TICKS = 4 * TICKS_PER_SECOND
