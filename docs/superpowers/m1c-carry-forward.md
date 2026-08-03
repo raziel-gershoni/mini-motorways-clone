@@ -66,3 +66,9 @@ Plans do not state expected test counts. The author got them wrong five times.
 - A test guarding a failure mode while exhibiting it — the row-seam self-blindness test.
 - **Testing that a guard refuses bad input is not testing that the feature does its job.** `syncFields` — the once-per-tick rebuild the game actually runs — had three mutations survive a green 232-test suite, including one where the game builds fields at startup and then ignores every road the player draws.
 - An assertion checked against the formula that produced the thing under test — the `ST_PUSHES` bound against its own allocation.
+- **A compound mutation being caught does not mean each half is.** "Drop the carpark from the spacing comparison" applied as one edit is caught; applied to only the *existing* destination's side it survives all 366 tests. The fixture guarded one direction of a symmetric comparison. When a mutation touches two symmetric code paths, mutate them separately — otherwise one live mutant hides inside a caught one.
+- **A confident wrong reason for why something cannot be tested is worse than an admitted unknown**, because it ends the search. A gap was reported as needing an allocation profiler the repo does not have; the real observable difference was which table the code consulted, and the test took twenty lines using a parameter already exposed. Interrogate your own "untestable" before writing it down.
+
+### One thing that went right, worth repeating
+
+An implementer inferred that destination-vs-destination overlap is *subsumed* by the Chebyshev spacing rule rather than needing its own check, stated the inference plainly, and flagged it. The reviewer checked all 4×4 orientation pairings and it held. Stating a load-bearing inference so someone can check it costs a sentence; the recurring failure is the same inference left silent. Cheap insurance, not distrust.
