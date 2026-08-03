@@ -112,6 +112,28 @@ describe('randomBelow', () => {
     expect(randomBelow(s, 0, 0)).toBe(0)
   })
 
+  it('validates the stream index even at a degenerate bound, which returns before drawing', () => {
+    // The `bound <= 1` early return sits above every call into `nextRandom`,
+    // so with the index guard left to `nextRandom` alone this returned 0 for
+    // ANY index, valid or not. A miswired hand-computed stream index would
+    // then stay silent for exactly as long as the bound happened to be
+    // degenerate — one destination of a colour, one spawn candidate — which
+    // is the start of a run, and the cheapest moment to catch it.
+    const s = store(5)
+    expect(() => randomBelow(s, 999, 1)).toThrow(RangeError)
+    expect(() => randomBelow(s, 999, 1)).toThrow(/stream index 999 out of range \(length 1\)/)
+    expect(() => randomBelow(s, 999, 0)).toThrow(RangeError)
+    expect(() => randomBelow(s, -1, 1)).toThrow(RangeError)
+    expect(() => randomBelow(s, 1.5, 1)).toThrow(RangeError)
+    // Still validated at a real bound, where it always was — via nextRandom
+    // then, via the hoisted guard now.
+    expect(() => randomBelow(s, 999, 7)).toThrow(RangeError)
+    // And the valid-index path is untouched: no throw, no draw consumed.
+    const before = s[0]
+    expect(randomBelow(s, 0, 1)).toBe(0)
+    expect(s[0]).toBe(before)
+  })
+
   it('is unbiased at a bound chosen so naive modulo would visibly fail', () => {
     // Bound just above 2^31, where modulo bias is near maximal.
     //   B = 0xA0000000, r = 2^32 - B = 0x60000000

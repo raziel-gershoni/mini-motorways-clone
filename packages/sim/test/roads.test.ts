@@ -209,6 +209,26 @@ describe('TREE endpoints', () => {
     }
   })
 
+  it('clears a TREE that is endpoint `a`, not only one that is endpoint `b`', () => {
+    // The mirror of the test above, and it is not decoration: deleting
+    // `cleared[a] = 1` from `placeRoad` left the WHOLE suite green, while
+    // deleting the mirrored `cleared[b] = 1` on the next line failed three
+    // tests. It slipped past both the 4000-iteration randomised sequence and
+    // the Task 6 golden because once a cell has been cleared via the `b`
+    // path the `a` write is idempotent, and the golden fixture's three
+    // tree-clears all happen to arrive via `b`.
+    //
+    // If that write regressed, `hasTree` would report a standing tree on a
+    // cell a road runs through — and M1c's spawn placement reads `hasTree`.
+    const { map, world } = fixture(50, 'tree-place-as-a')
+    const state = createState('s', map)
+    expect(hasTree(state, world, 13)).toBe(true)
+    expect(placeRoad(state, world, 13, 12)).toBe(true) // the TREE is endpoint `a` this time
+    expect(state.cleared[13]).toBe(1)
+    expect(hasTree(state, world, 13)).toBe(false)
+    expect(state.cleared[12]).toBe(0) // the LAND endpoint is still never marked
+  })
+
   it('placing between two LAND cells leaves cleared entirely zero', () => {
     const { map, world } = fixture(50, 'land-land')
     const state = createState('s', map)

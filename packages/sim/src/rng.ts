@@ -23,19 +23,28 @@ export function seedFromString(s: string): number {
 }
 
 /**
- * Advances the stream at `store[i]` and returns the next uint32.
+ * The stream-index guard, shared by both public draws rather than written
+ * twice — the two must not be able to disagree about what a valid index is.
  *
- * The bounds check is not defensive padding. Without it an out-of-range index
- * reads `undefined`, `undefined + 0x6d2b79f5` is `NaN`, `NaN | 0` is `0`, and
- * the stream returns 0 forever — `randomBelow` with it. A permanently dead
+ * It is not defensive padding. Without it an out-of-range index reads
+ * `undefined`, `undefined + 0x6d2b79f5` is `NaN`, `NaN | 0` is `0`, and the
+ * stream returns 0 forever — `randomBelow` with it. A permanently dead
  * generator presents as a balance mystery, never as a crash, and M1c wires
  * several streams by hand-computed index. A non-integer index fails the same
  * way, so it is rejected here too.
+ *
+ * The message names neither caller: it is one rule with one wording, and the
+ * stack trace already says which entry point hit it.
  */
-export function nextRandom(store: Uint32Array, i: number): number {
+function assertStreamIndex(store: Uint32Array, i: number): void {
   if (!Number.isInteger(i) || i < 0 || i >= store.length) {
-    throw new RangeError(`nextRandom: stream index ${i} out of range (length ${store.length})`)
+    throw new RangeError(`rng: stream index ${i} out of range (length ${store.length})`)
   }
+}
+
+/** Advances the stream at `store[i]` and returns the next uint32. */
+export function nextRandom(store: Uint32Array, i: number): number {
+  assertStreamIndex(store, i)
   let t = (store[i] = (((store[i] as number) + 0x6d2b79f5) | 0) >>> 0)
   t = Math.imul(t ^ (t >>> 15), t | 1)
   t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
@@ -47,8 +56,18 @@ export function nextRandom(store: Uint32Array, i: number): number {
  * over-represents the low end whenever `bound` does not divide 2^32, and a
  * skewed spawn or choice distribution is close to invisible in play while
  * quietly invalidating every balance measurement built on it.
+ *
+ * **The index is validated ABOVE the `bound <= 1` early return, not left to
+ * `nextRandom`.** Below it, `randomBelow(store, 999, 1)` returned 0 and never
+ * reached the generator at all, so a hand-computed stream index that is
+ * simply wrong stayed silent for exactly as long as the bound happened to be
+ * degenerate — which is the common case at the start of a run (one
+ * destination of a colour, one spawn candidate) and the point at which a
+ * miswired index is cheapest to notice. M1c wires several streams by
+ * hand-computed index, so the guard must not depend on the bound.
  */
 export function randomBelow(store: Uint32Array, i: number, bound: number): number {
+  assertStreamIndex(store, i)
   if (bound <= 1) return 0
   const limit = 0x100000000 - (0x100000000 % bound)
   let v = nextRandom(store, i)

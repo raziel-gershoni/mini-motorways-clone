@@ -10,7 +10,6 @@ import {
   createFlowField,
   createFlowFields,
   createScratch,
-  entryPoolCapacity,
   INF,
   NB,
   ST_EXPANSIONS,
@@ -420,8 +419,8 @@ describe('computeFlowField: structural properties over a randomised graph', () =
     expect(tested).toBeGreaterThan(50) // vacuity guard
   })
 
-  it('work counters: ST_EXPANSIONS equals the number of reachable cells; ST_PUSHES stays within the pool bound', () => {
-    const { field, scratch, world } = buildGraphAndField()
+  it('work counters: ST_EXPANSIONS equals the number of reachable cells; ST_PUSHES stays within the DERIVED push bound', () => {
+    const { field, scratch, world, sources } = buildGraphAndField()
     let reachable = 0
     for (let c = 0; c < world.cells; c++) if (field.dist[c] !== INF) reachable++
     expect(scratch.stats[ST_EXPANSIONS]).toBe(reachable)
@@ -429,8 +428,29 @@ describe('computeFlowField: structural properties over a randomised graph', () =
     // prose into a live assertion on a genuinely branching graph, rather
     // than only ever being checked on the one hand-built unequal-arms
     // fixture above.
+    //
+    // Bounded against the CLAIM, not against the allocation. The earlier
+    // version of this line compared with `entryPoolCapacity(world.cells)` —
+    // the same formula that sizes `entryCell`/`entryNext` — and `push()`
+    // already throws at `top >= cap`, so that clause held by construction
+    // whenever `computeFlowField` returned at all: verified inert by
+    // inflating the capacity to `cells * 1000`, which still passed. This
+    // bound is derived independently of the allocation from what
+    // entryPoolCapacity's comment actually claims — at most 2 pushes per
+    // non-source cell (a second improvement needs a strictly smaller edge
+    // cost, and there are only DISTINCT_EDGE_COSTS of them), plus one per
+    // source — so a change that makes the algorithm push more often is
+    // caught here even if the pool was grown to accommodate it.
+    //
+    // The `2` is deliberately a literal and NOT `DISTINCT_EDGE_COSTS`: M1c's
+    // intersection penalties add a third edge cost, which would grow both
+    // that constant and `entryPoolCapacity` together and leave a
+    // constant-derived bound just as inert as the capacity one. Pinning the
+    // literal makes that change fail here, which is where it should be
+    // reconsidered.
+    const derivedPushBound = 2 * (world.cells - sources.length) + sources.length
     expect(scratch.stats[ST_PUSHES]).toBeGreaterThan(0)
-    expect(scratch.stats[ST_PUSHES]).toBeLessThanOrEqual(entryPoolCapacity(world.cells))
+    expect(scratch.stats[ST_PUSHES]).toBeLessThanOrEqual(derivedPushBound)
   })
 })
 
