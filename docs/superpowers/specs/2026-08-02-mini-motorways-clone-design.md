@@ -51,7 +51,7 @@ We clone mechanics, not identity. Game rules are not copyrightable; the original
 
 ## 3. Decisions of record
 
-Facts below are tagged by evidence tier, matching the research dossier: **[DPC]** official developer material, **[MOD]** constants from a decompile-based mod (field names compile-verified, values possibly stale), **[FAN]** community sources, **[OURS]** our own decision where no public answer exists, **[M0]** measured on real hardware in the M0 spike — one iPhone, Telegram iOS Mini App, 2026-08-02, and nothing wider than that.
+Facts below are tagged by evidence tier, matching the research dossier: **[DPC]** official developer material, **[MOD]** constants from a decompile-based mod (field names compile-verified, values possibly stale), **[FAN]** community sources, **[OURS]** our own decision where no public answer exists, **[M0]** measured on real hardware in the M0 spike — one iPhone, Telegram iOS Mini App, 2026-08-02, and nothing wider than that; **[M1c]** measured against our own shipped code rather than a device, so it is exact for the layout it names and re-derivable at any time, but says nothing about a browser or a phone.
 
 | # | Decision | Rationale |
 |---|---|---|
@@ -459,7 +459,22 @@ Neither store is usable the way the old two-tier design assumed. CloudStorage is
 
 **Pre-compress on a timer.** `CompressionStream` is stream-based and async and **cannot run in a teardown handler**, so the payload must already be compressed and base64-encoded before any handler fires. Recompress on the same 30 s autosave tick and on the visibility trigger ahead of the write, hold the encoded string in a variable, and let the teardown path do nothing but one `setItem` of an already-built string.
 
-Measured sizes: full binary state of a 43×35 road grid + 60 buildings + 250 cars + header = **3,809 B raw, 492 B gzipped ≈ 656 chars base64**, against CloudStorage's **4,096-char** per-value cap — about **6× headroom**. That grid is larger than our 24×40, so treat it as an upper bound. The headroom is comfortable, not unlimited, and it is why the snapshot stays binary and compressed rather than JSON.
+**Sizes, measured on our own layout** [M1c]. The earlier figure here — 3,809 B raw for a 43×35 grid, called an upper bound because that grid is larger than our 24×40 — was wrong in both directions, and the correction matters. Our `firstCity` buffer is **7,908 B, constant at every occupancy**: the layout is fixed-size, so a bigger grid does not imply a bigger buffer and content does not change the raw size at all. Only compression varies.
+
+| Occupancy | Raw | Gzipped | base64(raw) | base64(gzip) |
+|---|---|---|---|---|
+| Empty | 7,908 B | 67 B | 10,544 | **92** |
+| Realistic — 20 houses, 8 destinations, 6 cars | 7,908 B | 475 B | 10,544 | **636** |
+| Full — 40 houses, 16 destinations, 80 cars in flight | 7,908 B | 1,206 B | 10,544 | **1,608** |
+
+Two things follow, against the 4,096-char cap:
+
+- **Gzip before base64 is mandatory, not an optimisation.** Base64 of the raw snapshot is 10,544 chars — **2.57× over the cap at every occupancy, including an empty grid.** The uncompressed path does not merely waste space, it never fits. §9.3's "pre-compress on a timer" is therefore load-bearing for correctness, not just for size, and a failure of `CompressionStream` must fall back to *not writing* rather than to writing raw.
+- **Headroom at full occupancy is 2.55×, not ~6×.** Still safe, but half what this section claimed. `carRoute` is 3,840 B — 48.6% of the buffer — and it is the dominant compressible payload: all-zero for idle cars, near-random direction nibbles for cars in flight, which is exactly why full occupancy compresses 18× worse than empty. Headroom therefore scales inversely with how busy the city is, and a future map with more cars than `firstCity` erodes it directly. Re-measure when `maxCars` changes.
+
+Measured with Node's `zlib.gzipSync`; the browser uses `CompressionStream('gzip')`. Both are DEFLATE and the sizes should track closely, but the numbers above have not been confirmed against a browser encoder.
+
+This is why the snapshot stays binary and compressed rather than JSON.
 
 **Triggers.** Listen to `document.visibilitychange`, `window.pagehide`, **and** Telegram's `deactivated`, all routed through one debounced, dirty-flagged save that drives both writes. You cannot rely on `beforeunload` or `unload` on mobile, and even `visibilitychange` occasionally fails to fire on Safari. `isActive` plus the `activated`/`deactivated` events are the correct pause signal — Telegram's minimize-to-app-bar does not consistently drive the web visibility event.
 
@@ -569,5 +584,5 @@ M0 is genuinely first. Both questions it answers — renderer viability and whet
 | The weekly demand ramp is our invention and unvalidated | Telemetry overlay from M1; expect several tuning passes |
 | `[MOD]` constants are from a 2021–22 decompile of a game now several balance patches ahead | Treat every one as a starting point, not truth. They are all in one constants file for exactly this reason |
 | Classic's unbounded run length is hostile to a chat-app session | Accepted deliberately. Persistence is the mitigation, which is why it is a launch blocker — and `freshContext: yes` on 7/7 launches [M0] means every reopen is a cold boot, so it is the *only* mitigation |
-| A long run's snapshot + input log will not fit one 4,096-char CloudStorage value | Measure in M3 and choose: a second key (another round trip) or dropping the log and marking the resume unranked (§9.4). The snapshot is never what gets dropped |
+| A long run's snapshot + input log will not fit one 4,096-char CloudStorage value. The snapshot alone is now measured: **1,608 chars gzip+base64 at full occupancy, leaving 2,488 for the log** [M1c] — and the snapshot's own headroom is 2.55×, not the ~6× §9.3 previously claimed | Near-certain to bind, and the budget is now known rather than guessed. Choose in M3: a second key (another round trip) or dropping the log and marking the resume unranked (§9.4). The snapshot is never what gets dropped. Note the log grows with run length while the snapshot does not, so this fails on long runs specifically — the exact runs worth submitting |
 | A balance patch invalidates every stored replay | `rulesVersion` on every row; keep old sim versions importable |
