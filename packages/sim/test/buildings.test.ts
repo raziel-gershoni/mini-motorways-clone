@@ -174,11 +174,24 @@ describe('footprint and carpark geometry — non-square grid, all four orientati
     expect(carparkCell(destCell, ORIENTATION_W, W, H)).not.toBe((y0 + 1) * W + (x0 - 1))
   })
 
-  it('carparkCell returns -1 when the carpark would fall off the grid', () => {
+  it('carparkCell returns -1 when the carpark would fall off the grid, for every orientation at its own edge', () => {
+    // Review finding I2: only the two LOW edges (N's y=-1, W's x=-1) had
+    // coverage. The two HIGH edges — E's x=w and S's y=h — are the ones a
+    // dropped `cx >= w` / `cy >= h` guard silently WRAPS into a plausible,
+    // wrong, in-bounds cell rather than merely producing a negative index,
+    // which is the more dangerous failure mode (see the out-of-bounds
+    // describe block below for the `canPlaceDestination`-level consequence).
+    //
     // Origin at (0,0): orientation N's carpark is at y=-1, off-grid.
     expect(carparkCell(0, ORIENTATION_N, W, H)).toBe(-1)
     // Origin at (0,0): orientation W's carpark is at x=-1, off-grid.
     expect(carparkCell(0, ORIENTATION_W, W, H)).toBe(-1)
+    // Origin (6,2), orientation E: footprint x{6,7,8} fits (w=9), but the
+    // carpark needs x=9 — off the high edge.
+    expect(carparkCell(destCellFor(6, 2), ORIENTATION_E, W, H)).toBe(-1)
+    // Origin (3,3), orientation S: footprint y{3,4,5} fits (h=6), but the
+    // carpark needs y=6 — off the high edge.
+    expect(carparkCell(destCellFor(3, 3), ORIENTATION_S, W, H)).toBe(-1)
   })
 
   it('footprint cells never include the carpark cell, for any orientation', () => {
@@ -397,6 +410,44 @@ describe('destination placement validity', () => {
     expect(canPlaceDestination(state, world, secondOrigin, ORIENTATION_N)).toEqual({ ok: true })
   })
 
+  it('rejects a diagonal violation where the carpark is the closer cell, over Chebyshev not Manhattan', () => {
+    // Review finding I1: the two existing spacing fixtures are both
+    // horizontal and both have footprint-to-footprint as the closest pair —
+    // neither the carpark's participation nor the Chebyshev-vs-Manhattan
+    // distinction is exercised. This fixture isolates both at once.
+    const { map, world } = fixture('dest-spacing-diagonal-carpark')
+    const state = createState('s', map)
+    // A: origin (0,1), orientation N -> footprint (0,1),(1,1),(0,2),(1,2),
+    // (0,3),(1,3); carpark (0,0).
+    expect(placeDestination(state, world, destCellFor(0, 1), ORIENTATION_N, 0, DEST_KIND_SQUARE)).toBe(true)
+    // B: origin (3,0), orientation W -> footprint (3,0),(4,0),(5,0),(3,1),
+    // (4,1),(5,1); carpark (2,0).
+    // The closest pair across the two destinations' full 7-cell sets is A's
+    // footprint cell (1,1) to B's CARPARK (2,0): dx=1, dy=1, Chebyshev=1
+    // (rejected), Manhattan=2 (NOT rejected). Every footprint-to-footprint
+    // pair is at Chebyshev/Manhattan >= 2 (checked by hand: (1,1)-(3,0) is
+    // dx=2,dy=1; (1,1)-(3,1) is dx=2,dy=0) — so a footprint-only comparison
+    // also finds no violation and would wrongly accept this placement.
+    expect(canPlaceDestination(state, world, destCellFor(3, 0), ORIENTATION_W)).toEqual({
+      ok: false,
+      reason: 'spacing',
+    })
+  })
+
+  it('accepts a vertically-separated destination sharing a column, where an x-only metric would wrongly reject', () => {
+    const { map, world } = fixture('dest-spacing-vertical-accept')
+    const state = createState('s', map)
+    // A: origin (0,0), orientation E -> footprint (0,0),(1,0),(2,0),(0,1),
+    // (1,1),(2,1); carpark (3,0). Occupies rows 0-1.
+    expect(placeDestination(state, world, destCellFor(0, 0), ORIENTATION_E, 0, DEST_KIND_SQUARE)).toBe(true)
+    // B: origin (0,4), orientation E -> footprint rows 4-5, same columns
+    // 0-2 as A. Every same-column pair (e.g. A's (0,1) to B's (0,4)) has
+    // dx=0, so an x-only distance metric reports 0 (< 2) and would reject
+    // this — but the true Chebyshev minimum is dy=4-1=3 (A's max row is 1,
+    // B's min row is 4), so the real rule correctly accepts it.
+    expect(canPlaceDestination(state, world, destCellFor(0, 4), ORIENTATION_E)).toEqual({ ok: true })
+  })
+
   it('rejects a footprint cell on an existing house, with reason building', () => {
     const { map, world } = fixture('dest-vs-house')
     const state = createState('s', map)
@@ -429,6 +480,72 @@ describe('destination placement validity', () => {
     })
     expect(placeDestination(state, world, destCellFor(3, 3), ORIENTATION_N, 0, DEST_KIND_SQUARE)).toBe(false)
     expect(state.header[H_DEST_COUNT]).toBe(before)
+  })
+})
+
+describe('grid-edge bounds guards (review finding I2)', () => {
+  // The brief's own validity list opens with "all in bounds", but no test
+  // exercised `reason: 'out-of-bounds'` at all before this block. Two of the
+  // mutations below are real escapes, not just wrong reason codes: dropping
+  // `cx >= w` from `carparkCell` (or the x-box test in `allSevenCells`) lets
+  // `canPlaceDestination` ACCEPT a destination whose carpark silently wraps
+  // to the next row — exactly the row-seam self-blindness `carparkCell`'s
+  // own doc comment says it guards against.
+
+  it('rejects out-of-bounds when the CARPARK alone falls off the grid, one case per orientation', () => {
+    const { map, world } = fixture('bounds-carpark-only')
+    const state = createState('s', map)
+    // N: origin (2,0) -> footprint y{0,1,2} fits (h=6); carpark y=-1 does not.
+    expect(canPlaceDestination(state, world, destCellFor(2, 0), ORIENTATION_N)).toEqual({
+      ok: false,
+      reason: 'out-of-bounds',
+    })
+    // S: origin (3,3) -> footprint y{3,4,5} fits (h=6); carpark y=6 does not.
+    expect(canPlaceDestination(state, world, destCellFor(3, 3), ORIENTATION_S)).toEqual({
+      ok: false,
+      reason: 'out-of-bounds',
+    })
+    // E: origin (6,2) -> footprint x{6,7,8} fits (w=9); carpark x=9 does not.
+    expect(canPlaceDestination(state, world, destCellFor(6, 2), ORIENTATION_E)).toEqual({
+      ok: false,
+      reason: 'out-of-bounds',
+    })
+    // W: origin (0,2) -> footprint x{0,1,2} fits (w=9); carpark x=-1 does not.
+    expect(canPlaceDestination(state, world, destCellFor(0, 2), ORIENTATION_W)).toEqual({
+      ok: false,
+      reason: 'out-of-bounds',
+    })
+  })
+
+  it('rejects out-of-bounds when the FOOTPRINT BOX itself would overhang the grid, in x and in y', () => {
+    const { map, world } = fixture('bounds-footprint-overhang')
+    const state = createState('s', map)
+    // N at x0=8 (w=9): footprint needs columns {8,9} — column 9 does not
+    // exist. This is the mutation the review calls a real escape: without
+    // this box test, 3 of the 6 footprint cells silently wrap to column 0
+    // of the next row instead of being rejected.
+    expect(canPlaceDestination(state, world, destCellFor(8, 1), ORIENTATION_N)).toEqual({
+      ok: false,
+      reason: 'out-of-bounds',
+    })
+    // E at y0=5 (h=6): footprint needs rows {5,6} — row 6 does not exist.
+    expect(canPlaceDestination(state, world, destCellFor(0, 5), ORIENTATION_E)).toEqual({
+      ok: false,
+      reason: 'out-of-bounds',
+    })
+  })
+
+  it('rejects out-of-bounds at cell === world.cells, not "terrain" (inBounds must use < , not <=)', () => {
+    const { map, world } = fixture('bounds-inclusive-upper')
+    const state = createState('s', map)
+    // One past the very last valid cell index. Under an `inBounds` that used
+    // `cell <= cells`, this would fall through to a `world.passable[cells]`
+    // read (`undefined`), reporting 'terrain' instead of 'out-of-bounds'.
+    expect(canPlaceHouse(state, world, world.cells)).toEqual({ ok: false, reason: 'out-of-bounds' })
+    expect(canPlaceDestination(state, world, world.cells, ORIENTATION_N)).toEqual({
+      ok: false,
+      reason: 'out-of-bounds',
+    })
   })
 })
 
