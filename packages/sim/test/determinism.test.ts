@@ -331,6 +331,7 @@ describe('sim source obeys the determinism rules', () => {
       'sim/src/index.ts',
       'sim/src/layout.ts',
       'sim/src/rng.ts',
+      'sim/src/roads.ts',
       'sim/src/state.ts',
       'sim/src/step.ts',
       'sim/src/world.ts',
