@@ -15,6 +15,7 @@ import {
   NB,
   ST_EXPANSIONS,
   ST_PUSHES,
+  type FlowField,
   type Scratch,
 } from '../src/scratch'
 import { computeFlowField, hashSources, hashRoadRegion, syncFields, fieldFor } from '../src/flowfield'
@@ -682,12 +683,141 @@ describe('computeFlowField: entry pool sizing (unequal-arms fixture)', () => {
   })
 })
 
+describe('syncFields: a rebuild that throws must not leave the stamps describing content the field no longer holds', () => {
+  /**
+   * The claim design decision 3 rests on is that a `FlowField` may live
+   * outside the snapshot because it is a pure function of what is inside.
+   * That holds while `computeFlowField` returns. It does not hold when it
+   * throws: `computeFlowField` wipes `dist`/`dir` at entry and validates
+   * afterwards, so writing the stamps only on success leaves a destroyed
+   * field still advertising the PREVIOUS, correct content — the next
+   * `syncFields` sees matching stamps, skips the rebuild, and `fieldFor`
+   * returns the wipe with no error at all.
+   *
+   * Both tests below follow the same three-tick shape, differing only in
+   * WHERE the throw comes from — the pre-loop source validation, and the
+   * middle of the drain loop — because the fix has to hold for a throw at
+   * any point after the wipe, not just for one that happens to fire before
+   * a single relaxation has run:
+   *
+   *   tick N    good build          -> stamps (h(R), h(S))
+   *   tick N+1  a rebuild that throws
+   *   tick N+2  back to tick N's exact inputs
+   *
+   * At tick N+2 the stamps from tick N still match the (unchanged) roads and
+   * (restored) sources, so without the zeroing this loop skips the rebuild
+   * and serves whatever the throwing tick left behind.
+   */
+  function buildCorridorFixture(id: string): {
+    state: GameState
+    world: WorldData
+    fields: FlowField[]
+    scratch: Scratch
+  } {
+    const { map, world } = landFixture(id, 6, 1)
+    const state = createState('s', map)
+    placeChain(state, world, [0, 1, 2, 3, 4, 5])
+    return {
+      state,
+      world,
+      fields: createFlowFields(1, world.cells),
+      scratch: createScratch(world.cells),
+    }
+  }
+
+  const GOOD_DIST = [0, 10, 20, 30, 40, 50]
+
+  it('a duplicate source (what M1c dispatch produces from two same-colour destinations on one access cell) leaves the field never-built, not stale-and-wrong', () => {
+    const { state, world, fields, scratch } = buildCorridorFixture('throw-desync-dup')
+
+    syncFields(state, world, [[0]], fields, scratch)
+    expect(Array.from(fieldFor(state, world, fields, 0, [0]).dist)).toEqual(GOOD_DIST)
+
+    // Roads are untouched throughout: the ONLY thing that changes here is the
+    // source list, and it changes back again below.
+    expect(() => syncFields(state, world, [[0, 0]], fields, scratch)).toThrow(/strictly ascending/)
+    // The wipe genuinely happened — this is the state the stamps would
+    // otherwise be vouching for.
+    expect(Array.from((fields[0] as FlowField).dist).every((d) => d === INF)).toBe(true)
+
+    // Reported as a failed rebuild, not as "you forgot to sync".
+    expect(() => fieldFor(state, world, fields, 0, [0])).toThrow(/never built/)
+
+    // Same sources, same roads as tick N. Without the stamp zeroing both
+    // stamps still match, syncFields skips, and this reads back all-INF.
+    syncFields(state, world, [[0]], fields, scratch)
+    expect(Array.from(fieldFor(state, world, fields, 0, [0]).dist)).toEqual(GOOD_DIST)
+  })
+
+  it('an entry-pool exhaustion mid-drain — where the corruption looks plausible rather than empty — is handled the same way', () => {
+    const { state, world, fields, scratch } = buildCorridorFixture('throw-desync-pool')
+
+    syncFields(state, world, [[0]], fields, scratch)
+    expect(Array.from(fieldFor(state, world, fields, 0, [0]).dist)).toEqual(GOOD_DIST)
+
+    // A pool with room for 2 entries: source 1 is pushed, its expansion
+    // relaxes cell 0, and the relaxation of cell 2 overflows. The throw comes
+    // from the middle of the drain loop with a partly relaxed field already
+    // written — an all-INF field at least LOOKS broken, whereas this one
+    // reads as a short, self-consistent, entirely wrong answer.
+    const tinyPool: Scratch = {
+      bucketHead: new Int32Array(NB),
+      entryCell: new Int32Array(2),
+      entryNext: new Int32Array(2),
+      nbrCell: new Int32Array(8),
+      nbrDir: new Int8Array(8),
+      stats: new Int32Array(2),
+    }
+    expect(() => syncFields(state, world, [[1]], fields, tinyPool)).toThrow(/entry pool exhausted/)
+    expect(Array.from((fields[0] as FlowField).dist)).toEqual([10, 0, 10, INF, INF, INF])
+
+    expect(() => fieldFor(state, world, fields, 0, [0])).toThrow(/never built/)
+
+    syncFields(state, world, [[0]], fields, scratch)
+    expect(Array.from(fieldFor(state, world, fields, 0, [0]).dist)).toEqual(GOOD_DIST)
+  })
+})
+
 describe('fieldFor: staleness', () => {
   it('throws on a never-built field — asserted first: a fresh FlowField’s dir is all-zero (reads as "head North")', () => {
+    // The message is pinned, not merely the throw. Replacing the never-built
+    // condition with `false` still throws — the stamp comparison two lines
+    // below catches it, since 0 never equals a real hash — so a bare
+    // `.toThrow()` here cannot tell the two branches apart, and this branch
+    // is now the one that reports a rebuild that threw (see the describe
+    // block above), where "stale — call syncFields" is actively misleading.
     const { map, world } = landFixture('never-built', 6, 5)
     const state = createState('s', map)
     const fields = createFlowFields(1, world.cells)
-    expect(() => fieldFor(state, world, fields, 0, [])).toThrow()
+    expect(() => fieldFor(state, world, fields, 0, [])).toThrow(/never built/)
+  })
+
+  it('reports never-built for a HALF-written stamp pair too, not just for both stamps at 0', () => {
+    // `syncFields` is the only writer of the stamps and always moves both
+    // together, so `builtFromRoads !== 0 && builtFromSources === 0` is
+    // unreachable through the public API — and deleting either half of the
+    // `||` therefore leaves the whole suite green without this test. That is
+    // exactly the shape C1 was: a stamp pair that momentarily describes
+    // something the field does not hold. The stamps are plain mutable fields
+    // on `FlowField`, so a future writer that sets them one at a time (or
+    // fails between the two) is a real reachable edit, and it must land in
+    // the never-built branch rather than be reported as "stale — call
+    // syncFields before reading it this tick", which sends the reader
+    // hunting for a missing sync that is not the problem.
+    const { map, world } = landFixture('half-stamp', 6, 5)
+    const state = createState('s', map)
+    placeRoad(state, world, 0, 1)
+    const sources = [0]
+    const scratch = createScratch(world.cells)
+
+    for (const zeroed of ['builtFromRoads', 'builtFromSources'] as const) {
+      const fields = createFlowFields(1, world.cells)
+      syncFields(state, world, [sources], fields, scratch)
+      expect(() => fieldFor(state, world, fields, 0, sources)).not.toThrow() // sanity: both stamps valid
+      const field = fields[0] as FlowField
+      field[zeroed] = 0
+      expect(() => fieldFor(state, world, fields, 0, sources), zeroed).toThrow(/never built/)
+    }
   })
 
   it('the nonZeroWord guard forces 0 to 1 — the same guard hashRoadRegion/hashSources both rely on to never present as "never built"; proven directly, not by an unbounded search for a colliding input', () => {

@@ -215,6 +215,34 @@ export function hashSources(sources: readonly number[]): number {
  * this runs — once per tick, for every colour), rebuilds every colour whose
  * stamps disagree with its current inputs, and leaves the rest untouched —
  * that is §5.4's "coalesce dirty rebuilds to at most one per tick".
+ *
+ * **Both stamps are zeroed BEFORE the rebuild and re-written only after it
+ * returns. This is the single line of defence for design decision 3's whole
+ * premise** — that derived state may live outside the snapshot because it is
+ * a pure function of what is inside — and that premise holds only while the
+ * stamps never describe content the field does not actually hold.
+ *
+ * `computeFlowField` wipes `dist`/`dir` at entry and validates afterwards:
+ * ascending order, source range, and entry-pool capacity all throw AFTER the
+ * wipe, the last of them from the middle of the drain loop with a partly
+ * relaxed field already written. Writing the stamps only on success would
+ * therefore leave a destroyed field still advertising the previous, correct
+ * content: the next tick's comparison matches, this loop skips the rebuild,
+ * and `fieldFor` returns an all-INF (or worse, plausible-looking, partly
+ * relaxed) field with no error anywhere. Two engines holding byte-identical
+ * `state` buffers and given identical `sources` would then serve different
+ * fields, decided purely by whether that engine's `FlowField` objects passed
+ * through the throwing tick — the exact browser-vs-Worker divergence this
+ * design exists to make impossible.
+ *
+ * Zeroing first converts that silent wrong answer back into the throw the
+ * design already has: a field left marked never-built is rejected by
+ * `fieldFor` (which is what makes its never-built branch load-bearing rather
+ * than redundant) and unconditionally rebuilt by the next `syncFields`,
+ * because 0 can never equal a real stamp (`nonZeroWord`). A throw before the
+ * wipe costs one extra rebuild next tick and nothing else; both engines still
+ * converge on identical field content, since a rebuild from identical inputs
+ * is byte-identical.
  */
 export function syncFields(
   state: GameState,
@@ -239,6 +267,8 @@ export function syncFields(
     const sources = sourcesByColour[c] as readonly number[]
     const sourcesHash = hashSources(sources)
     if (field.builtFromRoads === roadsHash && field.builtFromSources === sourcesHash) continue
+    field.builtFromRoads = 0
+    field.builtFromSources = 0
     computeFlowField(state, world, sources, field, scratch)
     field.builtFromRoads = roadsHash
     field.builtFromSources = sourcesHash
@@ -275,6 +305,15 @@ export function fieldFor(
   // explicitly, rather than folding it into the hash comparison, keeps the
   // two failure reasons distinguishable and keeps this guard correct even if
   // that were ever true.
+  //
+  // This branch reports two different situations now, not one: a genuinely
+  // fresh field, and a field whose last rebuild THREW (`syncFields` zeroes
+  // both stamps before calling `computeFlowField` — see its comment). The
+  // second is the one that matters, and it is why the message is pinned by a
+  // regex in the tests rather than by a bare `.toThrow()`: replacing this
+  // condition with `false` still throws, from the stamp comparison below,
+  // with a message that says "stale — call syncFields" and sends the reader
+  // looking for a missing sync that already happened and failed.
   if (field.builtFromRoads === 0 || field.builtFromSources === 0) {
     throw new Error(`fieldFor: colour ${colour} field was never built`)
   }
