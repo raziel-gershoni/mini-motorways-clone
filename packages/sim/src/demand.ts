@@ -116,6 +116,15 @@ function hasRoom(state: GameState, d: number): boolean {
  * because a destination this search skipped past was never mid-rotation
  * for this colour in the first place.
  *
+ * **Returns a packed `destIndex * 2 + subSlot` number, not `{destIndex,
+ * subSlot}`** — this runs once per pin fire, inside the tick once Task 6
+ * wires `runDemand` into `step()`, and an object literal here is exactly
+ * the shape `houseAt` (`state.ts`), `colourSourceOffset` (`flowfield.ts`)
+ * and `carparkCell` (`buildings.ts`) each document rejecting for the same
+ * reason: "nothing allocates inside a tick" is zero, not small. The caller,
+ * `fireColour`, decodes with the same `(v / 2) | 0` / `v & 1` this file
+ * already uses to decode `cursorRaw` itself — no new decoding shape.
+ *
  * Throws if no eligible colour-matching destination exists. The only
  * caller, `fireColour`, is only reached from `advanceAccumulators` after
  * `acc[colour] >= PIN_PERIOD_TICKS`, which requires `slotCount(colour)` to
@@ -123,19 +132,14 @@ function hasRoom(state: GameState, d: number): boolean {
  * colour, so at least one must exist. A throw here means that invariant
  * broke, not a reachable game state.
  */
-function resolveCurrent(
-  state: GameState,
-  colour: number,
-  tick: number,
-  cursorRaw: number,
-): { destIndex: number; subSlot: number } {
+function resolveCurrent(state: GameState, colour: number, tick: number, cursorRaw: number): number {
   const destCount = state.header[H_DEST_COUNT] as number
   const startIndex = (cursorRaw / 2) | 0
   const startSub = cursorRaw & 1
   for (let step = 0; step < destCount; step++) {
     const d = (startIndex + step) % destCount
     if (isEligibleOfColour(state, d, colour, tick)) {
-      return { destIndex: d, subSlot: d === startIndex ? startSub : 0 }
+      return d * 2 + (d === startIndex ? startSub : 0)
     }
   }
   throw new Error(
@@ -191,7 +195,9 @@ function advanceCursor(state: GameState, colour: number, tick: number, chosenInd
  */
 function fireColour(state: GameState, colour: number, tick: number): void {
   const cursorRaw = state.rotationCursor[colour] as number
-  const { destIndex, subSlot } = resolveCurrent(state, colour, tick, cursorRaw)
+  const chosenPacked = resolveCurrent(state, colour, tick, cursorRaw)
+  const destIndex = (chosenPacked / 2) | 0
+  const subSlot = chosenPacked & 1
 
   let recipient = -1
   if (hasRoom(state, destIndex)) {

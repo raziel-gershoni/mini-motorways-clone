@@ -80,6 +80,32 @@ function tickN(state: GameState, scratch: Scratch, n: number): void {
   for (let i = 0; i < n; i++) tick(state, scratch)
 }
 
+/**
+ * Sets `H_TICK` to exactly `tickValue`, forces `scratch.slotCounts[colour]`
+ * to `PIN_PERIOD_TICKS` (every other colour to 0) and calls
+ * `advanceAccumulators` directly — bypassing `computeSlotCounts` entirely,
+ * the same doctored-parameter technique the carry-vs-reset test already
+ * uses. This fires colour `colour` exactly once, AT a precisely chosen
+ * tick, regardless of what real destinations of that colour would
+ * naturally have accumulated by then.
+ *
+ * Needed for the eligibility-gate witnesses below because NATURAL
+ * accumulation cannot isolate them: with real accrual, a colour with any
+ * eligible destination reaches threshold only after hundreds of ticks
+ * (>= ceil(518/32) = 17 at the theoretical max slot count), by which time
+ * an "ineligible" witness destination (delay 120 ticks) may have become
+ * legitimately eligible anyway, destroying the fixture's premise. Forcing
+ * the fire at `tickValue = 1` (or another precisely chosen value) keeps
+ * the witness destination provably still within its own delay window at
+ * the moment resolution/advance/overflow actually runs.
+ */
+function forceFireAtTick(state: GameState, scratch: Scratch, tickValue: number, colour: number): void {
+  state.header[H_TICK] = tickValue
+  for (let c = 0; c < scratch.slotCounts.length; c++) scratch.slotCounts[c] = 0
+  scratch.slotCounts[colour] = PIN_PERIOD_TICKS
+  advanceAccumulators(state, scratch)
+}
+
 describe('constants: PIN_PERIOD_TICKS and FIRST_PIN_DELAY_TICKS', () => {
   it('PIN_PERIOD_TICKS is 518, derived through the week (never through TICKS_PER_DAY = 0)', () => {
     // 4500 / 8.68 = 518.4..., truncated down to 518 (fix-list #18; decision 1).
@@ -131,6 +157,123 @@ describe('eligibility gate: >=, not >, and independent per-destination delays', 
     expect(state.header[H_DEST_COUNT]).toBe(1) // genuinely placed, not silently rejected
     computeSlotCounts(state, scratch)
     expect(scratch.slotCounts[0]).toBe(0) // but excluded: tick(0) - spawn(0) = 0 < 120
+  })
+})
+
+describe('the eligibility gate at the ROTATION\'s three other call sites (I2 review finding)', () => {
+  // `isEligibleOfColour` is `colour-match AND eligible`. The block above
+  // tests the gate only through `computeSlotCounts`'s DIRECT `isEligible`
+  // call — it says nothing about whether an ineligible same-colour
+  // destination can still become "current" (`resolveCurrent`), get folded
+  // into the rotation's "next" pointer (`advanceCursor`), or receive an
+  // overflow pin. All three are `isEligibleOfColour` call sites the module
+  // comment claims are gated and none had a witness where dropping the
+  // eligibility half (while keeping the colour half) changes the outcome —
+  // every existing fixture uses `placeEligibleNow`, so every same-colour
+  // destination in every other test IS actually eligible by the time it
+  // matters, and colour-only matching agrees with colour-and-eligibility
+  // matching whenever eligibility happens to be true anyway.
+  //
+  // Non-redundancy: all four witnesses below were checked against the
+  // committed (pre-fix) source and confirmed to survive — 381/381 passed
+  // for each of dropping eligibility in `advanceCursor`, in the overflow
+  // walk, in `resolveCurrent`, and for shifting `fireColour`'s `tick`
+  // parameter by one — before these tests existed. They cannot be
+  // redundant with tests that did not kill the thing they are added to kill.
+
+  it('advanceCursor skips an ineligible same-colour destination when picking "next"', () => {
+    const { map, world } = fixture('elig-advance-cursor')
+    const { state, scratch } = rig(map, world)
+    const dA = placeEligibleNow(state, world, 0, 0, 0, DEST_KIND_SQUARE) // index 0, eligible now
+    const dHeld = state.header[H_DEST_COUNT] as number // index 1
+    expect(placeDestination(state, world, cellFor(5, 0), ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+    state.destSpawnTick[dHeld] = 0 // NOT backdated: eligible only once tick >= 120
+    const dC = placeEligibleNow(state, world, 10, 0, 0, DEST_KIND_SQUARE) // index 2, eligible now
+    expect([dA, dHeld, dC]).toEqual([0, 1, 2])
+
+    // Force the bootstrap fire at tick 1 — long before dHeld's tick-120
+    // threshold, so it is provably still ineligible when advanceCursor's
+    // search runs. resolveCurrent finds dA immediately (step 0, genuinely
+    // eligible); dA is a square, so advanceCursor searches forward from
+    // index 0 for the next eligible colour-0 destination.
+    forceFireAtTick(state, scratch, 1, 0)
+    expect(state.destPins[dA]).toBe(1) // the fire landed where expected
+    expect((state.header[H_TICK] as number) - (state.destSpawnTick[dHeld] as number)).toBeLessThan(FIRST_PIN_DELAY_TICKS)
+
+    // Correct: skip dHeld (ineligible), land on dC. A colour-only search
+    // (eligibility half dropped) would stop at dHeld instead.
+    expect(state.rotationCursor[0]).toBe(dC * 2)
+    expect(state.rotationCursor[0]).not.toBe(dHeld * 2)
+  })
+
+  it('the overflow walk skips an ineligible same-colour destination and drops the pin rather than deliver to it', () => {
+    const { map, world } = fixture('elig-overflow-walk')
+    const { state, scratch } = rig(map, world)
+    const dA = placeEligibleNow(state, world, 0, 0, 0, DEST_KIND_SQUARE) // index 0, eligible, will be capped
+    const dHeld = state.header[H_DEST_COUNT] as number // index 1
+    expect(placeDestination(state, world, cellFor(5, 0), ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+    state.destSpawnTick[dHeld] = 0 // held ineligible, but has PLENTY of room
+    state.destPins[dA] = PIN_CAP_SQUARE_HARD // pre-cap the only OTHER-than-dHeld colour-0 destination
+
+    const droppedBefore = state.header[H_PINS_DROPPED] as number
+    // Force the fire at tick 1: resolveCurrent finds dA (eligible, capped)
+    // as chosen; the overflow walk's only candidate is dHeld, which is
+    // NOT eligible yet.
+    forceFireAtTick(state, scratch, 1, 0)
+    expect((state.header[H_TICK] as number) - (state.destSpawnTick[dHeld] as number)).toBeLessThan(FIRST_PIN_DELAY_TICKS)
+
+    // Correct: dHeld is skipped by the walk (still ineligible) -> no
+    // candidate -> drop. Colour-only matching would hand it the pin.
+    expect(state.destPins[dHeld], 'ineligible destination must not receive an overflow pin').toBe(0)
+    expect(state.header[H_PINS_DROPPED]).toBe(droppedBefore + 1)
+  })
+
+  it('resolveCurrent skips an ineligible same-colour destination even when it is the LOWEST index (cannot become "current")', () => {
+    const { map, world } = fixture('elig-resolve-current')
+    const { state, scratch } = rig(map, world)
+    const dLow = state.header[H_DEST_COUNT] as number // index 0 — lowest index, held ineligible
+    expect(placeDestination(state, world, cellFor(0, 0), ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+    state.destSpawnTick[dLow] = 0
+    const dHigh = placeEligibleNow(state, world, 5, 0, 0, DEST_KIND_SQUARE) // index 1, eligible now
+    expect([dLow, dHigh]).toEqual([0, 1])
+
+    // Bootstrap cursor is 0, which decodes to dLow — exactly the case
+    // `resolveCurrent`'s search exists for. Force the fire at tick 1,
+    // before dLow's delay elapses.
+    forceFireAtTick(state, scratch, 1, 0)
+    expect((state.header[H_TICK] as number) - (state.destSpawnTick[dLow] as number)).toBeLessThan(FIRST_PIN_DELAY_TICKS)
+
+    // Correct: resolveCurrent's step-0 check on dLow fails eligibility,
+    // so it searches on and finds dHigh. Colour-only matching would stop
+    // at step 0 and wrongly deliver to dLow.
+    expect(state.destPins[dHigh], 'the only genuinely eligible destination receives the pin').toBe(1)
+    expect(state.destPins[dLow], 'the lowest-index destination is ineligible and must not fire').toBe(0)
+  })
+
+  it('the tick used to evaluate eligibility inside one fire is exactly H_TICK, not H_TICK + 1 — a one-tick shift flips a destination sitting exactly on its own boundary', () => {
+    const { map, world } = fixture('elig-tick-boundary')
+    const { state, scratch } = rig(map, world)
+    // Force the fire at STATE tick 1. Choose dBoundary's spawn tick so it
+    // is ineligible AT tick 1 (1 - spawn = 119 < 120) but would be
+    // eligible AT tick 2 (2 - spawn = 120 >= 120) — the exact boundary a
+    // `tick + 1` bug would cross. dFallback is unconditionally eligible,
+    // so clean code has somewhere correct to land instead of throwing.
+    const dBoundary = state.header[H_DEST_COUNT] as number // index 0
+    expect(placeDestination(state, world, cellFor(0, 0), ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+    state.destSpawnTick[dBoundary] = 1 - (FIRST_PIN_DELAY_TICKS - 1)
+    const dFallback = placeEligibleNow(state, world, 5, 0, 0, DEST_KIND_SQUARE) // index 1
+
+    // Vacuity: the boundary is genuinely where the arithmetic says.
+    expect(1 - (state.destSpawnTick[dBoundary] as number)).toBe(FIRST_PIN_DELAY_TICKS - 1)
+    expect(2 - (state.destSpawnTick[dBoundary] as number)).toBe(FIRST_PIN_DELAY_TICKS)
+
+    forceFireAtTick(state, scratch, 1, 0)
+
+    // Correct: dBoundary is ineligible AT tick 1, so the fire lands on
+    // dFallback. A `tick + 1` bug evaluates eligibility as if it were
+    // tick 2, where dBoundary looks eligible, and lands on it instead.
+    expect(state.destPins[dFallback], 'eligibility must be evaluated at H_TICK, not H_TICK + 1').toBe(1)
+    expect(state.destPins[dBoundary]).toBe(0)
   })
 })
 
@@ -295,7 +438,24 @@ describe('overflow: capacity, the distinct-destination walk, skipping other colo
     return { state, scratch, d1, d2, d3 }
   }
 
-  it('redirects to the next distinct, eligible, uncapped same-colour destination, skipping a capped one and other colours, and advances the cursor past the ORIGINALLY CHOSEN slot', () => {
+  it('redirects to the NEXT distinct, eligible, uncapped same-colour destination (not merely "the only one with room"), and advances the cursor past the ORIGINALLY CHOSEN slot', () => {
+    // C1 fix (review finding): the previous version of this fixture capped
+    // BOTH d2 (chosen) and d3, leaving exactly one uncapped same-colour
+    // destination (d1). With only one candidate, every walk order that
+    // visits all destinations reaches it — "start the overflow search at
+    // index 0" (`d = step % destCount` instead of `d = (destIndex + step) %
+    // destCount`) gives the SAME answer as the correct forward-from-chosen
+    // walk, so the fixture met the brief's three literal conditions
+    // (>= 3 same-colour destinations, capped one not at index 0, cursor not
+    // at 0) while being unable to distinguish the two. This version caps
+    // ONLY d2 (the chosen one), leaving TWO uncapped same-colour candidates
+    // — d1 and d3 — straddling it, so the two walk orders diverge:
+    //   correct (start at destIndex+1=3, wrap):  3 (d3, room) -> STOP, d3.
+    //   mutant  (start at absolute index 1):      1 (d1, room) -> STOP, d1.
+    // Verified live, not merely reasoned about: re-running the exact
+    // mutation (`d = step % destCount`) against this fixture below fails
+    // this test's `d3`/`d1` assertions (see the mutation table in the
+    // task report).
     const { state, scratch, d1, d2, d3 } = buildOverflowRig()
 
     // Fire once naturally (bootstrap): resolves to d1 (lowest colour-0
@@ -308,42 +468,72 @@ describe('overflow: capacity, the distinct-destination walk, skipping other colo
     expect(cursorBeforeOverflow, 'fixture requirement: cursor must not be 0 before the overflow fire').not.toBe(0)
     expect(cursorBeforeOverflow).toBe(d2 * 2) // cursor now names d2 (index 2) — the capped-one-not-at-0 target below
 
-    // Pre-cap d2 (the one the cursor now points at — the CHOSEN destination
-    // for the next fire) AND d3, so the overflow walk must pass over a
-    // second capped destination before finding room. Both writes are
-    // direct field pokes: legitimate white-box setup, same convention as
-    // `buildings.test.ts`'s capacity fixtures.
+    // Cap ONLY d2 (the chosen destination). d1 keeps its bootstrap pin (1,
+    // well under cap) and d3 is left at 0 — BOTH have room, on opposite
+    // sides of the chosen slot in destination-index order.
     state.destPins[d2] = PIN_CAP_SQUARE_HARD
-    state.destPins[d3] = PIN_CAP_SQUARE_HARD
-    // Vacuity: genuinely full, not merely "close to" full.
+    // Vacuity: genuinely full, not merely "close to" full; and d1/d3
+    // genuinely still have room (the witness requires >= 2 candidates).
     expect(state.destPins[d2]).toBe(PIN_CAP_SQUARE_HARD)
-    expect(state.destPins[d3]).toBe(PIN_CAP_SQUARE_HARD)
+    expect(state.destPins[d1]).toBeLessThan(PIN_CAP_SQUARE_HARD)
+    expect(state.destPins[d3]).toBeLessThan(PIN_CAP_SQUARE_HARD)
 
     const droppedBefore = state.header[H_PINS_DROPPED] as number
     // Advance the accumulator by exactly one more fire's worth for colour 0.
     for (let i = 0; i < 1200 && (state.rotationCursor[0] as number) === cursorBeforeOverflow; i++) tick(state, scratch)
 
-    // The overflow walk from chosen=d2 (index 2): step1 -> d3 (index 3,
-    // colour 0, CAPPED, skip) -> step2 -> d0 (index 0, colour 1, WRONG
-    // COLOUR, skip) -> step3 -> d1 (index 1, colour 0, room) -> recipient.
-    expect(state.destPins[d1], 'overflow recipient: d1, the next distinct uncapped same-colour destination').toBe(2)
+    // The overflow walk from chosen=d2 (index 2), forward: step1 -> d3
+    // (index 3, colour 0, room) -> STOP. d3 is the recipient, not d1 —
+    // this is what "NEXT distinct" means, as opposed to "any distinct
+    // destination with room somewhere on the map."
+    expect(state.destPins[d3], 'overflow recipient: d3, the NEXT distinct uncapped same-colour destination').toBe(1)
+    expect(state.destPins[d1], 'd1 has room too, but is NOT next from the chosen slot — must be unchanged').toBe(1)
     expect(state.destPins[d2], 'd2 (the capped, chosen destination) is unchanged — it did NOT receive an extra pin').toBe(
       PIN_CAP_SQUARE_HARD,
     )
-    expect(state.destPins[d3], 'd3 (capped, and correctly skipped by the walk) is unchanged').toBe(PIN_CAP_SQUARE_HARD)
-    expect(state.header[H_PINS_DROPPED], 'no drop: d1 had room').toBe(droppedBefore)
+    expect(state.header[H_PINS_DROPPED], 'no drop: d3 had room').toBe(droppedBefore)
 
     // The cursor advances past the ORIGINALLY CHOSEN slot (d2), never past
-    // the overflow recipient (d1). advance(chosen=d2,square) searches for
+    // the overflow recipient (d3). advance(chosen=d2,square) searches for
     // the next colour-0 destination after index 2: d3 (colour 0, eligible —
-    // eligibility does not care about cap) -> cursor = 3*2 = 6.
-    // The REJECTED alternative (advance past the recipient, d1) would give
-    // advance(d1,square) = next colour-0 dest after index1 = d2 -> cursor
-    // = 2*2 = 4, i.e. UNCHANGED from `cursorBeforeOverflow`. The two are
-    // observably different, which is what makes this assertion able to
-    // kill that specific mutation.
+    // eligibility does not care about cap) -> cursor = 3*2 = 6. This
+    // happens to be the same formula as "advance past the recipient" would
+    // give here (recipient IS d3), so the recipient-vs-chosen distinction
+    // is covered by the SECOND overflow test below instead, where the
+    // recipient and the chosen destination are provably different indices.
     expect(state.rotationCursor[0]).toBe(d3 * 2)
     expect(state.rotationCursor[0]).not.toBe(cursorBeforeOverflow)
+  })
+
+  it('finds the sole remaining candidate after walking past BOTH a capped same-colour destination and a wrong-colour one — not redundant with the all-capped/drop test, which cannot distinguish an early-truncated walk from a correct one', () => {
+    // Cap d2 (chosen) AND d3, leaving ONLY d1 with room: the walk must
+    // pass over d3 (capped, same colour) and d0 (colour 1, wrong colour)
+    // before reaching d1 — three loop iterations (step 1, 2, 3), not one.
+    //
+    // Non-redundancy, checked rather than assumed: the all-capped/drop test
+    // below walks this EXACT same path (d3, then d0, then d1) but with d1
+    // ALSO capped, so its outcome (drop) is identical whether the loop's
+    // third iteration (d1) runs or not — an off-by-one that truncates the
+    // walk one iteration early (`step < destCount - 1` instead of `step <
+    // destCount`) still drops, and the all-capped test cannot see the
+    // difference. HERE d1 has room, so the same truncation would wrongly
+    // drop a pin that should have been delivered — this fixture is the one
+    // that can tell "walked the full distance" from "gave up one step
+    // early", which the all-capped test structurally cannot.
+    const { state, scratch, d1, d2, d3 } = buildOverflowRig()
+    for (let i = 0; i < 1200 && (state.destPins[d1] as number) === 0; i++) tick(state, scratch)
+    const cursorBeforeOverflow = state.rotationCursor[0] as number
+    state.destPins[d2] = PIN_CAP_SQUARE_HARD
+    state.destPins[d3] = PIN_CAP_SQUARE_HARD
+    expect(state.destPins[d1]).toBeLessThan(PIN_CAP_SQUARE_HARD) // the only candidate with room
+
+    const droppedBefore = state.header[H_PINS_DROPPED] as number
+    for (let i = 0; i < 1200 && (state.rotationCursor[0] as number) === cursorBeforeOverflow; i++) tick(state, scratch)
+
+    expect(state.destPins[d1], 'walked past capped d3 and wrong-colour d0 to reach d1').toBe(2)
+    expect(state.destPins[d2]).toBe(PIN_CAP_SQUARE_HARD)
+    expect(state.destPins[d3]).toBe(PIN_CAP_SQUARE_HARD)
+    expect(state.header[H_PINS_DROPPED]).toBe(droppedBefore)
   })
 
   it('drops the pin and increments H_PINS_DROPPED once every same-colour destination is capped, and the walk terminates rather than hanging', () => {
