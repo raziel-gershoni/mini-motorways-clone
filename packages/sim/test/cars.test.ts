@@ -56,6 +56,7 @@ const H = 12
 const N = 0
 const E = 2
 const SE = 3
+const S = 4
 const W_DIR = 6
 const NW = 7
 
@@ -712,54 +713,57 @@ describe('movement is a pure function of the state buffer', () => {
 })
 
 describe('off-manifold guards', () => {
-  it('throws rather than wrapping the row seam when a hand-written route leaves the board', () => {
-    // Unreachable through `runDispatch` — its downhill walk breaks the moment
-    // a step would leave the grid and the route is refused, never committed.
-    // Reachable through a hand-written or corrupted route, where the
-    // alternative is not a crash but a silent wrap onto the next row.
-    //
-    // **All FOUR bounds, not just the eastern one.** Each half of the guard is
-    // its own mutation and three of them fail differently:
-    //   x >= w : stepping E off column 19 wraps onto the NEXT row's column 0.
-    //   x <  0 : stepping W off column 0 wraps onto the PREVIOUS row's last
-    //            column — the same row-seam false neighbour in the other
-    //            direction, and the one an eastern-only test leaves untested.
-    //   y >= h : stepping S off the last row indexes past the end of the grid.
-    //   y <  0 : stepping N off row 0 gives `y * w + x` in [-w, -1], which
-    //            `advanceCar`'s own `next < 0` arm already rejects — a genuine
-    //            equivalent mutant, exercised here for completeness rather than
-    //            because dropping that half is detectable.
-    const east = rig('off-grid-east')
-    commit(east.state, 0, 39, [E]) // (19, 1): the rightmost column
-    expect(39 % W).toBe(19)
+  /**
+   * `stepCell`'s bounds check, ONE `it()` PER BOUND. All four in a single test
+   * reports only the first to break, so a regression in two of them looks like
+   * a regression in one — and three of the four fail in genuinely different
+   * ways, which is exactly the information a merged test throws away.
+   *
+   * Off-manifold throughout: `runDispatch`'s downhill walk breaks the moment a
+   * step would leave the grid and refuses the route rather than committing it,
+   * so only a hand-written or corrupted route reaches these. The alternative to
+   * the throw is not a crash — it is a silent wrap onto a wrong-but-plausible
+   * cell.
+   */
+  function expectOffGrid(id: string, cell: number, dir: number): void {
+    const { state, world } = rig(id)
+    commit(state, 0, cell, [dir])
     expect(() => {
-      for (let t = 0; t < 8; t++) runMovement(east.state, east.world)
+      for (let t = 0; t < 8; t++) runMovement(state, world)
     }).toThrow(/step off the grid/)
-    expect(east.state.carCell[0]).toBe(39) // and it did not move onto cell 40 = (0, 2)
+    expect(state.carCell[0], 'the car moved despite the throw').toBe(cell)
+    expect(state.carRouteCursor[0]).toBe(0)
+  }
 
-    const west = rig('off-grid-west')
-    commit(west.state, 0, 40, [W_DIR]) // (0, 2): the leftmost column
-    expect(40 % W).toBe(0)
-    expect(() => {
-      for (let t = 0; t < 8; t++) runMovement(west.state, west.world)
-    }).toThrow(/step off the grid/)
-    expect(west.state.carCell[0]).toBe(40) // and it did not move onto cell 39 = (19, 1)
+  it('throws stepping E off the last column, rather than wrapping onto the next row (x >= w)', () => {
+    expect(39 % W).toBe(19) // (19, 1): the rightmost column
+    // Without this bound the car lands on cell 40 = (0, 2) — the next row's
+    // first column, a real cell the route never named.
+    expectOffGrid('off-grid-east', 39, E)
+  })
 
-    const south = rig('off-grid-south')
-    commit(south.state, 0, 225, [4]) // (5, 11): the last row; DIRS index 4 is S
-    expect(((225 / W) | 0) as number).toBe(H - 1)
-    expect(() => {
-      for (let t = 0; t < 8; t++) runMovement(south.state, south.world)
-    }).toThrow(/step off the grid/)
-    expect(south.state.carCell[0]).toBe(225)
+  it('throws stepping W off the first column, rather than wrapping onto the previous row (x < 0)', () => {
+    expect(40 % W).toBe(0) // (0, 2): the leftmost column
+    // The same row-seam hazard in the other direction — cell 39 = (19, 1) — and
+    // the one an eastern-only fixture leaves untested. It survived until the
+    // review caught it.
+    expectOffGrid('off-grid-west', 40, W_DIR)
+  })
 
-    const north = rig('off-grid-north')
-    commit(north.state, 0, 5, [N]) // (5, 0): the first row
-    expect(((5 / W) | 0) as number).toBe(0)
-    expect(() => {
-      for (let t = 0; t < 8; t++) runMovement(north.state, north.world)
-    }).toThrow(/step off the grid/)
-    expect(north.state.carCell[0]).toBe(5)
+  it('throws stepping S off the last row, rather than indexing past the grid (y >= h)', () => {
+    expect((225 / W) | 0).toBe(H - 1) // (5, 11): the last row
+    expectOffGrid('off-grid-south', 225, S)
+  })
+
+  it('throws stepping N off the first row (y < 0) — kept for symmetry, and disclosed as an equivalent mutant', () => {
+    expect((5 / W) | 0).toBe(0) // (5, 0): the first row
+    // Dropping this half of the guard is NOT detectable, and saying so is the
+    // point: the retained `x` bounds fence `x` into `[0, w - 1]`, so for any
+    // `y <= -1` the product `y * w + x` is at most `-1`. `advanceCar`'s own
+    // `next < 0` arm therefore rejects every northern overrun regardless. The
+    // case is exercised because the behaviour is required, not because this
+    // test can observe which line delivers it.
+    expectOffGrid('off-grid-north', 5, N)
   })
 
   it('throws on a corrupted route nibble rather than driving in a direction that does not exist', () => {
