@@ -10,6 +10,7 @@ import {
   PIN_CAP_SQUARE_TIMER, PIN_CAP_SQUARE_HARD, PIN_CAP_CIRCLE_TIMER, PIN_CAP_CIRCLE_HARD,
   GRID_W, GRID_H, GROUP_COUNT_DEFAULT, CARS_PER_HOUSE, MOTORWAY_CAP,
   MAX_GROUP_COUNT, MAX_PATH_LEN,
+  COST_UNIT_SCALE, CAR_SPEED_UNITS_PER_TICK,
 } from '../src/index'
 import * as C from '../src/index'
 
@@ -103,6 +104,35 @@ describe('rule constants', () => {
     expect(MAX_PATH_LEN).toBe(96)
     expect(MAX_PATH_LEN).toBeGreaterThan(GRID_W + GRID_H)
     expect(MAX_PATH_LEN % 2).toBe(0) // two 4-bit directions pack per carRoute byte
+  })
+
+  it('calibrates movement so a diagonal costs exactly 1.40 of an orthogonal', () => {
+    // M1c decision 3. Progress is accumulated in the pathfinder's own cost
+    // units, so traversal time is proportional to the Dijkstra weight by
+    // construction: the two thresholds are these products.
+    expect(COST_UNIT_SCALE).toBe(250)
+    expect(ORTHO_COST * COST_UNIT_SCALE).toBe(2500)
+    expect(DIAG_COST * COST_UNIT_SCALE).toBe(3500)
+    expect(CAR_SPEED_UNITS_PER_TICK).toBe(330)
+  })
+
+  it('keeps the car speed indivisible into BOTH thresholds, so the carry is always observable', () => {
+    // Load-bearing, not cosmetic (M1c decision 3, constraint 2). If the speed
+    // divided a threshold, the remainder on that edge type would always be
+    // zero and the "drop the carry at a crossing" bug — a systematic slowdown
+    // of a fraction of a tick per cell — would be invisible at every operating
+    // point. Every exact-tick assertion in `sim/test/cars.test.ts` is
+    // calibrated against these two remainders (130 and 140 units), so a future
+    // speed change that made either zero would silently disarm the whole file
+    // rather than fail it. This is where it fails instead.
+    // 2500 = 7 * 330 + 190, so the eighth tick overshoots by 330 - 190 = 140
+    // units, which is what the car carries onto its next cell.
+    expect((ORTHO_COST * COST_UNIT_SCALE) % CAR_SPEED_UNITS_PER_TICK).toBe(190)
+    expect(CAR_SPEED_UNITS_PER_TICK - 190).toBe(140)
+    // 3500 = 10 * 330 + 200, so the eleventh tick overshoots by 130.
+    expect((DIAG_COST * COST_UNIT_SCALE) % CAR_SPEED_UNITS_PER_TICK).toBe(200)
+    expect(CAR_SPEED_UNITS_PER_TICK - 200).toBe(130)
+    expect(CAR_SPEED_UNITS_PER_TICK).toBeLessThan(ORTHO_COST * COST_UNIT_SCALE) // at most one crossing per tick
   })
 
   it('encodes the failure constants at the right scale', () => {

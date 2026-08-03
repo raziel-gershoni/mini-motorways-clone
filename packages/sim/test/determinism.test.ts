@@ -336,6 +336,7 @@ describe('sim source obeys the determinism rules', () => {
       'shared/src/mapFormat.ts',
       'shared/src/maps/firstCity.ts',
       'sim/src/buildings.ts',
+      'sim/src/cars.ts',
       'sim/src/clock.ts',
       'sim/src/demand.ts',
       'sim/src/dispatch.ts',
