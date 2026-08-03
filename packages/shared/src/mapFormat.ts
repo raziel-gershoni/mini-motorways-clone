@@ -11,6 +11,8 @@
  * `index = y * w + x` — row-major, origin top-left, `x` fastest.
  */
 
+import { MAX_GROUP_COUNT } from './constants'
+
 export const TERRAIN = Object.freeze({ LAND: 0, WATER: 1, MOUNTAIN: 2, TREE: 3 } as const)
 export type TerrainCode = 0 | 1 | 2 | 3
 
@@ -21,6 +23,16 @@ export interface MapData {
   readonly h: number
   readonly terrain: readonly TerrainCode[] // index = y * w + x
   readonly startingTiles: number
+  /**
+   * The three limits M1c's buffer regions size from (`regions.ts`,
+   * `sim`). Building-spawn zones are deliberately NOT here — they are the
+   * M1e spawner's input, not the board's; when they land, they must be
+   * folded into `mapIdHash` for the same reason these three are (below).
+   */
+  readonly maxHouses: number
+  readonly maxDestinations: number
+  /** 1 <= groupCount <= MAX_GROUP_COUNT. Per-map, not a global constant — spec §4.2. */
+  readonly groupCount: number
 }
 
 /** Module-scope literal: frozen per Task 1's AST rule (`as const` alone is type-level only). */
@@ -31,10 +43,30 @@ const CODE_FOR_CHAR: Readonly<Record<string, TerrainCode>> = Object.freeze({
   T: TERRAIN.TREE,
 })
 
-export function parseMap(id: string, rows: readonly string[], startingTiles: number): MapData {
+export function parseMap(
+  id: string,
+  rows: readonly string[],
+  startingTiles: number,
+  maxHouses: number,
+  maxDestinations: number,
+  groupCount: number,
+): MapData {
   if (!Number.isInteger(startingTiles) || startingTiles < 0) {
     throw new Error(
       `parseMap("${id}"): startingTiles must be a non-negative integer, got ${startingTiles}`,
+    )
+  }
+  if (!Number.isInteger(maxHouses) || maxHouses < 1) {
+    throw new Error(`parseMap("${id}"): maxHouses must be a positive integer, got ${maxHouses}`)
+  }
+  if (!Number.isInteger(maxDestinations) || maxDestinations < 1) {
+    throw new Error(
+      `parseMap("${id}"): maxDestinations must be a positive integer, got ${maxDestinations}`,
+    )
+  }
+  if (!Number.isInteger(groupCount) || groupCount < 1 || groupCount > MAX_GROUP_COUNT) {
+    throw new Error(
+      `parseMap("${id}"): groupCount must be an integer in [1, ${MAX_GROUP_COUNT}], got ${groupCount}`,
     )
   }
 
@@ -75,5 +107,8 @@ export function parseMap(id: string, rows: readonly string[], startingTiles: num
     h,
     terrain: Object.freeze(terrain),
     startingTiles,
+    maxHouses,
+    maxDestinations,
+    groupCount,
   })
 }

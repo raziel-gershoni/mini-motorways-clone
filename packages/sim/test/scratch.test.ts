@@ -8,6 +8,8 @@ import {
   DISTINCT_EDGE_COSTS,
   ST_EXPANSIONS,
   ST_PUSHES,
+  CT_SYNCS,
+  CT_REBUILDS,
   createFlowField,
   createFlowFields,
   createScratch,
@@ -22,7 +24,7 @@ describe('createFlowField / createFlowFields', () => {
     expect(f.dir.length).toBe(37)
     expect(f.dist).toBeInstanceOf(Int32Array)
     expect(f.dir).toBeInstanceOf(Int8Array)
-    expect(f.builtFromRoads).toBe(0)
+    expect(f.builtFromFieldInputs).toBe(0)
     expect(f.builtFromSources).toBe(0)
   })
 
@@ -41,7 +43,7 @@ describe('createFlowField / createFlowFields', () => {
 
 describe('createScratch: allocation', () => {
   it('allocates bucketHead sized NB, nbrCell/nbrDir sized 8, stats sized for both counters', () => {
-    const s = createScratch(10)
+    const s = createScratch(10, 2, 3, new Int32Array(0))
     expect(s.bucketHead.length).toBe(NB)
     expect(s.nbrCell.length).toBe(8)
     expect(s.nbrDir.length).toBe(8)
@@ -51,9 +53,35 @@ describe('createScratch: allocation', () => {
   })
 
   it('sizes entryCell/entryNext to entryPoolCapacity(cells)', () => {
-    const s = createScratch(20)
+    const s = createScratch(20, 2, 3, new Int32Array(0))
     expect(s.entryCell.length).toBe(entryPoolCapacity(20))
     expect(s.entryNext.length).toBe(entryPoolCapacity(20))
+  })
+
+  it('sizes pushesPerCell to cells, reset (all zero) on a fresh scratch', () => {
+    const s = createScratch(20, 2, 3, new Int32Array(0))
+    expect(s.pushesPerCell.length).toBe(20)
+    expect(Array.from(s.pushesPerCell).every((v) => v === 0)).toBe(true)
+  })
+
+  it('sizes sourcesFlat to groupCount * maxDestinations, sourceCounts and slotCounts to groupCount', () => {
+    const s = createScratch(20, 3, 7, new Int32Array(0))
+    expect(s.sourcesFlat.length).toBe(3 * 7)
+    expect(s.sourceCounts.length).toBe(3)
+    expect(s.slotCounts.length).toBe(3)
+  })
+
+  it('sizes counters to hold CT_SYNCS and CT_REBUILDS, both starting at 0', () => {
+    const s = createScratch(20, 2, 3, new Int32Array(0))
+    expect(s.counters.length).toBeGreaterThan(Math.max(CT_SYNCS, CT_REBUILDS))
+    expect(s.counters[CT_SYNCS]).toBe(0)
+    expect(s.counters[CT_REBUILDS]).toBe(0)
+  })
+
+  it('stores fieldInputRanges as given, not recomputed', () => {
+    const ranges = Int32Array.from([4, 12, 40, 4])
+    const s = createScratch(20, 2, 3, ranges)
+    expect(s.fieldInputRanges).toBe(ranges) // same reference: never recomputed inside createScratch
   })
 })
 
@@ -62,6 +90,21 @@ describe('entryPoolCapacity', () => {
     expect(DISTINCT_EDGE_COSTS).toBe(2)
     expect(entryPoolCapacity(50)).toBe(150)
     expect(entryPoolCapacity(50)).toBe(50 * (1 + DISTINCT_EDGE_COSTS))
+  })
+})
+
+describe('DISTINCT_EDGE_COSTS linkage', () => {
+  // Neither `graph.test.ts`'s `expect(values.size).toBe(2)` nor this file's
+  // own `expect(DISTINCT_EDGE_COSTS).toBe(2)` above ties the two literals
+  // TOGETHER — both pass unchanged if a third edge-cost tier is added and
+  // only ONE of the two literals is bumped. This test computes the real
+  // distinct-value count from `edgeCost` itself and compares it against the
+  // constant directly, so "add a tier, forget to bump DISTINCT_EDGE_COSTS"
+  // fails here even though it would leave both literal-pinned tests green.
+  it('DISTINCT_EDGE_COSTS equals the number of distinct values edgeCost(k) actually returns', () => {
+    const values = new Set<number>()
+    for (let k = 0; k < DIR_COUNT; k++) values.add(edgeCost(k))
+    expect(DISTINCT_EDGE_COSTS).toBe(values.size)
   })
 })
 
@@ -94,11 +137,11 @@ describe('createScratch: invariant guards', () => {
     // arrays of this size — createScratch is expected to throw immediately.
     const hugeCells = Math.ceil(INF / DIAG_COST)
     expect(hugeCells * DIAG_COST).toBeGreaterThanOrEqual(INF)
-    expect(() => createScratch(hugeCells)).toThrow()
+    expect(() => createScratch(hugeCells, 2, 3, new Int32Array(0))).toThrow()
   })
 
   it('createScratch does not throw for a realistic board size', () => {
-    expect(() => createScratch(24 * 40)).not.toThrow()
+    expect(() => createScratch(24 * 40, 5, 16, new Int32Array(0))).not.toThrow()
   })
 })
 

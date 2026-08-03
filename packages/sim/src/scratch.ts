@@ -24,16 +24,31 @@ export const INF = 0x40000000
 /**
  * Dial's cyclic bucket count. Correct only while NB > every edge cost; §5.4
  * promises intersection and traffic-light penalties "as extra integer edge
- * weight", so 14 will be exceeded in M1c, and an over-large weight lands in a
- * bucket drained at the wrong d and is discarded — wrong answers, no crash.
- * `createScratch` asserts NB > edgeCost(k) for every k.
+ * weight" — M1c adds none, so 14 is not exceeded here, but M1d (chunk/
+ * intersection penalties) or M1e (upgrades) will exceed it, and an
+ * over-large weight lands in a bucket drained at the wrong d and is
+ * discarded — wrong answers, no crash. `createScratch` asserts NB >
+ * edgeCost(k) for every k.
+ *
+ * **Penalty-routing note, for whoever adds the first penalty.** `NB =
+ * DIAG_COST + 1 = 15` is the exact minimum — the instrumented maximum spread
+ * of pending distances is 14 (see `computeFlowField`'s module comment) — and
+ * `assertBucketCountExceedsEveryEdgeCost` only inspects `edgeCost(k)`. If a
+ * penalty is applied INSIDE `computeFlowField` rather than through the cost
+ * function, the assert keeps passing while the Dial queue silently aliases
+ * two distances into one bucket: wrong paths, no crash. A *per-cell* penalty
+ * makes cost depend on more than direction, so `edgeCost(dir)` and
+ * everything derived from it (including this constant) goes structurally
+ * blind — the signature is the thing that has to change, not just the value.
  */
 export const NB = DIAG_COST + 1
 
 /**
  * Distinct values `edgeCost` can return. Sets the entry-pool bound; M1d's
- * motorway tier makes it 3. Task 4 tests that edgeCost yields exactly this
- * many distinct values, so adding a tier without updating this fails a test.
+ * motorway tier makes it 3. `graph.test.ts` and `scratch.test.ts` both pin
+ * this against `edgeCost`'s real output (see the linkage test in
+ * `scratch.test.ts`, added M1c), so adding a cost tier without updating this
+ * constant fails a test rather than silently under-sizing the pool.
  */
 export const DISTINCT_EDGE_COSTS = 2
 
@@ -48,11 +63,34 @@ export const DISTINCT_EDGE_COSTS = 2
 export interface FlowField {
   readonly dist: Int32Array // weighted distance to the nearest source, or INF
   readonly dir: Int8Array // direction index toward a source; -1 at sources and unreachable cells
-  builtFromRoads: number // nonZeroWord(hashBytes(state.roads) | 0), or 0 if never built
-  builtFromSources: number // nonZeroWord(hashSources(sources) | 0), or 0 if never built
+  builtFromFieldInputs: number // nonZeroWord(hashFieldInputRegions(state, ranges) | 0), or 0 if never built
+  builtFromSources: number // nonZeroWord(hashSources(sourcesFlat, offset, count) | 0), or 0 if never built
 }
 
-/** Shared, transient. Fully overwritten at entry; carries nothing between calls. */
+/**
+ * Allocation and cross-call state for pathfinding, source assembly and
+ * instrumentation, all deliberately OUTSIDE the state buffer and outside
+ * every hash — none of this is replay state; it is all re-derivable from
+ * `state`/`world` alone (design decision 3, M1b).
+ *
+ * Members split by lifetime, since M1c mixes two shapes that used to be one:
+ *
+ *   - Pathfinding scratch (`bucketHead` ... `stats`, `pushesPerCell`): fully
+ *     overwritten at the entry of every `computeFlowField` call; carries
+ *     nothing between calls.
+ *   - Source buffers (`sourcesFlat`, `sourceCounts`, `slotCounts`): rewritten
+ *     in full by whatever assembles sources each tick (M1c Task 4's
+ *     dispatch); NOT reset by `computeFlowField` itself, since they are its
+ *     input, not its scratch.
+ *   - `counters` (`CT_SYNCS`, `CT_REBUILDS`): cumulative across the whole run,
+ *     never reset by anything — unlike `stats`, which is documented as
+ *     carrying nothing between calls, these exist specifically to answer
+ *     "did a sync happen this tick" and "did anything rebuild this tick" as
+ *     direct positive assertions.
+ *   - `fieldInputRanges`: built ONCE, at boot (`createFieldInputRanges`,
+ *     regions.ts), and never rewritten — the layout-derived staleness key
+ *     `hashFieldInputRegions` walks every tick.
+ */
 export interface Scratch {
   readonly bucketHead: Int32Array // NB
   readonly entryCell: Int32Array // entryPoolCapacity(cells)
@@ -60,20 +98,31 @@ export interface Scratch {
   readonly nbrCell: Int32Array // DIR_COUNT
   readonly nbrDir: Int8Array // DIR_COUNT
   readonly stats: Int32Array // ST_EXPANSIONS, ST_PUSHES
+  readonly pushesPerCell: Int32Array // cells; reset per computeFlowField call, incremented in push
+  readonly sourcesFlat: Int32Array // groupCount * maxDestinations; colour c occupies [c*maxDestinations, c*maxDestinations + sourceCounts[c])
+  readonly sourceCounts: Int32Array // groupCount
+  readonly slotCounts: Int32Array // groupCount; Task 3's accumulator input
+  readonly counters: Int32Array // CT_SYNCS, CT_REBUILDS — cumulative, never reset
+  readonly fieldInputRanges: Int32Array // (byteOffset, byteLength) pairs, one per FIELD_INPUT region
 }
 
 export const ST_EXPANSIONS = 0
 export const ST_PUSHES = 1
 const STATS_LENGTH = 2
 
+export const CT_SYNCS = 0
+export const CT_REBUILDS = 1
+const COUNTERS_LENGTH = 2
+
 /**
  * `entryPoolCapacity(cells) = cells * (1 + DISTINCT_EDGE_COSTS)`: one push
  * per distinct edge-cost value a cell can be improved by, plus one source
  * insertion. Conservative by construction — a source cell can never also be
  * improvement-pushed, since its distance (0) can never improve — and it is
- * the formulation that survives M1d's motorway ÷3 tier and flags M1c's
- * intersection penalties as requiring a revisit (both change
- * `DISTINCT_EDGE_COSTS`, which this derives from rather than a literal).
+ * the formulation that survives M1d's motorway ÷3 tier and flags M1d/M1e's
+ * intersection and traffic-light penalties as requiring a revisit (both
+ * change `DISTINCT_EDGE_COSTS`, which this derives from rather than a
+ * literal). M1c adds neither.
  *
  * The reviewed draft's `cells * 9` bound ("8 relaxations per cell plus one
  * source insertion") was wrong in both directions: expansions occur in
@@ -91,7 +140,7 @@ export function createFlowField(cells: number): FlowField {
   return {
     dist: new Int32Array(cells),
     dir: new Int8Array(cells),
-    builtFromRoads: 0,
+    builtFromFieldInputs: 0,
     builtFromSources: 0,
   }
 }
@@ -145,7 +194,24 @@ export function assertBucketCountExceedsEveryEdgeCost(
  *     marker, making a genuinely reachable cell indistinguishable from one
  *     that is not.
  */
-export function createScratch(cells: number): Scratch {
+/**
+ * `cells`, `groupCount` and `maxDestinations` size the source buffers;
+ * `fieldInputRanges` (built once, at boot, by `createFieldInputRanges` —
+ * regions.ts) is stored as-is, never recomputed here or on any later call —
+ * see that function's own comment for why recomputing it per tick would
+ * violate "nothing allocates inside a tick".
+ *
+ * Deliberately `createScratch(cells, groupCount, maxDestinations,
+ * fieldInputRanges)`, not `createScratch(map)`: this keeps `scratch.test.ts`
+ * free to pass a doctored huge `cells` to exercise the `cells * DIAG_COST >=
+ * INF` guard without allocating a real `MapData`.
+ */
+export function createScratch(
+  cells: number,
+  groupCount: number,
+  maxDestinations: number,
+  fieldInputRanges: Int32Array,
+): Scratch {
   assertBucketCountExceedsEveryEdgeCost(NB, DIR_COUNT, edgeCost)
   if (cells * DIAG_COST >= INF) {
     throw new Error(
@@ -163,5 +229,11 @@ export function createScratch(cells: number): Scratch {
     nbrCell: new Int32Array(DIR_COUNT),
     nbrDir: new Int8Array(DIR_COUNT),
     stats: new Int32Array(STATS_LENGTH),
+    pushesPerCell: new Int32Array(cells),
+    sourcesFlat: new Int32Array(groupCount * maxDestinations),
+    sourceCounts: new Int32Array(groupCount),
+    slotCounts: new Int32Array(groupCount),
+    counters: new Int32Array(COUNTERS_LENGTH),
+    fieldInputRanges,
   }
 }

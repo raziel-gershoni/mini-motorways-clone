@@ -1,10 +1,15 @@
 import { describe, it, expect } from 'vitest'
 import { parseMap, firstCity, type MapData } from '@laneways/shared'
 import { createWorld, mapIdHash } from '../src/world'
-import { createState, nonZeroWord, H_MAP } from '../src/state'
+import { createState, nonZeroWord, MI_MAP } from '../src/state'
 
-/** Re-blessed alongside any change to firstCity.ts's content — see the test below. */
-const FIRST_CITY_HASH = 777884973
+/**
+ * Re-blessed alongside any change to firstCity.ts's content — see the test
+ * below. Re-blessed in M1c Task 1 (was 777884973, M1b's value): `mapIdHash`
+ * now folds `maxHouses`/`maxDestinations`/`groupCount`, which firstCity()
+ * sets to 40/16/5.
+ */
+const FIRST_CITY_HASH = -914732692
 
 /**
  * Contains all four terrain codes — the vacuity check the ledger established
@@ -29,7 +34,7 @@ function expectedPassable(rows: readonly string[]): number[] {
 
 describe('createWorld', () => {
   it('produces terrain and passable arrays of exactly w * h', () => {
-    const map = parseMap('sizes', ROWS, 5)
+    const map = parseMap('sizes', ROWS, 5, 40, 16, 5)
     const world = createWorld(map)
     expect(world.cells).toBe(map.w * map.h)
     expect(world.terrain.length).toBe(map.w * map.h)
@@ -43,13 +48,13 @@ describe('createWorld', () => {
   })
 
   it('marks LAND and TREE passable, WATER and MOUNTAIN not, matching the source rows', () => {
-    const map = parseMap('passable', ROWS, 5)
+    const map = parseMap('passable', ROWS, 5, 40, 16, 5)
     const world = createWorld(map)
     expect(Array.from(world.passable)).toEqual(expectedPassable(ROWS))
   })
 
   it('is byte-identical across two calls for the same MapData', () => {
-    const map = parseMap('repeat', ROWS, 5)
+    const map = parseMap('repeat', ROWS, 5, 40, 16, 5)
     const a = createWorld(map)
     const b = createWorld(map)
     expect(Array.from(a.terrain)).toEqual(Array.from(b.terrain))
@@ -59,34 +64,62 @@ describe('createWorld', () => {
 
 describe('mapIdHash', () => {
   it('is deterministic for the same map content', () => {
-    const map = parseMap('det', ROWS, 5)
-    expect(mapIdHash(map)).toBe(mapIdHash(parseMap('det', ROWS, 5)))
+    const map = parseMap('det', ROWS, 5, 40, 16, 5)
+    expect(mapIdHash(map)).toBe(mapIdHash(parseMap('det', ROWS, 5, 40, 16, 5)))
   })
 
   it('is negative for at least one map, and equals what the header round-trips', () => {
     // Found by brute-force search over the exact recipe this function
-    // implements: a 1x1 LAND map with id "map0" hashes >= 2^31, so `| 0`
-    // makes it negative. If this ever collides with a future implementation
-    // change, the failure is exactly the point: it means the recipe changed.
-    const map = parseMap('map0', ['.'], 30)
+    // implements: a 1x1 LAND map with id "map4" hashes >= 2^31, so `| 0`
+    // makes it negative. Re-found in M1c Task 1 ("map0" no longer collides
+    // negative now that maxHouses/maxDestinations/groupCount are folded in —
+    // the recipe changed, so the search was re-run rather than the
+    // assertion loosened). If this ever collides with a future
+    // implementation change, the failure is exactly the point: it means the
+    // recipe changed.
+    const map = parseMap('map4', ['.'], 30, 40, 16, 5)
     const hash = mapIdHash(map)
     expect(hash).toBeLessThan(0)
     const state = createState('seed', map)
-    expect(state.header[H_MAP]).toBe(hash)
+    expect(state.mapIdentity[MI_MAP]).toBe(hash)
   })
 
   it('differs for two same-length ids with identical boards', () => {
-    const a: MapData = parseMap('firstCitY', ROWS, 5)
-    const b: MapData = parseMap('firstCitZ', ROWS, 5)
+    const a: MapData = parseMap('firstCitY', ROWS, 5, 40, 16, 5)
+    const b: MapData = parseMap('firstCitZ', ROWS, 5, 40, 16, 5)
     expect(mapIdHash(a)).not.toBe(mapIdHash(b))
   })
 
   it('differs when only the terrain content changes, id/w/h/startingTiles held equal', () => {
-    const a = parseMap('same-id', ['...', '...'], 7)
-    const b = parseMap('same-id', ['..~', '...'], 7)
+    const a = parseMap('same-id', ['...', '...'], 7, 40, 16, 5)
+    const b = parseMap('same-id', ['..~', '...'], 7, 40, 16, 5)
     expect(a.w).toBe(b.w)
     expect(a.h).toBe(b.h)
     expect(a.startingTiles).toBe(b.startingTiles)
+    expect(mapIdHash(a)).not.toBe(mapIdHash(b))
+  })
+
+  it('moves when maxHouses alone changes, id/w/h/startingTiles/maxDestinations/groupCount held equal', () => {
+    // The silent-corruption fix M1c's plan describes: a map re-authored
+    // between a run and its server replay with maxHouses/maxDestinations
+    // changed so the byte total is unchanged would, without this fold,
+    // produce the same MI_MAP, the same w/h, and the same total byte count —
+    // and `viewsOver` would reinterpret the whole buffer under a different
+    // offset table with no throw anywhere.
+    const a = parseMap('limits-houses', ROWS, 5, 40, 16, 5)
+    const b = parseMap('limits-houses', ROWS, 5, 8, 16, 5)
+    expect(mapIdHash(a)).not.toBe(mapIdHash(b))
+  })
+
+  it('moves when maxDestinations alone changes, everything else held equal', () => {
+    const a = parseMap('limits-dest', ROWS, 5, 40, 16, 5)
+    const b = parseMap('limits-dest', ROWS, 5, 40, 4, 5)
+    expect(mapIdHash(a)).not.toBe(mapIdHash(b))
+  })
+
+  it('moves when groupCount alone changes, everything else held equal', () => {
+    const a = parseMap('limits-group', ROWS, 5, 40, 16, 5)
+    const b = parseMap('limits-group', ROWS, 5, 40, 16, 3)
     expect(mapIdHash(a)).not.toBe(mapIdHash(b))
   })
 

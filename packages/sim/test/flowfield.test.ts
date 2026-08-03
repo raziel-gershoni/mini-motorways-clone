@@ -10,6 +10,7 @@ import {
   createFlowField,
   createFlowFields,
   createScratch,
+  DISTINCT_EDGE_COSTS,
   INF,
   NB,
   ST_EXPANSIONS,
@@ -17,22 +18,32 @@ import {
   type FlowField,
   type Scratch,
 } from '../src/scratch'
-import { computeFlowField, hashSources, hashRoadRegion, syncFields, fieldFor } from '../src/flowfield'
+import { computeFlowField, hashSources, hashFieldInputRegions, syncFields, fieldFor } from '../src/flowfield'
+import { createFieldInputRanges } from '../src/regions'
 
 /**
  * Fixtures and helpers shared across this file. All-LAND boards throughout:
  * terrain gating is graph.ts's concern (already covered by its own
  * randomised property test), so these fixtures need bounds/shape variety
  * instead — hence non-square (w != h) wherever the exact dimensions matter.
+ *
+ * M1c widened `computeFlowField`/`hashSources` to a preallocated
+ * `Int32Array` plus `(offset, count)`, and `syncFields`/`fieldFor` to read
+ * sources from `scratch.sourcesFlat`/`scratch.sourceCounts` (keyed by
+ * `world.map.maxDestinations`) rather than taking a `readonly number[]`
+ * directly. The adapters below preserve every existing test's call SHAPE
+ * (an array of numbers) while translating to the new API, so each test below
+ * still reads as "these are the sources" rather than "these are the bytes."
  */
 
 function cellAt(w: number, x: number, y: number): number {
   return y * w + x
 }
 
+/** `maxDestinations: 16, groupCount: 5` throughout — generous enough for every fixture below (max 4 sources used anywhere in this file). */
 function landFixture(id: string, w: number, h: number): { map: MapData; world: WorldData } {
   const rows = Array.from({ length: h }, () => '.'.repeat(w))
-  const map = parseMap(id, rows, 999)
+  const map = parseMap(id, rows, 999, 40, 16, 5)
   const world = createWorld(map)
   return { map, world }
 }
@@ -94,6 +105,68 @@ function firstRoadedCells(state: GameState, world: WorldData, count: number): nu
   return out
 }
 
+// --- M1c call-shape adapters --------------------------------------------
+
+/** `createScratch`, for tests that only ever call `computeField` — groupCount/maxDestinations are irrelevant to that path. */
+function scratchOnly(world: WorldData): Scratch {
+  return createScratch(world.cells, 1, world.map.maxDestinations, createFieldInputRanges(world.map))
+}
+
+/** `createScratch` sized for `groupCount` colours — required for `syncFieldsFromLists`/`fieldForColour` below, whose `syncFields` asserts `sourceCounts.length === fields.length`. */
+function scratchFor(world: WorldData, groupCount: number): Scratch {
+  return createScratch(world.cells, groupCount, world.map.maxDestinations, createFieldInputRanges(world.map))
+}
+
+/** `computeFlowField` over a plain source array, exactly M1b's call shape. */
+function computeField(
+  state: GameState,
+  world: WorldData,
+  sources: readonly number[],
+  out: FlowField,
+  scratch: Scratch,
+): void {
+  computeFlowField(state, world, Int32Array.from(sources), 0, sources.length, out, scratch)
+}
+
+/** `hashSources` over a plain source array. */
+function hashSourceList(list: readonly number[]): number {
+  return hashSources(Int32Array.from(list), 0, list.length)
+}
+
+/** Writes `list` into colour `colour`'s slice of `scratch.sourcesFlat`/`sourceCounts`, keyed by `world.map.maxDestinations` — the exact layout `syncFields`/`fieldFor` read. */
+function setSources(scratch: Scratch, world: WorldData, colour: number, list: readonly number[]): void {
+  const maxDestinations = world.map.maxDestinations
+  scratch.sourceCounts[colour] = list.length
+  for (let i = 0; i < list.length; i++) {
+    scratch.sourcesFlat[colour * maxDestinations + i] = list[i] as number
+  }
+}
+
+/** `syncFields` over per-colour plain source arrays, exactly M1b's call shape. */
+function syncFieldsFromLists(
+  state: GameState,
+  world: WorldData,
+  sourcesByColour: readonly (readonly number[])[],
+  fields: readonly FlowField[],
+  scratch: Scratch,
+): void {
+  for (let c = 0; c < sourcesByColour.length; c++) {
+    setSources(scratch, world, c, sourcesByColour[c] as readonly number[])
+  }
+  syncFields(state, world, fields, scratch)
+}
+
+/** `fieldFor`, reading whatever `scratch` currently holds for `colour` (no separate `sources` parameter in the M1c signature). */
+function fieldForColour(
+  state: GameState,
+  world: WorldData,
+  fields: readonly FlowField[],
+  colour: number,
+  scratch: Scratch,
+): FlowField {
+  return fieldFor(state, world, fields, colour, scratch)
+}
+
 // ---------------------------------------------------------------------------
 
 describe('computeFlowField: source acceptance', () => {
@@ -108,8 +181,8 @@ describe('computeFlowField: source acceptance', () => {
     expect(roadless).toBeLessThan(a) // keep the source list ascending below
 
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    computeFlowField(state, world, [roadless, a], field, scratch)
+    const scratch = scratchOnly(world)
+    computeField(state, world, [roadless, a], field, scratch)
 
     expect(field.dist[roadless]).toBe(INF)
     expect(field.dir[roadless]).toBe(-1)
@@ -121,8 +194,8 @@ describe('computeFlowField: source acceptance', () => {
     const { map, world } = landFixture('all-rejected', 5, 4)
     const state = createState('s', map)
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    computeFlowField(state, world, [0, 3, 7], field, scratch)
+    const scratch = scratchOnly(world)
+    computeField(state, world, [0, 3, 7], field, scratch)
     expect(Array.from(field.dist).every((d) => d === INF)).toBe(true)
     expect(Array.from(field.dir).every((d) => d === -1)).toBe(true)
   })
@@ -138,8 +211,8 @@ describe('computeFlowField: edge costs along a line', () => {
     placeChain(state, world, cells)
 
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    computeFlowField(state, world, [cells[0] as number], field, scratch)
+    const scratch = scratchOnly(world)
+    computeField(state, world, [cells[0] as number], field, scratch)
 
     for (let i = 0; i < cells.length; i++) {
       expect(field.dist[cells[i] as number], `hop ${i}`).toBe(i * ORTHO_COST)
@@ -154,8 +227,8 @@ describe('computeFlowField: edge costs along a line', () => {
     placeChain(state, world, cells)
 
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    computeFlowField(state, world, [cells[0] as number], field, scratch)
+    const scratch = scratchOnly(world)
+    computeField(state, world, [cells[0] as number], field, scratch)
 
     for (let i = 0; i < cells.length; i++) {
       expect(field.dist[cells[i] as number], `hop ${i}`).toBe(i * DIAG_COST)
@@ -174,8 +247,8 @@ describe('computeFlowField: edge costs along a line', () => {
     const roadless = cellAt(w, 4, 3)
 
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    computeFlowField(state, world, [source], field, scratch)
+    const scratch = scratchOnly(world)
+    computeField(state, world, [source], field, scratch)
 
     expect(field.dist[farA]).toBe(INF)
     expect(field.dir[farA]).toBe(-1)
@@ -205,8 +278,8 @@ describe('computeFlowField: row-seam safety', () => {
     const wrapTarget = cellAt(w, 0, 1) // row 1, column 0 — what `source + 1` would naively land on
 
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    computeFlowField(state, world, [source], field, scratch)
+    const scratch = scratchOnly(world)
+    computeField(state, world, [source], field, scratch)
 
     expect(field.dist[source]).toBe(0) // still an accepted source (it carries a road bit)
     expect(field.dist[wrapTarget]).toBe(INF)
@@ -226,8 +299,8 @@ describe('computeFlowField: two sources, five-cell corridor', () => {
   it('every cell takes the minimum distance from either end', () => {
     const { state, world } = buildCorridor()
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    computeFlowField(state, world, [0, 4], field, scratch)
+    const scratch = scratchOnly(world)
+    computeField(state, world, [0, 4], field, scratch)
     expect(Array.from(field.dist)).toEqual([0, 10, 20, 10, 0])
   })
 
@@ -243,16 +316,16 @@ describe('computeFlowField: two sources, five-cell corridor', () => {
     // dir stays pointed at cell 1.
     const { state, world } = buildCorridor()
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    computeFlowField(state, world, [0, 4], field, scratch)
+    const scratch = scratchOnly(world)
+    computeField(state, world, [0, 4], field, scratch)
     expect(Array.from(field.dir)).toEqual([-1, 6, 6, 2, -1])
   })
 
   it('the descending order [4, 0] throws (sources must be strictly ascending)', () => {
     const { state, world } = buildCorridor()
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    expect(() => computeFlowField(state, world, [4, 0], field, scratch)).toThrow()
+    const scratch = scratchOnly(world)
+    expect(() => computeField(state, world, [4, 0], field, scratch)).toThrow()
   })
 })
 
@@ -296,11 +369,11 @@ describe('computeFlowField: differential two-source oracle', () => {
     placeRoad(state, world, B, C) // diagonal, cost 14
 
     const fieldA = createFlowField(world.cells)
-    computeFlowField(state, world, [A], fieldA, createScratch(world.cells))
+    computeField(state, world, [A], fieldA, scratchOnly(world))
     const fieldB = createFlowField(world.cells)
-    computeFlowField(state, world, [B], fieldB, createScratch(world.cells))
+    computeField(state, world, [B], fieldB, scratchOnly(world))
     const fieldAB = createFlowField(world.cells)
-    computeFlowField(state, world, [A, B], fieldAB, createScratch(world.cells))
+    computeField(state, world, [A, B], fieldAB, scratchOnly(world))
 
     for (let c = 0; c < world.cells; c++) {
       const expected = Math.min(fieldA.dist[c] as number, fieldB.dist[c] as number)
@@ -320,11 +393,11 @@ describe('computeFlowField: differential two-source oracle', () => {
     const B = roaded[1] as number
 
     const fieldA = createFlowField(world.cells)
-    computeFlowField(state, world, [A], fieldA, createScratch(world.cells))
+    computeField(state, world, [A], fieldA, scratchOnly(world))
     const fieldB = createFlowField(world.cells)
-    computeFlowField(state, world, [B], fieldB, createScratch(world.cells))
+    computeField(state, world, [B], fieldB, scratchOnly(world))
     const fieldAB = createFlowField(world.cells)
-    computeFlowField(state, world, [A, B], fieldAB, createScratch(world.cells))
+    computeField(state, world, [A, B], fieldAB, scratchOnly(world))
 
     for (let c = 0; c < world.cells; c++) {
       expect(fieldAB.dist[c], `cell ${c}`).toBe(Math.min(fieldA.dist[c] as number, fieldB.dist[c] as number))
@@ -343,8 +416,8 @@ describe('computeFlowField: structural properties over a randomised graph', () =
     const { state, world } = randomGraphFixture('structural', 15, 11, 220)
     const sources = firstRoadedCells(state, world, 2)
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    computeFlowField(state, world, sources, field, scratch)
+    const scratch = scratchOnly(world)
+    computeField(state, world, sources, field, scratch)
     return { state, world, field, scratch, sources }
   }
 
@@ -442,15 +515,54 @@ describe('computeFlowField: structural properties over a randomised graph', () =
     // source — so a change that makes the algorithm push more often is
     // caught here even if the pool was grown to accommodate it.
     //
-    // The `2` is deliberately a literal and NOT `DISTINCT_EDGE_COSTS`: M1c's
-    // intersection penalties add a third edge cost, which would grow both
-    // that constant and `entryPoolCapacity` together and leave a
-    // constant-derived bound just as inert as the capacity one. Pinning the
-    // literal makes that change fail here, which is where it should be
-    // reconsidered.
+    // The `2` is deliberately a literal and NOT `DISTINCT_EDGE_COSTS`: a
+    // third edge cost tier (M1d/M1e) would grow both that constant and
+    // `entryPoolCapacity` together and leave a constant-derived bound just
+    // as inert as the capacity one. Pinning the literal makes that change
+    // fail here, which is where it should be reconsidered.
     const derivedPushBound = 2 * (world.cells - sources.length) + sources.length
     expect(scratch.stats[ST_PUSHES]).toBeGreaterThan(0)
     expect(scratch.stats[ST_PUSHES]).toBeLessThanOrEqual(derivedPushBound)
+  })
+
+  it('instrumented pushes-per-cell: max(pushesPerCell) <= DISTINCT_EDGE_COSTS over the same randomised graph', () => {
+    // The proof this bounds: a non-source cell is pushed at most once per
+    // distinct edge-cost value it can be IMPROVED by (a second improvement
+    // needs a strictly smaller edge cost than the first), plus a source
+    // cell is pushed exactly once (its distance, 0, can never improve). This
+    // is the test that fails when that PROOF collapses — e.g. if a future
+    // penalty applied inside computeFlowField (rather than through
+    // edgeCost) let a cell be relaxed more than DISTINCT_EDGE_COSTS times —
+    // rather than only when someone edits a literal (scratch.ts:62's
+    // `expect(DISTINCT_EDGE_COSTS).toBe(2)` and graph.test.ts:254's
+    // `expect(values.size).toBe(2)` do that job; this test is additive, not
+    // a replacement).
+    const { world, scratch } = buildGraphAndField()
+    let maxPushes = 0
+    for (let c = 0; c < world.cells; c++) {
+      const p = scratch.pushesPerCell[c] as number
+      if (p > maxPushes) maxPushes = p
+    }
+    expect(maxPushes).toBeGreaterThan(0) // vacuity: something was actually pushed
+    expect(maxPushes).toBeLessThanOrEqual(DISTINCT_EDGE_COSTS)
+  })
+
+  it('pushesPerCell resets to 0 per computeFlowField call, not accumulated across rebuilds', () => {
+    const { state, world, sources } = (() => {
+      const { state, world } = randomGraphFixture('pushes-reset', 9, 7, 250)
+      return { state, world, sources: firstRoadedCells(state, world, 2) }
+    })()
+    const field = createFlowField(world.cells)
+    const scratch = scratchOnly(world)
+    computeField(state, world, sources, field, scratch)
+    const firstTotal = Array.from(scratch.pushesPerCell).reduce((a, b) => a + b, 0)
+    expect(firstTotal).toBeGreaterThan(0)
+    computeField(state, world, sources, field, scratch)
+    const secondTotal = Array.from(scratch.pushesPerCell).reduce((a, b) => a + b, 0)
+    // If the reset were dropped, the second call's per-cell counts would be
+    // double the first's (same graph, same sources -> identical relaxation
+    // pattern) rather than equal to it.
+    expect(secondTotal).toBe(firstTotal)
   })
 })
 
@@ -459,8 +571,8 @@ describe('computeFlowField: reset contract (fresh vs. used scratch/field)', () =
     const { state, world } = randomGraphFixture('fresh', 9, 7, 250)
     const sources = firstRoadedCells(state, world, 2)
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    computeFlowField(state, world, sources, field, scratch)
+    const scratch = scratchOnly(world)
+    computeField(state, world, sources, field, scratch)
     expect(field.dist[sources[0] as number]).toBe(0)
     expect(Array.from(field.dist).some((d) => d !== INF && d !== 0)).toBe(true)
   })
@@ -469,15 +581,15 @@ describe('computeFlowField: reset contract (fresh vs. used scratch/field)', () =
     const { state, world } = randomGraphFixture('used', 9, 7, 250)
     const roaded = firstRoadedCells(state, world, 3)
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    computeFlowField(state, world, [roaded[0] as number], field, scratch) // "dirty" it first
+    const scratch = scratchOnly(world)
+    computeField(state, world, [roaded[0] as number], field, scratch) // "dirty" it first
 
     const secondSources = [roaded[1] as number, roaded[2] as number]
     const freshField = createFlowField(world.cells)
-    const freshScratch = createScratch(world.cells)
-    computeFlowField(state, world, secondSources, freshField, freshScratch)
+    const freshScratch = scratchOnly(world)
+    computeField(state, world, secondSources, freshField, freshScratch)
 
-    computeFlowField(state, world, secondSources, field, scratch)
+    computeField(state, world, secondSources, field, scratch)
 
     expect(Array.from(field.dist)).toEqual(Array.from(freshField.dist))
     expect(Array.from(field.dir)).toEqual(Array.from(freshField.dir))
@@ -487,11 +599,11 @@ describe('computeFlowField: reset contract (fresh vs. used scratch/field)', () =
     const { state, world } = randomGraphFixture('rebuild', 9, 7, 300)
     const sources = firstRoadedCells(state, world, 3)
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    computeFlowField(state, world, sources, field, scratch)
+    const scratch = scratchOnly(world)
+    computeField(state, world, sources, field, scratch)
     const dist1 = Array.from(field.dist)
     const dir1 = Array.from(field.dir)
-    computeFlowField(state, world, sources, field, scratch)
+    computeField(state, world, sources, field, scratch)
     expect(Array.from(field.dist)).toEqual(dist1)
     expect(Array.from(field.dir)).toEqual(dir1)
   })
@@ -503,30 +615,33 @@ describe('computeFlowField: source list validation', () => {
     const roaded = firstRoadedCells(state, world, 2)
     const dup = [roaded[0] as number, roaded[0] as number, roaded[1] as number]
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    expect(() => computeFlowField(state, world, dup, field, scratch)).toThrow()
+    const scratch = scratchOnly(world)
+    expect(() => computeField(state, world, dup, field, scratch)).toThrow()
   })
 
   it('throws on an out-of-range source (negative or >= cells), not by reading dist[s] as undefined', () => {
     const { map, world } = landFixture('range', 6, 5)
     const state = createState('s', map)
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    expect(() => computeFlowField(state, world, [-1], field, scratch)).toThrow()
-    expect(() => computeFlowField(state, world, [world.cells], field, scratch)).toThrow()
+    const scratch = scratchOnly(world)
+    expect(() => computeField(state, world, [-1], field, scratch)).toThrow()
+    expect(() => computeField(state, world, [world.cells], field, scratch)).toThrow()
   })
 
-  it('throws on a fractional (non-integer) source, rather than silently dropping it', () => {
-    // Without the `Number.isInteger` guard, a fractional in-range source is
-    // neither rejected nor genuinely processed: `state.roads[2.5]` and
-    // `dist[2.5]` are both no-ops on a typed array (a fractional index
-    // matches no real element), so the source would be silently swallowed
-    // instead of throwing — the guard turns that into a loud failure.
-    const { map, world } = landFixture('fractional', 6, 5)
-    const state = createState('s', map)
-    const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    expect(() => computeFlowField(state, world, [2.5], field, scratch)).toThrow()
+  it('a fractional source is unreachable as of M1c, and that is stated rather than hidden', () => {
+    // M1b's `readonly number[]` signature could carry a genuine fractional
+    // JS number this far; M1c's `Int32Array` cannot — `Int32Array.from([2.5])`
+    // truncates to `[2]` via ToInt32 (the exact same coercion a direct
+    // `sourcesFlat[i] = 2.5` write would apply) before `computeFlowField`
+    // ever sees the value, so a fractional element cannot exist in the
+    // container this signature accepts. `computeFlowField`'s own
+    // `Number.isInteger(s)` guard is kept anyway (see its module comment,
+    // same reasoning as `hashSources`' length fold: cheap and independently
+    // correct even though currently subsumed) — this test pins that the
+    // widened API's OWN typed-array coercion is what closes the case the old
+    // guard used to be the only defence against, not that the guard became
+    // meaningless.
+    expect(Int32Array.from([2.5])[0]).toBe(2) // the coercion, demonstrated directly
   })
 
   it('sorting a shuffled source list gives the same dir as the already-sorted list; the shuffled list itself throws', () => {
@@ -536,16 +651,16 @@ describe('computeFlowField: source list validation', () => {
     expect([...shuffled].sort((a, b) => a - b)).toEqual(sortedSources) // sanity: same set
 
     const fieldSorted = createFlowField(world.cells)
-    computeFlowField(state, world, sortedSources, fieldSorted, createScratch(world.cells))
+    computeField(state, world, sortedSources, fieldSorted, scratchOnly(world))
 
     const fieldFromShuffleSorted = createFlowField(world.cells)
     const sortedFromShuffle = [...shuffled].sort((a, b) => a - b)
-    computeFlowField(state, world, sortedFromShuffle, fieldFromShuffleSorted, createScratch(world.cells))
+    computeField(state, world, sortedFromShuffle, fieldFromShuffleSorted, scratchOnly(world))
 
     expect(Array.from(fieldFromShuffleSorted.dir)).toEqual(Array.from(fieldSorted.dir))
     expect(Array.from(fieldFromShuffleSorted.dist)).toEqual(Array.from(fieldSorted.dist))
 
-    expect(() => computeFlowField(state, world, shuffled, createFlowField(world.cells), createScratch(world.cells))).toThrow()
+    expect(() => computeField(state, world, shuffled, createFlowField(world.cells), scratchOnly(world))).toThrow()
   })
 })
 
@@ -620,8 +735,8 @@ describe('computeFlowField: entry pool sizing (unequal-arms fixture)', () => {
   it('X is genuinely relaxed twice: first to 84 (via PB), then improved to 80 (via PA)', () => {
     const { state, world, S, PA, PB, X } = buildUnequalArms()
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    computeFlowField(state, world, [S], field, scratch)
+    const scratch = scratchOnly(world)
+    computeField(state, world, [S], field, scratch)
     expect(field.dist[PA]).toBe(70)
     expect(field.dist[PB]).toBe(70)
     expect(field.dist[X]).toBe(80)
@@ -631,8 +746,8 @@ describe('computeFlowField: entry pool sizing (unequal-arms fixture)', () => {
   it('the real entry pool (cells * 3) handles this fixture without overflow', () => {
     const { state, world, S } = buildUnequalArms()
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells) // real capacity: world.cells * 3
-    expect(() => computeFlowField(state, world, [S], field, scratch)).not.toThrow()
+    const scratch = scratchOnly(world) // real capacity: world.cells * 3
+    expect(() => computeField(state, world, [S], field, scratch)).not.toThrow()
   })
 
   it('work counters: ST_EXPANSIONS counts the 14 reachable cells exactly once each (not X\'s stale first entry); ST_PUSHES counts exactly the known 15; both reset on rebuild', () => {
@@ -655,8 +770,8 @@ describe('computeFlowField: entry pool sizing (unequal-arms fixture)', () => {
     // plus X's second, improving relaxation (1) = 1 + 13 + 1 = 15.
     const { state, world, S } = buildUnequalArms()
     const field = createFlowField(world.cells)
-    const scratch = createScratch(world.cells)
-    computeFlowField(state, world, [S], field, scratch)
+    const scratch = scratchOnly(world)
+    computeField(state, world, [S], field, scratch)
     let reachable = 0
     for (let c = 0; c < world.cells; c++) if (field.dist[c] !== INF) reachable++
     expect(reachable).toBe(14)
@@ -668,7 +783,7 @@ describe('computeFlowField: entry pool sizing (unequal-arms fixture)', () => {
     // `stats[ST_EXPANSIONS] = 0`) at entry is invisible on a FRESH scratch,
     // whose default is already 0, and only visible here, on a scratch that
     // already holds a nonzero count from the call above.
-    computeFlowField(state, world, [S], field, scratch)
+    computeField(state, world, [S], field, scratch)
     expect(scratch.stats[ST_EXPANSIONS]).toBe(14)
     expect(scratch.stats[ST_PUSHES]).toBe(15)
   })
@@ -677,6 +792,7 @@ describe('computeFlowField: entry pool sizing (unequal-arms fixture)', () => {
     const { state, world, S } = buildUnequalArms()
     const field = createFlowField(world.cells)
     const undersized: Scratch = {
+      ...scratchOnly(world),
       bucketHead: new Int32Array(NB),
       entryCell: new Int32Array(14),
       entryNext: new Int32Array(14),
@@ -684,13 +800,14 @@ describe('computeFlowField: entry pool sizing (unequal-arms fixture)', () => {
       nbrDir: new Int8Array(8),
       stats: new Int32Array(2),
     }
-    expect(() => computeFlowField(state, world, [S], field, undersized)).toThrow()
+    expect(() => computeField(state, world, [S], field, undersized)).toThrow()
   })
 
   it('a pool sized for exactly 15 entries is sufficient and produces the correct answer', () => {
     const { state, world, S, X } = buildUnequalArms()
     const field = createFlowField(world.cells)
     const exact: Scratch = {
+      ...scratchOnly(world),
       bucketHead: new Int32Array(NB),
       entryCell: new Int32Array(15),
       entryNext: new Int32Array(15),
@@ -698,7 +815,7 @@ describe('computeFlowField: entry pool sizing (unequal-arms fixture)', () => {
       nbrDir: new Int8Array(8),
       stats: new Int32Array(2),
     }
-    expect(() => computeFlowField(state, world, [S], field, exact)).not.toThrow()
+    expect(() => computeField(state, world, [S], field, exact)).not.toThrow()
     expect(field.dist[X]).toBe(80)
   })
 })
@@ -720,7 +837,7 @@ describe('syncFields: a rebuild that throws must not leave the stamps describing
    * any point after the wipe, not just for one that happens to fire before
    * a single relaxation has run:
    *
-   *   tick N    good build          -> stamps (h(R), h(S))
+   *   tick N    good build          -> stamps (h(inputs), h(sources))
    *   tick N+1  a rebuild that throws
    *   tick N+2  back to tick N's exact inputs
    *
@@ -741,7 +858,7 @@ describe('syncFields: a rebuild that throws must not leave the stamps describing
       state,
       world,
       fields: createFlowFields(1, world.cells),
-      scratch: createScratch(world.cells),
+      scratch: scratchFor(world, 1),
     }
   }
 
@@ -750,30 +867,30 @@ describe('syncFields: a rebuild that throws must not leave the stamps describing
   it('a duplicate source (what M1c dispatch produces from two same-colour destinations on one access cell) leaves the field never-built, not stale-and-wrong', () => {
     const { state, world, fields, scratch } = buildCorridorFixture('throw-desync-dup')
 
-    syncFields(state, world, [[0]], fields, scratch)
-    expect(Array.from(fieldFor(state, world, fields, 0, [0]).dist)).toEqual(GOOD_DIST)
+    syncFieldsFromLists(state, world, [[0]], fields, scratch)
+    expect(Array.from(fieldForColour(state, world, fields, 0, scratch).dist)).toEqual(GOOD_DIST)
 
     // Roads are untouched throughout: the ONLY thing that changes here is the
     // source list, and it changes back again below.
-    expect(() => syncFields(state, world, [[0, 0]], fields, scratch)).toThrow(/strictly ascending/)
+    expect(() => syncFieldsFromLists(state, world, [[0, 0]], fields, scratch)).toThrow(/strictly ascending/)
     // The wipe genuinely happened — this is the state the stamps would
     // otherwise be vouching for.
     expect(Array.from((fields[0] as FlowField).dist).every((d) => d === INF)).toBe(true)
 
     // Reported as a failed rebuild, not as "you forgot to sync".
-    expect(() => fieldFor(state, world, fields, 0, [0])).toThrow(/never built/)
+    expect(() => fieldForColour(state, world, fields, 0, scratch)).toThrow(/never built/)
 
     // Same sources, same roads as tick N. Without the stamp zeroing both
     // stamps still match, syncFields skips, and this reads back all-INF.
-    syncFields(state, world, [[0]], fields, scratch)
-    expect(Array.from(fieldFor(state, world, fields, 0, [0]).dist)).toEqual(GOOD_DIST)
+    syncFieldsFromLists(state, world, [[0]], fields, scratch)
+    expect(Array.from(fieldForColour(state, world, fields, 0, scratch).dist)).toEqual(GOOD_DIST)
   })
 
   it('an entry-pool exhaustion mid-drain — where the corruption looks plausible rather than empty — is handled the same way', () => {
     const { state, world, fields, scratch } = buildCorridorFixture('throw-desync-pool')
 
-    syncFields(state, world, [[0]], fields, scratch)
-    expect(Array.from(fieldFor(state, world, fields, 0, [0]).dist)).toEqual(GOOD_DIST)
+    syncFieldsFromLists(state, world, [[0]], fields, scratch)
+    expect(Array.from(fieldForColour(state, world, fields, 0, scratch).dist)).toEqual(GOOD_DIST)
 
     // A pool with room for 2 entries: source 1 is pushed, its expansion
     // relaxes cell 0, and the relaxation of cell 2 overflows. The throw comes
@@ -781,6 +898,7 @@ describe('syncFields: a rebuild that throws must not leave the stamps describing
     // written — an all-INF field at least LOOKS broken, whereas this one
     // reads as a short, self-consistent, entirely wrong answer.
     const tinyPool: Scratch = {
+      ...scratch,
       bucketHead: new Int32Array(NB),
       entryCell: new Int32Array(2),
       entryNext: new Int32Array(2),
@@ -788,13 +906,14 @@ describe('syncFields: a rebuild that throws must not leave the stamps describing
       nbrDir: new Int8Array(8),
       stats: new Int32Array(2),
     }
-    expect(() => syncFields(state, world, [[1]], fields, tinyPool)).toThrow(/entry pool exhausted/)
+    setSources(tinyPool, world, 0, [1])
+    expect(() => syncFields(state, world, fields, tinyPool)).toThrow(/entry pool exhausted/)
     expect(Array.from((fields[0] as FlowField).dist)).toEqual([10, 0, 10, INF, INF, INF])
 
-    expect(() => fieldFor(state, world, fields, 0, [0])).toThrow(/never built/)
+    expect(() => fieldForColour(state, world, fields, 0, scratch)).toThrow(/never built/)
 
-    syncFields(state, world, [[0]], fields, scratch)
-    expect(Array.from(fieldFor(state, world, fields, 0, [0]).dist)).toEqual(GOOD_DIST)
+    syncFieldsFromLists(state, world, [[0]], fields, scratch)
+    expect(Array.from(fieldForColour(state, world, fields, 0, scratch).dist)).toEqual(GOOD_DIST)
   })
 })
 
@@ -809,12 +928,13 @@ describe('fieldFor: staleness', () => {
     const { map, world } = landFixture('never-built', 6, 5)
     const state = createState('s', map)
     const fields = createFlowFields(1, world.cells)
-    expect(() => fieldFor(state, world, fields, 0, [])).toThrow(/never built/)
+    const scratch = scratchFor(world, 1)
+    expect(() => fieldForColour(state, world, fields, 0, scratch)).toThrow(/never built/)
   })
 
   it('reports never-built for a HALF-written stamp pair too, not just for both stamps at 0', () => {
     // `syncFields` is the only writer of the stamps and always moves both
-    // together, so `builtFromRoads !== 0 && builtFromSources === 0` is
+    // together, so `builtFromFieldInputs !== 0 && builtFromSources === 0` is
     // unreachable through the public API — and deleting either half of the
     // `||` therefore leaves the whole suite green without this test. That is
     // exactly the shape C1 was: a stamp pair that momentarily describes
@@ -827,34 +947,37 @@ describe('fieldFor: staleness', () => {
     const { map, world } = landFixture('half-stamp', 6, 5)
     const state = createState('s', map)
     placeRoad(state, world, 0, 1)
-    const sources = [0]
-    const scratch = createScratch(world.cells)
+    const scratch = scratchFor(world, 1)
+    setSources(scratch, world, 0, [0])
 
-    for (const zeroed of ['builtFromRoads', 'builtFromSources'] as const) {
+    for (const zeroed of ['builtFromFieldInputs', 'builtFromSources'] as const) {
       const fields = createFlowFields(1, world.cells)
-      syncFields(state, world, [sources], fields, scratch)
-      expect(() => fieldFor(state, world, fields, 0, sources)).not.toThrow() // sanity: both stamps valid
+      syncFields(state, world, fields, scratch)
+      expect(() => fieldForColour(state, world, fields, 0, scratch)).not.toThrow() // sanity: both stamps valid
       const field = fields[0] as FlowField
       field[zeroed] = 0
-      expect(() => fieldFor(state, world, fields, 0, sources), zeroed).toThrow(/never built/)
+      expect(() => fieldForColour(state, world, fields, 0, scratch), zeroed).toThrow(/never built/)
     }
   })
 
-  it('the nonZeroWord guard forces 0 to 1 — the same guard hashRoadRegion/hashSources both rely on to never present as "never built"; proven directly, not by an unbounded search for a colliding input', () => {
+  it('the nonZeroWord guard forces 0 to 1 — the same guard hashFieldInputRegions/hashSources both rely on to never present as "never built"; proven directly, not by an unbounded search for a colliding input', () => {
     expect(nonZeroWord(0)).toBe(1)
   })
 
-  it('hashRoadRegion differs between two same-cell-count, differently-shaped boards, even with byte-identical roads content', () => {
+  it('hashFieldInputRegions differs between two same-cell-count, differently-shaped boards, even with byte-identical roads content', () => {
     // A roads-only hash cannot see this: two boards with the same total
     // `cells` (6x4 and 4x6) but swapped `w`/`h` can have byte-for-byte
     // identical `roads` arrays while meaning something completely
     // different geometrically. `fieldFor`'s cell-count guard (`dist.length
     // === world.cells`) is a count, not a shape, so it cannot catch this
-    // either. Not reachable today — one map per session, `createWorld`/
+    // either. `mapIdentity` being a FIELD_INPUT region (M1c) is what closes
+    // it: `mapIdentity` folds `w`/`h`, so two boards this different produce
+    // two different `mapIdentity` byte contents even though `roads` alone
+    // is identical. Not reachable today — one map per session, `createWorld`/
     // `createState` always paired — but the staleness key should not
     // depend on that pairing by convention rather than by construction.
-    const mapA = parseMap('geom-6x4', Array.from({ length: 4 }, () => '......'), 999) // w=6, h=4
-    const mapB = parseMap('geom-4x6', Array.from({ length: 6 }, () => '....'), 999) // w=4, h=6
+    const mapA = parseMap('geom-6x4', Array.from({ length: 4 }, () => '......'), 999, 40, 16, 5) // w=6, h=4
+    const mapB = parseMap('geom-4x6', Array.from({ length: 6 }, () => '....'), 999, 40, 16, 5) // w=4, h=6
     const worldA = createWorld(mapA)
     const worldB = createWorld(mapB)
     expect(worldA.cells).toBe(worldB.cells) // both 24, the collision precondition
@@ -871,26 +994,28 @@ describe('fieldFor: staleness', () => {
     // A roads-only hash WOULD collide here — the precondition this test
     // exists to falsify for the real stamp.
     expect(hashBytes(stateA.roads)).toBe(hashBytes(stateB.roads))
-    expect(hashRoadRegion(stateA)).not.toBe(hashRoadRegion(stateB))
+    const rangesA = createFieldInputRanges(mapA)
+    const rangesB = createFieldInputRanges(mapB)
+    expect(hashFieldInputRegions(stateA, rangesA)).not.toBe(hashFieldInputRegions(stateB, rangesB))
   })
 
   it('hashSources differs for two lists of the same length, and for the same list with one element changed', () => {
-    expect(hashSources([1, 2, 3])).not.toBe(hashSources([1, 2, 4]))
-    expect(hashSources([1, 2, 3])).not.toBe(hashSources([4, 5, 6]))
+    expect(hashSourceList([1, 2, 3])).not.toBe(hashSourceList([1, 2, 4]))
+    expect(hashSourceList([1, 2, 3])).not.toBe(hashSourceList([4, 5, 6]))
   })
 
   it('hashSources is order sensitive — an order-insensitive fold (sum/XOR) would collide on a permutation', () => {
-    expect(hashSources([1, 2, 3])).not.toBe(hashSources([3, 2, 1]))
-    expect(hashSources([1, 2, 3])).not.toBe(hashSources([2, 1, 3]))
+    expect(hashSourceList([1, 2, 3])).not.toBe(hashSourceList([3, 2, 1]))
+    expect(hashSourceList([1, 2, 3])).not.toBe(hashSourceList([2, 1, 3]))
   })
 
   it('syncFields then fieldFor returns the field', () => {
     const { state, world } = randomGraphFixture('sync-basic', 8, 6, 200)
     const sources = firstRoadedCells(state, world, 2)
     const fields = createFlowFields(1, world.cells)
-    const scratch = createScratch(world.cells)
-    syncFields(state, world, [sources], fields, scratch)
-    const f = fieldFor(state, world, fields, 0, sources)
+    const scratch = scratchFor(world, 1)
+    syncFieldsFromLists(state, world, [sources], fields, scratch)
+    const f = fieldForColour(state, world, fields, 0, scratch)
     expect(f.dist[sources[0] as number]).toBe(0)
   })
 
@@ -899,11 +1024,11 @@ describe('fieldFor: staleness', () => {
     const roaded = firstRoadedCells(state, world, 3)
     const sourcesByColour: number[][] = [[roaded[0] as number], [roaded[1] as number], [roaded[2] as number]]
     const fields = createFlowFields(3, world.cells)
-    const scratch = createScratch(world.cells)
-    syncFields(state, world, sourcesByColour, fields, scratch)
+    const scratch = scratchFor(world, 3)
+    syncFieldsFromLists(state, world, sourcesByColour, fields, scratch)
     for (let c = 0; c < 3; c++) {
       const colourSources = sourcesByColour[c] as number[]
-      const f = fieldFor(state, world, fields, c, colourSources)
+      const f = fieldForColour(state, world, fields, c, scratch)
       expect(f.dist[colourSources[0] as number], `colour ${c}`).toBe(0)
     }
   })
@@ -912,8 +1037,8 @@ describe('fieldFor: staleness', () => {
     const { state, world } = randomGraphFixture('sync-coalesce', 8, 6, 200)
     const sources = firstRoadedCells(state, world, 2)
     const fields = createFlowFields(1, world.cells)
-    const scratch = createScratch(world.cells)
-    syncFields(state, world, [sources], fields, scratch)
+    const scratch = scratchFor(world, 1)
+    syncFieldsFromLists(state, world, [sources], fields, scratch)
     expect(scratch.stats[ST_EXPANSIONS]).toBeGreaterThan(0)
     // computeFlowField unconditionally zeroes stats at entry, so the ONLY way
     // ST_EXPANSIONS can read back 0 after the call below is if computeFlowField
@@ -923,7 +1048,7 @@ describe('fieldFor: staleness', () => {
     // happened to visit exactly 0 cells, which is not what "did not rebuild"
     // means.
     scratch.stats[ST_EXPANSIONS] = -1
-    syncFields(state, world, [sources], fields, scratch)
+    syncFieldsFromLists(state, world, [sources], fields, scratch)
     expect(scratch.stats[ST_EXPANSIONS]).toBe(-1)
   })
 
@@ -935,10 +1060,10 @@ describe('fieldFor: staleness', () => {
     // coverage for `fieldFor`'s staleness check, but it leaves the loop the
     // game actually runs every tick (sources or roads change -> `syncFields`
     // -> `fieldFor`) completely unexercised: `syncFields`'s own rebuild
-    // condition independently re-implements the same "roads AND sources"
+    // condition independently re-implements the same "inputs AND sources"
     // check `fieldFor` makes, in its own line of source, and nothing here
     // proved the two agree. Three mutations at that one line all survive a
-    // green suite without this test: `&&` -> `||`, "rebuild only if roads
+    // green suite without this test: `&&` -> `||`, "rebuild only if inputs
     // never matched" (ignoring the source stamp), and "rebuild only once,
     // ever" (ignoring both stamps after the first build) — the last of
     // which means the game builds its fields at startup and then ignores
@@ -950,40 +1075,40 @@ describe('fieldFor: staleness', () => {
     placeRoad(state, world, 0, 1)
     placeRoad(state, world, 1, 2)
     const fields = createFlowFields(1, world.cells)
-    const scratch = createScratch(world.cells)
+    const scratch = scratchFor(world, 1)
 
-    syncFields(state, world, [[0]], fields, scratch)
-    expect(Array.from(fieldFor(state, world, fields, 0, [0]).dist)).toEqual([0, 10, 20, INF])
+    syncFieldsFromLists(state, world, [[0]], fields, scratch)
+    expect(Array.from(fieldForColour(state, world, fields, 0, scratch).dist)).toEqual([0, 10, 20, INF])
 
     // Sources change ONLY (roads untouched) -> re-sync -> must not throw,
     // and must actually reflect the new source, not the stale one.
-    syncFields(state, world, [[2]], fields, scratch)
-    expect(() => fieldFor(state, world, fields, 0, [2])).not.toThrow()
-    expect(Array.from(fieldFor(state, world, fields, 0, [2]).dist)).toEqual([20, 10, 0, INF])
+    syncFieldsFromLists(state, world, [[2]], fields, scratch)
+    expect(() => fieldForColour(state, world, fields, 0, scratch)).not.toThrow()
+    expect(Array.from(fieldForColour(state, world, fields, 0, scratch).dist)).toEqual([20, 10, 0, INF])
 
     // Roads change ONLY (sources untouched, still [2]) -> re-sync -> must
     // not throw, and must actually reflect the new road.
     expect(placeRoad(state, world, 2, 3)).toBe(true)
-    syncFields(state, world, [[2]], fields, scratch)
-    expect(() => fieldFor(state, world, fields, 0, [2])).not.toThrow()
-    expect(Array.from(fieldFor(state, world, fields, 0, [2]).dist)).toEqual([20, 10, 0, 10])
+    syncFieldsFromLists(state, world, [[2]], fields, scratch)
+    expect(() => fieldForColour(state, world, fields, 0, scratch)).not.toThrow()
+    expect(Array.from(fieldForColour(state, world, fields, 0, scratch).dist)).toEqual([20, 10, 0, 10])
   })
 
-  it('syncFields throws when sourcesByColour is shorter than fields, rather than a raw TypeError from inside hashSources', () => {
+  it('syncFields throws when scratch.sourceCounts is shorter than fields, rather than a raw TypeError from inside hashSources', () => {
     const { map, world } = landFixture('sync-length-guard', 5, 4)
     const state = createState('s', map)
     const fields = createFlowFields(2, world.cells)
-    const scratch = createScratch(world.cells)
-    expect(() => syncFields(state, world, [[0]], fields, scratch)).toThrow(/sourcesByColour/)
+    const scratch = scratchFor(world, 1) // sized for 1 colour, fields has 2
+    expect(() => syncFields(state, world, fields, scratch)).toThrow(/sourceCounts/)
   })
 
   it('after a road mutation, fieldFor throws — with no explicit invalidation call anywhere in this test', () => {
     const { state, world } = randomGraphFixture('sync-road-mut', 8, 6, 200)
     const sources = firstRoadedCells(state, world, 2)
     const fields = createFlowFields(1, world.cells)
-    const scratch = createScratch(world.cells)
-    syncFields(state, world, [sources], fields, scratch)
-    expect(() => fieldFor(state, world, fields, 0, sources)).not.toThrow()
+    const scratch = scratchFor(world, 1)
+    syncFieldsFromLists(state, world, [sources], fields, scratch)
+    expect(() => fieldForColour(state, world, fields, 0, scratch)).not.toThrow()
 
     // Must be a GENUINELY NEW bit — placeRoad succeeds (returns true) even
     // when re-placing an already-existing segment (idempotent, buffer
@@ -1008,7 +1133,7 @@ describe('fieldFor: staleness', () => {
       }
     }
     expect(placed).toBe(true)
-    expect(() => fieldFor(state, world, fields, 0, sources)).toThrow()
+    expect(() => fieldForColour(state, world, fields, 0, scratch)).toThrow()
   })
 
   it('after a source-list change with roads untouched, fieldFor throws', () => {
@@ -1016,12 +1141,12 @@ describe('fieldFor: staleness', () => {
     const roaded = firstRoadedCells(state, world, 3)
     const sources = [roaded[0] as number]
     const fields = createFlowFields(1, world.cells)
-    const scratch = createScratch(world.cells)
-    syncFields(state, world, [sources], fields, scratch)
-    expect(() => fieldFor(state, world, fields, 0, sources)).not.toThrow()
+    const scratch = scratchFor(world, 1)
+    syncFieldsFromLists(state, world, [sources], fields, scratch)
+    expect(() => fieldForColour(state, world, fields, 0, scratch)).not.toThrow()
 
-    const newSources = [roaded[1] as number]
-    expect(() => fieldFor(state, world, fields, 0, newSources)).toThrow()
+    setSources(scratch, world, 0, [roaded[1] as number])
+    expect(() => fieldForColour(state, world, fields, 0, scratch)).toThrow()
   })
 
   it('fieldFor throws when handed a fields array sized for a different cell count', () => {
@@ -1031,20 +1156,19 @@ describe('fieldFor: staleness', () => {
     // inevitably hashes differently too — so the staleness branch fires
     // first, `.toThrow()` passes either way, and mutating away the size
     // check (`if (false)`, or the tautology `dist.length !== dir.length`)
-    // is invisible. Here `state` and `sources` are the EXACT ones the field
-    // was built from, so both stamps still match; a `world` that agrees on
-    // everything except `cells` is the only remaining way to make it throw,
-    // which is exactly the branch this test exists to pin.
+    // is invisible. Here `state` and `scratch`'s sources are the EXACT ones
+    // the field was built from, so both stamps still match; a `world` that
+    // agrees on everything except `cells` is the only remaining way to make
+    // it throw, which is exactly the branch this test exists to pin.
     const { map, world } = landFixture('wrong-size', 8, 7)
     const state = createState('s', map)
     placeRoad(state, world, 0, 1)
-    const sources = [0]
     const fields = createFlowFields(1, world.cells)
-    const scratch = createScratch(world.cells)
-    syncFields(state, world, [sources], fields, scratch)
-    expect(() => fieldFor(state, world, fields, 0, sources)).not.toThrow() // sanity: matches today
+    const scratch = scratchFor(world, 1)
+    syncFieldsFromLists(state, world, [[0]], fields, scratch)
+    expect(() => fieldForColour(state, world, fields, 0, scratch)).not.toThrow() // sanity: matches today
 
     const mismatchedWorld: WorldData = { ...world, cells: world.cells + 1 }
-    expect(() => fieldFor(state, mismatchedWorld, fields, 0, sources)).toThrow(/dist\.length/)
+    expect(() => fieldForColour(state, mismatchedWorld, fields, 0, scratch)).toThrow(/dist\.length/)
   })
 })

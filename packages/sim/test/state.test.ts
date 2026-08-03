@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseMap } from '@laneways/shared'
+import { parseMap, CARS_PER_HOUSE, MAX_PATH_LEN } from '@laneways/shared'
 import {
   createState,
   snapshot,
@@ -10,11 +10,17 @@ import {
   H_TICK,
   H_SCORE,
   H_WEEK,
-  H_MAP,
-  H_MAP_W,
-  H_MAP_H,
   H_TILES,
+  H_HOUSE_COUNT,
+  H_DEST_COUNT,
+  H_PINS_DROPPED,
+  H_ROUTES_REFUSED,
+  H_EPOCH,
   HEADER_LENGTH,
+  MI_MAP,
+  MI_MAP_W,
+  MI_MAP_H,
+  MAP_IDENTITY_LENGTH,
 } from '../src/state'
 import { nextRandom } from '../src/rng'
 import { computeLayout } from '../src/layout'
@@ -26,12 +32,12 @@ import { createWorld, mapIdHash } from '../src/world'
  * catch `H_MAP_W`/`H_MAP_H` being swapped in `createState` — mutation-tested
  * and confirmed square would hide it.
  */
-const MAP = parseMap('test-map', ['.....', '.~^..', '.T...'], 20)
+const MAP = parseMap('test-map', ['.....', '.~^..', '.T...'], 20, 40, 16, 5)
 
 /** Same dimensions as MAP, different content — the only construction that
  * reaches `restore`'s map-hash check without the byte-length guard firing
  * first (design decision 1's own justification). */
-const OTHER_MAP_SAME_SIZE = parseMap('other-map', ['.....', '.....', '.....'], 20)
+const OTHER_MAP_SAME_SIZE = parseMap('other-map', ['.....', '.....', '.....'], 20, 40, 16, 5)
 
 describe('createState', () => {
   it('is deterministic for a given seed', () => {
@@ -59,11 +65,11 @@ describe('createState', () => {
     expect(createState('x', MAP).rng[0]).not.toBe(0)
   })
 
-  it('writes H_MAP as the map content hash, and H_MAP_W / H_MAP_H as its dimensions', () => {
+  it('writes MI_MAP as the map content hash, and MI_MAP_W / MI_MAP_H as its dimensions', () => {
     const s = createState('map-header', MAP)
-    expect(s.header[H_MAP]).toBe(mapIdHash(MAP))
-    expect(s.header[H_MAP_W]).toBe(MAP.w)
-    expect(s.header[H_MAP_H]).toBe(MAP.h)
+    expect(s.mapIdentity[MI_MAP]).toBe(mapIdHash(MAP))
+    expect(s.mapIdentity[MI_MAP_W]).toBe(MAP.w)
+    expect(s.mapIdentity[MI_MAP_H]).toBe(MAP.h)
   })
 
   it('seeds H_TILES from map.startingTiles', () => {
@@ -111,36 +117,36 @@ describe('snapshot and restore', () => {
     expect(() => restore(snapshot(s), world)).not.toThrow()
   })
 
-  it('rejects a buffer whose H_MAP disagrees with the world, at identical dimensions', () => {
+  it('rejects a buffer whose MI_MAP disagrees with the world, at identical dimensions', () => {
     // Whenever w*h differs, the byte-length guard fires first and this
     // comparison — the entire justification for design decision 1 — is
     // never exercised. Two same-size, different-content maps are the only
     // construction that reaches it.
     const s = createState('mismatch', MAP)
     const otherWorld = createWorld(OTHER_MAP_SAME_SIZE)
-    expect(() => restore(snapshot(s), otherWorld)).toThrow(/H_MAP/)
+    expect(() => restore(snapshot(s), otherWorld)).toThrow(/MI_MAP/)
   })
 
-  it('rejects a buffer whose H_MAP_W disagrees with the world, with H_MAP itself left correct', () => {
-    // Written directly into the header, not via a second map: every
+  it('rejects a buffer whose MI_MAP_W disagrees with the world, with MI_MAP itself left correct', () => {
+    // Written directly into mapIdentity, not via a second map: every
     // map-based construction that changes `w` also changes `mapIdHash`'s own
-    // byte recipe (it bakes `w` into the hash), so `H_MAP` would already
+    // byte recipe (it bakes `w` into the hash), so `MI_MAP` would already
     // disagree and that check alone would reject the buffer — this branch
     // would never run. A reviewer confirmed exactly this: deleting the
-    // `H_MAP_W`/`H_MAP_H` checks entirely left the suite green, because no
-    // existing test reached them independently of `H_MAP`. Writing the
-    // header directly is the only construction that does — do not "improve"
-    // this into a second-map construction, which would silently re-merge it
-    // with the `H_MAP` case above and lose the isolation.
+    // `MI_MAP_W`/`MI_MAP_H` checks entirely left the suite green, because no
+    // existing test reached them independently of `MI_MAP`. Writing
+    // mapIdentity directly is the only construction that does — do not
+    // "improve" this into a second-map construction, which would silently
+    // re-merge it with the `MI_MAP` case above and lose the isolation.
     const s = createState('bad-width', MAP)
-    s.header[H_MAP_W] = MAP.w + 1
-    expect(() => restore(snapshot(s), world)).toThrow(/H_MAP_W/)
+    s.mapIdentity[MI_MAP_W] = MAP.w + 1
+    expect(() => restore(snapshot(s), world)).toThrow(/MI_MAP_W/)
   })
 
-  it('rejects a buffer whose H_MAP_H disagrees with the world, with H_MAP itself left correct', () => {
+  it('rejects a buffer whose MI_MAP_H disagrees with the world, with MI_MAP itself left correct', () => {
     const s = createState('bad-height', MAP)
-    s.header[H_MAP_H] = MAP.h + 1
-    expect(() => restore(snapshot(s), world)).toThrow(/H_MAP_H/)
+    s.mapIdentity[MI_MAP_H] = MAP.h + 1
+    expect(() => restore(snapshot(s), world)).toThrow(/MI_MAP_H/)
   })
 
   it('round-trips to an identical hash', () => {
@@ -232,27 +238,68 @@ describe('view layout wiring', () => {
   // `computeLayout` is exercised exhaustively in layout.test.ts — its internal
   // consistency (no overlap, no gap, correct alignment) is guaranteed by
   // construction and cannot fail here. What CAN fail is `viewsOver` wiring a
-  // view to the wrong entry. This mirrors state.ts's own declared regions
-  // (documented at the top of state.ts: rng, header, roads, cleared) and
-  // recomputes their layout independently, then asserts every live view
-  // against it — not just the fixed byte totals.
-  const RNG_LENGTH = 1
+  // view to the wrong entry. This INDEPENDENTLY re-declares the full M1c
+  // region list (mirroring regions.ts's `regionsFor`, not importing it) and
+  // recomputes their layout, then asserts every live view against it — not
+  // just the fixed byte totals. Importing `regionsFor` here would make this
+  // test tautological against a bug in `regionsFor` itself; hand-declaring
+  // the same shape is what lets it catch `viewsOver` wiring a view to the
+  // wrong entry independently of whether the table that produced the entry
+  // was correct.
   const cells = MAP.w * MAP.h
+  const maxCars = CARS_PER_HOUSE * MAP.maxHouses
+  const routeBytes = MAX_PATH_LEN / 2
   const REGIONS = [
-    { name: 'rng', ctor: Uint32Array, len: RNG_LENGTH },
+    { name: 'rng', ctor: Uint32Array, len: 1 },
+    { name: 'mapIdentity', ctor: Int32Array, len: MAP_IDENTITY_LENGTH },
     { name: 'header', ctor: Int32Array, len: HEADER_LENGTH },
+    { name: 'pinAccum', ctor: Int32Array, len: MAP.groupCount },
+    { name: 'rotationCursor', ctor: Int32Array, len: MAP.groupCount },
+    { name: 'houseCell', ctor: Int32Array, len: MAP.maxHouses },
+    { name: 'destCell', ctor: Int32Array, len: MAP.maxDestinations },
+    { name: 'destSpawnTick', ctor: Int32Array, len: MAP.maxDestinations },
+    { name: 'carHome', ctor: Int32Array, len: maxCars },
+    { name: 'carCell', ctor: Int32Array, len: maxCars },
+    { name: 'carProgress', ctor: Int32Array, len: maxCars },
+    { name: 'carTargetDest', ctor: Int32Array, len: maxCars },
+    { name: 'carRouteLen', ctor: Int16Array, len: maxCars },
+    { name: 'carRouteCursor', ctor: Int16Array, len: maxCars },
     { name: 'roads', ctor: Uint8Array, len: cells },
     { name: 'cleared', ctor: Uint8Array, len: cells },
+    { name: 'houseColour', ctor: Uint8Array, len: MAP.maxHouses },
+    { name: 'destMeta', ctor: Uint8Array, len: MAP.maxDestinations },
+    { name: 'destPins', ctor: Uint8Array, len: MAP.maxDestinations },
+    { name: 'destReserved', ctor: Uint8Array, len: MAP.maxDestinations },
+    { name: 'carPhase', ctor: Uint8Array, len: maxCars },
+    { name: 'carRoute', ctor: Uint8Array, len: maxCars * routeBytes },
   ] as const
 
   it('wires every view to its own layout entry, with no gap or overlap beyond declared padding', () => {
     const { entries, totalBytes } = computeLayout(REGIONS)
     const s = createState('layout-wiring', MAP)
-    const viewByName: Record<string, Uint32Array | Int32Array | Uint8Array> = {
+    const viewByName: Record<string, Uint32Array | Int32Array | Int16Array | Uint8Array> = {
       rng: s.rng,
+      mapIdentity: s.mapIdentity,
       header: s.header,
+      pinAccum: s.pinAccum,
+      rotationCursor: s.rotationCursor,
+      houseCell: s.houseCell,
+      destCell: s.destCell,
+      destSpawnTick: s.destSpawnTick,
+      carHome: s.carHome,
+      carCell: s.carCell,
+      carProgress: s.carProgress,
+      carTargetDest: s.carTargetDest,
+      carRouteLen: s.carRouteLen,
+      carRouteCursor: s.carRouteCursor,
       roads: s.roads,
       cleared: s.cleared,
+      houseColour: s.houseColour,
+      destMeta: s.destMeta,
+      destPins: s.destPins,
+      destReserved: s.destReserved,
+      carPhase: s.carPhase,
+      carRoute: s.carRoute,
     }
 
     let sumOfViewBytes = 0
@@ -272,5 +319,85 @@ describe('view layout wiring', () => {
     const padding = totalBytes - expectedNextOffset
     expect(sumOfViewBytes + padding, 'declared view bytes plus padding').toBe(s.buffer.byteLength)
     expect(totalBytes).toBe(stateBytesFor(MAP))
+  })
+
+  // The zero-padding claim itself (`totalBytes === sum(len *
+  // BYTES_PER_ELEMENT)`) is NOT asserted against `MAP` here: `MAP` is a
+  // small non-square fixture (5x3 = 15 cells) whose Uint8 tier ends at a
+  // byte offset that is not itself a multiple of 4, so `computeLayout`
+  // correctly appends a 2-byte TAIL pad for it (layout.ts's own documented
+  // "rounds the total up to 4 even when no region is that wide" behaviour —
+  // this is expected, not a defect). The plan's zero-padding claim is
+  // specifically about `firstCity`'s sizes (960 cells, total exactly 7,908
+  // B), and is asserted against the real, exported `regionsFor(firstCity())`
+  // in `regions.test.ts`, not re-derived here against an unrelated fixture.
+})
+
+describe('atomicity (H_EPOCH)', () => {
+  it('a fresh state has H_EPOCH === 0', () => {
+    const s = createState('epoch-fresh', MAP)
+    expect(s.header[H_EPOCH]).toBe(0)
+  })
+
+  it('restore throws a named error when H_EPOCH is non-zero, even though byte length and MI_MAP all agree', () => {
+    const world = createWorld(MAP)
+    const s = createState('epoch-poisoned', MAP)
+    s.header[H_EPOCH] = 7 // simulates a step that threw before clearing it
+    expect(() => restore(snapshot(s), world)).toThrow(/H_EPOCH/)
+  })
+
+  it('restore does not throw when H_EPOCH is 0', () => {
+    const world = createWorld(MAP)
+    const s = createState('epoch-clean', MAP)
+    expect(() => restore(snapshot(s), world)).not.toThrow()
+  })
+})
+
+describe('the new M1c header slots exist and start at 0', () => {
+  it('H_HOUSE_COUNT, H_DEST_COUNT, H_PINS_DROPPED, H_ROUTES_REFUSED all start at 0', () => {
+    const s = createState('new-header-slots', MAP)
+    expect(s.header[H_HOUSE_COUNT]).toBe(0)
+    expect(s.header[H_DEST_COUNT]).toBe(0)
+    expect(s.header[H_PINS_DROPPED]).toBe(0)
+    expect(s.header[H_ROUTES_REFUSED]).toBe(0)
+  })
+
+  it('HEADER_LENGTH is exactly 9 — one slot per named constant, in order 0..8', () => {
+    expect(HEADER_LENGTH).toBe(9)
+    expect([H_TICK, H_SCORE, H_WEEK, H_TILES, H_HOUSE_COUNT, H_DEST_COUNT, H_PINS_DROPPED, H_ROUTES_REFUSED, H_EPOCH]).toEqual([
+      0, 1, 2, 3, 4, 5, 6, 7, 8,
+    ])
+  })
+})
+
+describe('a building-free fresh state is all-zero outside rng/mapIdentity/header[H_TILES]', () => {
+  // The property "Why one re-bless is now true" depends on: every M1c region
+  // is zero-initialised, with no `-1` sentinel written anywhere at creation.
+  it('every car/house/destination region reads back as all zero on a fresh state', () => {
+    const s = createState('all-zero-fresh', MAP)
+    const regions: readonly (Int32Array | Int16Array | Uint8Array)[] = [
+      s.pinAccum,
+      s.rotationCursor,
+      s.houseCell,
+      s.destCell,
+      s.destSpawnTick,
+      s.carHome,
+      s.carCell,
+      s.carProgress,
+      s.carTargetDest,
+      s.carRouteLen,
+      s.carRouteCursor,
+      s.roads,
+      s.cleared,
+      s.houseColour,
+      s.destMeta,
+      s.destPins,
+      s.destReserved,
+      s.carPhase,
+      s.carRoute,
+    ]
+    for (const region of regions) {
+      expect(Array.from(region).every((v) => v === 0)).toBe(true)
+    }
   })
 })

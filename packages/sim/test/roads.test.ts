@@ -38,7 +38,7 @@ const W = 6
 const H = 4
 
 function fixture(startingTiles: number, id: string): { map: MapData; world: WorldData } {
-  const map = parseMap(id, ROWS, startingTiles)
+  const map = parseMap(id, ROWS, startingTiles, 40, 16, 5)
   const world = createWorld(map)
   return { map, world }
 }
@@ -518,7 +518,7 @@ describe('design decision 1 — cleared lives in the buffer, terrain never chang
 describe('randomised whole-grid sequence', () => {
   it('maintains every invariant across a long seeded sequence of place/erase attempts', () => {
     const startingTiles = 1000 // ample: this test is not about the budget edge cases, those have dedicated tests above
-    const map = parseMap('roads-random-seq', ROWS, startingTiles)
+    const map = parseMap('roads-random-seq', ROWS, startingTiles, 40, 16, 5)
     const world = createWorld(map)
     const state = createState('roads-random-seq-seed', map)
 

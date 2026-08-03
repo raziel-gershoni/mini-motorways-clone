@@ -14,7 +14,8 @@ import {
   type FlowField,
   type Scratch,
 } from '../src/scratch'
-import { computeFlowField, hashRoadRegion, syncFields, fieldFor } from '../src/flowfield'
+import { computeFlowField, hashFieldInputRegions, syncFields, fieldFor } from '../src/flowfield'
+import { createFieldInputRanges } from '../src/regions'
 import { step } from '../src/step'
 import type { TickInputs } from '../src/step'
 
@@ -59,6 +60,16 @@ import type { TickInputs } from '../src/step'
  * If this file needed a new production function to make an assertion
  * possible, that would itself be a finding — a behaviour this task is meant
  * to prove would have no reachable call site.
+ *
+ * **M1c widened `syncFields`/`fieldFor`/`computeFlowField` to read sources
+ * from `scratch.sourcesFlat`/`scratch.sourceCounts` (or, for
+ * `computeFlowField`, a preallocated `Int32Array` plus `(offset, count)`)
+ * rather than a plain `readonly number[]`.** The adapter helpers below
+ * preserve every existing call's SHAPE (an array of numbers) so this file's
+ * proof structure and comments read exactly as before; only the plumbing
+ * underneath changed. Also renamed: `hashRoadRegion` -> `hashFieldInputRegions`
+ * (it now folds every FIELD_INPUT region, not just roads + the map hash),
+ * and `FlowField.builtFromRoads` -> `builtFromFieldInputs`.
  */
 
 // ---------------------------------------------------------------------------
@@ -73,7 +84,7 @@ function cellAt(w: number, x: number, y: number): number {
 
 function landFixture(id: string, w: number, h: number): { map: MapData; world: WorldData } {
   const rows = Array.from({ length: h }, () => '.'.repeat(w))
-  const map = parseMap(id, rows, 999)
+  const map = parseMap(id, rows, 999, 40, 16, 5)
   const world = createWorld(map)
   return { map, world }
 }
@@ -206,6 +217,62 @@ function poisonAll(scratch: Scratch, field: FlowField, fill: Fill, seed: string)
 
 const NO_INPUT: TickInputs = { actions: [] }
 
+// --- M1c call-shape adapters (duplicated from flowfield.test.ts) ----------
+
+function scratchOnly(world: WorldData): Scratch {
+  return createScratch(world.cells, 1, world.map.maxDestinations, createFieldInputRanges(world.map))
+}
+
+function scratchFor(world: WorldData, groupCount: number): Scratch {
+  return createScratch(world.cells, groupCount, world.map.maxDestinations, createFieldInputRanges(world.map))
+}
+
+function computeField(
+  state: GameState,
+  world: WorldData,
+  sources: readonly number[],
+  out: FlowField,
+  scratch: Scratch,
+): void {
+  computeFlowField(state, world, Int32Array.from(sources), 0, sources.length, out, scratch)
+}
+
+function setSources(scratch: Scratch, world: WorldData, colour: number, list: readonly number[]): void {
+  const maxDestinations = world.map.maxDestinations
+  scratch.sourceCounts[colour] = list.length
+  for (let i = 0; i < list.length; i++) {
+    scratch.sourcesFlat[colour * maxDestinations + i] = list[i] as number
+  }
+}
+
+function syncFieldsFromLists(
+  state: GameState,
+  world: WorldData,
+  sourcesByColour: readonly (readonly number[])[],
+  fields: readonly FlowField[],
+  scratch: Scratch,
+): void {
+  for (let c = 0; c < sourcesByColour.length; c++) {
+    setSources(scratch, world, c, sourcesByColour[c] as readonly number[])
+  }
+  syncFields(state, world, fields, scratch)
+}
+
+function fieldForColour(
+  state: GameState,
+  world: WorldData,
+  fields: readonly FlowField[],
+  colour: number,
+  scratch: Scratch,
+): FlowField {
+  return fieldFor(state, world, fields, colour, scratch)
+}
+
+/** `hashFieldInputRegions`, deriving `ranges` from `world.map` — the M1b call shape took no `ranges` argument. */
+function hashInputsFor(state: GameState, world: WorldData): number {
+  return hashFieldInputRegions(state, createFieldInputRanges(world.map))
+}
+
 // ---------------------------------------------------------------------------
 // Step 1: the fresh-vs-used invariant, in three arms.
 // ---------------------------------------------------------------------------
@@ -218,13 +285,13 @@ describe('rollback proof: the fresh-vs-used invariant', () => {
         const sources = firstRoadedCells(state, world, 2)
 
         const freshField = createFlowField(world.cells)
-        const freshScratch = createScratch(world.cells)
-        computeFlowField(state, world, sources, freshField, freshScratch)
+        const freshScratch = scratchOnly(world)
+        computeField(state, world, sources, freshField, freshScratch)
 
         const usedField = createFlowField(world.cells)
-        const usedScratch = createScratch(world.cells)
+        const usedScratch = scratchOnly(world)
         poisonAll(usedScratch, usedField, pattern.fill, `poison-seed-${pattern.name}`)
-        computeFlowField(state, world, sources, usedField, usedScratch)
+        computeField(state, world, sources, usedField, usedScratch)
 
         expect(Array.from(usedField.dist)).toEqual(Array.from(freshField.dist))
         expect(Array.from(usedField.dir)).toEqual(Array.from(freshField.dir))
@@ -247,17 +314,17 @@ describe('rollback proof: the fresh-vs-used invariant', () => {
       const sourcesA = firstRoadedCells(state, world, 2)
 
       const usedField = createFlowField(world.cells)
-      const usedScratch = createScratch(world.cells)
-      computeFlowField(state, world, sourcesA, usedField, usedScratch)
+      const usedScratch = scratchOnly(world)
+      computeField(state, world, sourcesA, usedField, usedScratch)
       // Vacuity: A must leave real, non-degenerate residue for B to risk leaking.
       expect(Array.from(usedField.dist).some((d) => d !== INF && d !== 0)).toBe(true)
 
       const sourcesB: readonly number[] = [] // exactly `sources.length === 0`
-      computeFlowField(state, world, sourcesB, usedField, usedScratch)
+      computeField(state, world, sourcesB, usedField, usedScratch)
 
       const freshField = createFlowField(world.cells)
-      const freshScratch = createScratch(world.cells)
-      computeFlowField(state, world, sourcesB, freshField, freshScratch)
+      const freshScratch = scratchOnly(world)
+      computeField(state, world, sourcesB, freshField, freshScratch)
 
       expect(Array.from(usedField.dist)).toEqual(Array.from(freshField.dist))
       expect(Array.from(usedField.dir)).toEqual(Array.from(freshField.dir))
@@ -281,8 +348,8 @@ describe('rollback proof: the fresh-vs-used invariant', () => {
       dirtySources: readonly number[],
     ): { field: FlowField; scratch: Scratch } {
       const field = createFlowField(world.cells)
-      const scratch = createScratch(world.cells)
-      computeFlowField(state, world, dirtySources, field, scratch) // dirties it with a real, unrelated prior computation
+      const scratch = scratchOnly(world)
+      computeField(state, world, dirtySources, field, scratch) // dirties it with a real, unrelated prior computation
       return { field, scratch }
     }
 
@@ -293,11 +360,11 @@ describe('rollback proof: the fresh-vs-used invariant', () => {
       const dirtySources = [roaded[1] as number, roaded[2] as number]
 
       const freshField = createFlowField(world.cells)
-      const freshScratch = createScratch(world.cells)
-      computeFlowField(state, world, sources, freshField, freshScratch)
+      const freshScratch = scratchOnly(world)
+      computeField(state, world, sources, freshField, freshScratch)
 
       const used = buildUsedPair(state, world, dirtySources)
-      computeFlowField(state, world, sources, used.field, used.scratch)
+      computeField(state, world, sources, used.field, used.scratch)
 
       expect(Array.from(used.field.dist)).toEqual(Array.from(freshField.dist))
       expect(Array.from(used.field.dir)).toEqual(Array.from(freshField.dir))
@@ -310,11 +377,11 @@ describe('rollback proof: the fresh-vs-used invariant', () => {
       const dirtySources = [roaded[1] as number, roaded[2] as number]
 
       const used = buildUsedPair(state, world, dirtySources)
-      computeFlowField(state, world, sources, used.field, used.scratch)
+      computeField(state, world, sources, used.field, used.scratch)
 
       const freshField = createFlowField(world.cells)
-      const freshScratch = createScratch(world.cells)
-      computeFlowField(state, world, sources, freshField, freshScratch)
+      const freshScratch = scratchOnly(world)
+      computeField(state, world, sources, freshField, freshScratch)
 
       expect(Array.from(used.field.dist)).toEqual(Array.from(freshField.dist))
       expect(Array.from(used.field.dir)).toEqual(Array.from(freshField.dir))
@@ -344,10 +411,10 @@ function runScriptedTick(
   sourcesByColour: readonly (readonly number[])[],
 ): TraceEntry {
   for (const e of edits) placeRoad(state, world, e.a, e.b) // not asserted: a repeat/failed attempt is a legitimate no-op
-  step(state, NO_INPUT)
-  syncFields(state, world, sourcesByColour, fields, scratch)
-  const f0 = fieldFor(state, world, fields, 0, sourcesByColour[0] as readonly number[])
-  const f1 = fieldFor(state, world, fields, 1, sourcesByColour[1] as readonly number[])
+  step(state, world, fields, scratch, NO_INPUT)
+  syncFieldsFromLists(state, world, sourcesByColour, fields, scratch)
+  const f0 = fieldForColour(state, world, fields, 0, scratch)
+  const f1 = fieldForColour(state, world, fields, 1, scratch)
   return {
     tick: state.header[H_TICK] as number,
     stateHash: hashState(state),
@@ -360,7 +427,7 @@ describe('the snapshot-and-replay arm', () => {
   it('replaying from a snapshot on the SAME reused FlowField/Scratch objects reproduces the trace exactly', () => {
     const W = 8
     const H = 6
-    const map = parseMap('rollback-replay-fixture', Array.from({ length: H }, () => '.'.repeat(W)), 999)
+    const map = parseMap('rollback-replay-fixture', Array.from({ length: H }, () => '.'.repeat(W)), 999, 40, 16, 5)
     const world = createWorld(map)
     const state = createState('rollback-replay-seed', map)
     const S0 = 0
@@ -393,7 +460,7 @@ describe('the snapshot-and-replay arm', () => {
     }
 
     const fields = createFlowFields(2, world.cells)
-    const scratch = createScratch(world.cells)
+    const scratch = scratchFor(world, 2)
 
     const originalTrace: TraceEntry[] = []
     for (let t = 1; t <= T; t++) {
@@ -402,7 +469,7 @@ describe('the snapshot-and-replay arm', () => {
       )
     }
 
-    const roadsHashAtSnapshot = hashRoadRegion(state)
+    const inputsHashAtSnapshot = hashInputsFor(state, world)
     const snap = snapshot(state)
 
     for (let t = T + 1; t <= TICKS; t++) {
@@ -413,18 +480,20 @@ describe('the snapshot-and-replay arm', () => {
     // Length asserted BEFORE comparing — an empty trace compares equal to an empty trace.
     expect(originalTrace.length).toBe(TICKS)
 
-    // Vacuity: the abandoned timeline's road region genuinely diverged from
-    // what gets restored below. If it hadn't, this whole arm would pass
+    // Vacuity: the abandoned timeline's roads genuinely diverged from what
+    // gets restored below (roads is a FIELD_INPUT region, so this moves the
+    // whole field-input hash). If it hadn't, this whole arm would pass
     // trivially even under a broken staleness check, for the wrong reason.
-    expect(hashRoadRegion(state)).not.toBe(roadsHashAtSnapshot)
+    expect(hashInputsFor(state, world)).not.toBe(inputsHashAtSnapshot)
 
     const restored = restore(snap, world)
 
     // Reusing the SAME `fields`/`scratch` objects is the point, not an
     // optimisation: at this exact moment they hold the ABANDONED timeline's
-    // tick-16 field, built from a road hash that does not match `restored`'s
-    // tick-10 roads. Nothing below tells them so — no invalidation call, no
-    // reset, just `syncFields`'s own content comparison on the very next call.
+    // tick-16 field, built from field-input bytes that do not match
+    // `restored`'s tick-10 roads. Nothing below tells them so — no
+    // invalidation call, no reset, just `syncFields`'s own content
+    // comparison on the very next call.
     const replayTrace: TraceEntry[] = []
     for (let t = T + 1; t <= TICKS; t++) {
       replayTrace.push(
@@ -451,9 +520,9 @@ describe('the invalidation nobody triggered', () => {
     expect(placeRoad(state, world, S, A)).toBe(true) // S now carries a road: an accepted source
 
     const fields = createFlowFields(1, world.cells)
-    const scratch = createScratch(world.cells)
-    syncFields(state, world, [[S]], fields, scratch) // "Build a field"
-    expect(() => fieldFor(state, world, fields, 0, [S])).not.toThrow() // sanity: valid immediately after building
+    const scratch = scratchFor(world, 1)
+    syncFieldsFromLists(state, world, [[S]], fields, scratch) // "Build a field"
+    expect(() => fieldForColour(state, world, fields, 0, scratch)).not.toThrow() // sanity: valid immediately after building
 
     expect(placeRoad(state, world, A, B)).toBe(true) // "mutate the roads" — a genuinely new bit; the road region's content moves
     const restored = restore(snapshot(state), world) // "snapshot" + "restore" — a fresh, independent GameState
@@ -463,19 +532,19 @@ describe('the invalidation nobody triggered', () => {
     // Under a header-flag design, this would be the assertion that `restore`
     // remembered to set a bit — testing the test author's memory, not the
     // design. Here there is nothing to remember: `fields`' stamp still
-    // names the road content from before the mutation, `restored`'s actual
-    // roads have moved, and the two content hashes simply disagree.
-    expect(() => fieldFor(restored, world, fields, 0, [S])).toThrow()
+    // names the field-input content from before the mutation, `restored`'s
+    // actual roads have moved, and the two content hashes simply disagree.
+    expect(() => fieldForColour(restored, world, fields, 0, scratch)).toThrow()
 
     // Then syncFields repairs it, and the repaired field matches a
     // from-scratch rebuild over a SEPARATE FlowField.
-    syncFields(restored, world, [[S]], fields, scratch)
-    const repaired = fieldFor(restored, world, fields, 0, [S])
+    syncFieldsFromLists(restored, world, [[S]], fields, scratch)
+    const repaired = fieldForColour(restored, world, fields, 0, scratch)
 
     const freshFields = createFlowFields(1, world.cells)
-    const freshScratch = createScratch(world.cells)
-    syncFields(restored, world, [[S]], freshFields, freshScratch)
-    const fresh = fieldFor(restored, world, freshFields, 0, [S])
+    const freshScratch = scratchFor(world, 1)
+    syncFieldsFromLists(restored, world, [[S]], freshFields, freshScratch)
+    const fresh = fieldForColour(restored, world, freshFields, 0, freshScratch)
 
     expect(Array.from(repaired.dist)).toEqual(Array.from(fresh.dist))
     expect(Array.from(repaired.dir)).toEqual(Array.from(fresh.dir))
@@ -508,10 +577,10 @@ describe('accept-and-reuse across a restore', () => {
     expect(placeRoad(state, world, A, B)).toBe(true)
 
     const fields = createFlowFields(1, world.cells)
-    const scratch = createScratch(world.cells)
-    syncFields(state, world, [[S]], fields, scratch)
-    const distBefore = Array.from(fieldFor(state, world, fields, 0, [S]).dist)
-    const hashBefore = hashField(fieldFor(state, world, fields, 0, [S]))
+    const scratch = scratchFor(world, 1)
+    syncFieldsFromLists(state, world, [[S]], fields, scratch)
+    const distBefore = Array.from(fieldForColour(state, world, fields, 0, scratch).dist)
+    const hashBefore = hashField(fieldForColour(state, world, fields, 0, scratch))
     // Vacuity: the field must hold genuine reachable content, or "reused
     // correctly" and "reused as an empty wipe" would be the same assertion.
     expect(distBefore.some((d) => d !== 0 && d !== INF)).toBe(true)
@@ -521,10 +590,10 @@ describe('accept-and-reuse across a restore', () => {
     // The live timeline diverges with a genuinely new road bit, so the field
     // and the live state genuinely disagree at the moment of the restore.
     expect(placeRoad(state, world, B, C)).toBe(true)
-    expect(() => fieldFor(state, world, fields, 0, [S])).toThrow()
+    expect(() => fieldForColour(state, world, fields, 0, scratch)).toThrow()
 
     const restored = restore(snap, world)
-    expect(hashRoadRegion(restored)).not.toBe(hashRoadRegion(state)) // vacuity: the two timelines really differ
+    expect(hashInputsFor(restored, world)).not.toBe(hashInputsFor(state, world)) // vacuity: the two timelines really differ
 
     // The field was built before the snapshot; `restored`'s roads are what
     // it was built from. `syncFields` must ACCEPT it and not rebuild.
@@ -533,21 +602,21 @@ describe('accept-and-reuse across a restore', () => {
     // previous nonzero count in place would pass even for a rebuild that
     // happened to visit zero cells.
     scratch.stats[ST_EXPANSIONS] = -1
-    syncFields(restored, world, [[S]], fields, scratch)
+    syncFieldsFromLists(restored, world, [[S]], fields, scratch)
     expect(scratch.stats[ST_EXPANSIONS]).toBe(-1)
 
     // Accepted — and still the right answer, byte for byte, both against
     // what it held before the rollback and against an independent rebuild
     // over the restored state. Reuse alone is not the property; reuse of
     // something still correct is.
-    const reused = fieldFor(restored, world, fields, 0, [S])
+    const reused = fieldForColour(restored, world, fields, 0, scratch)
     expect(hashField(reused)).toBe(hashBefore)
     expect(Array.from(reused.dist)).toEqual(distBefore)
 
     const freshFields = createFlowFields(1, world.cells)
-    const freshScratch = createScratch(world.cells)
-    syncFields(restored, world, [[S]], freshFields, freshScratch)
-    expect(hashField(fieldFor(restored, world, freshFields, 0, [S]))).toBe(hashBefore)
+    const freshScratch = scratchFor(world, 1)
+    syncFieldsFromLists(restored, world, [[S]], freshFields, freshScratch)
+    expect(hashField(fieldForColour(restored, world, freshFields, 0, freshScratch))).toBe(hashBefore)
   })
 })
 
@@ -566,6 +635,9 @@ describe('blessed goldens', () => {
     'rollback-golden-v1',
     ['......', '.T..T.', '..~^..', '......', '.T....'],
     GOLDEN_STARTING_TILES,
+    8,
+    4,
+    2,
   )
 
   function buildGoldenNetwork(): { state: GameState; world: WorldData } {
@@ -592,11 +664,11 @@ describe('blessed goldens', () => {
   }
 
   it('road-network golden: pins hashState over a fixed, seeded road network', () => {
-    // What this pins: the buffer layout and byte order, the `roads` AND
-    // `cleared` regions (a tree is genuinely destroyed by this exact
-    // network), the tile budget (`H_TILES` after real spending), and the
-    // map identity slots (`H_MAP`/`H_MAP_W`/`H_MAP_H`). What it does NOT
-    // pin: any field data of any kind — nothing here ever calls
+    // What this pins: the buffer layout and byte order (the full M1c region
+    // list), the `roads` AND `cleared` regions (a tree is genuinely
+    // destroyed by this exact network), the tile budget (`H_TILES` after
+    // real spending), and the map identity slots (`mapIdentity`). What it
+    // does NOT pin: any field data of any kind — nothing here ever calls
     // `computeFlowField`/`syncFields`, and `hashState` only ever reads
     // `s.buffer`, which holds no derived pathfinding state at all.
     //
@@ -619,7 +691,10 @@ describe('blessed goldens', () => {
     )
     expect(tilesLeft(state), 'and must not have overspent the budget').toBeGreaterThanOrEqual(0)
 
-    expect(hashState(state)).toBe(3183850973)
+    // Re-blessed in M1c Task 1 (was 3183850973, M1b's value): the buffer
+    // grew to the full M1c region list. See "Why one re-bless is now true"
+    // in the M1c plan — this is the milestone's one deliberate re-bless.
+    expect(hashState(state)).toBe(2790151213)
   })
 
   it("field golden: pins hashBytes over each colour's dist/dir bytes, folded together, computed over the SAME fixed network above", () => {
@@ -629,14 +704,22 @@ describe('blessed goldens', () => {
     // PLACEMENT SEQUENCE moves both goldens, but a change to, say,
     // `H_SCORE` or the rng stream would move neither.
     //
+    // **This golden must NOT move as a result of M1c Task 1's signature
+    // widening** (`computeFlowField`/`hashSources`/`syncFields`/`fieldFor`
+    // now take a preallocated `Int32Array`/`Scratch` instead of a
+    // `readonly number[]`) — the container the sources travel in changed,
+    // not the source VALUES or the algorithm that consumes them. If this
+    // number moves, Task 1's plumbing changed pathfinding behaviour, which
+    // is a defect, not a re-bless.
+    //
     // When a rule change makes this fail intentionally, re-bless it in the
     // same commit as the change, never separately.
     const { state, world } = buildGoldenNetwork()
     const roaded = firstRoadedCells(state, world, 2)
     const sourcesByColour = [[roaded[0] as number], [roaded[1] as number]]
     const fields = createFlowFields(2, world.cells)
-    const scratch = createScratch(world.cells)
-    syncFields(state, world, sourcesByColour, fields, scratch)
+    const scratch = scratchFor(world, 2)
+    syncFieldsFromLists(state, world, sourcesByColour, fields, scratch)
 
     // Same reasoning as the guards on the golden above, applied to the thing
     // THIS golden pins. A hash over an all-INF field, or over one where

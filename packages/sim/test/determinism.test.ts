@@ -4,6 +4,9 @@ import { join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TICKS_PER_WEEK, parseMap } from '@laneways/shared'
 import { createState, hashState } from '../src/state'
+import { createWorld } from '../src/world'
+import { createFlowFields, createScratch } from '../src/scratch'
+import { createFieldInputRanges } from '../src/regions'
 import { nextRandom } from '../src/rng'
 import { step, type TickInputs } from '../src/step'
 
@@ -338,6 +341,7 @@ describe('sim source obeys the determinism rules', () => {
       'sim/src/hash.ts',
       'sim/src/index.ts',
       'sim/src/layout.ts',
+      'sim/src/regions.ts',
       'sim/src/rng.ts',
       'sim/src/roads.ts',
       'sim/src/scratch.ts',
@@ -438,18 +442,32 @@ describe('golden replay', () => {
   // would otherwise churn this golden for no reason connected to sim
   // correctness. `firstCity()`'s own content hash is pinned separately, in
   // `world.test.ts`, which is the assertion that SHOULD fire when it changes.
-  const GOLDEN_MAP = parseMap('golden-fixture-v1', ['....', '.~^.', '.T..', '....'], 12)
+  //
+  // maxHouses/maxDestinations/groupCount are fixed, arbitrary-but-small
+  // values (8/4/2) — part of this fixture's frozen recipe as of M1c, exactly
+  // like `w`/`h`/`startingTiles` already were. This fixture stays
+  // BUILDING-FREE (the plan's own constraint): no house or destination is
+  // ever placed on it, so `pinAccum`/`rotationCursor` never advance and no
+  // car ever exists — that is what makes M1c's Task 1 the only task that
+  // re-blesses this golden, per the plan's "Why one re-bless is now true".
+  const GOLDEN_MAP = parseMap('golden-fixture-v1', ['....', '.~^.', '.T..', '....'], 12, 8, 4, 2)
+  const GOLDEN_WORLD = createWorld(GOLDEN_MAP)
 
   it('reproduces a known hash', () => {
     // What this pins, precisely: the buffer layout and byte order (now
-    // including the map-derived header slots and the roads/cleared regions
-    // Task 3 will write into), the seed derivation from the seed string, the
-    // map's content hash and dimensions, tick accumulation, coarse week
-    // tracking, TICKS_PER_WEEK itself, and the rng stream's position after a
-    // known number of draws. It does not pin `dayOfWeek` — no day is stored
-    // in the buffer — and it is coarse about the clock by construction;
-    // `clock.test.ts` walks a full week tick by tick and `step.test.ts` bites
-    // on a ±1 change, which is where that coverage actually lives.
+    // including the full M1c region list — mapIdentity, the M1c header
+    // slots, and every zero-initialised building/car region — none of which
+    // this fixture ever writes into, per the building-free constraint
+    // above), the seed derivation from the seed string, the map's content
+    // hash and dimensions, tick accumulation, coarse week tracking,
+    // TICKS_PER_WEEK itself, the rng stream's position after a known number
+    // of draws, and one call to `syncFields` per tick via `step` (which,
+    // with zero sources on every colour, never rebuilds any field and so
+    // never touches anything `hashState` can see — fields live outside the
+    // buffer). It does not pin `dayOfWeek` — no day is stored in the buffer
+    // — and it is coarse about the clock by construction; `clock.test.ts`
+    // walks a full week tick by tick and `step.test.ts` bites on a ±1
+    // change, which is where that coverage actually lives.
     //
     // The run stops one tick short of a week boundary so that a change to
     // TICKS_PER_WEEK moves both the tick total and the stored week, and folds
@@ -459,17 +477,24 @@ describe('golden replay', () => {
     // When a rule change makes this fail intentionally, re-bless it in the same
     // commit as the rule change, never separately.
     const s = createState('golden-seed-v1', GOLDEN_MAP)
+    const fields = createFlowFields(GOLDEN_MAP.groupCount, GOLDEN_WORLD.cells)
+    const scratch = createScratch(
+      GOLDEN_WORLD.cells,
+      GOLDEN_MAP.groupCount,
+      GOLDEN_MAP.maxDestinations,
+      createFieldInputRanges(GOLDEN_MAP),
+    )
     const ticks = TICKS_PER_WEEK * 3 - 1
     for (let i = 0; i < ticks; i++) {
-      step(s, NO_INPUT)
+      step(s, GOLDEN_WORLD, fields, scratch, NO_INPUT)
       if (i % 1000 === 0) nextRandom(s.rng, 0)
     }
-    // Re-blessed in M1b Task 2 (was 917870623): the buffer grew by the
-    // `roads`/`cleared` regions and the header grew from 3 to 7 slots
-    // (H_MAP, H_MAP_W, H_MAP_H, H_TILES), and this replay now also pins the
-    // map's content hash and dimensions via those new header slots. This is
-    // the milestone's one deliberate golden re-bless (design decision 5) —
-    // no later M1b task should need another.
-    expect(hashState(s)).toBe(1073292924)
+    // Re-blessed in M1c Task 1 (was 1073292924, M1b's value): the buffer
+    // grew to the full M1c region list — `mapIdentity` split out of
+    // `header`, the header widened from 7 to 9 slots, and eighteen new
+    // zero-initialised building/car/demand regions added — per the plan's
+    // "Why one re-bless is now true": this is the milestone's one
+    // deliberate golden re-bless. No later M1c task should need another.
+    expect(hashState(s)).toBe(2413319809)
   })
 })

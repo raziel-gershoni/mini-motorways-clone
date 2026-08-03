@@ -58,5 +58,5 @@ const ROWS = Object.freeze([
 ] as const)
 
 export function firstCity(): MapData {
-  return parseMap('firstCity', ROWS, 30)
+  return parseMap('firstCity', ROWS, 30, 40, 16, 5)
 }

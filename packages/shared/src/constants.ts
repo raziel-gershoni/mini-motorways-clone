@@ -61,3 +61,23 @@ export const GRID_H = 40
 export const GROUP_COUNT_DEFAULT = 5
 export const CARS_PER_HOUSE = 2
 export const MOTORWAY_CAP = 9
+
+/**
+ * Upper bound on `MapData.groupCount` (spec §4.2's exhaustive enumeration:
+ * colour group count is per-map, 5 or 6 — this is the ceiling `parseMap`
+ * validates against, not a claim that 6 is typical). `destMeta`'s packed
+ * colour field (roads.ts / buildings.ts, M1c) is 3 bits specifically because
+ * 2 bits cannot address a 6th group.
+ */
+export const MAX_GROUP_COUNT = 6
+
+/**
+ * Maximum steps in a committed car route (M1c decision 2): 24 + 40 = 64 is
+ * the board's Manhattan diameter (`GRID_W + GRID_H`); 96 gives 1.5x headroom
+ * for detours. `ROUTE_BYTES = MAX_PATH_LEN / 2` (one 4-bit direction per
+ * step, two per byte) sizes the `carRoute` state region. Exceeding this walk
+ * length is a defined refusal (`H_ROUTES_REFUSED`), not a crash — it also
+ * bounds a hand-corrupted `dir`'s walk, which `dir` being a tree toward the
+ * sources cannot otherwise cycle through.
+ */
+export const MAX_PATH_LEN = 96

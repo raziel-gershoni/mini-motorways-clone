@@ -1,9 +1,9 @@
 import { hashBytes, hashInt32 } from './hash'
-import { H_MAP, nonZeroWord, type GameState } from './state'
+import { nonZeroWord, type GameState } from './state'
 import type { WorldData } from './world'
 import { neighbours, edgeCost } from './graph'
 import { OPPOSITE } from './roads'
-import { INF, NB, ST_EXPANSIONS, ST_PUSHES, type FlowField, type Scratch } from './scratch'
+import { CT_REBUILDS, CT_SYNCS, INF, NB, ST_EXPANSIONS, ST_PUSHES, type FlowField, type Scratch } from './scratch'
 
 /**
  * Multi-source Dijkstra over the *road graph* (never raw passable terrain —
@@ -49,14 +49,9 @@ import { INF, NB, ST_EXPANSIONS, ST_PUSHES, type FlowField, type Scratch } from 
  * `NB` (15)". The 4 is the spread *before* the current bucket's own pushes
  * are made; instrumenting the queue over 200 seeded random graphs measures a
  * true maximum spread of 14, i.e. the full interval. Reading 4 as headroom
- * would be a 3.5x overestimate of room that does not exist.) §5.4 promises
- * intersection and traffic-light penalties "as extra integer edge weight":
- * **any new edge cost requires `NB` to grow with it**, since `NB` must
- * strictly exceed the largest edge cost. `createScratch` asserts exactly
- * that (`assertBucketCountExceedsEveryEdgeCost`), so the failure is a throw
- * at allocation rather than a silently mis-bucketed distance — but the
- * constant still has to be updated deliberately, in scratch.ts, alongside
- * the new cost.
+ * would be a 3.5x overestimate of room that does not exist.) See
+ * `scratch.ts`'s penalty-routing note for what a future edge-cost change
+ * must re-derive alongside `NB`.
  *
  * The check stays because it saves work (skipping a stale cell's whole
  * neighbour scan), and because `scratch.stats[ST_EXPANSIONS]` — which counts
@@ -65,17 +60,24 @@ import { INF, NB, ST_EXPANSIONS, ST_PUSHES, type FlowField, type Scratch } from 
  */
 
 /**
- * Fills `out` and `scratch` for the given `sources`, replacing whatever
- * either held before.
+ * Fills `out` and `scratch` for the source slice `sourcesFlat[offset,
+ * offset + count)`, replacing whatever either held before.
  *
- * **The reset is unconditional — dist/dir/bucketHead are fully overwritten
- * and stats zeroed before anything else runs, with no early return for an
- * empty `sources`.** A natural `if (sources.length === 0) return` guard
- * would leave `out` holding whatever the previous colour (or the previous
- * build of this same colour) last wrote, and design decision 3's staleness
- * detection depends on every rebuild actually producing this colour's own,
- * current answer — not silently reusing a stale one because this
- * particular call happened to have nothing to relax.
+ * **Widened for M1c (fix-list #6): sources are a preallocated `Int32Array`
+ * slice, not a fresh `readonly number[]` per call.** Assembling a JS array
+ * of sources every tick (once per colour, ~6/tick at 30 Hz) would be an
+ * allocation this milestone's "nothing allocates inside a tick" rule
+ * forbids; a caller-owned flat buffer plus `(offset, count)` costs nothing
+ * to slice.
+ *
+ * **The reset is unconditional — dist/dir/bucketHead/pushesPerCell are fully
+ * overwritten and stats zeroed before anything else runs, with no early
+ * return for an empty source slice.** A natural `if (count === 0) return`
+ * guard would leave `out` holding whatever the previous colour (or the
+ * previous build of this same colour) last wrote, and design decision 3's
+ * staleness detection depends on every rebuild actually producing this
+ * colour's own, current answer — not silently reusing a stale one because
+ * this particular call happened to have nothing to relax.
  *
  * **Source validity: a source is accepted iff it is in range AND carries at
  * least one road bit.** A pin sitting on a cell with no road is not a source
@@ -85,37 +87,42 @@ import { INF, NB, ST_EXPANSIONS, ST_PUSHES, type FlowField, type Scratch } from 
  * M1c must seed sources from a destination's road-adjacent access cell, not
  * from the building cell itself.)
  *
- * **`sources` must be strictly ascending cell indices — throws otherwise,
- * including on a duplicate.** Source order silently decides `dir` at ties
- * while `dist` stays identical, so an unsorted (or differently-ordered)
- * source list would make browser and Worker agree on `dist` but potentially
- * disagree on `dir` — a divergence a `dist`-only check would never catch.
- * Canonicalising by throwing (rather than sorting internally) keeps the
- * decision of "what counts as the same source set" out of this function and
- * in whatever assembles `sources` every tick.
+ * **The source slice must be strictly ascending cell indices — throws
+ * otherwise, including on a duplicate.** Source order silently decides
+ * `dir` at ties while `dist` stays identical, so an unsorted (or
+ * differently-ordered) source list would make browser and Worker agree on
+ * `dist` but potentially disagree on `dir` — a divergence a `dist`-only
+ * check would never catch. Canonicalising by throwing (rather than sorting
+ * internally) keeps the decision of "what counts as the same source set"
+ * out of this function and in whatever assembles `sourcesFlat` every tick.
  */
 export function computeFlowField(
   state: GameState,
   world: WorldData,
-  sources: readonly number[],
+  sourcesFlat: Int32Array,
+  sourcesOffset: number,
+  sourcesCount: number,
   out: FlowField,
   scratch: Scratch,
 ): void {
   const { cells } = world
   const { dist, dir } = out
-  const { bucketHead, entryCell, entryNext, nbrCell, nbrDir, stats } = scratch
+  const { bucketHead, entryCell, entryNext, nbrCell, nbrDir, stats, pushesPerCell } = scratch
 
   dist.fill(INF)
   dir.fill(-1)
   bucketHead.fill(-1)
+  pushesPerCell.fill(0)
   stats[ST_EXPANSIONS] = 0
   stats[ST_PUSHES] = 0
 
-  for (let i = 1; i < sources.length; i++) {
-    if ((sources[i] as number) <= (sources[i - 1] as number)) {
+  for (let i = 1; i < sourcesCount; i++) {
+    const prev = sourcesFlat[sourcesOffset + i - 1] as number
+    const cur = sourcesFlat[sourcesOffset + i] as number
+    if (cur <= prev) {
       throw new Error(
         `computeFlowField: sources must be strictly ascending cell indices; ` +
-          `got ${sources[i - 1]} at index ${i - 1} followed by ${sources[i]} at index ${i}`,
+          `got ${prev} at index ${i - 1} followed by ${cur} at index ${i}`,
       )
     }
   }
@@ -140,10 +147,20 @@ export function computeFlowField(
     top++
     pending++
     stats[ST_PUSHES] = (stats[ST_PUSHES] as number) + 1
+    pushesPerCell[cell] = (pushesPerCell[cell] as number) + 1
   }
 
-  for (let i = 0; i < sources.length; i++) {
-    const s = sources[i] as number
+  for (let i = 0; i < sourcesCount; i++) {
+    const s = sourcesFlat[sourcesOffset + i] as number
+    // `Number.isInteger(s)` is unreachable through this signature and kept
+    // anyway — the same "cheap, independently correct, currently subsumed"
+    // reasoning `hashSources`' length fold documents. `sourcesFlat` is
+    // `Int32Array`, so ANY write into it — `arr[i] = 2.5` exactly as much as
+    // `Int32Array.from([2.5])` — truncates to an integer via ToInt32 before
+    // this line ever runs; M1b's `readonly number[]` signature could carry a
+    // genuine fractional value this far, M1c's typed-array signature cannot.
+    // The bounds half of this check (`s < 0 || s >= cells`) is very much
+    // still reachable: a valid Int32 can be negative or exceed `cells`.
     if (!Number.isInteger(s) || s < 0 || s >= cells) {
       throw new Error(`computeFlowField: source ${s} is out of range for ${cells} cells`)
     }
@@ -191,62 +208,96 @@ export function computeFlowField(
 }
 
 /**
- * `nonZeroWord` of a hash over BOTH `state.roads` and the map's identity
- * (`state.header[H_MAP]`, which already encodes `w`/`h` and every terrain
- * byte — see `mapIdHash` in world.ts). Folding in the map identity closes a
- * gap a roads-only hash would leave open: two boards with the same total
- * `cells` (e.g. 6x4 and 4x6) but different `w`/`h` would otherwise produce
- * byte-identical `roads` regions for byte-identical content and therefore
- * collide here, and `fieldFor`'s cell-count guard checks `dist.length ===
- * world.cells` — a count, not a shape — so it cannot catch that swap
- * either. Not reachable today (one map per running session; `createWorld`
- * and `createState` are always built from the same `MapData` together),
- * but the staleness key should not silently depend on that pairing holding
- * by convention rather than by construction.
+ * `nonZeroWord` of an FNV chain over every FIELD_INPUT region's bytes, in
+ * layout order — replaces M1b's `hashRoadRegion`.
+ *
+ * **Driven from the layout table (`ranges`, built once by
+ * `createFieldInputRanges` and stored on `Scratch`), not a hand-written
+ * sequence of `hashBytes(s.roads)`, `hashBytes(s.destPins)`, ...** — the
+ * hand-written form lets a region be classified FIELD_INPUT
+ * (`regions.ts`'s `FIELD_INPUT_REGIONS`) and then silently not hashed here:
+ * the union test stays green, the layout test stays green, and the field
+ * reports fresh while its inputs changed. Walking `ranges` instead makes
+ * that divergence structurally impossible — classification IS what gets
+ * hashed, because the ranges are derived from the same partition.
+ *
+ * Each region's bytes are hashed with `hashBytes` (finalised) and the
+ * per-region hashes are chained with `hashInt32`, in `ranges` order — the
+ * same "hash of hashes, order-sensitive" shape `hashSources` already uses
+ * below, reusing the two existing FNV primitives rather than adding a third.
+ * `mapIdentity` being a FIELD_INPUT region means the old `hashRoadRegion`'s
+ * separate `H_MAP` fold (M1b) is subsumed here: `mapIdentity` is simply one
+ * more region in `ranges`, hashed whole.
  */
-export function hashRoadRegion(state: GameState): number {
-  return nonZeroWord(hashInt32(hashBytes(state.roads) | 0, state.header[H_MAP] as number) | 0)
+export function hashFieldInputRegions(state: GameState, ranges: Int32Array): number {
+  let h = 0x811c9dc5 // FNV-1a offset basis
+  for (let i = 0; i < ranges.length; i += 2) {
+    const offset = ranges[i] as number
+    const length = ranges[i + 1] as number
+    const bytes = new Uint8Array(state.buffer, offset, length)
+    h = hashInt32(h, hashBytes(bytes) | 0)
+  }
+  return nonZeroWord(h | 0)
 }
 
 /**
- * nonZeroWord over the length and each element, via hashInt32.
- * Order-sensitive by design: an order-insensitive fold (a sum, an XOR) is the
- * tempting implementation, and it collides on permutations of the same
- * elements — which matters because `computeFlowField` throws on an unsorted
- * list, so an order-sensitive hash is the only kind that can actually detect
- * "the caller passed a different (even if same-length, same-set) source
- * list" as a staleness trigger.
+ * nonZeroWord over the length and each element of `sourcesFlat[offset,
+ * offset + count)`, via hashInt32. Order-sensitive by design: an
+ * order-insensitive fold (a sum, an XOR) is the tempting implementation, and
+ * it collides on permutations of the same elements — which matters because
+ * `computeFlowField` throws on an unsorted list, so an order-sensitive hash
+ * is the only kind that can actually detect "the caller passed a different
+ * (even if same-length, same-set) source list" as a staleness trigger.
  *
  * **Disclosed, so it does not read as an oversight: the length fold has no
- * constructible mutation.** Deleting `h = hashInt32(h, sources.length)`
- * leaves every test green, because FNV chaining is already prefix-sensitive
- * — `[1, 2]` and `[1, 2, 3]` diverge at the third element regardless of
- * whether the length was folded in first. It is kept as genuine
- * defence-in-depth on the staleness key rather than removed, on the same
- * reasoning as the terrain whitelist in roads.ts: a check that is currently
- * subsumed but independently correct is cheap, and the thing subsuming it is
- * a property of the hash function rather than of this function's contract.
+ * constructible mutation.** Deleting `h = hashInt32(h, count)` leaves every
+ * test green, because FNV chaining is already prefix-sensitive — `[1, 2]`
+ * and `[1, 2, 3]` diverge at the third element regardless of whether the
+ * length was folded in first. It is kept as genuine defence-in-depth on the
+ * staleness key rather than removed, on the same reasoning as the terrain
+ * whitelist in roads.ts: a check that is currently subsumed but
+ * independently correct is cheap, and the thing subsuming it is a property
+ * of the hash function rather than of this function's contract.
  */
-export function hashSources(sources: readonly number[]): number {
+export function hashSources(sourcesFlat: Int32Array, offset: number, count: number): number {
   // FNV-1a's offset basis — the same seed hashBytes starts from, hardcoded
   // here (not imported) rather than shared: hashBytes' seed is a
   // never-exported implementation detail of a function under the golden
   // hash, and pinning it wall-to-wall to hashInt32's usage elsewhere is
   // covered directly in hash.test.ts instead.
   let h = 0x811c9dc5
-  h = hashInt32(h, sources.length)
-  for (let i = 0; i < sources.length; i++) {
-    h = hashInt32(h, sources[i] as number)
+  h = hashInt32(h, count)
+  for (let i = 0; i < count; i++) {
+    h = hashInt32(h, sourcesFlat[offset + i] as number)
   }
   return nonZeroWord(h | 0)
 }
 
 /**
+ * Every colour's source slice in `scratch.sourcesFlat`, sized
+ * `world.map.maxDestinations` apart: colour `c` occupies `[c *
+ * maxDestinations, c * maxDestinations + scratch.sourceCounts[c])`. A tiny
+ * shared helper rather than repeating the arithmetic in both `syncFields`
+ * and `fieldFor` — those two independently re-implementing "roads AND
+ * sources" staleness is exactly the kind of duplication M1b's carry-forward
+ * flagged once already; the offset arithmetic gets the same treatment here.
+ */
+function colourSourceRange(
+  colour: number,
+  scratch: Scratch,
+  world: WorldData,
+): { readonly offset: number; readonly count: number } {
+  const maxDestinations = world.map.maxDestinations
+  return { offset: colour * maxDestinations, count: scratch.sourceCounts[colour] as number }
+}
+
+/**
  * The once-per-tick rebuild point, and the only writer of the stamps.
- * Computes the road hash once (roads rarely change relative to how often
- * this runs — once per tick, for every colour), rebuilds every colour whose
- * stamps disagree with its current inputs, and leaves the rest untouched —
- * that is §5.4's "coalesce dirty rebuilds to at most one per tick".
+ * Computes the field-input hash once (these regions rarely change relative
+ * to how often this runs — once per tick, for every colour), rebuilds every
+ * colour whose stamps disagree with its current inputs, and leaves the rest
+ * untouched — that is §5.4's "coalesce dirty rebuilds to at most one per
+ * tick".
  *
  * **Both stamps are zeroed BEFORE the rebuild and re-written only after it
  * returns. This is the single line of defence for design decision 3's whole
@@ -262,7 +313,7 @@ export function hashSources(sources: readonly number[]): number {
  * content: the next tick's comparison matches, this loop skips the rebuild,
  * and `fieldFor` returns an all-INF (or worse, plausible-looking, partly
  * relaxed) field with no error anywhere. Two engines holding byte-identical
- * `state` buffers and given identical `sources` would then serve different
+ * `state` buffers and given identical sources would then serve different
  * fields, decided purely by whether that engine's `FlowField` objects passed
  * through the throwing tick — the exact browser-vs-Worker divergence this
  * design exists to make impossible.
@@ -275,34 +326,41 @@ export function hashSources(sources: readonly number[]): number {
  * wipe costs one extra rebuild next tick and nothing else; both engines still
  * converge on identical field content, since a rebuild from identical inputs
  * is byte-identical.
+ *
+ * **Sources and the field-input hash both live on `scratch` (M1c), not as
+ * separate parameters** — `scratch.sourcesFlat`/`scratch.sourceCounts` are
+ * whatever the tick's source-assembly phase last wrote (Task 4's dispatch in
+ * production; a test poking them directly here in Task 1), and
+ * `scratch.fieldInputRanges` is the boot-time layout-derived table. This
+ * keeps `syncFields`' signature stable regardless of how many FIELD_INPUT
+ * regions the partition ever grows to.
  */
 export function syncFields(
   state: GameState,
   world: WorldData,
-  sourcesByColour: readonly (readonly number[])[],
   fields: readonly FlowField[],
   scratch: Scratch,
 ): void {
   // Checked explicitly rather than left to fall through: an out-of-range
-  // `sourcesByColour[c]` reads `undefined`, and `hashSources(undefined)`
-  // would throw a raw `TypeError: Cannot read properties of undefined
-  // (reading 'length')` naming neither `syncFields` nor which colour was
-  // missing its source list.
-  if (sourcesByColour.length !== fields.length) {
+  // `scratch.sourceCounts[c]` reads `undefined`, and treating it as a count
+  // would throw a raw, unnamed error from deep inside `hashSources`.
+  if (scratch.sourceCounts.length !== fields.length) {
     throw new Error(
-      `syncFields: sourcesByColour.length (${sourcesByColour.length}) !== fields.length (${fields.length})`,
+      `syncFields: scratch.sourceCounts.length (${scratch.sourceCounts.length}) !== fields.length (${fields.length})`,
     )
   }
-  const roadsHash = hashRoadRegion(state)
+  scratch.counters[CT_SYNCS] = (scratch.counters[CT_SYNCS] as number) + 1
+  const fieldInputHash = hashFieldInputRegions(state, scratch.fieldInputRanges)
   for (let c = 0; c < fields.length; c++) {
     const field = fields[c] as FlowField
-    const sources = sourcesByColour[c] as readonly number[]
-    const sourcesHash = hashSources(sources)
-    if (field.builtFromRoads === roadsHash && field.builtFromSources === sourcesHash) continue
-    field.builtFromRoads = 0
+    const { offset, count } = colourSourceRange(c, scratch, world)
+    const sourcesHash = hashSources(scratch.sourcesFlat, offset, count)
+    if (field.builtFromFieldInputs === fieldInputHash && field.builtFromSources === sourcesHash) continue
+    field.builtFromFieldInputs = 0
     field.builtFromSources = 0
-    computeFlowField(state, world, sources, field, scratch)
-    field.builtFromRoads = roadsHash
+    computeFlowField(state, world, scratch.sourcesFlat, offset, count, field, scratch)
+    scratch.counters[CT_REBUILDS] = (scratch.counters[CT_REBUILDS] as number) + 1
+    field.builtFromFieldInputs = fieldInputHash
     field.builtFromSources = sourcesHash
   }
 }
@@ -314,13 +372,18 @@ export function syncFields(
  * throw here means the caller read a field without syncing this tick first,
  * which is a bug worth surfacing rather than papering over with an implicit
  * rebuild.
+ *
+ * **`step` calls this once per colour per tick and holds the reference for
+ * the tick** (fix-list #21) — never `fields[c].dist[cell]` directly, which
+ * passes every test today and makes this whole staleness guard dead code in
+ * the exact place it exists to protect.
  */
 export function fieldFor(
   state: GameState,
   world: WorldData,
   fields: readonly FlowField[],
   colour: number,
-  sources: readonly number[],
+  scratch: Scratch,
 ): FlowField {
   const field = fields[colour]
   if (field === undefined) {
@@ -346,12 +409,13 @@ export function fieldFor(
   // condition with `false` still throws, from the stamp comparison below,
   // with a message that says "stale — call syncFields" and sends the reader
   // looking for a missing sync that already happened and failed.
-  if (field.builtFromRoads === 0 || field.builtFromSources === 0) {
+  if (field.builtFromFieldInputs === 0 || field.builtFromSources === 0) {
     throw new Error(`fieldFor: colour ${colour} field was never built`)
   }
-  const roadsHash = hashRoadRegion(state)
-  const sourcesHash = hashSources(sources)
-  if (field.builtFromRoads !== roadsHash || field.builtFromSources !== sourcesHash) {
+  const fieldInputHash = hashFieldInputRegions(state, scratch.fieldInputRanges)
+  const { offset, count } = colourSourceRange(colour, scratch, world)
+  const sourcesHash = hashSources(scratch.sourcesFlat, offset, count)
+  if (field.builtFromFieldInputs !== fieldInputHash || field.builtFromSources !== sourcesHash) {
     throw new Error(
       `fieldFor: colour ${colour} field is stale — call syncFields before reading it this tick`,
     )

@@ -22,13 +22,13 @@ const H = 4
 const MIXED_ROWS = ['.~....', '.^....', '.T....', '......']
 
 function landFixture(id: string): { map: MapData; world: WorldData } {
-  const map = parseMap(id, LAND_ROWS, 999)
+  const map = parseMap(id, LAND_ROWS, 999, 40, 16, 5)
   const world = createWorld(map)
   return { map, world }
 }
 
 function mixedFixture(id: string, startingTiles: number): { map: MapData; world: WorldData } {
-  const map = parseMap(id, MIXED_ROWS, startingTiles)
+  const map = parseMap(id, MIXED_ROWS, startingTiles, 40, 16, 5)
   const world = createWorld(map)
   return { map, world }
 }

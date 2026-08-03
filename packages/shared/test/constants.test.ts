@@ -9,6 +9,7 @@ import {
   ARRIVAL_KNOCKBACK_PCT, ARRIVAL_KNOCKBACK_MAX_MS, OVERCROWD_GRACE_MS,
   PIN_CAP_SQUARE_TIMER, PIN_CAP_SQUARE_HARD, PIN_CAP_CIRCLE_TIMER, PIN_CAP_CIRCLE_HARD,
   GRID_W, GRID_H, GROUP_COUNT_DEFAULT, CARS_PER_HOUSE, MOTORWAY_CAP,
+  MAX_GROUP_COUNT, MAX_PATH_LEN,
 } from '../src/index'
 import * as C from '../src/index'
 
@@ -92,6 +93,16 @@ describe('rule constants', () => {
     expect(GROUP_COUNT_DEFAULT).toBe(5)
     expect(CARS_PER_HOUSE).toBe(2)
     expect(MOTORWAY_CAP).toBe(9)
+  })
+
+  it('bounds groupCount and the committed route length for M1c', () => {
+    // MAX_GROUP_COUNT: destMeta packs colour in 3 bits (regions.ts), which is
+    // exactly what makes a 6th group addressable — 2 bits would not.
+    expect(MAX_GROUP_COUNT).toBe(6)
+    // MAX_PATH_LEN: 1.5x the board's Manhattan diameter (GRID_W + GRID_H = 64).
+    expect(MAX_PATH_LEN).toBe(96)
+    expect(MAX_PATH_LEN).toBeGreaterThan(GRID_W + GRID_H)
+    expect(MAX_PATH_LEN % 2).toBe(0) // two 4-bit directions pack per carRoute byte
   })
 
   it('encodes the failure constants at the right scale', () => {
