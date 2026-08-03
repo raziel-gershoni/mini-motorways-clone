@@ -321,6 +321,12 @@ describe('sim source obeys the determinism rules', () => {
     // `files.length > 0` passed against any directory holding .ts files — the
     // reviewer ran the whole suite green against the wrong package. The list is
     // the point: a new source file must be added here deliberately.
+    //
+    // Reconfirmed in M1b Task 6 (the milestone's last task, which adds no new
+    // source file): the list below already named every `sim/src`/`shared/src`
+    // file on disk, in sorted label order, including `scratch.ts` and
+    // `flowfield.ts` from Task 5 — verified live by deleting one entry here,
+    // observing this test fail, and reverting.
     expect(files.map(label).sort()).toEqual([
       'shared/src/constants.ts',
       'shared/src/index.ts',
