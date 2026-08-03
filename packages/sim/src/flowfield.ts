@@ -1,5 +1,5 @@
 import { hashBytes, hashInt32 } from './hash'
-import { nonZeroWord, type GameState } from './state'
+import { H_MAP, nonZeroWord, type GameState } from './state'
 import type { WorldData } from './world'
 import { neighbours, edgeCost } from './graph'
 import { OPPOSITE } from './roads'
@@ -18,10 +18,14 @@ import { INF, NB, ST_EXPANSIONS, ST_PUSHES, type FlowField, type Scratch } from 
  * this cell, and draining that bucket walks into the wrong list. Allocating a
  * fresh entry per insertion and skipping stale entries on drain avoids it.
  *
- * `computeFlowField` allocates nothing — every array it touches is either
- * `out` or `scratch`, both caller-provided. `createFlowField`/`createScratch`
- * (scratch.ts) are the only allocation points, so a flow-field rebuild (up to
- * once per colour per tick, per design decision 3) never allocates.
+ * `computeFlowField` allocates no arrays — every typed array it touches is
+ * either `out` or `scratch`, both caller-provided; `createFlowField`/
+ * `createScratch` (scratch.ts) are the only typed-array allocation points.
+ * It does allocate one closure (the `push` arrow function) per call, which
+ * the brief anticipates and which is harmless at the up-to-once-per-colour-
+ * per-tick rate this runs at (design decision 3) — the claim here is about
+ * the data buffers a hot pathfinding loop would actually churn through, not
+ * about zero JS object creation of any kind.
  *
  * **The staleness check inside the drain loop (`dist[cur] !== d`) is a
  * performance guard, not a correctness one.** Pushes happen only on strict
@@ -130,7 +134,11 @@ export function computeFlowField(
     const b = d % NB
     let e = bucketHead[b] as number
     bucketHead[b] = -1
-    while (e !== -1) {
+    // `>= 0` rather than `!== -1`: if `e` ever became `undefined` (an
+    // out-of-range read some future edit introduced), `!== -1` would be
+    // true forever and spin; `>= 0` terminates on it for free instead of
+    // turning a bug into a hang.
+    while (e >= 0) {
       const cur = entryCell[e] as number
       e = entryNext[e] as number
       pending--
@@ -160,9 +168,22 @@ export function computeFlowField(
   }
 }
 
-/** nonZeroWord(hashBytes(state.roads) | 0). */
+/**
+ * `nonZeroWord` of a hash over BOTH `state.roads` and the map's identity
+ * (`state.header[H_MAP]`, which already encodes `w`/`h` and every terrain
+ * byte — see `mapIdHash` in world.ts). Folding in the map identity closes a
+ * gap a roads-only hash would leave open: two boards with the same total
+ * `cells` (e.g. 6x4 and 4x6) but different `w`/`h` would otherwise produce
+ * byte-identical `roads` regions for byte-identical content and therefore
+ * collide here, and `fieldFor`'s cell-count guard checks `dist.length ===
+ * world.cells` — a count, not a shape — so it cannot catch that swap
+ * either. Not reachable today (one map per running session; `createWorld`
+ * and `createState` are always built from the same `MapData` together),
+ * but the staleness key should not silently depend on that pairing holding
+ * by convention rather than by construction.
+ */
 export function hashRoadRegion(state: GameState): number {
-  return nonZeroWord(hashBytes(state.roads) | 0)
+  return nonZeroWord(hashInt32(hashBytes(state.roads) | 0, state.header[H_MAP] as number) | 0)
 }
 
 /**
@@ -202,6 +223,16 @@ export function syncFields(
   fields: readonly FlowField[],
   scratch: Scratch,
 ): void {
+  // Checked explicitly rather than left to fall through: an out-of-range
+  // `sourcesByColour[c]` reads `undefined`, and `hashSources(undefined)`
+  // would throw a raw `TypeError: Cannot read properties of undefined
+  // (reading 'length')` naming neither `syncFields` nor which colour was
+  // missing its source list.
+  if (sourcesByColour.length !== fields.length) {
+    throw new Error(
+      `syncFields: sourcesByColour.length (${sourcesByColour.length}) !== fields.length (${fields.length})`,
+    )
+  }
   const roadsHash = hashRoadRegion(state)
   for (let c = 0; c < fields.length; c++) {
     const field = fields[c] as FlowField

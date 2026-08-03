@@ -5,16 +5,19 @@ import { createWorld, type WorldData } from '../src/world'
 import { placeRoad, DIR_COUNT, DX, DY } from '../src/roads'
 import { seedFromString, randomBelow } from '../src/rng'
 import { edgeCost } from '../src/graph'
+import { hashBytes } from '../src/hash'
 import {
   createFlowField,
   createFlowFields,
   createScratch,
+  entryPoolCapacity,
   INF,
   NB,
   ST_EXPANSIONS,
+  ST_PUSHES,
   type Scratch,
 } from '../src/scratch'
-import { computeFlowField, hashSources, syncFields, fieldFor } from '../src/flowfield'
+import { computeFlowField, hashSources, hashRoadRegion, syncFields, fieldFor } from '../src/flowfield'
 
 /**
  * Fixtures and helpers shared across this file. All-LAND boards throughout:
@@ -416,11 +419,17 @@ describe('computeFlowField: structural properties over a randomised graph', () =
     expect(tested).toBeGreaterThan(50) // vacuity guard
   })
 
-  it('work counter: ST_EXPANSIONS equals the number of reachable cells', () => {
+  it('work counters: ST_EXPANSIONS equals the number of reachable cells; ST_PUSHES stays within the pool bound', () => {
     const { field, scratch, world } = buildGraphAndField()
     let reachable = 0
     for (let c = 0; c < world.cells; c++) if (field.dist[c] !== INF) reachable++
     expect(scratch.stats[ST_EXPANSIONS]).toBe(reachable)
+    // Converts the pool-bound claim (entryPoolCapacity's doc comment) from
+    // prose into a live assertion on a genuinely branching graph, rather
+    // than only ever being checked on the one hand-built unequal-arms
+    // fixture above.
+    expect(scratch.stats[ST_PUSHES]).toBeGreaterThan(0)
+    expect(scratch.stats[ST_PUSHES]).toBeLessThanOrEqual(entryPoolCapacity(world.cells))
   })
 })
 
@@ -484,6 +493,19 @@ describe('computeFlowField: source list validation', () => {
     const scratch = createScratch(world.cells)
     expect(() => computeFlowField(state, world, [-1], field, scratch)).toThrow()
     expect(() => computeFlowField(state, world, [world.cells], field, scratch)).toThrow()
+  })
+
+  it('throws on a fractional (non-integer) source, rather than silently dropping it', () => {
+    // Without the `Number.isInteger` guard, a fractional in-range source is
+    // neither rejected nor genuinely processed: `state.roads[2.5]` and
+    // `dist[2.5]` are both no-ops on a typed array (a fractional index
+    // matches no real element), so the source would be silently swallowed
+    // instead of throwing — the guard turns that into a loud failure.
+    const { map, world } = landFixture('fractional', 6, 5)
+    const state = createState('s', map)
+    const field = createFlowField(world.cells)
+    const scratch = createScratch(world.cells)
+    expect(() => computeFlowField(state, world, [2.5], field, scratch)).toThrow()
   })
 
   it('sorting a shuffled source list gives the same dir as the already-sorted list; the shuffled list itself throws', () => {
@@ -592,7 +614,7 @@ describe('computeFlowField: entry pool sizing (unequal-arms fixture)', () => {
     expect(() => computeFlowField(state, world, [S], field, scratch)).not.toThrow()
   })
 
-  it('work counter: ST_EXPANSIONS counts the 14 reachable cells exactly once each, not X\'s stale first entry', () => {
+  it('work counters: ST_EXPANSIONS counts the 14 reachable cells exactly once each (not X\'s stale first entry); ST_PUSHES counts exactly the known 15; both reset on rebuild', () => {
     // A random graph's ties are not guaranteed to produce ANY stale entry at
     // all, so a work-counter check over one (see the "structural properties"
     // describe block below) can pass whether or not the staleness guard
@@ -603,6 +625,13 @@ describe('computeFlowField: entry pool sizing (unequal-arms fixture)', () => {
     // is skipped and ST_EXPANSIONS counts each of the 14 reachable cells
     // (S, the 5 diagonal-arm cells, the 7 orthogonal-arm cells, and X) once.
     // Without it, X's stale entry would ALSO count, making it 15.
+    //
+    // ST_PUSHES is written and otherwise never read by anything in this
+    // suite except via `Math.max` inside an array-length assertion — this is
+    // the only place it is checked against a known value. This exact
+    // fixture needs exactly 15 pushes: one per source (1), one per distinct
+    // relaxation (13 of the 14 non-source reachable cells relaxed once each),
+    // plus X's second, improving relaxation (1) = 1 + 13 + 1 = 15.
     const { state, world, S } = buildUnequalArms()
     const field = createFlowField(world.cells)
     const scratch = createScratch(world.cells)
@@ -611,6 +640,16 @@ describe('computeFlowField: entry pool sizing (unequal-arms fixture)', () => {
     for (let c = 0; c < world.cells; c++) if (field.dist[c] !== INF) reachable++
     expect(reachable).toBe(14)
     expect(scratch.stats[ST_EXPANSIONS]).toBe(14)
+    expect(scratch.stats[ST_PUSHES]).toBe(15)
+
+    // Rebuilding over the same (now "used") scratch must reset both
+    // counters, not accumulate them — deleting `stats[ST_PUSHES] = 0` (or
+    // `stats[ST_EXPANSIONS] = 0`) at entry is invisible on a FRESH scratch,
+    // whose default is already 0, and only visible here, on a scratch that
+    // already holds a nonzero count from the call above.
+    computeFlowField(state, world, [S], field, scratch)
+    expect(scratch.stats[ST_EXPANSIONS]).toBe(14)
+    expect(scratch.stats[ST_PUSHES]).toBe(15)
   })
 
   it('a pool sized for only 14 entries overflows; this exact graph needs 15 pushes (14 relaxations + 1 source)', () => {
@@ -651,8 +690,38 @@ describe('fieldFor: staleness', () => {
     expect(() => fieldFor(state, world, fields, 0, [])).toThrow()
   })
 
-  it('hashRoadRegion and hashSources are never 0 — proven via nonZeroWord(0) directly, not by search', () => {
+  it('the nonZeroWord guard forces 0 to 1 — the same guard hashRoadRegion/hashSources both rely on to never present as "never built"; proven directly, not by an unbounded search for a colliding input', () => {
     expect(nonZeroWord(0)).toBe(1)
+  })
+
+  it('hashRoadRegion differs between two same-cell-count, differently-shaped boards, even with byte-identical roads content', () => {
+    // A roads-only hash cannot see this: two boards with the same total
+    // `cells` (6x4 and 4x6) but swapped `w`/`h` can have byte-for-byte
+    // identical `roads` arrays while meaning something completely
+    // different geometrically. `fieldFor`'s cell-count guard (`dist.length
+    // === world.cells`) is a count, not a shape, so it cannot catch this
+    // either. Not reachable today — one map per session, `createWorld`/
+    // `createState` always paired — but the staleness key should not
+    // depend on that pairing by convention rather than by construction.
+    const mapA = parseMap('geom-6x4', Array.from({ length: 4 }, () => '......'), 999) // w=6, h=4
+    const mapB = parseMap('geom-4x6', Array.from({ length: 6 }, () => '....'), 999) // w=4, h=6
+    const worldA = createWorld(mapA)
+    const worldB = createWorld(mapB)
+    expect(worldA.cells).toBe(worldB.cells) // both 24, the collision precondition
+
+    const stateA = createState('s', mapA)
+    const stateB = createState('s', mapB)
+    for (let i = 0; i < worldA.cells; i++) {
+      const v = (i * 37) % 256
+      stateA.roads[i] = v
+      stateB.roads[i] = v
+    }
+    expect(Array.from(stateA.roads)).toEqual(Array.from(stateB.roads)) // byte-identical roads
+
+    // A roads-only hash WOULD collide here — the precondition this test
+    // exists to falsify for the real stamp.
+    expect(hashBytes(stateA.roads)).toBe(hashBytes(stateB.roads))
+    expect(hashRoadRegion(stateA)).not.toBe(hashRoadRegion(stateB))
   })
 
   it('hashSources differs for two lists of the same length, and for the same list with one element changed', () => {
@@ -708,6 +777,56 @@ describe('fieldFor: staleness', () => {
     expect(scratch.stats[ST_EXPANSIONS]).toBe(-1)
   })
 
+  it('syncFields rebuilds after sources change alone, and again after roads change alone — not just detects staleness once', () => {
+    // Every other `syncFields` test in this file syncs from a fresh field
+    // exactly once; the tests that change an input afterward (the two
+    // below this one) only ever call `fieldFor` again and assert it
+    // THROWS — they never call `syncFields` a second time. That is real
+    // coverage for `fieldFor`'s staleness check, but it leaves the loop the
+    // game actually runs every tick (sources or roads change -> `syncFields`
+    // -> `fieldFor`) completely unexercised: `syncFields`'s own rebuild
+    // condition independently re-implements the same "roads AND sources"
+    // check `fieldFor` makes, in its own line of source, and nothing here
+    // proved the two agree. Three mutations at that one line all survive a
+    // green suite without this test: `&&` -> `||`, "rebuild only if roads
+    // never matched" (ignoring the source stamp), and "rebuild only once,
+    // ever" (ignoring both stamps after the first build) — the last of
+    // which means the game builds its fields at startup and then ignores
+    // every road the player draws for the rest of the run.
+    //
+    // A 4-cell row, 0-1-2 connected, 2-3 not (yet):
+    const { map, world } = landFixture('sync-roundtrip', 4, 1)
+    const state = createState('s', map)
+    placeRoad(state, world, 0, 1)
+    placeRoad(state, world, 1, 2)
+    const fields = createFlowFields(1, world.cells)
+    const scratch = createScratch(world.cells)
+
+    syncFields(state, world, [[0]], fields, scratch)
+    expect(Array.from(fieldFor(state, world, fields, 0, [0]).dist)).toEqual([0, 10, 20, INF])
+
+    // Sources change ONLY (roads untouched) -> re-sync -> must not throw,
+    // and must actually reflect the new source, not the stale one.
+    syncFields(state, world, [[2]], fields, scratch)
+    expect(() => fieldFor(state, world, fields, 0, [2])).not.toThrow()
+    expect(Array.from(fieldFor(state, world, fields, 0, [2]).dist)).toEqual([20, 10, 0, INF])
+
+    // Roads change ONLY (sources untouched, still [2]) -> re-sync -> must
+    // not throw, and must actually reflect the new road.
+    expect(placeRoad(state, world, 2, 3)).toBe(true)
+    syncFields(state, world, [[2]], fields, scratch)
+    expect(() => fieldFor(state, world, fields, 0, [2])).not.toThrow()
+    expect(Array.from(fieldFor(state, world, fields, 0, [2]).dist)).toEqual([20, 10, 0, 10])
+  })
+
+  it('syncFields throws when sourcesByColour is shorter than fields, rather than a raw TypeError from inside hashSources', () => {
+    const { map, world } = landFixture('sync-length-guard', 5, 4)
+    const state = createState('s', map)
+    const fields = createFlowFields(2, world.cells)
+    const scratch = createScratch(world.cells)
+    expect(() => syncFields(state, world, [[0]], fields, scratch)).toThrow(/sourcesByColour/)
+  })
+
   it('after a road mutation, fieldFor throws — with no explicit invalidation call anywhere in this test', () => {
     const { state, world } = randomGraphFixture('sync-road-mut', 8, 6, 200)
     const sources = firstRoadedCells(state, world, 2)
@@ -756,16 +875,26 @@ describe('fieldFor: staleness', () => {
   })
 
   it('fieldFor throws when handed a fields array sized for a different cell count', () => {
-    const { map: bigMap, world: bigWorld } = landFixture('wrong-size-big', 8, 7)
-    const bigState = createState('s', bigMap)
-    placeRoad(bigState, bigWorld, 0, 1)
-    const fields = createFlowFields(1, bigWorld.cells)
-    const scratch = createScratch(bigWorld.cells)
-    syncFields(bigState, bigWorld, [[0]], fields, scratch)
+    // Isolates the SIZE branch specifically, rather than merely producing
+    // *some* throw: a naive version of this test paired the field's world
+    // with an unrelated, differently-shaped world/state, whose `state.roads`
+    // inevitably hashes differently too — so the staleness branch fires
+    // first, `.toThrow()` passes either way, and mutating away the size
+    // check (`if (false)`, or the tautology `dist.length !== dir.length`)
+    // is invisible. Here `state` and `sources` are the EXACT ones the field
+    // was built from, so both stamps still match; a `world` that agrees on
+    // everything except `cells` is the only remaining way to make it throw,
+    // which is exactly the branch this test exists to pin.
+    const { map, world } = landFixture('wrong-size', 8, 7)
+    const state = createState('s', map)
+    placeRoad(state, world, 0, 1)
+    const sources = [0]
+    const fields = createFlowFields(1, world.cells)
+    const scratch = createScratch(world.cells)
+    syncFields(state, world, [sources], fields, scratch)
+    expect(() => fieldFor(state, world, fields, 0, sources)).not.toThrow() // sanity: matches today
 
-    const { map: smallMap, world: smallWorld } = landFixture('wrong-size-small', 6, 5)
-    const smallState = createState('s2', smallMap)
-    expect(bigWorld.cells).not.toBe(smallWorld.cells)
-    expect(() => fieldFor(smallState, smallWorld, fields, 0, [0])).toThrow()
+    const mismatchedWorld: WorldData = { ...world, cells: world.cells + 1 }
+    expect(() => fieldFor(state, mismatchedWorld, fields, 0, sources)).toThrow(/dist\.length/)
   })
 })

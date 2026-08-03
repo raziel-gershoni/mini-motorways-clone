@@ -57,8 +57,8 @@ export interface Scratch {
   readonly bucketHead: Int32Array // NB
   readonly entryCell: Int32Array // entryPoolCapacity(cells)
   readonly entryNext: Int32Array // entryPoolCapacity(cells)
-  readonly nbrCell: Int32Array // 8
-  readonly nbrDir: Int8Array // 8
+  readonly nbrCell: Int32Array // DIR_COUNT
+  readonly nbrDir: Int8Array // DIR_COUNT
   readonly stats: Int32Array // ST_EXPANSIONS, ST_PUSHES
 }
 
@@ -157,8 +157,11 @@ export function createScratch(cells: number): Scratch {
     bucketHead: new Int32Array(NB),
     entryCell: new Int32Array(cap),
     entryNext: new Int32Array(cap),
-    nbrCell: new Int32Array(8),
-    nbrDir: new Int8Array(8),
+    // Sized from `DIR_COUNT` (roads.ts owns that count), not a literal `8` —
+    // a second hardcoded copy of the direction count is exactly how the two
+    // would silently drift if `DIR_COUNT` ever changed.
+    nbrCell: new Int32Array(DIR_COUNT),
+    nbrDir: new Int8Array(DIR_COUNT),
     stats: new Int32Array(STATS_LENGTH),
   }
 }
