@@ -752,7 +752,7 @@ Cover at minimum:
 
 *Design decision 1*
 - **`world.terrain` is byte-identical before and after the entire sequence.** This is the assertion that would have caught the tree-destruction defect, and it is the only thing standing between `WorldData` and cross-instance mutable state.
-- Place on a tree, snapshot, place more, restore, and assert the tree is back — the rollback the `cleared` region exists to make possible, and which was architecturally impossible in the reviewed draft.
+- Take the snapshot **before** placing on the tree, then place, then restore, and assert the tree is back — the rollback the `cleared` region exists to make possible, and which was architecturally impossible in the reviewed draft. The ordering is the whole test and is easy to get backwards: snapshotting *after* the clearing captures the already-cleared state, so restoring it proves nothing and the test passes against an implementation that never restores anything.
 
 - [ ] **Step 2: Confirm they fail**
 
