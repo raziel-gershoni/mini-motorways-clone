@@ -405,13 +405,42 @@ describe('assertSymmetric and assertNoRoadOnImpassable', () => {
   })
 
   it('assertSymmetric throws when a road bit points off the right edge (row-seam self-blindness)', () => {
-    // The specific hazard design decision 2 calls out: an implementation
-    // that recomputes neighbours with the same wrap-prone arithmetic as a
-    // buggy `dirBetween` would see this pair as mirror-symmetric.
+    // What this discriminates, precisely — and why leaving out the mirror
+    // write below (which looks like the obviously-simpler version of this
+    // test) makes it vacuous:
+    //
+    // A correct `assertSymmetric` decomposes to x/y and rejects a bit
+    // whose neighbour falls outside [0,w)x[0,h) BEFORE it ever looks at
+    // that neighbour's mask. A self-blind implementation instead computes
+    // the "neighbour" as `cell + dx + dy*w` with no bounds check at all,
+    // so a bit at (w-1, y) pointing "east" lands, numerically, on
+    // (0, y+1) — the very row-seam wrap this test is named for — and it
+    // proceeds to compare masks with THAT cell as if it were a real
+    // neighbour.
+    //
+    // If only `roads[cell]`'s bit were set (the tempting, "obviously
+    // sufficient" version of this test), the untouched wrapped cell would
+    // have an all-zero mask, so the self-blind implementation's ordinary
+    // "no mirrored bit at the neighbour" branch would ALSO throw — for a
+    // completely unrelated reason. `.toThrow()` would pass against BOTH
+    // implementations, and this test would not be testing what its name
+    // claims.
+    //
+    // So the mirror bit is set at the WRAPPED target too: under the
+    // self-blind implementation's own (wrong) arithmetic, the pair now
+    // looks perfectly mirror-symmetric, and it reports no violation at
+    // all. Only the correct implementation still throws, via its
+    // off-grid branch, before it ever reaches a mask comparison. That
+    // gap between "throws" and "does not throw" is the actual
+    // discrimination this test needs — do not "simplify" this back down
+    // to a single write.
     const { map, world } = fixture(50, 'assert-sym-rowseam')
     const state = createState('s', map)
     const cell = 1 * W + (W - 1) // row1, last column — LAND
-    state.roads[cell] = 1 << eastDir()
+    const dir = eastDir()
+    const wrappedTarget = cell + 1 // numerically row2, first column, under cell+dx+dy*w
+    state.roads[cell] = 1 << dir
+    state.roads[wrappedTarget] = 1 << (OPPOSITE[dir] as number)
     expect(() => assertSymmetric(state, world)).toThrow()
   })
 
