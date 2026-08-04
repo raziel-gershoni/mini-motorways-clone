@@ -93,10 +93,12 @@ Dependency direction is strictly one-way: `bot` and `game` depend on `sim` and `
 **`sim` is the whole bet.** Its contract is:
 
 ```ts
-step(state: GameState, inputs: TickInputs): GameState
+step(state: GameState, world: World, fields: FlowField[], scratch: Scratch, inputs: TickInputs): void
 ```
 
-Pure, integer-only, allocation-free. It runs unchanged in the browser and in a Cloudflare Worker. That single property is what makes verified leaderboards a config flag later rather than a rewrite, and it is brutal to retrofit — hence adopted from the first commit.
+**Corrected in M1c** — this section previously read `step(state, inputs): GameState`, returning a new state. It does not. `step` mutates `state` in place and returns nothing, and it takes the world, the per-colour flow fields and the scratch buffers explicitly. Both changes are load-bearing rather than cosmetic: returning a fresh state would allocate per tick, and the milestone's hard rule is **zero allocations per tick** (measured, and enforced by review since no profiler exists here). Widening the signature is also what gave the once-per-tick field sync a production home — M1b's most consequential finding was that the rebuild loop the game actually runs had no coverage because it had no caller.
+
+Purity therefore means *deterministic and side-effect-free with respect to anything outside the passed buffers*, not *non-mutating*. Integer-only and allocation-free. It runs unchanged in the browser and in a Cloudflare Worker. That single property is what makes verified leaderboards a config flag later rather than a rewrite, and it is brutal to retrofit — hence adopted from the first commit.
 
 ### 4.1 Determinism rules, enforced by lint
 
