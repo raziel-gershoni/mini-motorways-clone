@@ -59,4 +59,52 @@ The plan inherited the tension rather than resolving it, and Decision 3 asserted
 
 ---
 
+## C4 (Important) — the two new packages would be silently unlinted, and `pnpm lint` would still pass
+
+**Verified by reading `eslint.config.js`.** It contains exactly **one** `files:` block:
+
+```js
+files: ['packages/sim/src/**/*.{ts,mts,cts,js}', 'packages/shared/src/**/*.{ts,mts,cts,js}'],
+extends: [tseslint.configs.recommended],
+```
+
+`tseslint.configs.recommended` is *inside* that block. So adding `packages/render` and `packages/game` gives them **no linting at all** — not the determinism rules, which is correct since those packages are explicitly allowed floats and DOM, but also not the recommended TypeScript rules, which they should have.
+
+`pnpm lint` will keep exiting 0, so nothing announces the gap. This is the project's signature defect shape at the toolchain level: **a check that appears to cover something and does not.**
+
+Separately verified: the source scan in `packages/sim/test/determinism.test.ts` is explicitly scoped to `../src` and `../../shared/src`, so it will not reach the new packages and will not produce false failures there. That half is already correct and needs no change.
+
+**Fix — add to Task 1's file list and state it as a decision:**
+
+> A second `eslint.config.js` block covers `packages/render/src/**` and `packages/game/src/**` with `tseslint.configs.recommended` only. The `determinism/*` rules, `no-restricted-globals` and `no-restricted-syntax` deliberately **do not** apply there: `render` and `game` are outside the determinism boundary by design (spec §4), they legitimately use floats, `document`, `performance` and `Math.random`, and `no-module-mutable-state` would forbid the atlas cache that Decision 4 requires. The boundary is enforced instead by the one-way dependency direction and by `render` importing nothing from `sim`.
+
+Add a test asserting the new packages are actually covered by *some* config, so this cannot silently regress — `ESLint.calculateConfigForFile` on a representative file from each.
+
+---
+
+## C5 (Important) — Task 1's symmetry fixture violates Task 1's own vacuity check
+
+Task 1 states the coverage as:
+
+> a tile's ink is symmetric under the mask's own symmetry (**mask for N+S is vertically symmetric, E+W horizontally**)
+
+and then states the vacuity condition as:
+
+> the symmetry fixture **must use a mask that is not symmetric under both axes**, or a blank tile passes
+
+**Both named examples are symmetric under both axes.** Verified against the real bit order (`roads.ts:92-95`, where bit *i* is direction *i*, so N=0, NE=1, E=2, SE=3, S=4, SW=5, W=6, NW=7):
+
+- **N+S** is mask `0b00010001` = **17** — a vertical bar. Mirrored horizontally it is still a vertical bar. Symmetric under both axes.
+- **E+W** is mask `0b01000100` = **68** — a horizontal bar. Symmetric under both axes.
+
+So an implementer following the coverage bullet literally writes a fixture the vacuity check forbids, and a blank tile passes the symmetry assertion. The bullet and its own guard are in direct contradiction.
+
+**Fix — name an asymmetric mask explicitly:**
+
+> A tile's ink is symmetric under the mask's own symmetry, tested on **mask 5 (N+E, `0b00000101`)** — an elbow, symmetric about the NE–SW diagonal and asymmetric under *both* the horizontal and vertical axes, which is what makes a blank or centred tile fail. Assert the diagonal symmetry, and assert the horizontal and vertical asymmetry, so the fixture cannot pass by having no ink.
+
+**The plan's other mask literals do check out**, verified against the same bit order and worth keeping: **85** = `0b01010101` = the four orthogonals, **170** = `0b10101010` = the four diagonals, **255** = all eight, **1** = N alone, **0** = empty.
+
+---
+
 *The four-lens adversarial review appends below.*
