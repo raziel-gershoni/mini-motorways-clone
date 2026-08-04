@@ -107,4 +107,41 @@ So an implementer following the coverage bullet literally writes a fixture the v
 
 ---
 
+## C6 (Critical) — Task 5 sizes the canvas once, and the spike's own code says once is not enough
+
+**Verified against `spike/src/main.ts:19,90,95` and `spike/src/telegram.ts`.** The spike sizes the canvas as `stableHeight() - contentSafeAreaTop() - 16` and then **re-reads it a second time after the fullscreen transition settles**, with a comment explaining why:
+
+> At module-eval time `requestFullscreen()` had only just been called and the client had not yet published the real inset.
+
+Task 5 says the boot order ends "**only then** size the canvas", implying a single pass immediately after `boot()` returns. That is precisely the pass the spike documents as a **best guess**. The plan therefore encodes the wrong half of a lesson M0 already learned: it correctly moves sizing *after* the Telegram calls, and then stops one step short.
+
+The consequence is not cosmetic. Tile size is derived from canvas size, and **the atlas is built from tile size**, so a wrong first measurement means a full atlas rebuild on the first correction — or worse, a stale atlas if the rebuild trigger only watches resize events that never fire.
+
+**Fix — replace Task 5's sizing sentence:**
+
+> Size the canvas after the boot calls, then **size it again once the fullscreen transition has settled**, because at boot-return the client has not yet published the real content-safe-area inset — this is measured spike behaviour, not a precaution. Treat the first pass as provisional. Drive the atlas rebuild from *measured tile size changing*, never from a resize event, so the second pass rebuilds correctly and a no-change second pass costs nothing.
+>
+> **Coverage:** a boot in which the second measurement differs from the first rebuilds the atlas exactly once and leaves the first frame's tile size unused; a boot in which they agree rebuilds zero times.
+
+That second coverage bullet is the vacuity guard — without it, "always rebuild" passes.
+
+---
+
+## C7 (Important) — Task 5's version-gate coverage is unsatisfiable for half the calls it names
+
+**Verified in `spike/src/telegram.ts:82-90`.** The boot order is exact, and the gates are exactly `'7.7'` and `'8.0'` as the plan states. But `ready()` and `expand()` are **not gated at all** — they pass no `minVersion`, correctly, since both are 6.0 baseline.
+
+Task 5 claims "**every** call version-gated with `isVersionAtLeast`" and then asks for coverage that "each version gate suppresses its call on an older reported version". For `ready` and `expand` there is no gate to suppress, so **two of the four bullets cannot be written**. An implementer either invents gates that should not exist, or quietly drops the bullets.
+
+Three further lift hazards found in the same pass, none of which the plan mentions:
+
+- **`atLeast()` is the exported helper; `isVersionAtLeast` is used only inside a private `webApp()` wrapper.** A recording stub must therefore stub `globalThis.Telegram.WebApp.isVersionAtLeast`, not an importable symbol — worth stating, because stubbing the wrong one produces a test that passes and proves nothing.
+- **`atLeast` returns `false` when `isVersionAtLeast` is absent**, so an "old client" fixture suppresses *everything* past `expand()`. That is the correct behaviour and it makes a single old-client fixture unable to distinguish the 7.7 gate from the 8.0 gate. Each needs its own reported version.
+- **`telegram.ts` imports `type { CloudLike } from './cloudProbe'`**, which is spike-only, and exports `cloudStorage()`. M2 defers persistence to M3, so the lift must **drop `cloudStorage()` and that import** rather than drag `cloudProbe.ts` into `packages/game`.
+- `stableHeight()` reads `globalThis.innerHeight`, so `packages/game`'s tsconfig needs `"lib": ["DOM"]`. `sim` and `shared` have no DOM need, so confirm what `tsconfig.base.json` actually provides before assuming it is inherited.
+
+**Fix:** restate the claim as "every call that *needs* a gate is gated, and `ready`/`expand` are 6.0 baseline and deliberately ungated", and scope the coverage to the two real gates, each with its own reported-version fixture.
+
+---
+
 *The four-lens adversarial review appends below.*
