@@ -45,21 +45,33 @@ export interface TickInputs {
  * replaying 2*(N/2) ticks run this exact function the same number of times
  * either way.
  *
- * **The seven phases, each justified by the constraint that forces its
- * position rather than by preference** (M1c, "The tick order, derived"). The
- * order is derived; do not reorder it for tidiness.
+ * **The seven phases. Most positions are forced by a constraint; TWO ADJACENT
+ * SWAPS ARE NOT, and this comment says which** (M1c, "The tick order,
+ * derived"). An earlier version opened "each justified by the constraint that
+ * forces its position rather than by preference — the order is derived; do not
+ * reorder it for tidiness", and that was an overstatement in the one comment
+ * that presents the whole order as derived. All 13 reorderings were run: 11 are
+ * caught by tests, **`1 <-> 2` and `2 <-> 3` are 0-detector no-ops today.** See
+ * the disclosure below the table; do not read it as licence to reorder.
  *
- *   1. `H_EPOCH <- tick`; advance `H_TICK`, `H_WEEK` — demand's 4 s
- *      eligibility gate compares `H_TICK - destSpawnTick[d]` against
+ *   1. `H_EPOCH <- tick`; advance `H_TICK`, `H_WEEK`. **The real constraint is
+ *      "the advance must precede phase 3", not "it must be first".** Demand's
+ *      4 s eligibility gate compares `H_TICK - destSpawnTick[d]` against
  *      `FIRST_PIN_DELAY_TICKS`, and it is the ONLY thing inside a tick that
- *      reads `H_TICK` at all. Moving this one slot later delays every first
- *      pin by exactly one tick, which no golden can see (they are
- *      building-free) and only a run that CROSSES the 120-tick boundary can:
- *      `loop.test.ts` has that boundary test. `H_EPOCH` is the atomicity
- *      marker — see state.ts's "Atomicity" note. A throw in a later phase
- *      leaves it non-zero, and both the next `step` and `restore` throw a
- *      named error rather than proceed from a buffer a throwing tick may
- *      have partly mutated.
+ *      reads `H_TICK` at all — phase 2 calls only `roads.ts`, which reads
+ *      neither `H_TICK` nor `H_WEEK`. An earlier version of this bullet said
+ *      "moving this one slot later delays every first pin by exactly one
+ *      tick"; that is measurably false — one slot later does nothing, and it
+ *      takes moving past demand, two slots, before anything changes. Moving it
+ *      past demand IS caught, by three tests: `loop.test.ts`'s 120-tick
+ *      boundary test, its same-tick dispatch test, and the loop golden (which
+ *      does see it, through `pinAccum` — the older parenthetical "no golden can
+ *      see this, they are building-free" was written before this milestone had
+ *      a golden with buildings in it). `H_EPOCH` is the atomicity marker and
+ *      genuinely must be written first — see state.ts's "Atomicity" note. A
+ *      throw in a later phase leaves it non-zero, and both the next `step` and
+ *      `restore` throw a named error rather than proceed from a buffer a
+ *      throwing tick may have partly mutated.
  *   2. Apply inputs — the only phase that changes `roads`. Must precede the
  *      field sync, or a road drawn on tick T is invisible to this tick's
  *      field.
@@ -84,6 +96,23 @@ export interface TickInputs {
  *      only in-tick reader is phase 5, so this binds external callers only,
  *      and `loop.test.ts` asserts the throw rather than assuming it.
  *   — `H_EPOCH <- 0` on successful exit.
+ *
+ * **The two checked no-ops, disclosed in `cars.ts`'s idiom for exactly this
+ * shape, and the reason they are kept anyway.** `1 <-> 2` (the clock advance
+ * after input application) and `2 <-> 3` (inputs after demand) are each
+ * 0-detector across the whole suite. Both are no-ops for one reason: **no
+ * `TickAction` currently reads `H_TICK`.** `roads.ts` is the only module phase
+ * 2 calls, and it reads neither the clock nor the week.
+ *
+ * That is a property of today's action set, not of the design — and the change
+ * that ends it is already written and already scheduled. `placeDestination`
+ * (`buildings.ts`) stamps `destSpawnTick[d]` from `H_TICK`, and M1e's job is to
+ * make building placement a `TickAction`. **The day it does, both swaps become
+ * real off-by-ones in every destination's first-pin delay at once, and nothing
+ * in the suite catches either.** Anyone adding an action that reads the clock
+ * owns re-deriving these two positions and pinning them; until then this
+ * paragraph is the only record that they were checked rather than merely
+ * assumed.
  *
  * Pure in the sense that matters: the result depends only on the contents of
  * `s.buffer`, `world`, `fields`/`scratch` (both re-derivable from `s.buffer`

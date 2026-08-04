@@ -291,8 +291,37 @@ export function assertFreeCarFound(k: number, h: number, colour: number): void {
   }
 }
 
-/** The cell one step in direction `k` from `cell`, or -1 if that leaves the grid. */
-function stepCell(cell: number, k: number, w: number, h: number): number {
+/**
+ * The cell one step in direction `k` from `cell`, or -1 if that leaves the grid.
+ *
+ * **The x/y round-trip is not decoration, and this is the copy that decides
+ * where every committed route actually goes.** `cell + DY[k] * w + DX[k]` alone
+ * wraps the grid's right edge onto the next row's left column — the same
+ * row-seam false neighbour `carparkCell`, `dirBetween`, `neighbours` and
+ * `cars.ts`'s own `stepCell` each carry a paragraph about. The failure is a
+ * route committed onto a cell the walk never named: wrong-but-plausible, not a
+ * crash.
+ *
+ * **`@internal` Exported for testing only; `dispatchColour`'s walk is the real
+ * call site — and the export exists because of a specific, measured gap.**
+ * `cars.ts` holds a five-line duplicate of this function and `cars.test.ts`
+ * gives THAT copy one `it()` per bound, by name. This copy had none: all four
+ * bounds and the whole x/y decomposition survived the entire suite. The
+ * milestone review named it "the catalogue's *production code with no covering
+ * test, masked by a redundant sibling* in its most literal form — the sibling
+ * has four tests and the original has zero", and per-task review could not see
+ * it because it never looked at both copies at once.
+ *
+ * Testing it only through `dispatchColour` is not enough: with `x` fenced into
+ * `[0, w - 1]`, any `y <= -1` makes `y * w + x <= -1`, so the caller's own
+ * `if (next < 0) break` masks the `y < 0` bound completely. Direct calls
+ * observe all four. The caller's refusal branch gets its own witness in
+ * `dispatch.test.ts` — the bounds and the refusal are two different
+ * obligations. Consolidating the three copies into `roads.ts` beside
+ * `DX`/`DY`/`dirBetween` remains the recorded plan (M1d); this closes the
+ * coverage half of it now, because coverage is what was actually missing.
+ */
+export function stepCell(cell: number, k: number, w: number, h: number): number {
   const x = (cell % w) + (DX[k] as number)
   const y = ((cell / w) | 0) + (DY[k] as number)
   if (x < 0 || x >= w || y < 0 || y >= h) return -1
@@ -529,6 +558,20 @@ function dispatchColour(
  * `destReserved` and car state, never the source set — which is exactly what
  * makes "no phase between the sync and a field read may mutate the source
  * set" hold.
+ *
+ * **Colour iteration order is a checked no-op today, and it is disclosed here
+ * rather than left silent** — the idiom `runMovement` (cars.ts) and
+ * `demand.ts`'s overflow-walk bound already use. `for (c = groupCount - 1; c >=
+ * 0; c--)` survives the whole suite, and it is provably a no-op by reading:
+ * colours partition destinations, houses and cars; `dispatchColour` reads and
+ * writes only its own colour's slots plus `H_ROUTES_REFUSED` (a commutative
+ * counter); and every region it writes is FIELD_IRRELEVANT, so no colour's
+ * dispatch can perturb another colour's field staleness.
+ *
+ * Ascending is kept because M1d's blocking gives cars a shared resource, at
+ * which point colour order becomes outcome-visible. The finding this paragraph
+ * closes was the SILENCE, not the order: without it the next reader has no
+ * record that anyone checked.
  */
 export function runDispatch(
   state: GameState,

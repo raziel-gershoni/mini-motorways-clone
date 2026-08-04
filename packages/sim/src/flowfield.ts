@@ -377,6 +377,24 @@ export function syncFields(
       `syncFields: scratch.sourceCounts.length (${scratch.sourceCounts.length}) !== fields.length (${fields.length})`,
     )
   }
+  // The OTHER half of the same scratch/world sizing agreement, and it was
+  // missing: `colourSourceOffset` strides by `world.map.maxDestinations` while
+  // `sourcesFlat` was sized from `createScratch`'s own parameter. Only
+  // UNDER-sizing is dangerous (over-sizing just spreads the slices further
+  // apart and is provably harmless — `hashSources` folds the same values), and
+  // it currently fails as `computeFlowField: source undefined is out of range
+  // for N cells`: a message naming neither the cause nor a function the caller
+  // can act on, from three frames deep, after `H_EPOCH` has been poisoned and
+  // the run made unresumable. Checked AFTER the guard above so a scratch that
+  // is wrong in both dimensions still reports the `groupCount` half first.
+  const expectedFlat = world.map.groupCount * world.map.maxDestinations
+  if (scratch.sourcesFlat.length !== expectedFlat) {
+    throw new Error(
+      `syncFields: scratch.sourcesFlat.length (${scratch.sourcesFlat.length}) !== ` +
+        `groupCount * maxDestinations (${world.map.groupCount} * ${world.map.maxDestinations} = ${expectedFlat}) — ` +
+        'the scratch was built for a different map than the world it is being used with',
+    )
+  }
   scratch.counters[CT_SYNCS] = (scratch.counters[CT_SYNCS] as number) + 1
   const fieldInputHash = hashFieldInputRegions(state, scratch.fieldInputRanges)
   for (let c = 0; c < fields.length; c++) {

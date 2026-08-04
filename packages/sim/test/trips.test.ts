@@ -500,6 +500,70 @@ describe('cars runArrivals must not touch', () => {
   })
 })
 
+describe('the cursor comparisons are >= and <=, not === (the fail-closed guards)', () => {
+  /**
+   * `runArrivals`' two cursor tests are `>=` and `<=` rather than `===`, and
+   * `trips.ts` justifies that with a concrete behaviour: off the manifold,
+   * `===` reads a cursor that HAD overshot as "still driving" and strands the
+   * car outbound forever, holding its reservation and blocking its destination.
+   *
+   * **Nothing observed that.** Both `>=` → `===` and `<= 0` → `=== 0` were
+   * 0-detector across the whole suite. The under-shoot side was covered twice
+   * ("a car mid-route is left exactly as it was"); the over-shoot side, which is
+   * the side the guards exist for, not at all — so the comment named a failure
+   * mode and cited an analogy to `dispatch.ts`'s pinned `destPins -
+   * destReserved <= 0` **as if the analogy transferred the coverage with it.**
+   *
+   * These two are the observers. They are mutated separately, because they are
+   * symmetric halves and a compound kill would say nothing about either.
+   *
+   * Off-manifold by construction: `advanceCar` stops at exactly the bound, so a
+   * cursor can only pass it through corruption or a hand-written slot.
+   */
+  it('collects an OUTBOUND car whose cursor has OVERSHOT routeLen', () => {
+    const r = rig('overshoot')
+    expect(placeHouse(r.state, r.world, 10, 0)).toBe(true)
+    r.state.destPins[0] = 1
+    r.state.destReserved[0] = 1
+    outboundExhausted(r.state, 0, 0, [E, E], 12, 900)
+    r.state.carRouteCursor[0] = 3 // OVERSHOT: routeLen is 2
+
+    // Vacuity, per the negative-assertion rule: nothing ELSE in this fixture
+    // can produce the observation. The car is OUTBOUND, so the RETURNING arm
+    // cannot fire; and 3 !== 2, so an `===` test is false — the `>=` is the
+    // only thing that can collect it.
+    expect(r.state.carRouteCursor[0]).toBeGreaterThan(r.state.carRouteLen[0] as number)
+    expect(r.state.carPhase[0]).toBe(PHASE_OUTBOUND)
+
+    runArrivals(r.state)
+
+    expect(r.state.carPhase[0]).toBe(PHASE_RETURNING)
+    expect(r.state.destPins[0]).toBe(0)
+    expect(r.state.destReserved[0]).toBe(0) // the reservation is released, not stranded
+  })
+
+  it('completes a RETURNING car whose cursor has UNDERSHOT 0', () => {
+    const r = rig('undershoot')
+    expect(placeHouse(r.state, r.world, 10, 0)).toBe(true)
+    expect(placeHouse(r.state, r.world, 20, 0)).toBe(true)
+    returnExhausted(r.state, 2, 0, [E, E], 12, 900)
+    r.state.carRouteCursor[2] = -1 // UNDERSHOT
+
+    // Vacuity: the car is RETURNING, so the OUTBOUND arm cannot fire, and
+    // -1 !== 0, so an `=== 0` test is false.
+    expect(r.state.carRouteCursor[2]).toBeLessThan(0)
+    expect(r.state.carPhase[2]).toBe(PHASE_RETURNING)
+
+    runArrivals(r.state)
+
+    expect(r.state.carPhase[2]).toBe(PHASE_IDLE)
+    expect(r.state.header[H_SCORE]).toBe(1)
+    expect(r.state.carCell[2]).toBe(20) // its OWN house, not house 0's
+    expect(r.state.carRouteCursor[2]).toBe(0) // the corrupt cursor is normalised, not preserved
+    expect(r.state.carProgress[2]).toBe(0)
+  })
+})
+
 describe('the anti-double-act invariant, and iteration order', () => {
   it('makes at most one phase transition per car per call, even for a zero-length route', () => {
     // OFF-MANIFOLD: dispatch refuses a zero-length route precisely so a car

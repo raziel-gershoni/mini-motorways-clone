@@ -1125,6 +1125,46 @@ describe('fieldFor: staleness', () => {
     expect(() => syncFields(state, world, fields, scratch)).toThrow(/sourceCounts/)
   })
 
+  it('throws when the scratch was sized for a different maxDestinations than the world — the other half of the same agreement', () => {
+    // `syncFields` owns this check because it is the one place that holds both
+    // numbers, and it previously owned only the `groupCount` half. Under-sizing
+    // used to surface as `computeFlowField: source undefined is out of range
+    // for N cells` — three frames deep, naming neither the cause nor a function
+    // the caller can act on, and (through `step`) after `H_EPOCH` had already
+    // been poisoned.
+    const { map, world } = landFixture('sync-maxdest-guard', 5, 4)
+    const state = createState('s', map)
+    const fields = createFlowFields(world.map.groupCount, world.cells)
+    const undersized = createScratch(
+      world.cells,
+      world.map.groupCount,
+      world.map.maxDestinations - 1,
+      createFieldInputRanges(world.map),
+    )
+    // Vacuity: the groupCount half genuinely passes, so this is the new guard
+    // firing and not the old one.
+    expect(undersized.sourceCounts.length).toBe(fields.length)
+    expect(undersized.sourcesFlat.length).not.toBe(world.map.groupCount * world.map.maxDestinations)
+    expect(() => syncFields(state, world, fields, undersized)).toThrow(/sourcesFlat/)
+
+    // Over-sizing is the harmless direction — the slices simply sit further
+    // apart and `hashSources` folds the same values — but it is rejected too,
+    // deliberately: a scratch built for another map is a caller wiring bug
+    // whichever way it is wrong, and "silently correct today" is how the
+    // groupCount half would have been argued away as well.
+    const oversized = createScratch(
+      world.cells,
+      world.map.groupCount,
+      world.map.maxDestinations + 1,
+      createFieldInputRanges(world.map),
+    )
+    expect(() => syncFields(state, world, fields, oversized)).toThrow(/sourcesFlat/)
+
+    // And the correctly-sized one does not throw, so the guard is not simply
+    // rejecting everything.
+    expect(() => syncFields(state, world, fields, scratchFor(world, world.map.groupCount))).not.toThrow()
+  })
+
   it('after a road mutation, fieldFor throws — with no explicit invalidation call anywhere in this test', () => {
     const { state, world } = randomGraphFixture('sync-road-mut', 8, 6, 200)
     const sources = firstRoadedCells(state, world, 2)

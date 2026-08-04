@@ -159,9 +159,20 @@ function resolveCurrent(state: GameState, colour: number, tick: number, cursorRa
  * including wrapping back to `chosenIndex` itself when it is the only
  * eligible destination of its colour (a lone destination's rotation is a
  * self-loop; `step <= destCount` inclusive is what makes that reachable,
- * as opposed to the overflow walk's `step < destCount` in `fireColour`,
- * which must NOT revisit the chosen destination — the two loops have
- * different bounds for exactly this reason).
+ * as opposed to the overflow walk's `step < destCount` in `fireColour`).
+ *
+ * **Corrected: the two bounds differ for clarity and cost, NOT for
+ * correctness.** An earlier version of this sentence said the overflow walk
+ * "must NOT revisit the chosen destination — the two loops have different
+ * bounds for exactly this reason", which contradicts `fireColour`'s own inline
+ * note 45 lines below, and `fireColour` is the one that was measured:
+ * mutating that bound to `<=` is a checked no-op, because `hasRoom(destIndex)`
+ * was already false and nothing writes `destPins[destIndex]` in between, so a
+ * revisit would fail its own capacity test anyway. What actually stops a
+ * capped circle receiving its own overflow is walking DESTINATIONS rather than
+ * SLOTS. Two comments disagreeing about one loop is worse than either being
+ * wrong alone: this one is above the other and is a doc comment, so it is the
+ * one a reader reaches first.
  *
  * Takes the CHOSEN slot (the one `resolveCurrent` returned, before any
  * overflow redirection) as its `chosenIndex`/`chosenSub` parameters, never
