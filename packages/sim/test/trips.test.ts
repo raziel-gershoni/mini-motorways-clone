@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, it, expect } from 'vitest'
 import { parseMap, CARS_PER_HOUSE, type MapData } from '@laneways/shared'
 import { createState, H_SCORE, type GameState } from '../src/state'
@@ -10,7 +12,7 @@ import {
   PHASE_OUTBOUND,
   PHASE_RETURNING,
 } from '../src/buildings'
-import { runArrivals } from '../src/trips'
+import { runArrivals, assertArrivalHonoured } from '../src/trips'
 
 /**
  * Unit coverage for phase 7 — arrival, pin consumption, reservation release,
@@ -123,6 +125,102 @@ function returnExhausted(
   state.carTargetDest[i] = dest
   state.carPhase[i] = PHASE_RETURNING
 }
+
+describe('arrivals cannot re-path and cannot search for a house, by signature', () => {
+  /**
+   * `trips.ts`'s module header calls its signature "the primary defence,
+   * exactly as it is in `cars.ts`" — and the first version of this file did not
+   * back that claim with anything, while `cars.test.ts:642-654` backs the
+   * identical claim about `runMovement` with two live tests. Adding a `fields`
+   * parameter and wiring `step` to pass it passed the whole suite.
+   *
+   * **The shape of that gap is worth naming, because it is not the ordinary
+   * "comment overstates its case".** The unverified claim was used as the
+   * REASON not to run two plan-named mutations ("read a field in arrivals",
+   * "return to the nearest house") as executable mutants — the argument being
+   * that they are not constructible against a module with neither a field nor a
+   * geometry in scope. That argument is sound, but only while the structure
+   * holds, and nothing held it. An overstated comment that merely decorates
+   * code is cheap; one that discharges a testing obligation silently REMOVES
+   * coverage rather than merely failing to add it. Cite a structural defence as
+   * grounds for skipping a mutation only after pinning the structure.
+   */
+  it('takes state and nothing else — no world, no fields, no scratch', () => {
+    expect(runArrivals.length).toBe(1)
+  })
+
+  it('imports neither the flow field, the scratch module nor the world, and looks up no house but its own', () => {
+    // A source assertion, in the idiom `determinism.test.ts` and
+    // `cars.test.ts` already use: the arity pin above can be defeated by
+    // reaching for a module-level import, and this cannot. Matching on the
+    // import specifier rather than a bare word keeps it immune to this file's
+    // own prose and to `trips.ts`'s own comments.
+    const source = readFileSync(fileURLToPath(new URL('../src/trips.ts', import.meta.url)), 'utf8')
+    expect(source).not.toMatch(/from '\.\/flowfield'/)
+    expect(source).not.toMatch(/from '\.\/scratch'/)
+    expect(source).not.toMatch(/from '\.\/world'/)
+    expect(source).not.toMatch(/\bfield\w*\s*\.\s*dir\b/)
+    // The return leg has no house search at all: `houseCell` may be indexed by
+    // `carHome[i]` and by nothing else. This is what makes "return to the
+    // nearest house" unconstructible here rather than merely untested — the
+    // claim the report leans on.
+    //
+    // Phrased as "every `houseCell[` in this file is indexed by `carHome`"
+    // rather than as an exact-string match, deliberately: the exact-string
+    // form fires on this module's own PROSE (its header names
+    // `houseCell[carHome]` when explaining the rule), which is the
+    // self-referential fragility `cars.test.ts` documents avoiding. A
+    // comment that mentions `carHome` is harmless; a line of code that
+    // indexes `houseCell` by anything else is exactly the mutation.
+    const houseReads = source.match(/houseCell\s*\[[^\]]*/g) ?? []
+    expect(houseReads.length).toBeGreaterThan(0) // vacuity: the scan found something to check
+    for (let i = 0; i < houseReads.length; i++) {
+      expect(houseReads[i], 'houseCell must only ever be indexed by carHome').toMatch(/carHome/)
+    }
+    // Vacuity: the scan is looking at the right file, and at code rather than
+    // at an empty string.
+    expect(source).toMatch(/export function runArrivals/)
+  })
+})
+
+describe('assertArrivalHonoured, called directly', () => {
+  /**
+   * The doc comment says `@internal Exported for testing only; runArrivals is
+   * the real call site`, and cites four precedents — every one of which IS
+   * directly imported by its own test file. This is the direct test that makes
+   * the sentence true. Without it the export claimed a call site that did not
+   * exist, and the parameterisation the four precedents exist to justify (make
+   * an unreachable throw reachable from a test, rather than leaving it as the
+   * one branch nothing executes) bought nothing.
+   *
+   * Both arms are also exercised through `runArrivals` below, off the reachable
+   * manifold. That is deliberate duplication, not redundancy: this describes
+   * the guard, those describe the phase.
+   */
+  it('passes through the only combination the manifold permits', () => {
+    expect(() => assertArrivalHonoured(1, 1, 0, 0)).not.toThrow()
+    expect(() => assertArrivalHonoured(10, 3, 5, 7)).not.toThrow()
+  })
+
+  it('names destPins, the destination and the car when there is no pin to consume', () => {
+    expect(() => assertArrivalHonoured(0, 1, 5, 7)).toThrow(/destPins/)
+    expect(() => assertArrivalHonoured(0, 1, 5, 7)).toThrow(/car 7/)
+    expect(() => assertArrivalHonoured(0, 1, 5, 7)).toThrow(/destination 5/)
+  })
+
+  it('names destReserved when there is no reservation to release, and says why that matters', () => {
+    // The message has to name the Uint8 wrap, because "reserved is 0" reads as
+    // harmless and "decrementing would store 255" does not.
+    expect(() => assertArrivalHonoured(1, 0, 5, 7)).toThrow(/destReserved/)
+    expect(() => assertArrivalHonoured(1, 0, 5, 7)).toThrow(/255/)
+  })
+
+  it('checks the pin arm first, so a state that breaks both is reported as the pin failure', () => {
+    // Not cosmetic: `destPins === 0` is the invariant break the plan names, and
+    // a doubly-broken state must not be diagnosed as the sibling symptom.
+    expect(() => assertArrivalHonoured(0, 0, 5, 7)).toThrow(/destPins/)
+  })
+})
 
 describe('arrival at the destination', () => {
   /** One house (cars 0 and 1), one notional destination index 0 holding pins. */

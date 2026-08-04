@@ -28,7 +28,7 @@ import {
 import { createWorld, type WorldData } from '../src/world'
 import { createFieldInputRanges } from '../src/regions'
 import { createScratch, createFlowFields, type FlowField, type Scratch } from '../src/scratch'
-import { fieldFor } from '../src/flowfield'
+import { fieldFor, hashFieldInputRegions } from '../src/flowfield'
 import { roadMask, tilesLeft } from '../src/roads'
 import {
   placeHouse,
@@ -451,6 +451,20 @@ describe('the trip loop, end to end through step()', () => {
     expect(r.state.header[H_SCORE]).toBe(4)
     expect(r.state.header[H_ROUTES_REFUSED]).toBe(0)
     expect(r.state.header[H_PINS_DROPPED]).toBe(0)
+
+    // The brief's "the score started at 0 and some intermediate tick had score
+    // < N" vacuity, read off the per-tick record rather than inferred. The
+    // record used to be written and never read — dead scaffolding that looked
+    // like coverage. This is what it was collected for.
+    expect(obs.scoreAfterTick.length).toBe(RUN_TICKS)
+    expect(obs.scoreAfterTick[0]).toBe(0) // score 0 after tick 1
+    expect(obs.scoreAfterTick[RUN_TICKS - 1]).toBe(4)
+    // It rose through every intermediate value rather than jumping: a run that
+    // scored all four on one tick would satisfy "started at 0, ended at 4".
+    expect(obs.scoreAfterTick[46]).toBe(1) // after tick 47
+    expect(obs.scoreAfterTick[91]).toBe(2) // after tick 92
+    expect(obs.scoreAfterTick[95]).toBe(3) // after tick 96
+    expect(obs.scoreAfterTick[139]).toBe(3) // after tick 140 — still N-1
   })
 
   it('at least one scored trip returned to a house that is NOT the nearest one to the destination it served', () => {
@@ -620,6 +634,7 @@ describe('the run replays byte-identically from a mid-flight snapshot', () => {
     expect(r.state.carProgress[2]).not.toBe(0)
 
     const hashAtSnapshot = hashState(r.state)
+    const inputsAtSnapshot = hashFieldInputRegions(r.state, r.scratch.fieldInputRanges)
     const snap = snapshot(r.state)
 
     runScripted(r, SNAPSHOT_TICK, RUN_TICKS, obs)
@@ -627,9 +642,20 @@ describe('the run replays byte-identically from a mid-flight snapshot', () => {
     expect(obs.violations).toEqual([])
 
     // Vacuity AFTER: the abandoned timeline genuinely diverged from the
-    // snapshot, mirroring rollback.test.ts's own check with `hashState`. If it
-    // had not, the comparison below would pass trivially.
+    // snapshot. Both hashes, and the second is the one that matters.
+    //
+    // `hashState` moving proves only that SOMETHING moved — `carProgress`
+    // alone would do it — and under that alone the warm-fields arm below could
+    // be trivially satisfiable, because reusing a stale field is only a real
+    // test when the FIELD-INPUT regions differ between the snapshot and the
+    // point the reused fields were built at. `rollback.test.ts:489` uses
+    // `hashInputsFor` for exactly this reason; the brief authorised `hashState`
+    // here, so this asserts both rather than swapping one for the other. It is
+    // true today (`destPins` is [0,1] at tick 30 and [0,0] at tick 150) and
+    // this is what makes it a fact the test enforces rather than one a reader
+    // has to derive.
     expect(expectedFinal).not.toBe(hashAtSnapshot)
+    expect(hashFieldInputRegions(r.state, r.scratch.fieldInputRanges)).not.toBe(inputsAtSnapshot)
 
     // A Worker cold-starts with fresh derived state: no fields, no scratch,
     // just the buffer and the input log.
@@ -646,7 +672,26 @@ describe('the run replays byte-identically from a mid-flight snapshot', () => {
     expect(coldObs.violations).toEqual([])
     expect(hashState(cold.state)).toBe(expectedFinal)
     // And it is the same RUN, not just the same final bytes.
-    expect(coldObs.scores).toEqual(obs.scores.filter((s) => !s.startsWith('tick=2 ')))
+    //
+    // Asserted against hand-written literals rather than against
+    // `obs.scores.filter(s => !s.startsWith('tick=2 '))`, which is what the
+    // first version of this line did: no score event begins `tick=2 ` (they are
+    // at 47, 92, 96 and 141), so that filter removed nothing while READING as
+    // if it were compensating for a real difference between the original and
+    // the replayed timeline. A predicate that silently discards nothing today
+    // silently discards a divergence tomorrow.
+    const ALL_SCORES = [
+      `tick=47 car=2 home=1 cell=${H1_CELL}`,
+      `tick=92 car=0 home=0 cell=${H0_CELL}`,
+      `tick=96 car=2 home=1 cell=${H1_CELL}`,
+      `tick=141 car=1 home=0 cell=${H0_CELL}`,
+    ]
+    expect(coldObs.scores).toEqual(ALL_SCORES)
+    // ...and the replay is expected to reproduce ALL of them only because the
+    // snapshot precedes every one. Asserted, so moving `SNAPSHOT_TICK` past a
+    // score fails here rather than silently comparing a truncated list.
+    expect(obs.scores).toEqual(ALL_SCORES)
+    expect(SNAPSHOT_TICK).toBeLessThan(47)
 
     // The harder arm: reuse the fields/scratch that at this moment hold the
     // ABANDONED timeline's tick-150 field, built from field-input bytes that

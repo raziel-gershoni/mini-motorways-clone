@@ -161,13 +161,26 @@ function completeTrip(state: GameState, i: number): void {
 /**
  * Phase 7 of the tick order: collect every car whose leg ran out this tick.
  *
- * **The phase byte is read exactly once per car**, into `phase`, which is what
- * makes the anti-double-act invariant ("at most one phase transition per car
- * per tick") structural rather than argued. Re-reading `state.carPhase[i]`
- * after the OUTBOUND branch has written it would collect a car twice in one
- * call for any route of length 0 — off the manifold, since dispatch refuses a
- * zero-length route, but the structure costs nothing and `trips.test.ts` has
- * the witness.
+ * **The anti-double-act invariant ("at most one phase transition per car per
+ * tick") rests on TWO structures here, and either one alone is enough.** An
+ * earlier version of this paragraph claimed only the first and called it "what
+ * makes the invariant structural", which overstated by exactly one guard:
+ *
+ *   1. The phase byte is read once per car, into `phase`, so the second branch
+ *      cannot see a write the first branch made.
+ *   2. The `else if` chain, so the second branch is not evaluated at all once
+ *      the first has fired.
+ *
+ * Measured, not argued: removing (1) alone and removing (2) alone are each a
+ * **0-detector no-op** against the whole suite, because each is individually
+ * sufficient. Only removing BOTH collects a car twice in one call — and only
+ * for a route of length 0, which is off the manifold since dispatch refuses
+ * one. `trips.test.ts` carries that witness. Note the consequence for anyone
+ * mutating this file: the usual rule is "decompose a compound mutation,
+ * because a compound being caught does not mean each half is". Here the
+ * inverse holds and it has to be stated — neither half has an observer or
+ * could have one, and the compound is the only meaningful mutation. Do not
+ * read either guard as dead code on the strength of its own survival.
  *
  * The cursor tests are `>=` / `<=` rather than `===`, on the same fail-closed
  * reasoning as `dispatch.ts`'s `destPins - destReserved <= 0`: on the manifold
