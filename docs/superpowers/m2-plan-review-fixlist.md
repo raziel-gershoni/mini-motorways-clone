@@ -144,4 +144,114 @@ Three further lift hazards found in the same pass, none of which the plan mentio
 
 ---
 
-*The four-lens adversarial review appends below.*
+# The four-lens adversarial review
+
+**VERDICT: DO NOT EXECUTE AS WRITTEN.**
+
+74 findings raised across four lenses — **24 Critical, 36 Important, 14 Minor.** 50 reached an independent refuter before the session limit stopped the run: 22 refuted, 28 survived. **24 findings never got a refuter, and the synthesis agent died**, so this section was written by hand from the run's journal. Findings below are marked where I verified them myself.
+
+The run cost 79 agents and ~3M tokens. It was worth it: the plan cannot reach its own stated goal.
+
+---
+
+## The one that ends the argument
+
+### CR1 — Nothing in M2 places a house or a destination. The board is empty forever.
+**All four lenses found this independently** (M2-R1, M2R-03, M2-07, F1).
+
+`placeHouse` and `placeDestination` (`buildings.ts:332,422`) have **no production caller anywhere in `packages/`**. The authored spawn schedule is M1e's, and this plan's Scope table defers M1e without noticing it depends on it.
+
+So an M2 build renders terrain and roads, and nothing else. No house, no destination, no pin, no car, no score. **The Goal — "draw a road with your finger, watch a car take it, see the score tick" — is unreachable from the work the plan assigns**, and Task 6's end-to-end test asserts a state that cannot exist.
+
+This is M2's version of M1c's "the return leg had no mechanism at all": a whole half of the deliverable with no owner, invisible because every task looked correct in isolation.
+
+**Fix:** add a task before Task 6 that seeds a fixed, hand-authored starting city — a few houses and destinations at literal cell coordinates, placed once at startup, deterministic, no schedule. Explicitly **not** M1e's spawner. State that M1e replaces it.
+
+---
+
+## Criticals that change the design
+
+### CR2 — Interpolation interpolates the wrong quantity, and is worse than not interpolating
+**Four lenses** (M2-R2, M2R-01, M2R-02, M2-01, F2).
+
+**Verified: `2500/330 = 7.576` ticks to cross an orthogonal cell, `3500/330 = 10.61` for a diagonal.** So `carCell` changes on roughly **one tick in eight**. A prev-cell→curr-cell lerp renders a car motionless for ~6.6 ticks (0.22 s) and then smears one whole cell across a single 33 ms window. **That is a 4 Hz strobe, not smooth motion** — materially worse than drawing at `carCell` and not interpolating at all.
+
+The sim already stores the sub-cell term. The correct resolved position is:
+
+```
+pos = cell + dirVector * (carProgress + alpha * speedUnits) / (edgeCost(dir) * COST_UNIT_SCALE)
+```
+
+**`carProgress`, `carRouteCursor`, `carRouteLen` and `COST_UNIT_SCALE` appear nowhere in the plan** — not in Decision 2, not in Task 3, and not in C2's revised Decision 3 above, which lists `edgeCost`, `stepCell`, `routeStep` and the direction tables and still misses the progress term. **C2's fix was incomplete and must be reopened.**
+
+### CR3 — Decision 2's guard makes interpolation never fire, and its "must fail" mutation is a provable no-op
+**Four lenses** (M2-R3, M2R-04, M2-03, F4).
+
+Decision 2 snaps when the interpolated distance is "under one cell" — but a car never moves more than one cell per tick, so **phase-unchanged already implies a move of at most one cell**. The guard the plan calls load-bearing is a 0-detector, and the named mutation *"snap on phase change only — must fail"* **cannot fail**. Its fixture is not constructible: `step`'s phase order makes a teleport with an unchanged phase byte impossible.
+
+Both discontinuities Decision 2 is built on need re-deriving against the real tick order once CR2 changes what is being interpolated.
+
+### CR4 — `RenderFrame` has no liveness prefixes: 80 phantom cars stack on cell 0
+(M2R-05.) A fresh `GameState` is all-zero and **writes no `-1` sentinel** (`state.ts:306-315`). Unused slots are those at index ≥ `H_HOUSE_COUNT`/`H_DEST_COUNT`; unused cars are `PHASE_NONE = 0`. Every unused `carCell`/`houseCell`/`destCell` is therefore **0 — a real, in-bounds, drawable cell.**
+
+On `firstCity` a renderer that iterates the arrays it is handed draws **80 cars, 40 houses and 16 destinations piled on the top-left tile from frame 1.** Task 2's "only cells inside the revealed grid are drawn" does not catch it, because cell 0 *is* inside the grid.
+
+**Fix:** `RenderFrame` carries `houseCount`, `destCount`, and `carPhase` (cars' only liveness marker). Task 2 needs a bullet that a state with live prefixes shorter than the array length draws exactly the live ones.
+
+### CR5 — The camera fits two different grids, and one of them violates spec §5.1
+**Two lenses** (M2-06, F6). Three mutually exclusive readings appear in one plan: Decision 5 fits the **full** 24×40 grid; Scope and the Deferred table fit the **revealed** grid; Task 2's coverage says "only cells inside the revealed grid".
+
+Reading 1 gives **16 CSS px tiles — 57% of spec §5.1's hard 28 CSS px floor** — and is unreachable on any phone (24 × 28 = 672 CSS px against 390–430 available). **The premise the pan/zoom deferral rests on is false under reading 1.** Reading 2 satisfies the spec (14 × 28 = 392 ≤ 406) and yields ~29 px tiles. It also changes atlas memory 3.3×.
+
+Also: **"revealed grid" exists in no code.** Nothing tracks reveal state; that is M1e's. Pick reading 2, define the revealed rect as a constant for now, and say so.
+
+### CR6 — M0's only "Adopt now" performance decision is absent
+(M2-04.) M0 §7's decision table has exactly one **Adopt now** row: **cap `devicePixelRatio` at 2 universally, 1.5 on `performanceClass === 'LOW'`** — "the largest single lever available", worked at ~5 ms vs ~8.5 ms on a LOW Android.
+
+The plan mentions `devicePixelRatio` zero times and `performanceClass` zero times, builds the atlas "at device pixel ratio, full stop", and lists "skip the DPR multiply" as a mutation — **hard-coding the uncapped behaviour as correct.** On the one device M0 measured (DPR 3) that is 2.25× the pixels on every fill, blit and clear.
+
+### CR7 — The shadow layer re-imports the exact cost structure M0 used to delete the road bake
+(M2-05.) **This one is mine, and it is embarrassing:** Decision 6 defends the shadow layer by explicit contrast with the bake M0 killed — *"unlike the road bake it is justified"* — and on M0's own numbers the contrast does not hold.
+
+A full-canvas offscreen layer costs **one full-canvas clear plus one full-canvas composite** per frame: 2 × 3,178,980 = **6,357,960 device px, ~0.64 ms**. M0 costed the entire per-frame road layer at 0.168 ms and the whole *rejected* bake at 0.318 ms. **The shadow layer is ~2× the cost of the thing M0 deleted and ~3.8× the entire road layer** — on the fastest mobile device anyone has measured. It carries the same **+12.13 MiB** M0 charged against the bake, and my accounting omitted the clear entirely.
+
+"Removes N alpha compositions" values the thing M0 measured as nearly free: 500 shadow sprites drawn directly are ~415 kpx, ~0.04 ms — **1/15th of the layer's own overhead.**
+
+**Fix:** draw shadows directly per sprite and accept the overlap darkening for M2, or clear/composite only the grid bounds rather than the full canvas. Either way, re-derive it from M0's pixel model rather than from the spec bullet.
+
+### CR8 — The deploy destroys the live M0 artefact, and the toolchain does not exist
+(M2-R5.) There is exactly one Worker config: `spike/wrangler.jsonc`. Task 6 says "modify the existing Worker config"; Global Constraints say "do not modify `spike/`". So Task 6 is either forbidden by the plan's own rule or it **repoints the deployed M0 spike**, serving the game at the spike's URL and breaking the page still accepting `POST /api/result` into D1.
+
+Worse: **neither `vite` nor `wrangler` is in the workspace.** Root devDependencies are exactly `@types/node`, `eslint`, `typescript`, `typescript-eslint`, `vitest`; `spike/` is deliberately *outside* the workspace with its own lockfile. No task provisions them.
+
+### CR9 — Two hand-computed tick counts are wrong, and the natural fix desynchronises the clock
+**Three lenses** (M2-R4, M2-02, F3). **I verified this by execution:**
+
+```
+TICK_MS = 1000/30 = 33.333333333333335702
+100 ms frame -> 2 ticks, remainder 33.33333333333332, alpha = 0.9999999999999996
+16.7 ms frame -> 0 ticks
+250 / TICK_MS = 7.499999999999999
+```
+
+The plan asserts "a 100 ms frame runs **exactly 3 ticks**". It runs **2**, because `1000/30` rounds *above* exact so the third subtraction fails by one ulp. The plan's "0 or 1 ticks" for 16.7 ms is also wrong on a cold first frame.
+
+The trap: an implementer who "fixes" this by writing `TICK_MS = 33` **desynchronises the game clock from the sim's 30 Hz by 1%** — a week runs 148.5 s instead of 150.
+
+### CR10 — The HTML shell has no stated requirements, including the Telegram SDK script
+(M2-08.) Without `telegram-web-app.js`, `globalThis.Telegram` is undefined, `atLeast()` returns false, and **the entire boot sequence silently no-ops** — no error, no test failure, because every planned test stubs the API. Also unspecified: viewport meta, `touch-action`, overscroll behaviour, and background colour.
+
+---
+
+## Importants worth naming here
+
+- **Three of Task 6's four named mutations survive every guard it pairs them with** (F5), including one that is a provable no-op against the sim's documented idempotence.
+- 36 Importants total; the full text of every finding is in the run journal at
+  `subagents/workflows/wf_b5e17f7a-6f6/journal.jsonl`.
+
+---
+
+## Honest limits of this review
+
+- **24 of 74 findings never faced a refuter**, and the refuted/survived mapping was lost when the synthesis died — the journal records verdicts without finding labels. Everything above is either multi-lens, or verified by me directly, or both. Treat single-lens unrefuted findings in the journal as unvetted.
+- The refuters that did run **refuted 22 of 50**, a 44% rate consistent with earlier runs — so a meaningful fraction of the unrefuted 24 are probably wrong too.
