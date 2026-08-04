@@ -351,6 +351,7 @@ describe('sim source obeys the determinism rules', () => {
       'sim/src/scratch.ts',
       'sim/src/state.ts',
       'sim/src/step.ts',
+      'sim/src/trips.ts',
       'sim/src/world.ts',
     ])
   })

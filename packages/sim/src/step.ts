@@ -5,6 +5,10 @@ import type { WorldData } from './world'
 import type { FlowField, Scratch } from './scratch'
 import { syncFields } from './flowfield'
 import { placeRoad, eraseRoad } from './roads'
+import { runDemand } from './demand'
+import { assembleSources, runDispatch } from './dispatch'
+import { runMovement } from './cars'
+import { runArrivals } from './trips'
 
 /**
  * A single road edit applied on one tick. `a`/`b` are the same cell-index
@@ -41,23 +45,44 @@ export interface TickInputs {
  * replaying 2*(N/2) ticks run this exact function the same number of times
  * either way.
  *
- * Phases implemented in M1c Task 1 (structural prep — the demand, dispatch,
- * movement and arrivals phases the M1c plan's "tick order, derived" table
- * describes are Tasks 2-6's job; wiring all seven phases together is Task
- * 6's, per the plan's File Structure):
+ * **The seven phases, each justified by the constraint that forces its
+ * position rather than by preference** (M1c, "The tick order, derived"). The
+ * order is derived; do not reorder it for tidiness.
  *
- *   1. `H_EPOCH <- tick`; advance `H_TICK`, `H_WEEK` — see state.ts's
- *      "Atomicity" note. A throw in a later phase leaves `H_EPOCH` non-zero,
- *      and both the next `step` and `restore` throw a named error rather
- *      than proceed from a buffer a throwing tick may have partly mutated.
+ *   1. `H_EPOCH <- tick`; advance `H_TICK`, `H_WEEK` — demand's 4 s
+ *      eligibility gate compares `H_TICK - destSpawnTick[d]` against
+ *      `FIRST_PIN_DELAY_TICKS`, and it is the ONLY thing inside a tick that
+ *      reads `H_TICK` at all. Moving this one slot later delays every first
+ *      pin by exactly one tick, which no golden can see (they are
+ *      building-free) and only a run that CROSSES the 120-tick boundary can:
+ *      `loop.test.ts` has that boundary test. `H_EPOCH` is the atomicity
+ *      marker — see state.ts's "Atomicity" note. A throw in a later phase
+ *      leaves it non-zero, and both the next `step` and `restore` throw a
+ *      named error rather than proceed from a buffer a throwing tick may
+ *      have partly mutated.
  *   2. Apply inputs — the only phase that changes `roads`. Must precede the
  *      field sync, or a road drawn on tick T is invisible to this tick's
  *      field.
- *   4. Sync fields — exactly once, from whatever `scratch.sourcesFlat`/
- *      `sourceCounts` currently hold. (Phase 3, demand, is Task 3's; phases
- *      5-7, dispatch/movement/arrivals, are Tasks 4-6's — this file has no
- *      phase between 2 and 4 yet, and the tick order's own numbering is kept
- *      so a later diff reads as insertion, not renumbering.)
+ *   3. Demand — accumulators, pins, overflow, drops. Mutates `destPins`,
+ *      which decides the source set, so it must precede the sync.
+ *   4. Assemble sources, then EXACTLY ONE `syncFields`. Every source-mutating
+ *      phase is now behind it, and `fieldFor` throws unless the sync ran
+ *      against exactly the current sources.
+ *   5. Dispatch — the whole tick's only field reader. Mutates `destReserved`
+ *      and car state, never the source set: that is what decision 4 buys, and
+ *      it is what makes "no phase between the sync and a field read may mutate
+ *      the source set" hold with no in-tick reasoning required.
+ *   6. Movement — advances committed routes and reads no field at all
+ *      (decision 2). AFTER dispatch, so a car dispatched on tick T also moves
+ *      on tick T; the alternative costs every trip one tick and every
+ *      exact-tick assertion inherits it.
+ *   7. Arrivals — consume the pin, release the reservation, credit the score,
+ *      free the car. Mutates `destPins` AFTER the sync, so it must be last.
+ *      **Stated residual: the fields are stale from here until the next
+ *      tick's sync.** Nothing may call `fieldFor` in that window — not a
+ *      renderer, not a debug hash, not a test helper. Under decision 2 the
+ *      only in-tick reader is phase 5, so this binds external callers only,
+ *      and `loop.test.ts` asserts the throw rather than assuming it.
  *   — `H_EPOCH <- 0` on successful exit.
  *
  * Pure in the sense that matters: the result depends only on the contents of
@@ -97,7 +122,16 @@ export function step(
     }
   }
 
+  runDemand(s, scratch)
+
+  assembleSources(s, world, scratch)
   syncFields(s, world, fields, scratch)
+
+  runDispatch(s, world, fields, scratch)
+
+  runMovement(s, world)
+
+  runArrivals(s)
 
   s.header[H_EPOCH] = 0
 }

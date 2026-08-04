@@ -6,6 +6,13 @@ import { createFlowFields, createScratch, CT_SYNCS, CT_REBUILDS, type FlowField,
 import { createFieldInputRanges } from '../src/regions'
 import { fieldFor } from '../src/flowfield'
 import { roadMask } from '../src/roads'
+import {
+  placeDestination,
+  placeHouse,
+  DEST_KIND_SQUARE,
+  ORIENTATION_S,
+  PHASE_OUTBOUND,
+} from '../src/buildings'
 import { TICKS_PER_WEEK, parseMap } from '@laneways/shared'
 
 const NO_INPUT: TickInputs = { actions: [] }
@@ -129,22 +136,37 @@ describe('step', () => {
     })
 
     it('a road placed through step on tick T is visible in the field read on tick T (input application precedes the sync)', () => {
+      // Rewritten in Task 6: `step` now owns source assembly (phase 4a), which
+      // REWRITES `scratch.sourcesFlat`/`sourceCounts` in full from the live
+      // destination prefix every tick, so the previous version's hand-poked
+      // source no longer survives to the sync. The property under test is
+      // unchanged and now travels the whole production path — placement,
+      // assembly, sync — rather than half of it.
       const s = createState('place-then-sync', MAP)
       const fields = freshFields()
       const scratch = freshScratch()
-      const A = 0
-      const B = 1
-      // Colour 0's source is B — B carries no road yet, so before this tick's
-      // place action runs, a sync would leave B at dist=INF (rejected: no
-      // road bit). The action places a road ending at B in the SAME tick.
-      scratch.sourceCounts[0] = 1
-      scratch.sourcesFlat[0] = B
-      expect(roadMask(s, B)).toBe(0) // vacuity: B genuinely has no road before this tick
+      // Destination origin (0,0) orientation S: footprint x0..1 y0..2 (cells
+      // 0,1,4,5,8,9), carpark (0,3) = 12. Hand-written literals on the 4-wide
+      // board, not a call to `carparkCell`.
+      const CARPARK = 12
+      const NEIGHBOUR = 13 // (1,3): the only non-footprint cell adjacent to the carpark
+      expect(placeDestination(s, WORLD, 0, ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+      s.destPins[0] = 1
+      // The carpark carries no road yet, so before this tick's place action
+      // runs, assembly would reject it (`roadMask === 0`) and the colour-0
+      // field would have no source at all. The action places a road reaching
+      // it in the SAME tick.
+      expect(roadMask(s, CARPARK)).toBe(0) // vacuity: genuinely no road before this tick
 
-      step(s, WORLD, fields, scratch, { actions: [{ kind: 'place', a: A, b: B }] })
+      step(s, WORLD, fields, scratch, { actions: [{ kind: 'place', a: NEIGHBOUR, b: CARPARK }] })
 
+      // Checked BEFORE the field read, deliberately: assembly (phase 4a) runs
+      // after input application, so "inputs moved after the sync" shows up
+      // here as a plain 1-vs-0 rather than only as `fieldFor`'s staleness
+      // throw, which names a different-looking problem.
+      expect(scratch.sourceCounts[0]).toBe(1)
       const field = fieldFor(s, WORLD, fields, 0, scratch)
-      expect(field.dist[B]).toBe(0) // B is now an accepted source, this same tick
+      expect(field.dist[CARPARK]).toBe(0) // an accepted source, this same tick
     })
 
     it('an unknown action kind throws, naming the offending kind', () => {
@@ -232,19 +254,36 @@ describe('step', () => {
     // with a partly relaxed field already written" case the plan's
     // Atomicity paragraph calls out as the dangerous one.
 
-    it('a non-ascending source list (computeFlowField throwing via syncFields) leaves H_EPOCH non-zero, and the next step and restore both throw named errors', () => {
-      const s = createState('poison-sources', MAP)
+    // Rewritten in Task 6. The previous version of the first of these poked a
+    // DESCENDING source list onto `scratch` and reached
+    // `computeFlowField`'s "strictly ascending" guard. That guard is no
+    // longer reachable through `step` at all, and that is a correct
+    // consequence of wiring phase 4a rather than a lost test: `step` now calls
+    // `assembleSources`, which rewrites the source slices in full every tick
+    // by ascending insertion, so no caller can hand `syncFields` an unsorted
+    // list any more. `dispatch.test.ts` and `flowfield.test.ts` still cover
+    // the guard where it IS reachable — by calling `computeFlowField`
+    // directly. What replaces it here is a throw from the LAST phase, which
+    // is the atomicity case the wired tick newly creates: every earlier phase
+    // has already mutated the buffer by then.
+
+    it('a throw from the arrivals phase (the last phase, after every other has mutated the buffer) leaves H_EPOCH non-zero, and the next step and restore both throw named errors', () => {
+      const s = createState('poison-arrivals', MAP)
       const fields = freshFields()
       const scratch = freshScratch()
-      // Two sources for colour 0, written descending: computeFlowField's own
-      // "strictly ascending" guard throws from inside syncFields's rebuild
-      // loop, not from step's input-application phase.
-      scratch.sourceCounts[0] = 2
-      scratch.sourcesFlat[0] = 5
-      scratch.sourcesFlat[1] = 3
+      // OFF-MANIFOLD, deliberately: decision 4 proves `destReserved <=
+      // destPins`, so an outbound car arriving at a pinless destination
+      // cannot occur — which is exactly why arrivals ASSERT it. Hand-written
+      // here because a throw out of phase 7 is otherwise unreachable.
+      expect(placeHouse(s, WORLD, 15, 0)).toBe(true)
+      s.carRouteLen[0] = 1
+      s.carRouteCursor[0] = 1 // outbound route exhausted: this car has arrived
+      s.carTargetDest[0] = 0
+      s.carPhase[0] = PHASE_OUTBOUND
+      s.destPins[0] = 0
 
       expect(s.header[H_EPOCH]).toBe(0)
-      expect(() => step(s, WORLD, fields, scratch, NO_INPUT)).toThrow(/strictly ascending/)
+      expect(() => step(s, WORLD, fields, scratch, NO_INPUT)).toThrow(/destPins/)
       expect(s.header[H_EPOCH]).not.toBe(0)
 
       expect(() => step(s, WORLD, fields, scratch, NO_INPUT)).toThrow(/H_EPOCH/)
@@ -262,14 +301,15 @@ describe('step', () => {
         entryCell: new Int32Array(1),
         entryNext: new Int32Array(1),
       }
-      tinyPool.sourceCounts[0] = 1
-      tinyPool.sourcesFlat[0] = 0 // will carry a road once placed below, in the same tick
+      // The source now comes from a real placed destination, via phase 4a,
+      // rather than being poked onto `scratch` — see the note above.
+      const CARPARK = 12
+      const NEIGHBOUR = 13
+      expect(placeDestination(s, WORLD, 0, ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+      s.destPins[0] = 1
 
       expect(s.header[H_EPOCH]).toBe(0)
-      const actions: readonly TickAction[] = [
-        { kind: 'place', a: 0, b: 1 },
-        { kind: 'place', a: 1, b: 2 },
-      ]
+      const actions: readonly TickAction[] = [{ kind: 'place', a: NEIGHBOUR, b: CARPARK }]
       expect(() => step(s, WORLD, fields, tinyPool, { actions })).toThrow(/entry pool exhausted/)
       expect(s.header[H_EPOCH]).not.toBe(0)
 
