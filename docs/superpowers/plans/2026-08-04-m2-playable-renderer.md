@@ -180,7 +180,11 @@ Pixel throughput binds at roughly **10 Gpx/s**; a `drawImage` costs about **0.16
 
 **The atlas stays and is the reason the per-frame path is cheap:** 256 entries keyed by the 8-bit neighbour mask, pre-rendered once at the effective device pixel ratio, rebuilt only when the tile's device size changes.
 
-**M2 issues no `clearRect`.** Three opaque fills cover the canvas exactly once — the top band, the grid rect in the land colour, the HUD band — and everything else draws on top. A `clearRect` plus a land fill covers it twice. At M2's regime on the M0 device that is a saved full-canvas pass: **1,412,880 device px, ~0.141 ms — more than the entire road layer.** The rule this creates: *every* pixel of the canvas must be covered by one of those three fills each frame, or the previous frame ghosts.
+**M2 issues no `clearRect`.** Three opaque fills cover the canvas exactly once — the top band, the **middle band** in the land colour, the HUD band — and everything else draws on top. A `clearRect` plus a land fill covers it twice. At M2's regime on the M0 device that is a saved full-canvas pass: **1,412,880 device px, ~0.141 ms — more than the entire road layer.** The rule this creates: *every* pixel of the canvas must be covered by one of those three fills each frame, or the previous frame ghosts.
+
+**Corrected during Task 5, which found this decision self-contradictory as written.** It originally said "the grid **rect**" — and a rect the width of the grid cannot also tile a canvas wider than the grid. Three fills and full coverage force the middle fill to span the **full canvas width**, so the horizontal letterbox is painted land, not background. That is the reading the 1,412,880 figure was computed from, so the figure stands and the prose was the error.
+
+**The consequence is deliberate and belongs on Task 9's list, not fixed here:** the playfield has **no visible edge**. Land runs to the screen edge, so nothing on screen distinguishes a tap that lands on cell (0, y) from one that lands in the letterbox and does nothing. On a phone that reads as an unresponsive game rather than an out-of-bounds tap. Task 9 must either give the letterbox its own colour — a fourth fill, and the pixel budget above must be recomputed, not assumed — or make the grid edge visible some other way. Do not leave it to the art pass: it is an input-affordance defect, not a styling one.
 
 Frame model at M2's regime (M0 device, 406×870 CSS, DPR capped to 2, 29 CSS px tiles, 14×22 revealed):
 
