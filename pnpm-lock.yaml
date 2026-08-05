@@ -24,6 +24,20 @@ importers:
         specifier: ^3.0.0
         version: 3.2.7(@types/node@26.1.2)
 
+  packages/game:
+    dependencies:
+      '@laneways/render':
+        specifier: workspace:*
+        version: link:../render
+      '@laneways/shared':
+        specifier: workspace:*
+        version: link:../shared
+      '@laneways/sim':
+        specifier: workspace:*
+        version: link:../sim
+
+  packages/render: {}
+
   packages/shared: {}
 
   packages/sim:

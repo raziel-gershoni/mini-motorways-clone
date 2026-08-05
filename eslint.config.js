@@ -62,4 +62,31 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // `render` and `game` sit OUTSIDE the determinism boundary by design
+    // (spec §4: "render depends on nothing but its own interface types",
+    // and `game` is the glue that owns every wall-clock/DOM/float concern
+    // the sim itself is forbidden from touching). None of the three
+    // determinism mechanisms above apply here:
+    //   - `determinism/no-module-mutable-state` would forbid the atlas
+    //     cache (plan Decision 4) and the action pool (plan Decision 9),
+    //     both legitimate module-scope state in these packages.
+    //   - `no-restricted-globals`/`no-restricted-properties` would forbid
+    //     `document`, `performance`, `devicePixelRatio` and `Math.random`,
+    //     all of which `render`/`game` legitimately use.
+    //   - `no-restricted-syntax`'s `new Date()` ban is a determinism-only
+    //     concern; nothing here replays against a server hash.
+    // The determinism boundary itself is enforced instead by the one-way
+    // dependency direction (render's package.json has no dependency on
+    // sim/shared) and by the import scan in
+    // `packages/render/test/boundary.test.ts`, which a plain `files:` scope
+    // change here cannot silence.
+    files: [
+      'packages/render/src/**/*.{ts,mts,cts,js}',
+      'packages/render/test/**/*.{ts,mts,cts,js}',
+      'packages/game/src/**/*.{ts,mts,cts,js}',
+      'packages/game/test/**/*.{ts,mts,cts,js}',
+    ],
+    extends: [tseslint.configs.recommended],
+  },
 )
