@@ -181,7 +181,12 @@ describe('render imports nothing from sim or shared', () => {
     // one level too high, or too low. This is `determinism.test.ts`'s own
     // "scans the sim and shared sources, not some other directory" idiom:
     // the list must be updated deliberately when a later task adds a file.
-    expect(files.map(label).sort()).toEqual(['render/src/index.ts', 'render/src/types.ts'])
+    expect(files.map(label).sort()).toEqual([
+      'render/src/camera.ts',
+      'render/src/index.ts',
+      'render/src/palette.ts',
+      'render/src/types.ts',
+    ])
   })
 
   it('contains no import of @laneways/sim or @laneways/shared', () => {

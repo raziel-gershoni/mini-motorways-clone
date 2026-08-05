@@ -9,6 +9,7 @@ import {
   ARRIVAL_KNOCKBACK_PCT, ARRIVAL_KNOCKBACK_MAX_MS, OVERCROWD_GRACE_MS,
   PIN_CAP_SQUARE_TIMER, PIN_CAP_SQUARE_HARD, PIN_CAP_CIRCLE_TIMER, PIN_CAP_CIRCLE_HARD,
   GRID_W, GRID_H, GROUP_COUNT_DEFAULT, CARS_PER_HOUSE, MOTORWAY_CAP,
+  REVEALED_X0, REVEALED_Y0, REVEALED_W, REVEALED_H,
   MAX_GROUP_COUNT, MAX_PATH_LEN,
   COST_UNIT_SCALE, CAR_SPEED_UNITS_PER_TICK,
 } from '../src/index'
@@ -94,6 +95,36 @@ describe('rule constants', () => {
     expect(GROUP_COUNT_DEFAULT).toBe(5)
     expect(CARS_PER_HOUSE).toBe(2)
     expect(MOTORWAY_CAP).toBe(9)
+  })
+
+  it('reveals a 14 x 22 rect centred in the 24 x 40 board, entirely in bounds', () => {
+    // Spec §3 decision row 4, "~24×40 grid revealed from 14×22", frozen by M2
+    // plan Decision 5 and made dynamic by M1d. The integer/finite/non-negative
+    // assertions above already cover these four automatically (the registry is
+    // derived from the module's real exports); what they cannot see is the
+    // three RELATIONS that make the rect meaningful — in bounds, centred, and
+    // asymmetric.
+    expect(REVEALED_W).toBe(14)
+    expect(REVEALED_H).toBe(22)
+    expect(REVEALED_X0).toBe(5)
+    expect(REVEALED_Y0).toBe(9)
+
+    // In bounds: a rect running off the board would index past the state
+    // buffer's row stride and draw the next row's cells.
+    expect(REVEALED_X0 + REVEALED_W).toBeLessThanOrEqual(GRID_W)
+    expect(REVEALED_Y0 + REVEALED_H).toBeLessThanOrEqual(GRID_H)
+
+    // Centred, derived rather than asserted as a second literal: this is where
+    // 5 and 9 come from, and it is what keeps them right if the board resizes.
+    expect(REVEALED_X0).toBe(Math.floor((GRID_W - REVEALED_W) / 2))
+    expect(REVEALED_Y0).toBe(Math.floor((GRID_H - REVEALED_H) / 2))
+
+    // Asymmetric on both axes. Load-bearing for every camera and pointer test
+    // downstream: with x0 === y0, or cols === rows, a transposed axis in the
+    // grid<->screen transform passes every round-trip fixture written against
+    // this rect.
+    expect(REVEALED_X0).not.toBe(REVEALED_Y0)
+    expect(REVEALED_W).not.toBe(REVEALED_H)
   })
 
   it('bounds groupCount and the committed route length for M1c', () => {

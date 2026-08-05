@@ -62,6 +62,37 @@ export const GROUP_COUNT_DEFAULT = 5
 export const CARS_PER_HOUSE = 2
 export const MOTORWAY_CAP = 9
 
+// --- The revealed rect (spec §3 decision 4, M2 plan Decision 5) ---
+/**
+ * The rectangle of the board that is revealed, and therefore drawn, at the
+ * start of a run: `x ∈ [5, 19)`, `y ∈ [9, 31)` — spec §3 decision row 4,
+ * *"portrait-native, ~24×40 grid revealed from 14×22"*, centred in the 24×40
+ * board (`(24 - 14) / 2 = 5`, `(40 - 22) / 2 = 9`).
+ *
+ * **Frozen constants, and M1d owns making them dynamic.** Expansion (§5.1) is
+ * a per-map, per-week schedule that does not exist yet: `MapData` carries `w`
+ * and `h` only, and every "reveal" mention in `packages/` before this was a
+ * comment deferring it. When M1d lands, the camera reads state instead of
+ * these four numbers and nothing else moves — `render/camera.ts` already takes
+ * the rect as a parameter (`RevealedRect`) rather than importing it, because
+ * `render` imports nothing from `shared` (spec §4).
+ *
+ * **These are drawn from, not simulated on.** The sim's board is the full
+ * `GRID_W × GRID_H`; nothing in `sim` reads these, and a building or road
+ * outside the rect is legal state that is simply not visible. M2's
+ * hand-authored starting city (`game/startingCity.ts`) is placed entirely
+ * inside it for that reason.
+ *
+ * Why the rect and not the full grid: fitting 24×40 into the measured M0
+ * viewport gives `floor(min(406/24, 870/40))` = **16 CSS px** against spec
+ * §5.1's hard floor of 28, and 40 rows at 28 px needs 1,120 CSS px of height
+ * that no phone has. The revealed rect gives 29 CSS px on that device.
+ */
+export const REVEALED_X0 = 5
+export const REVEALED_Y0 = 9
+export const REVEALED_W = 14
+export const REVEALED_H = 22
+
 /**
  * Upper bound on `MapData.groupCount` (spec §4.2's exhaustive enumeration:
  * colour group count is per-map, 5 or 6 — this is the ceiling `parseMap`
