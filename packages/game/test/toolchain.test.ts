@@ -94,6 +94,32 @@ describe('packages/render and packages/game are covered by a real eslint block',
     }
   })
 
+  // I5: an earlier version of the glob covered `src/**` and `test/**` only,
+  // so a package-ROOT file (not under either) was unlinted — and the plan
+  // puts one there: `packages/game/vite.config.ts` (tech-stack line: "vite
+  // and wrangler are added as devDependencies of packages/game for build and
+  // deploy only"). Neither of these two paths exists yet — Task 9 adds
+  // `vite.config.ts` — but `calculateConfigForFile` only matches the path
+  // string against the glob, so this pins the glob shape now rather than
+  // waiting for Task 9 to discover the gap. Not redundant with the src/test
+  // assertions above: those all sit one directory level deeper, exactly the
+  // level the narrower `src/**`/`test/**` globs already covered.
+  it('a package-root file for game (e.g. vite.config.ts) is covered too, not just src/test', async () => {
+    const config = await configForRepoFile('packages/game/vite.config.ts')
+    expect(config, 'no files: block matches a package-root file under packages/game').toBeDefined()
+    for (const rule of RECOMMENDED_MARKER_RULES) {
+      expect(config?.rules?.[rule], `missing recommended rule ${rule} for a package-root game file`).toBeDefined()
+    }
+  })
+
+  it('a package-root file for render is covered too, not just src/test', async () => {
+    const config = await configForRepoFile('packages/render/some-root-level-file.ts')
+    expect(config, 'no files: block matches a package-root file under packages/render').toBeDefined()
+    for (const rule of RECOMMENDED_MARKER_RULES) {
+      expect(config?.rules?.[rule], `missing recommended rule ${rule} for a package-root render file`).toBeDefined()
+    }
+  })
+
   it('a packages/sim/src file IS covered by the determinism rules — the block those rules actually live in', async () => {
     const config = await configForRepoFile('packages/sim/src/state.ts')
     expect(config?.rules?.[DETERMINISM_MARKER_RULE], 'sim lost its determinism coverage').toBeDefined()
@@ -126,24 +152,52 @@ interface PackageJson {
   readonly scripts?: Readonly<Record<string, string>>
 }
 
-function readPackageJson(pkg: 'render' | 'game'): PackageJson {
-  return JSON.parse(readFileSync(join(REPO_ROOT, 'packages', pkg, 'package.json'), 'utf8')) as PackageJson
+function readPackageJsonAt(absolutePath: string): PackageJson {
+  try {
+    return JSON.parse(readFileSync(absolutePath, 'utf8')) as PackageJson
+  } catch {
+    // M8: a missing or unparsable package.json degrades to "no scripts"
+    // rather than an uncaught ENOENT/SyntaxError, so the caller's own
+    // `scripts.test`/`scripts.typecheck` assertion is what names the
+    // failure — the same design as `boundary.test.ts`'s `sourceFiles`.
+    return {}
+  }
 }
 
-describe('both new packages declare test and typecheck scripts, checked directly', () => {
+function readPackageJson(pkg: 'render' | 'game'): PackageJson {
+  return readPackageJsonAt(join(REPO_ROOT, 'packages', pkg, 'package.json'))
+}
+
+describe('readPackageJsonAt degrades gracefully instead of crashing (M8)', () => {
+  it('does not throw on a path that does not exist, and returns no scripts', () => {
+    const missing = join(REPO_ROOT, 'packages', 'game', 'package.json.DOES-NOT-EXIST')
+    let result: PackageJson = {}
+    expect(() => {
+      result = readPackageJsonAt(missing)
+    }, 'readPackageJsonAt crashed on a missing file instead of degrading').not.toThrow()
+    expect(result).toEqual({})
+  })
+})
+
+describe('both new packages declare test and typecheck scripts, checked directly, from BOTH suites', () => {
   // The root scripts run `pnpm -r --filter './packages/*' --filter
   // './tools/*' test` (and `typecheck`), with no `--if-present`. The brief's
   // stated detector for a missing script was "caught by the root test
   // script reaching it" — but `pnpm help recursive` documents `run`'s real
   // semantics: "If a package doesn't have the command, it is skipped. If
   // NONE of the packages have the command, the command fails." Verified
-  // live: removing `packages/render/package.json`'s "test" script and
-  // running `pnpm test` from the repo root still exits 0, because
-  // sim/shared/game/tools still have theirs — pnpm silently skips render
-  // rather than failing the run. That detector is therefore not real, and
-  // this direct check — reading each package's own package.json — is what
-  // actually enforces it, independent of how many sibling packages happen
-  // to have the script.
+  // live: removing "test" from either package's package.json still leaves
+  // root `pnpm test` exiting 0, because the others still have theirs — pnpm
+  // silently skips the one missing it rather than failing the run.
+  //
+  // I2: this exact block is ALSO hosted in `packages/render/test/boundary.test.ts`,
+  // deliberately duplicated rather than shared, because a detector that
+  // lives only inside the suite it protects cannot see that suite being
+  // switched off — deleting `game`'s "test" script would silently delete
+  // this check too if it lived only here. Hosting it in both suites means
+  // either package losing its script is caught by the OTHER package's
+  // suite; only removing both packages' scripts in the same edit survives,
+  // since then neither suite runs to report it.
   for (const pkg of ['render', 'game'] as const) {
     it(`packages/${pkg}/package.json declares a "test" script`, () => {
       const scripts = readPackageJson(pkg).scripts ?? {}
@@ -155,4 +209,16 @@ describe('both new packages declare test and typecheck scripts, checked directly
       expect(scripts.typecheck, `packages/${pkg}/package.json has no "typecheck" script`).toBeDefined()
     })
   }
+})
+
+describe('the root "lint" script is not silently narrowed (M7)', () => {
+  // The proof above is `calculateConfigForFile` against an explicit
+  // `overrideConfigFile`, which is independent of how `pnpm lint` itself is
+  // invoked — narrowing the root script to `eslint packages/sim` would leave
+  // every test above green while `pnpm lint` stopped covering render/game
+  // for real. This pins the invocation itself.
+  it('the root package.json "lint" script is "eslint ." — the whole repo, not a narrowed scope', () => {
+    const rootPkg = readPackageJsonAt(join(REPO_ROOT, 'package.json')) as { scripts?: Record<string, string> }
+    expect(rootPkg.scripts?.lint).toBe('eslint .')
+  })
 })

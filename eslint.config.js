@@ -81,12 +81,15 @@ export default tseslint.config(
     // sim/shared) and by the import scan in
     // `packages/render/test/boundary.test.ts`, which a plain `files:` scope
     // change here cannot silence.
-    files: [
-      'packages/render/src/**/*.{ts,mts,cts,js}',
-      'packages/render/test/**/*.{ts,mts,cts,js}',
-      'packages/game/src/**/*.{ts,mts,cts,js}',
-      'packages/game/test/**/*.{ts,mts,cts,js}',
-    ],
+    //
+    // Review finding I5: an earlier version of this glob covered `src/**`
+    // and `test/**` only, so a package-ROOT file was unlinted — and the plan
+    // puts one there (`packages/game/vite.config.ts`, tech-stack line: "vite
+    // and wrangler are added as devDependencies of packages/game for build
+    // and deploy only"). Globbing the whole package tree closes that; the
+    // top-level `ignores` above already excludes `**/dist/**` and
+    // `**/node_modules/**` regardless of depth, so nothing new leaks in.
+    files: ['packages/render/**/*.{ts,mts,cts,js}', 'packages/game/**/*.{ts,mts,cts,js}'],
     extends: [tseslint.configs.recommended],
   },
 )

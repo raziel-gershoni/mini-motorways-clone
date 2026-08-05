@@ -7,3 +7,14 @@
  * `render` ever imports from `game`.
  */
 export {}
+
+/**
+ * M11: makes `packages/game/tsconfig.json`'s `"lib": ["ES2022", "DOM",
+ * "DOM.Iterable"]` override load-bearing from Task 1 onward, rather than
+ * trusting a later task to rediscover a dropped override. `document` is a
+ * DOM-only global (the brief: "game needs document, performance, pointer
+ * events and globalThis.innerHeight"); `typeof document` is a type-only
+ * reference and needs no import. Dropping the `lib` override fails
+ * `tsc --noEmit` here with "Cannot find name 'document'".
+ */
+export type _RequiresDomLib = typeof document

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync, statSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 /**
@@ -17,9 +18,23 @@ import { fileURLToPath } from 'node:url'
  * but it is rooted at `../src` (sim) and `../../shared/src` and cannot reach
  * `packages/render` — this is a second, independent scan, not an extension
  * of it.
+ *
+ * Review finding C1: an earlier version of this scan matched only the bare
+ * `@laneways/sim`/`@laneways/shared` specifier forms, which are ALSO already
+ * rejected by `tsc` (TS2307) under pnpm's strict layout — render has no
+ * dependency entry for either package, so the bare specifier never resolves.
+ * That made the scan's coverage a subset of typecheck's, and its one real
+ * blind spot was the form typecheck accepts: a relative path that walks back
+ * out of `render/src` into a sibling package's source tree
+ * (`../../sim/src/hash`), which resolves and compiles fine. `BANNED_IMPORT_RE`
+ * below now matches that form too, plus a bare side-effect import
+ * (`import '@laneways/sim'`, no `from`, no parens — review finding I3), and
+ * scans the whole file rather than one line at a time, so a `from` clause
+ * split across lines cannot evade it either.
  */
 
 const PACKAGES_DIR = fileURLToPath(new URL('../..', import.meta.url))
+const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url))
 const SCAN_ROOT = fileURLToPath(new URL('../src', import.meta.url))
 
 /** Not just `.ts`, so a stray module in another flavour cannot hide from the scan. */
@@ -33,15 +48,25 @@ function sourceFiles(dir: string): string[] {
   } catch {
     // A scan root that does not exist (a typo'd path, or a directory not yet
     // created) yields zero files rather than an uncaught ENOENT. Silence
-    // here is deliberate: it is the "scanned a non-zero number of files"
-    // guard below, not this function, that must be the thing that catches a
+    // here is deliberate: it is the "scans exactly the known files" guard
+    // below, not this function, that must be the thing that catches a
     // misconfigured root — an uncaught exception would read like a crash,
     // not like the vacuity guard doing its job.
     return out
   }
   for (const name of entries.sort()) {
     const p = join(dir, name)
-    if (statSync(p).isDirectory()) out.push(...sourceFiles(p))
+    // M9: `statSync` gets its own try, separate from `readdirSync`'s above.
+    // A dangling symlink (or a file removed between the `readdirSync` and
+    // this `statSync`) throws ENOENT here specifically, a different failure
+    // point than a missing root, and one the outer try above never reached.
+    let isDirectory: boolean
+    try {
+      isDirectory = statSync(p).isDirectory()
+    } catch {
+      continue // skip the unreadable entry rather than crashing the walk
+    }
+    if (isDirectory) out.push(...sourceFiles(p))
     else if (SOURCE_EXTENSIONS.some((e) => name.endsWith(e))) out.push(p)
   }
   return out
@@ -105,33 +130,58 @@ function stripComments(src: string): string {
 }
 
 /**
- * Matches the three import forms named in the task brief: `from '...'`,
- * `import(...)`, and `require(...)`, each against a specifier that is
- * `@laneways/sim` or `@laneways/shared`, optionally with a deep subpath.
- * Deliberately NOT a global-flagged regex — see determinism.test.ts's own
- * note on why `.test()` on a stateful regex is a bug waiting to happen.
+ * Matches every import form named in the brief (`from '...'`, `import(...)`,
+ * `require(...)`) plus two evasions review found by probing with real files:
+ * a bare side-effect import (`import '...'`, no `from`, no parens — I3) and
+ * a `from` keyword whose quoted specifier sits on a later line. And it
+ * matches two specifier shapes: the bare workspace specifier
+ * (`@laneways/sim`, optionally with a deep subpath) and a relative escape
+ * that walks out of `render/src` into a sibling package's tree
+ * (`../../sim/src/...`, any depth of `../`, any number of intermediate
+ * segments) — C1's fix, the one form `tsc` does not already reject.
+ *
+ * The relative alternative requires the LITERAL segment `sim/` or `shared/`
+ * (trailing slash included), not a substring match, so `../simulation/x` and
+ * `../shared-utils/x` do not false-positive — see the negative fixtures
+ * below.
+ *
+ * Global-flagged and walked with `matchAll`, never `.test()`/`.exec()`.
+ * `matchAll` takes its own snapshot of position state per call and cannot
+ * leak between scans of different strings, unlike the stateful-`.test()`
+ * footgun `determinism.test.ts`'s own meta-test guards against by staying
+ * non-global. The `g` flag is required here — unlike the sim scan — because
+ * a match can now start mid-string after a multi-line `from` clause, so the
+ * text can no longer be split into independent lines before testing.
  */
-const BANNED_IMPORT_RE = /(?:\bfrom\s*|\b(?:import|require)\s*\(\s*)(['"])@laneways\/(?:sim|shared)(?:\/[^'"]*)?\1/
+const BANNED_IMPORT_RE =
+  /(?:\bfrom\s+|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s+)(['"])(?:@laneways\/(?:sim|shared)(?:\/[^'"]*)?|\.\.\/(?:[^'"]*\/)?(?:sim|shared)\/[^'"]*)\1/g
+
+function lineNumberAt(text: string, index: number): number {
+  let line = 1
+  for (let i = 0; i < index; i++) if (text[i] === '\n') line++
+  return line
+}
 
 function scanForBannedImports(text: string): number[] {
-  const hitLines: number[] = []
-  stripComments(text)
-    .split('\n')
-    .forEach((line, i) => {
-      if (BANNED_IMPORT_RE.test(line)) hitLines.push(i + 1)
-    })
-  return hitLines
+  const stripped = stripComments(text)
+  const hits: number[] = []
+  for (const match of stripped.matchAll(BANNED_IMPORT_RE)) {
+    hits.push(lineNumberAt(stripped, match.index ?? 0))
+  }
+  return hits
 }
 
 describe('render imports nothing from sim or shared', () => {
   const files = sourceFiles(SCAN_ROOT)
 
-  it('scans a non-zero number of render source files', () => {
-    // Vacuity guard named in the brief: if SCAN_ROOT were ever pointed at a
-    // directory that does not exist (or is empty), every assertion below
-    // would pass vacuously on zero files. This is the assertion that turns
-    // that silent pass into a caught failure.
-    expect(files.length).toBeGreaterThan(0)
+  it('scans exactly the known render source files, not some other or empty directory', () => {
+    // I4: replaces a bare `files.length > 0` guard, which is satisfied by
+    // ANY single file and cannot tell "the right two files" from "one
+    // unrelated file" — it would not have caught SCAN_ROOT quietly pointing
+    // one level too high, or too low. This is `determinism.test.ts`'s own
+    // "scans the sim and shared sources, not some other directory" idiom:
+    // the list must be updated deliberately when a later task adds a file.
+    expect(files.map(label).sort()).toEqual(['render/src/index.ts', 'render/src/types.ts'])
   })
 
   it('contains no import of @laneways/sim or @laneways/shared', () => {
@@ -171,6 +221,71 @@ describe('the import scan itself works', () => {
     expect(scanForBannedImports(src)).toEqual([3])
   })
 
+  // --- C1: the relative-escape form tsc does not reject ---------------------
+  // Not redundant with the bare-specifier fixtures above: those match
+  // `@laneways/sim` as a literal specifier text, which resolves through the
+  // pnpm-managed `@laneways` namespace and is rejected by `tsc` on its own
+  // (render has no dependency entry for either package) whenever the scan
+  // itself is bypassed. A relative path never goes through that namespace at
+  // all, so it is the one specifier shape neither `tsc` nor the old regex
+  // could see — this is the case the review's real-file probe found live.
+
+  it('fires on a two-level relative escape into sim (the exact case the review probe found)', () => {
+    expect(scanForBannedImports(`import { hashInt32 } from '../../sim/src/hash'`)).toEqual([1])
+  })
+
+  it('fires on a deeper relative escape into shared, proving both packages are covered by this form', () => {
+    expect(
+      scanForBannedImports(`import { GRID_W } from '../../../packages/shared/src/constants'`),
+    ).toEqual([1])
+  })
+
+  it('does not fire on a relative import that merely CONTAINS "sim" as a substring, not as a path segment', () => {
+    // Guards the literal `sim/`/`shared/` requirement (trailing slash) against
+    // over-matching: "simulation" starts with "sim" but is not the sim package.
+    expect(scanForBannedImports(`import { x } from '../simulation/foo'`)).toEqual([])
+  })
+
+  it('does not fire on a relative import that merely CONTAINS "shared" as a substring, not as a path segment', () => {
+    expect(scanForBannedImports(`import { x } from '../shared-utils/x'`)).toEqual([])
+  })
+
+  // --- I3: the bare side-effect import, no `from`, no parens ----------------
+  // Not redundant with the `from`/`import(`/`require(` fixtures above: those
+  // all require one of three specific prefixes this form has none of. A bare
+  // `import '...'` is valid TypeScript that really loads the module, and is
+  // its own alternative in `BANNED_IMPORT_RE`, not a variant of an existing one.
+
+  it('fires on a bare side-effect import with no from clause', () => {
+    expect(scanForBannedImports(`import '@laneways/sim'`)).toEqual([1])
+  })
+
+  it('does not mistake an ordinary default import (has a from clause) for the bare-side-effect form', () => {
+    // Regression guard for the alternative added for I3: `import X from '...'`
+    // must still be judged solely by its `from`-clause specifier, never by the
+    // new "import directly followed by whitespace" alternative — `Camera`
+    // sits between `import` and the quote, which the bare-side-effect
+    // alternative's `\s+` cannot skip over.
+    expect(scanForBannedImports(`import Camera from './camera'`)).toEqual([])
+  })
+
+  // --- the from-clause-on-a-later-line evasion -------------------------------
+  // Not redundant with "reports the correct line number" above: that fixture
+  // has the violation entirely on one line, after unrelated lines — this one
+  // splits a SINGLE logical import statement across two lines, which the old
+  // per-line `.split('\n')` scan could never see even with a correct regex,
+  // because the `from` keyword and the quoted specifier were never in the
+  // same string being tested.
+
+  it('fires when the from clause and its specifier are on different lines', () => {
+    // The match starts at `from` itself (line 3, where the `from` keyword
+    // sits), not at the specifier's own line (4) — what matters for this
+    // fixture is that it fires AT ALL, which a per-line scan structurally
+    // could not do: `from` and the quoted specifier never share one line.
+    const src = ['import {', '  step,', '} from', `  '@laneways/sim'`].join('\n')
+    expect(scanForBannedImports(src)).toEqual([3])
+  })
+
   it('does not fire on an unrelated relative import', () => {
     expect(scanForBannedImports(`import { Camera } from './types'`)).toEqual([])
   })
@@ -184,4 +299,136 @@ describe('the import scan itself works', () => {
     const src = ['/**', ' * @laneways/sim is the reference.', ' */', "import { x } from './x'"].join('\n')
     expect(scanForBannedImports(src)).toEqual([])
   })
+})
+
+/**
+ * I4: `render/src` holds two flat `.ts` files today, so the recursion branch
+ * in `sourceFiles` and three of `SOURCE_EXTENSIONS`' four entries were never
+ * exercised by anything scanning the real tree — review confirmed both
+ * "disable recursion" and "narrow to ['.ts']" left 11/11 green. These are
+ * real filesystem fixtures against `sourceFiles` itself, distinct from every
+ * fixture above: those all exercise `scanForBannedImports` on in-memory
+ * strings and never touch the directory walk.
+ */
+function withTempDir(fn: (dir: string) => void): void {
+  const dir = mkdtempSync(join(tmpdir(), 'boundary-walk-'))
+  try {
+    fn(dir)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+describe('the file walk itself: recursion, every declared extension, and a dangling symlink', () => {
+  it('walks into a nested subdirectory, not just the top level', () => {
+    withTempDir((dir) => {
+      writeFileSync(join(dir, 'top.ts'), 'export {}')
+      mkdirSync(join(dir, 'sub'), { recursive: true })
+      writeFileSync(join(dir, 'sub', 'nested.ts'), 'export {}')
+
+      const found = sourceFiles(dir)
+        .map((f) => relative(dir, f).split(sep).join('/'))
+        .sort()
+      expect(found).toEqual(['sub/nested.ts', 'top.ts'])
+    })
+  })
+
+  it('matches every declared extension and ignores an undeclared one', () => {
+    withTempDir((dir) => {
+      writeFileSync(join(dir, 'a.ts'), 'export {}')
+      writeFileSync(join(dir, 'b.mts'), 'export {}')
+      writeFileSync(join(dir, 'c.cts'), 'export {}')
+      writeFileSync(join(dir, 'd.js'), 'export {}')
+      writeFileSync(join(dir, 'e.md'), '# not a source file')
+
+      const found = sourceFiles(dir)
+        .map((f) => relative(dir, f).split(sep).join('/'))
+        .sort()
+      expect(found).toEqual(['a.ts', 'b.mts', 'c.cts', 'd.js'])
+    })
+  })
+
+  it('does not crash on a dangling symlink — it skips the entry (M9)', () => {
+    withTempDir((dir) => {
+      writeFileSync(join(dir, 'real.ts'), 'export {}')
+      symlinkSync(join(dir, 'does-not-exist.ts'), join(dir, 'dangling.ts'))
+
+      let found: string[] = []
+      expect(() => {
+        found = sourceFiles(dir)
+          .map((f) => relative(dir, f).split(sep).join('/'))
+          .sort()
+      }, 'sourceFiles crashed on a dangling symlink instead of skipping it').not.toThrow()
+      expect(found).toEqual(['real.ts'])
+    })
+  })
+})
+
+/**
+ * I2: the script-presence check in `packages/game/test/toolchain.test.ts`
+ * lives inside `game`'s own suite, so deleting `game`'s "test" script makes
+ * root `pnpm test` silently skip `game` — deleting the detector along with
+ * the thing it was watching. Mirrored here so each package's suite guards
+ * the OTHER: `render`'s suite catches `game` losing its script, and vice
+ * versa. This closes both single-package cases; only removing BOTH
+ * packages' scripts in the same edit survives, since then neither suite
+ * runs to report it.
+ */
+interface PackageJsonWithScripts {
+  readonly scripts?: Readonly<Record<string, string>>
+}
+
+function readPackageJsonAt(absolutePath: string): PackageJsonWithScripts {
+  try {
+    return JSON.parse(readFileSync(absolutePath, 'utf8')) as PackageJsonWithScripts
+  } catch {
+    // M8: a missing or unparsable package.json degrades to "no scripts"
+    // rather than an uncaught ENOENT/SyntaxError, so the caller's own
+    // `scripts.test`/`scripts.typecheck` assertion is what names the
+    // failure — same shape as `sourceFiles`' missing-root guard above.
+    return {}
+  }
+}
+
+function readPackageJson(pkg: 'render' | 'game'): PackageJsonWithScripts {
+  return readPackageJsonAt(join(REPO_ROOT, 'packages', pkg, 'package.json'))
+}
+
+describe('readPackageJsonAt degrades gracefully instead of crashing (M8)', () => {
+  it('does not throw on a path that does not exist, and returns no scripts', () => {
+    const missing = join(REPO_ROOT, 'packages', 'render', 'package.json.DOES-NOT-EXIST')
+    let result: PackageJsonWithScripts = {}
+    expect(() => {
+      result = readPackageJsonAt(missing)
+    }, 'readPackageJsonAt crashed on a missing file instead of degrading').not.toThrow()
+    expect(result).toEqual({})
+  })
+})
+
+describe('both new packages declare test and typecheck scripts, checked directly, from BOTH suites', () => {
+  // The root scripts run `pnpm -r --filter './packages/*' --filter
+  // './tools/*' test` (and `typecheck`), with no `--if-present`. The brief's
+  // stated detector for a missing script was "caught by the root test
+  // script reaching it" — but `pnpm help recursive` documents `run`'s real
+  // semantics: "If a package doesn't have the command, it is skipped. If
+  // NONE of the packages have the command, the command fails." Verified
+  // live: removing "test" from either package's package.json still leaves
+  // root `pnpm test` exiting 0, because the others still have theirs — pnpm
+  // silently skips the one missing it rather than failing the run. This
+  // direct check — reading each package's own package.json — is what
+  // actually enforces it, independent of how many sibling packages happen
+  // to have the script, and it is hosted in BOTH `render` and `game`'s
+  // suites (see the module comment above) so removing one package's script
+  // does not also remove the check that would have caught it.
+  for (const pkg of ['render', 'game'] as const) {
+    it(`packages/${pkg}/package.json declares a "test" script`, () => {
+      const scripts = readPackageJson(pkg).scripts ?? {}
+      expect(scripts.test, `packages/${pkg}/package.json has no "test" script`).toBeDefined()
+    })
+
+    it(`packages/${pkg}/package.json declares a "typecheck" script`, () => {
+      const scripts = readPackageJson(pkg).scripts ?? {}
+      expect(scripts.typecheck, `packages/${pkg}/package.json has no "typecheck" script`).toBeDefined()
+    })
+  }
 })
