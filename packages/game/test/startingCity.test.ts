@@ -28,6 +28,7 @@ import {
   destMetaOrientation,
   placeDestination,
   placeHouse,
+  placeRoad,
   hasTree,
   DEST_KIND_SQUARE,
   DEST_KIND_CIRCLE,
@@ -49,7 +50,13 @@ import {
   type TickInputs,
   type WorldData,
 } from '@laneways/sim'
-import { seedStartingCity, STARTING_DESTINATIONS, STARTING_HOUSES } from '../src/startingCity'
+import {
+  seedStartingCity,
+  STARTING_DESTINATIONS,
+  STARTING_HOUSES,
+  type SeedDestination,
+  type SeedHouse,
+} from '../src/startingCity'
 
 /**
  * The hand-authored starting city, and the first end-to-end evidence in this
@@ -373,12 +380,49 @@ describe('every placement the seed makes is accepted', () => {
     expect(state.header[H_HOUSE_COUNT] as number).toBe(3)
   })
 
-  it('seedStartingCity throws, naming the building, rather than shipping a half-built city', () => {
-    // Seeding twice is the cheapest reachable rejection: the second pass hits
-    // its own destinations' spacing rule. The point is the FAILURE MODE — a
+  /**
+   * **The two `false`-return guards need one test each, and this is why.**
+   * `seedStartingCity` places destinations first, so on any input that would
+   * reject both, the DESTINATION guard throws first and the house guard is
+   * never reached — deleting the house-side check alone then has zero
+   * detectors while the compound stays caught. That is the catalogue's "a
+   * caught compound does not mean each half is", and it matters here because
+   * Task 9 calls this function. So: one fixture that can only fail on a
+   * destination, one that can only fail on a house.
+   */
+  it('throws naming the DESTINATION when a destination is what fails', () => {
+    // Seeding twice: the second pass hits its own destinations' spacing rule
+    // before it ever reaches a house. The point is the FAILURE MODE — a
     // rejected placement is loud, not a silent `false` nobody reads.
     const { state, world } = seededRig()
     expect(() => seedStartingCity(state, world)).toThrow(/destination 0 at \(9, 10\)/)
+  })
+
+  it('throws naming the HOUSE when a house is what fails — reached only when every destination places', () => {
+    // A road across house 0's cell, laid before the seed runs. `canPlaceHouse`
+    // rejects it with 'road'; every destination still places cleanly, because
+    // neither road cell — (8,23) and (8,24) — touches any destination's 7
+    // cells. So this fixture reaches the house guard and nothing else.
+    const { state, world } = makeRig()
+    expect(placeRoad(state, world, 560, H0_CELL)).toBe(true)
+    expect(() => seedStartingCity(state, world)).toThrow(/house 0 at \(8, 24\)/)
+  })
+
+  it('freezes both tables at runtime, so a consumer cannot edit the city in place', () => {
+    // `readonly` on the exported type is a type-level assertion with no
+    // runtime effect. `Object.freeze` on the arrays AND on each entry is the
+    // half that actually holds, and it needs an observer of its own or the
+    // comment claiming it is load-bearing is the only thing asserting it.
+    expect(Object.isFrozen(STARTING_DESTINATIONS)).toBe(true)
+    expect(Object.isFrozen(STARTING_HOUSES)).toBe(true)
+    expect(Object.isFrozen(STARTING_DESTINATIONS[0] as SeedDestination)).toBe(true)
+    expect(Object.isFrozen(STARTING_HOUSES[0] as SeedHouse)).toBe(true)
+    // Test modules are ESM and therefore strict, so the write throws rather
+    // than failing silently — and the value is unchanged either way.
+    expect(() => {
+      ;(STARTING_HOUSES[0] as { x: number }).x = 99
+    }).toThrow(TypeError)
+    expect((STARTING_HOUSES[0] as SeedHouse).x).toBe(8)
   })
 })
 
@@ -509,17 +553,23 @@ describe('the constraints on the literals', () => {
   })
 
   /**
-   * **Disclosed, so it does not read as coverage it is not:** this one has no
-   * constructible mutation through the seed. `canPlaceHouse`/
-   * `canPlaceDestination` already reject a cell that is not passable (WATER,
-   * MOUNTAIN — including the river column) and one carrying a standing tree,
-   * and the seed lays no road, so `cleared` is all-zero and nothing can have
-   * been felled. A placement that SUCCEEDED is therefore already known to be
-   * on LAND. It is kept on the same "cheap, independently correct, currently
-   * subsumed" reasoning `roads.ts`'s terrain whitelist documents — the thing
-   * subsuming it is a property of `buildings.ts`, not of this seed — and the
-   * mutation that matters (a building moved onto water) is caught by the
-   * per-placement guard and by the count/literal assertions above.
+   * **The river-column half of this has a real detector, and it is the one
+   * that is not subsumed.** Flipping D1 from `ORIENTATION_W` to
+   * `ORIENTATION_E` moves its carpark to (12, 18) — column 12, but on one of
+   * the two rows (18 and 19) where the river has its bridgeable gap, so the
+   * cell is LAND and `canPlaceDestination` ACCEPTS it. Nothing else in this
+   * file sees that: the counts are right, the placements all return `true`,
+   * and only `expect(xOf(cell)).not.toBe(12)` fires. A building parked in the
+   * river's column is exactly the accident the "avoid the river deliberately"
+   * decision exists to prevent.
+   *
+   * The `TERRAIN.LAND` and `hasTree` halves ARE subsumed and are disclosed as
+   * such: `canPlaceHouse`/`canPlaceDestination` already reject a non-passable
+   * cell and a standing tree, and the seed lays no road, so `cleared` is
+   * all-zero and nothing can have been felled. They are kept on the same
+   * "cheap, independently correct, currently subsumed" reasoning `roads.ts`'s
+   * terrain whitelist documents — the thing subsuming them is a property of
+   * `buildings.ts`, not of this seed.
    */
   it('keeps every occupied cell on LAND with no standing tree, and off the river column', () => {
     const { state, world } = seededRig()
