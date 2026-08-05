@@ -131,11 +131,12 @@ export function fitCamera(view: ViewportMetrics, reveal: RevealedRect): Camera {
 
   const gridWidth = reveal.cols * tileSize
   const gridHeight = reveal.rows * tileSize
+  const originY = view.topInset + Math.floor((availableH - gridHeight) / 2)
 
   return {
     tileSize,
     originX: Math.floor((view.cssW - gridWidth) / 2),
-    originY: view.topInset + Math.floor((availableH - gridHeight) / 2),
+    originY,
     x0: reveal.x0,
     y0: reveal.y0,
     cols: reveal.cols,
@@ -143,7 +144,17 @@ export function fitCamera(view: ViewportMetrics, reveal: RevealedRect): Camera {
     dpr: effectiveDpr(view.rawDpr, view.performanceClass),
     cssW: view.cssW,
     cssH: view.cssH,
-    hudTop: view.cssH - view.bottomInset - HUD_BAND_CSS,
+    // `Math.max` is INERT on every viewport that fits: `hudTop` is
+    // `topInset + availableH` and `originY + gridHeight` is at most
+    // `topInset + availableH/2 + gridHeight/2 <= topInset + availableH`, so the
+    // band already clears the grid rect whenever `tileSize` was not clamped.
+    // The clamp above is the one case that breaks it — on a transiently
+    // zero-sized viewport the plain formula puts `hudTop` ABOVE the grid rect,
+    // and because `screenToGrid` tests the HUD band before the grid-bottom
+    // check, grid rows would classify as HUD. Making the invariant hold by
+    // construction is one expression; relying on "a hidden webview receives no
+    // taps" is a platform assumption.
+    hudTop: Math.max(originY + gridHeight, view.cssH - view.bottomInset - HUD_BAND_CSS),
     hudHeight: HUD_BAND_CSS,
   }
 }

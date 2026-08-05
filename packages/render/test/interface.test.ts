@@ -20,6 +20,22 @@ const H = 6
 const CELLS = W * H
 
 /**
+ * The revealed rect this fixture's camera draws: a STRICT SUB-RECT of the 8x6
+ * board, `x ∈ [1, 7)`, `y ∈ [1, 5)`.
+ *
+ * Review finding R1, and the reason it is not `{0, 0, W, H}`: with the rect
+ * covering the whole board, `inside()` below returns `true` for every cell
+ * index that exists, so the assertion named "places every dead slot INSIDE the
+ * drawn region" asserts nothing — mutating `inside` to `return true` left all
+ * 82 tests green. That is the same trap as the cell-0 one, from the other
+ * direction: **if there is no outside, in-side-ness cannot be what does the
+ * work.** A sub-rect gives `inside()` content, and it puts cell 0 — the sim's
+ * real dead value — genuinely outside, which is the fact the whole fixture
+ * shape exists to encode.
+ */
+const RECT = { x0: 1, y0: 1, cols: 6, rows: 4 } as const
+
+/**
  * Deliberately built the way a LIVENESS fixture must be built (plan Decision 2,
  * and the catalogue's "a bounds check can hide the defect a fixture was built
  * to expose"): the dead house/dest/car slots below carry cell indices INSIDE
@@ -30,6 +46,14 @@ const CELLS = W * H
  * is OUTSIDE the revealed rect, so a fixture that leaves dead slots at 0 is
  * proved correct by the renderer's bounds check rather than by the liveness
  * prefix, and the prefix is never exercised.
+ *
+ * **All three collections carry a dead slot, destinations included.** Six of
+ * the frame's twenty-two fields sit behind `destCount`, and an earlier version
+ * of this fixture had `destCell.length === destCount` — no dead destination
+ * existed, so appending one at cell 0 past the count, and setting `destCount`
+ * to 0 outright, both left all 82 tests green. Task 5 draws destinations from
+ * this prefix; a template that cannot represent a dead destination would hand
+ * it an assertion that passes whether or not `drawFrame` respects the count.
  */
 function handBuiltFrame(): RenderFrame {
   const roads = new Uint8Array(CELLS)
@@ -39,16 +63,20 @@ function handBuiltFrame(): RenderFrame {
   terrainClass[1 * W + 2] = TerrainClass.TREE
 
   // Four house slots allocated, two live. The two dead ones sit on real,
-  // in-bounds, drawn cells.
+  // in-bounds, drawn cells: (3, 3) and (4, 3).
   const houseCell = new Int32Array([2 * W + 2, 4 * W + 5, 3 * W + 3, 3 * W + 4])
   const houseColour = new Uint8Array([0, 1, 0, 0])
 
-  const destCell = new Int32Array([1 * W + 5, 3 * W + 1])
-  const destColour = new Uint8Array([0, 0])
-  const destKind = new Uint8Array([0, 1])
-  const destOrientation = new Uint8Array([0, 2])
-  const destPins = new Uint8Array([3, 0])
-  const destCarpark = new Int32Array([1 * W + 4, 3 * W + 2])
+  // THREE destination slots allocated, two live. The dead one is at (2, 3) —
+  // inside the drawn rect, non-zero, and distinct from every live entry. Every
+  // one of the six parallel dense arrays is extended with it, because `render`
+  // indexes all six by the same slot number.
+  const destCell = new Int32Array([1 * W + 5, 3 * W + 1, 3 * W + 2])
+  const destColour = new Uint8Array([0, 0, 0])
+  const destKind = new Uint8Array([0, 1, 0])
+  const destOrientation = new Uint8Array([0, 2, 0])
+  const destPins = new Uint8Array([3, 0, 0])
+  const destCarpark = new Int32Array([1 * W + 4, 3 * W + 2, 2 * W + 2])
 
   // Eight car slots allocated, two live; the tail holds a stale in-bounds
   // position rather than (0, 0).
@@ -66,7 +94,7 @@ function handBuiltFrame(): RenderFrame {
   return {
     camera: fitCamera(
       { cssW: 390, cssH: 844, topInset: 47, bottomInset: 34, rawDpr: 2.625, performanceClass: 'LOW' },
-      { x0: 0, y0: 0, cols: W, rows: H },
+      RECT,
     ),
     gridW: W,
     roads,
@@ -107,10 +135,42 @@ describe('RenderFrame is constructible from plain typed arrays and scalars alone
     // boundary rather than merely undrawn. Cars have no index-based count in
     // the sim at all — PHASE_NONE is their only liveness marker — which is why
     // `game` must densify them before the frame is handed over.
+    //
+    // All three comparisons are STRICT. `toBeLessThanOrEqual` on destinations
+    // passed at equality and therefore carried no information — it was true of
+    // a fixture with no dead destination at all, which is exactly the fixture
+    // that was shipped (review R1).
     const frame = handBuiltFrame()
     expect(frame.houseCount).toBeLessThan(frame.houseCell.length)
-    expect(frame.destCount).toBeLessThanOrEqual(frame.destCell.length)
+    expect(frame.destCount).toBeLessThan(frame.destCell.length)
     expect(frame.carCount * 2).toBeLessThan(frame.carXY.length)
+  })
+
+  it('is non-vacuous: every collection has at least one LIVE entry as well as a dead slot', () => {
+    // The other half of the prefix's meaning, and the half a strict `<` cannot
+    // give: a count of 0 satisfies "count < length" trivially while making
+    // every downstream liveness assertion vacuous, because nothing is drawn at
+    // all and "the dead slots were not drawn" is then true by accident.
+    const frame = handBuiltFrame()
+    expect(frame.houseCount).toBe(2)
+    expect(frame.destCount).toBe(2)
+    expect(frame.carCount).toBe(2)
+  })
+
+  it('keeps all six destination arrays the same length, so one slot index addresses all of them', () => {
+    // `render` reads destCell/destColour/destKind/destOrientation/destPins/
+    // destCarpark by the same slot number. A short array hands `undefined` to
+    // a fillStyle or a coordinate on the last live destination — and under
+    // `noUncheckedIndexedAccess` that is a type error in `render` but not in a
+    // hand-built fixture, so the fixture is where it has to be caught.
+    const frame = handBuiltFrame()
+    const n = frame.destCell.length
+    expect(n).toBe(3)
+    expect(frame.destColour.length).toBe(n)
+    expect(frame.destKind.length).toBe(n)
+    expect(frame.destOrientation.length).toBe(n)
+    expect(frame.destPins.length).toBe(n)
+    expect(frame.destCarpark.length).toBe(n)
   })
 
   it('places every dead slot INSIDE the drawn region, not on cell 0', () => {
@@ -124,9 +184,29 @@ describe('RenderFrame is constructible from plain typed arrays and scalars alone
       const y = Math.floor(cell / frame.gridW)
       return x >= cam.x0 && x < cam.x0 + cam.cols && y >= cam.y0 && y < cam.y0 + cam.rows
     }
+
+    // NEGATIVE CONTROL for `inside` itself, which is the fix for review R1.
+    // Without it, `inside` returning `true` unconditionally satisfies every
+    // assertion below — and that is not hypothetical: the previous fixture
+    // revealed the whole board, so `inside` COULD NOT return false for any
+    // cell that exists, and mutating it to `return true` left all 82 tests
+    // green. Cell 0 is the sim's real dead value and the one that must be
+    // outside; (7, 5) is the far corner, outside on both axes at once.
+    expect(inside(0), 'cell 0 must be OUTSIDE the drawn rect or this fixture proves nothing').toBe(
+      false,
+    )
+    expect(inside(5 * W + 7)).toBe(false)
+    expect(inside(2 * W + 2), 'a live house must be inside, or the rect excludes everything').toBe(
+      true,
+    )
+
     for (let i = frame.houseCount; i < frame.houseCell.length; i++) {
       expect(inside(frame.houseCell[i] as number), `dead house slot ${i} is outside the drawn rect`).toBe(true)
       expect(frame.houseCell[i] as number).not.toBe(0)
+    }
+    for (let i = frame.destCount; i < frame.destCell.length; i++) {
+      expect(inside(frame.destCell[i] as number), `dead dest slot ${i} is outside the drawn rect`).toBe(true)
+      expect(frame.destCell[i] as number).not.toBe(0)
     }
     for (let i = frame.carCount * 2; i < frame.carXY.length; i += 2) {
       const x = frame.carXY[i] as number

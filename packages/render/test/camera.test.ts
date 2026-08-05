@@ -14,7 +14,13 @@ import {
   hudRects,
   screenToGrid,
 } from '../src/camera'
-import { HitRegion, type Camera, type RevealedRect, type ViewportMetrics } from '../src/types'
+import {
+  HitRegion,
+  type Camera,
+  type GridHit,
+  type RevealedRect,
+  type ViewportMetrics,
+} from '../src/types'
 
 /**
  * The camera is plan Decision 5's arithmetic, and the plan calls it "the bug
@@ -292,6 +298,40 @@ describe('fitCamera — the revealed rect, insets and HUD band subtracted first'
     expect(cam.tileSize).toBe(1)
   })
 
+  it('keeps the HUD band below the grid rect even on the degenerate viewport', () => {
+    // Review finding M3. `tileSize` clamping to 1 is the ONE case in which the
+    // plain `cssH - bottomInset - HUD_BAND_CSS` puts the band ABOVE the grid
+    // rect: at 0x0 it gives hudTop -106 against a grid rect at y in [-41, -19).
+    // And because screenToGrid tests the HUD band before the grid-bottom check,
+    // seven of the grid rect's 22 rows then classify as HUD — measured, not
+    // hypothesised. "A hidden webview receives no taps" is a platform
+    // assumption; the Math.max in fitCamera makes it an invariant instead.
+    //
+    // Asserting only `tileSize === 1` above was not enough: the clamp prevented
+    // the division by zero and left the layout incoherent.
+    const cam = fitCamera({ ...M0_DEVICE, cssH: 0, cssW: 0 }, REVEALED_RECT)
+    expect(cam.originY + cam.rows * cam.tileSize).toBeLessThanOrEqual(cam.hudTop)
+
+    // And no point anywhere on that canvas classifies as both a grid cell and
+    // the HUD band, which is what the invariant is protecting.
+    const hit = createGridHit()
+    for (let y = cam.originY; y < cam.originY + cam.rows * cam.tileSize; y++) {
+      screenToGrid(cam, cam.originX, y, 0, 0, hit)
+      expect(hit.region, `CSS y ${y} is inside the grid rows but classified HUD`).not.toBe(
+        HitRegion.HUD,
+      )
+    }
+  })
+
+  it('leaves the HUD band exactly where the plain formula puts it on every real viewport', () => {
+    // The other half of the Math.max above: it must be INERT wherever the fit
+    // was not clamped, or it would silently move the band on a real device.
+    for (const view of [M0_DEVICE, PHONE_390, SHORT_WIDE]) {
+      const cam = fitCamera(view, REVEALED_RECT)
+      expect(cam.hudTop).toBe(view.cssH - view.bottomInset - HUD_BAND_CSS)
+    }
+  })
+
   it('publishes the HUD band height as the literal the fit subtracts', () => {
     expect(HUD_BAND_CSS).toBe(72)
   })
@@ -437,56 +477,70 @@ describe('screenToGrid — CSS client px to board cell, canvas offset (40, 23)',
     expect([unoffset.gx, unoffset.gy]).toEqual([9, 15])
   })
 
-  it('reports a point above the grid rect as ABOVE, not as a cell', () => {
-    // CSS y 94, one px above originY 95 -> client y 117
-    //
-    // The `out` object is DELIBERATELY reused after a successful grid hit. A
-    // fresh `createGridHit()` already carries gx = gy = -1, so a miss path that
-    // forgot to clear them would pass — and the caller's object is reused
-    // across every pointer event, so the stale cell it would leave behind is
-    // exactly the one the last successful tap returned.
-    const cam = phone390Camera()
+  /**
+   * Queries a MISS through a `GridHit` that already holds a successful hit on
+   * tile (8, 14), which is how `game/pointer.ts` will use it: one `GridHit`
+   * reused across every pointer event, so the stale cell a miss path could
+   * leave behind is exactly the last successfully tapped one.
+   *
+   * Every miss test below goes through this. Review finding R2: an earlier
+   * version seeded only the ABOVE test and gave the other four a fresh
+   * `createGridHit()`, whose `gx`/`gy` are ALREADY -1 — so moving the reset
+   * into the ABOVE branch alone left all 82 tests green. A fresh output object
+   * cannot observe a reset; only a dirty one can.
+   */
+  function missAfterAHit(cam: Camera, clientX: number, clientY: number): GridHit {
     const out = createGridHit()
     screenToGrid(cam, 140.5, 266.5, CANVAS_LEFT, CANVAS_TOP, out)
-    expect([out.region, out.gx, out.gy]).toEqual([HitRegion.GRID, 8, 14])
+    expect([out.region, out.gx, out.gy], 'the seeding hit itself failed').toEqual([
+      HitRegion.GRID,
+      8,
+      14,
+    ])
+    return screenToGrid(cam, clientX, clientY, CANVAS_LEFT, CANVAS_TOP, out)
+  }
 
-    const hit = screenToGrid(cam, 140.5, 117, CANVAS_LEFT, CANVAS_TOP, out)
+  it('reports a point above the grid rect as ABOVE, not as a cell', () => {
+    // CSS y 94, one px above originY 95 -> client y 117
+    const hit = missAfterAHit(phone390Camera(), 140.5, 117)
     expect(hit.region).toBe(HitRegion.ABOVE)
-    expect(hit.gx).toBe(-1)
-    expect(hit.gy).toBe(-1)
+    expect([hit.gx, hit.gy]).toEqual([-1, -1])
   })
 
   it('reports a point below the grid rect but above the HUD band as BELOW', () => {
     // grid bottom CSS 689, HUD top CSS 738. CSS y 700 -> client 723.
-    const cam = phone390Camera()
-    const hit = screenToGrid(cam, 140.5, 723, CANVAS_LEFT, CANVAS_TOP, createGridHit())
+    const hit = missAfterAHit(phone390Camera(), 140.5, 723)
     expect(hit.region).toBe(HitRegion.BELOW)
+    expect([hit.gx, hit.gy]).toEqual([-1, -1])
   })
 
   it('reports a point inside the HUD band as HUD, distinguishably from BELOW', () => {
     // CSS y 750 (inside [738, 810)) -> client 773
-    const cam = phone390Camera()
-    const hit = screenToGrid(cam, 140.5, 773, CANVAS_LEFT, CANVAS_TOP, createGridHit())
+    const hit = missAfterAHit(phone390Camera(), 140.5, 773)
     expect(hit.region).toBe(HitRegion.HUD)
     expect(hit.region).not.toBe(HitRegion.BELOW)
+    expect([hit.gx, hit.gy]).toEqual([-1, -1])
   })
 
   it('reports the bottom inset, below the HUD band, as BELOW rather than HUD', () => {
     // CSS y 820 (past the band's bottom edge at 810) -> client 843. The band
     // is where the HUD is DRAWN and tapped; the inset below it is the home
     // indicator's, and a tap there must not toggle pause.
-    const cam = phone390Camera()
-    const hit = screenToGrid(cam, 140.5, 843, CANVAS_LEFT, CANVAS_TOP, createGridHit())
+    const hit = missAfterAHit(phone390Camera(), 140.5, 843)
     expect(hit.region).toBe(HitRegion.BELOW)
+    expect([hit.gx, hit.gy]).toEqual([-1, -1])
   })
 
   it('reports points left and right of the letterboxed grid rect distinguishably', () => {
     // grid rect x in [6, 384) CSS. CSS x 5 -> client 45; CSS x 384 -> client 424.
     const cam = phone390Camera()
-    const left = screenToGrid(cam, 45, 266.5, CANVAS_LEFT, CANVAS_TOP, createGridHit())
-    const right = screenToGrid(cam, 424, 266.5, CANVAS_LEFT, CANVAS_TOP, createGridHit())
+    const left = missAfterAHit(cam, 45, 266.5)
     expect(left.region).toBe(HitRegion.LEFT)
+    expect([left.gx, left.gy]).toEqual([-1, -1])
+
+    const right = missAfterAHit(cam, 424, 266.5)
     expect(right.region).toBe(HitRegion.RIGHT)
+    expect([right.gx, right.gy]).toEqual([-1, -1])
   })
 
   it('writes into the caller\'s object and returns it, allocating nothing', () => {
@@ -499,27 +553,38 @@ describe('screenToGrid — CSS client px to board cell, canvas offset (40, 23)',
 
   it('round-trips every cell in the revealed rect through the tile centre', () => {
     // Kept as a cheap extra and NOT RELIED ON as the primary constraint — the
-    // hand-computed literals above are what actually pin the transform.
+    // hand-computed literals above are what actually pin the transform. THE
+    // BRIEF'S REASON FOR THAT IS CORRECT AND THIS COMMENT PREVIOUSLY CLAIMED
+    // OTHERWISE. The retraction is left in rather than edited away, because a
+    // later reader who trusts a too-strong claim here would over-trust the
+    // round trip.
     //
-    // The brief's stated REASON for distrusting it is measurably wrong on this
-    // implementation, and the correction is worth recording rather than
-    // quietly benefiting from. The brief says the round trip "is self-inverse
-    // and survives any error applied consistently to a shared transform — a
-    // swapped axis, a dropped origin, a dropped x0". All three were built and
-    // run here, and all three FAILED this test:
+    // What was first reported: three "consistent" errors were built — drop x0
+    // in `gridToScreenX` AND `screenToGrid`, drop originY in both directions,
+    // transpose x/y in both — and all three FAILED this test (regions RIGHT,
+    // ABOVE, and a mismatch), so the brief's "survives any consistently applied
+    // error" was called falsified.
     //
-    //   drop x0 in gridToScreenX AND screenToGrid  -> caught (region RIGHT)
-    //   drop originY in both directions            -> caught (region ABOVE)
-    //   transpose x/y in both directions           -> caught
+    // Why that was wrong: `screenToGrid` uses `originX`/`originY`/`cols`/`rows`
+    // TWICE — once to classify the point against the grid rect, once to invert
+    // — and those three mutations touched only the inverting use. The
+    // classifier still anchored the true rect, so the far cells fell outside it
+    // and the pair stopped agreeing. That is an error applied to HALF the uses,
+    // not a consistent one.
     //
-    // The inverse property really does survive them — the arithmetic still
-    // round-trips — but `screenToGrid` does not only invert: it also
-    // CLASSIFIES the point against the grid rect, and that classification is
-    // built from the unmutated `originX`/`cols`/`rows`. A consistent offset
-    // error pushes the far cells outside the rect the classifier still
-    // believes in, so the pair stops agreeing. Recorded because the honest
-    // reading is "this test is stronger than the brief credits, for a reason
-    // the brief did not model", not "the brief was right and we got lucky".
+    // Verified here: mutating the classifier's bounds to match — drop originY
+    // from `gridToScreenY`, from `screenToGrid`'s gy, AND from both originY
+    // bounds tests — leaves this test PASSING (1 passed, 81 skipped, run
+    // filtered onto this test alone). Same for the originX/LEFT/RIGHT version.
+    // The brief's mathematical claim holds exactly as stated.
+    //
+    // What survives as a real, narrower observation: because `screenToGrid`
+    // classifies as well as inverts, the REALISTIC single-site mutations do not
+    // achieve full consistency and are caught here. That is a reason this test
+    // is a slightly better tripwire than a bare inverse would be — it is not a
+    // reason to rely on it. The full suite kills the genuinely consistent
+    // version with 11 detectors, all of them the hand-computed literals above,
+    // which is precisely the defence the brief prescribed.
     const cam = phone390Camera()
     const p = { x: 0, y: 0 }
     const hit = createGridHit()

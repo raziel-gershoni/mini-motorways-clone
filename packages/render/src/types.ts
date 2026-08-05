@@ -53,8 +53,14 @@ export const TerrainClass = Object.freeze({
   TREE: 3,
 } as const)
 
-/** The four values `TerrainClass` can take, as a type. */
-export type TerrainClassCode = 0 | 1 | 2 | 3
+/**
+ * The four values `TerrainClass` can take, as a type — **derived from the const,
+ * not hand-written as `0 | 1 | 2 | 3`.** A hand-written union is a second copy
+ * of a numbering that already exists as a second copy of `shared`'s `TERRAIN`
+ * (see above), and the two would drift silently: renumbering `WATER` in the
+ * const would leave the union describing the old set with nothing to notice.
+ */
+export type TerrainClassCode = (typeof TerrainClass)[keyof typeof TerrainClass]
 
 /**
  * What `screenToGrid` found under a CSS point. Every code is **non-zero**: a
@@ -80,8 +86,8 @@ export const HitRegion = Object.freeze({
   RIGHT: 6,
 } as const)
 
-/** A `HitRegion` value. */
-export type HitRegionCode = 1 | 2 | 3 | 4 | 5 | 6
+/** A `HitRegion` value, derived from the const for the same reason as above. */
+export type HitRegionCode = (typeof HitRegion)[keyof typeof HitRegion]
 
 /**
  * The viewport as measured, before any capping or fitting. Everything here is
@@ -198,9 +204,16 @@ export interface HudRects {
   readonly tiles: Rect
 }
 
-/** `screenToGrid`'s result. `gx`/`gy` are -1 unless `region` is `HitRegion.GRID`. */
+/**
+ * `screenToGrid`'s result. `gx`/`gy` are -1 unless `region` is `HitRegion.GRID`.
+ *
+ * `region` is narrowed to `HitRegionCode` rather than left as `number`, so a
+ * caller that compares against a constant from the wrong enum — `TerrainClass`
+ * has values 0-3, which overlap `HitRegion`'s 1-6 — is a compile error, and so
+ * `pointer.ts` (Task 7) gets a real exhaustiveness check on its `switch`.
+ */
 export interface GridHit {
-  region: number
+  region: HitRegionCode
   gx: number
   gy: number
 }
