@@ -438,6 +438,10 @@ Every array is preallocated once and rewritten in place. `render` reads `[0, cou
 
 `drawFrame(ctx, frame, atlas, palette)` implements Decision 4 against a recording context. It reads `frame` and nothing else — no globals, no `sim`, no `shared`.
 
+**Inherited hazard from Task 4, and this signature is what makes it dangerous.** The atlas **bakes its stroke colour in at build time**, so changing `palette` and re-calling `drawFrame` leaves every road drawn in the *old* colour until the atlas is rebuilt. The `drawFrame(…, palette)` parameter actively suggests otherwise — it reads as though palette is a per-frame input, and for everything except roads it is.
+
+Do not fix this by threading a palette into the draw path. Either make the dependency explicit in the type (the atlas carries the palette it was built with, and `drawFrame` throws or asserts when handed a different one), or document it at the signature and add a coverage bullet that a palette change without a rebuild is detected. **Say which you chose and why.** An implementer arriving at the theme work in a later milestone will hit this, and the failure mode — roads in the previous theme's colour, everything else correct — reads as a rendering bug rather than a caching one.
+
 **Draw order is load-bearing and must be asserted:** top band fill → grid land fill → non-land terrain → roads → destination footprints and carparks → houses → cars → HUD band fill → HUD content. Buildings above roads, because a road is legal on a house cell and on a carpark cell and would otherwise cover them. Cars above buildings, because a car drives onto the carpark.
 
 **Coverage required:**
