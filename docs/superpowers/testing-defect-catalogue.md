@@ -1,6 +1,6 @@
 # Testing defect catalogue
 
-Every way this project's tests have lied, with the case that produced each one. **Thirty-two findings across M1a-M1c have been defects in tests, or in untested code that looked covered — every single one passed a green suite, and none would have been found by running the code.**
+Every way this project's tests have lied, with the case that produced each one. **Thirty-plus findings across M1a-M2 have been defects in tests, or in untested code that looked covered — every single one passed a green suite, and none would have been found by running the code.** The count is deliberately not exact: it was wrong twice when maintained by hand, which is itself an entry below.
 
 Read this before writing a plan, a brief, or a test. It is a review checklist, not a history.
 
@@ -10,7 +10,7 @@ It outlived its original filename (`m1c-carry-forward.md`): the shapes are miles
 
 Plan first, then **adversarially review the plan before executing it**. M0 and M1a ran plan → execute → review, and every substantive defect in both was a plan defect. M1b's pre-execution review returned 9 Critical for the cost of one review — two of which produce green tests and execution would never have caught.
 
-Every task mutation-tests its own tests. Sixteen findings on this project have been defects in tests or in untested code that looked covered; every one passed a green suite. For each behaviour, record the one-line change that makes its test fail, and where you cannot construct one, say so — that answer is useful.
+Every task mutation-tests its own tests, **and confirms each mutant actually executed** — a crash count reads exactly like a kill count. For each behaviour, record the one-line change that makes its test fail, and where you cannot construct one, say so — that answer is useful.
 
 Plans do not state expected test counts. The author got them wrong five times.
 
