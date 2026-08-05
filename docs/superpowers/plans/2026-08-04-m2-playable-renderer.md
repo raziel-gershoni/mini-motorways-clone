@@ -431,6 +431,12 @@ Every array is preallocated once and rewritten in place. `render` reads `[0, cou
 
 ---
 
+> **Two corrections to Task 4, from its review — carried here because they are plan defects, not implementation ones.**
+>
+> **The prescribed mask list cannot discriminate diagonals.** Masks 0, 1, 5, 85, 170 and 255 leave **all 23 non-identity permutations of the four diagonal bits invariant** — 170 is all four diagonals at once, and no other listed mask contains a diagonal at all. Permutation also preserves popcount, distinctness and centre, so every structural assertion passes. Any future atlas work must include masks that isolate single diagonals (**2, 8, 32, 128**) and at least one asymmetric diagonal pair. Do not copy the original list.
+>
+> **A zero-gutter tile grid and `lineCap='round'` are incompatible.** Spokes that reach the tile edge push a half-disc of radius `0.3 × tileDevicePx` into the neighbouring tile — the exact rect the draw path blits. Unclipped, **248 of 256 tiles carried foreign ink**, a dead end rendered as a through-road and an elbow as a four-way crossing. Every tile must be clipped to its own rect. The inherent residual — a diagonal road's band narrows toward each shared corner, bounded by `0.3 × tileDevicePx` per side — is forced by the blit source rect being one tile, not by the clip, and belongs to the art pass.
+
 ## Task 5: Drawing
 
 **Files:**
