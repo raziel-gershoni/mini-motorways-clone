@@ -272,6 +272,19 @@ function assertSurfaceSize(surface: AtlasSurface, sizePx: number): void {
  * art, it is bounded by `0.3 * tileDevicePx` on each side, and the art pass
  * owns it. The alternative on offer was contaminating every blit.
  *
+ * **`lineJoin` is inert here, and saying so is the point.** Spec §6 asks for
+ * round caps AND joins, and this builder sets both — but every spoke is its own
+ * two-point subpath (`moveTo` the centre, `lineTo` the edge), and a two-point
+ * subpath has no join. So no join is ever rasterised, the `'miter'` mutation is
+ * an equivalent mutant, and the only thing that kills it is the assertion that
+ * the ASSIGNMENT was made. The assignment is kept because the setting is
+ * spec-mandated and because the first person to draw a multi-segment subpath
+ * here — a curved corner, a roundabout — would otherwise inherit a miter
+ * silently. What rounds the visible junction is the start CAP of each spoke,
+ * not the join. Recorded rather than left as apparent coverage: a test that
+ * pins a property nothing depends on reads exactly like a test that pins one
+ * that matters.
+ *
  * Mask 0 draws nothing, and that is correct rather than a gap: `state.roads`
  * uses 0 for "no road", so tile 0 is never blitted by a correct `drawFrame`.
  * It exists so the mask indexes the grid directly.

@@ -471,8 +471,17 @@ describe('buildAtlas: the stroke state', () => {
     const byProp = new Map(sets.map((c) => [c.prop, c.value]))
     expect(byProp.get('lineWidth')).toBe(24) // 0.6 * 40
     expect(byProp.get('lineCap')).toBe('round')
-    expect(byProp.get('lineJoin')).toBe('round')
     expect(byProp.get('strokeStyle')).toBe(PALETTE.road)
+
+    // `lineJoin` is asserted, and it is INERT — review m1. Every spoke is its
+    // own two-point subpath, and a two-point subpath has no join, so nothing
+    // here rasterises one and the `'miter'` mutation is an equivalent mutant
+    // that only this assignment assertion kills. Kept because spec §6 mandates
+    // the setting and because the first multi-segment subpath drawn here would
+    // otherwise inherit a miter silently. What rounds the visible junction is
+    // each spoke's start CAP. Said out loud so this line is not read as
+    // coverage of something the atlas depends on.
+    expect(byProp.get('lineJoin')).toBe('round')
   })
 
   it('keeps the stroke width inside spec §6’s 55-65% band at both sizes', () => {
