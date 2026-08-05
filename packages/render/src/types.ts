@@ -288,7 +288,20 @@ export interface RenderFrame {
   readonly destCarpark: Int32Array
   /** Live cars only. */
   readonly carCount: number
-  /** DENSE: 2 floats per live car, in grid-cell units. Length may exceed `carCount * 2`. */
+  /**
+   * DENSE: 2 floats per live car, in grid-cell units. Length may exceed
+   * `carCount * 2`.
+   *
+   * **The units are cell CENTRES, and this is the one convention mismatch in the
+   * milestone worth stating at the field.** `gridToScreen` maps a cell to its
+   * top-LEFT corner, while plan Decision 2's resolver maps a parked car to
+   * `(cx, cy)` of its cell and a car half way along an eastward edge to
+   * `(cx + 0.5, cy)`. So an integer coordinate here names a cell's centre, and
+   * `canvas.ts` draws a car centred at `gridToScreen(gx, gy) + tileSize / 2`.
+   * `game`'s resolver (Task 6) must produce that same convention: emitting
+   * corner units instead shifts every car half a cell up and left, which reads
+   * as an art offset rather than as a coordinate bug.
+   */
   readonly carXY: Float32Array
   /** Dense, one per live car. */
   readonly carColour: Uint8Array

@@ -184,6 +184,7 @@ describe('render imports nothing from sim or shared', () => {
     expect(files.map(label).sort()).toEqual([
       'render/src/atlas.ts', // M2 Task 4
       'render/src/camera.ts',
+      'render/src/canvas.ts', // M2 Task 5
       'render/src/index.ts',
       'render/src/palette.ts',
       'render/src/types.ts',
