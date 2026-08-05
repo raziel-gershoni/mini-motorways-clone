@@ -119,7 +119,11 @@ export interface AtlasContext {
   lineCap: CanvasLineCap
   lineJoin: CanvasLineJoin
   strokeStyle: string | CanvasGradient | CanvasPattern
+  save(): void
+  restore(): void
   beginPath(): void
+  rect(x: number, y: number, w: number, h: number): void
+  clip(): void
   moveTo(x: number, y: number): void
   lineTo(x: number, y: number): void
   stroke(): void
@@ -161,8 +165,30 @@ export interface Atlas {
   readonly cols: number
   readonly widthPx: number
   readonly heightPx: number
-  /** The stroke width actually used, in device px. */
+  /**
+   * The stroke width actually used, in device px — `ROAD_STROKE_FRACTION *
+   * tileDevicePx`.
+   *
+   * Public because it is half of the arithmetic that says how far a round cap
+   * reaches past a spoke's endpoint (`strokeWidthPx / 2`), which is the
+   * quantity `assertTileClip`'s whole existence rests on, and because a caller
+   * drawing anything that must line up with a road — a carpark stub, a bridge —
+   * needs the same number rather than a second copy of the fraction.
+   */
   readonly strokeWidthPx: number
+  /**
+   * The palette this atlas was **baked with**, carried so a caller can tell a
+   * stale atlas from a current one.
+   *
+   * `drawFrame(ctx, frame, atlas, palette)` takes a palette of its own and
+   * cannot re-tint a blit, so the two can silently disagree: the roads keep the
+   * colour they were rasterised with while everything else changes. Task 5
+   * compares `atlas.palette` against the palette it was handed and rebuilds (or
+   * throws) rather than drawing a board in two themes. Identity comparison is
+   * enough — `PALETTE` is frozen and preallocated, and a palette that is a
+   * different object is a different palette by construction.
+   */
+  readonly palette: Palette
 }
 
 /**
@@ -174,7 +200,7 @@ export interface Atlas {
 function assertAtlasDimension(sizePx: number, tileDevicePx: number): void {
   if (sizePx > MAX_ATLAS_DIMENSION_PX) {
     throw new Error(
-      `atlas: a ${tileDevicePx} px tile needs a ${sizePx} x ${sizePx} px surface, past the ` +
+      `atlas: a tile of ${tileDevicePx} px needs a ${sizePx} x ${sizePx} px surface, past the ` +
         `${MAX_ATLAS_DIMENSION_PX} px canvas dimension limit — WebKit gives back a silently ` +
         'blank or downscaled backing store there, which no Node-side test can see',
     )
@@ -220,18 +246,47 @@ function assertSurfaceSize(surface: AtlasSurface, sizePx: number): void {
  * where the neighbouring tile's own spoke meets it. Round caps and joins
  * (spec §6) round the centre blob and the spoke ends.
  *
+ * **Every tile is clipped to its own rect, and that is not hygiene — without it
+ * this atlas is wrong on 248 of its 256 tiles.** The grid has no gutter, every
+ * spoke runs to the tile edge, and a round cap is a half-disc of radius
+ * `strokeWidthPx / 2` = `0.3 * tileDevicePx` centred ON that endpoint. So
+ * `0.3 * tileDevicePx` of every spoke's ink lands in the neighbouring tile's
+ * rect — which is exactly the rect `drawFrame` blits. Mask 4 (E) puts a stub
+ * inside mask 5's rect; blit mask 1, a dead end, and you get the left edge of
+ * mask 2's tile with it. Measured on the recorded command stream: mean 14% of a
+ * tile's area foreign, worst 37%. A dead end renders as a through-road and an
+ * elbow renders as a crossing.
+ *
+ * The cap stays round — it is what rounds the junction blob at the tile centre,
+ * where the start caps of every spoke overlap — and the clip is what keeps its
+ * far end out of the neighbour. Nothing is lost at the tile edge, because a
+ * mask bit means the neighbour has the OPPOSITE bit set (`placeRoad` writes
+ * both ends), so every spoke that reaches an edge meets the neighbouring
+ * tile's own spoke there. There are no stubs into empty space to round off.
+ *
+ * **The consequence, stated rather than discovered:** a diagonal road's band is
+ * 0.6 tiles wide and crosses a shared CORNER, so clipping removes the parts
+ * that would fall in the two orthogonal neighbours and the band narrows toward
+ * that corner. Correct — those neighbours may be plain grass — and inherent to
+ * any cell-sized-tile atlas, not to this clip. It is a visual property of the
+ * art, it is bounded by `0.3 * tileDevicePx` on each side, and the art pass
+ * owns it. The alternative on offer was contaminating every blit.
+ *
  * Mask 0 draws nothing, and that is correct rather than a gap: `state.roads`
  * uses 0 for "no road", so tile 0 is never blitted by a correct `drawFrame`.
  * It exists so the mask indexes the grid directly.
  *
  * The stroke state is set **once**, before the mask loop: it never varies per
  * tile, and 1,024 redundant property assignments on a real context are 1,024
- * chances to invalidate its state cache at boot.
+ * chances to invalidate its state cache at boot. `save`/`restore` around each
+ * tile restores exactly that state, so it never needs re-setting.
  *
  * `palette` defaults to `PALETTE` and is a parameter so the colour is not a
  * hidden global. **The colour is baked at build time** — `drawFrame(ctx, frame,
  * atlas, palette)` blits, and a blit cannot re-tint — so changing the road
- * colour means rebuilding the atlas. There is no palette switch in M2.
+ * colour means rebuilding the atlas. `Atlas.palette` carries the one it was
+ * baked with so a caller can detect the mismatch. There is no palette switch in
+ * M2.
  */
 export function buildAtlas(
   createSurface: AtlasSurfaceFactory,
@@ -262,13 +317,21 @@ export function buildAtlas(
 
   const half = tileDevicePx / 2
   for (let mask = 0; mask < ATLAS_MASK_COUNT; mask++) {
-    const cx = (mask % ATLAS_COLS) * tileDevicePx + half
-    const cy = Math.floor(mask / ATLAS_COLS) * tileDevicePx + half
+    const originX = (mask % ATLAS_COLS) * tileDevicePx
+    const originY = Math.floor(mask / ATLAS_COLS) * tileDevicePx
+    const cx = originX + half
+    const cy = originY + half
 
-    // `beginPath` and `stroke` are issued for EVERY mask, including 0. A
-    // stroke of an empty path is a no-op on a real context, and the uniformity
-    // is what lets a recording test read the log as 256 groups without knowing
-    // anything about which masks are empty.
+    // `save`/`rect`/`clip`/`restore` are issued for EVERY mask, including 0,
+    // and so are `beginPath` and `stroke`. A stroke of an empty path is a
+    // no-op on a real context, and the uniformity is what lets a recording
+    // test read the log as 256 tile groups without knowing anything about
+    // which masks are empty.
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(originX, originY, tileDevicePx, tileDevicePx)
+    ctx.clip()
+
     ctx.beginPath()
     for (let dir = 0; dir < ROAD_DIR_COUNT; dir++) {
       if ((mask & (1 << dir)) === 0) continue
@@ -276,6 +339,7 @@ export function buildAtlas(
       ctx.lineTo(cx + (ROAD_DIR_DX[dir] as number) * half, cy + (ROAD_DIR_DY[dir] as number) * half)
     }
     ctx.stroke()
+    ctx.restore()
   }
 
   return {
@@ -285,6 +349,7 @@ export function buildAtlas(
     widthPx: sizePx,
     heightPx: sizePx,
     strokeWidthPx,
+    palette,
   }
 }
 

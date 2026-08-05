@@ -20,26 +20,33 @@ import type { Palette } from '../src/types'
 /**
  * Task 4's whole test strategy in one sentence: **the atlas is exercised
  * through an injected surface factory, and every assertion below is over
- * recorded drawing state — never over ink.**
+ * recorded drawing state.**
  *
  * This workspace has no jsdom, no `canvas` module and no vitest DOM config;
  * `node -e "typeof OffscreenCanvas"` prints `undefined`. Plan Decision 8 is
- * therefore not a convenience, it is the only way this file runs at all. What a
- * recorder observes is exactly the atlas's decision content: which segments it
- * strokes for each mask, and with what stroke state — `moveTo`/`lineTo`
- * coordinates, `lineWidth`, `lineCap`, `lineJoin`, `strokeStyle`, and the
- * surface's width and height.
+ * therefore not a convenience, it is the only way this file runs at all.
  *
- * **What it cannot observe, stated so nobody records it as covered:** whether a
- * browser rasterises those segments the way we expect. That is a browser
- * property, not ours, and Task 9's deploy is its only check.
+ * **What the recorder can see is larger than "the commands issued", and the
+ * first version of this file got that wrong in a way that hid a real defect.**
+ * It filed the round cap's footprint under "browser property, only the deploy
+ * can check it" — and a round cap's reach past an endpoint is `lineWidth / 2`
+ * by the canvas spec, which is arithmetic over two things this recorder already
+ * captures. 248 of 256 tiles were contaminated by their neighbours' ink and the
+ * "cannot observe" label is what ended the search. `describe('the clip')` below
+ * is the assertion that should always have existed; the review that found it is
+ * why this comment names the mistake rather than quietly fixing it.
+ *
+ * **What is genuinely out of reach** is re-derived in the report's §2 and is
+ * now a shorter, more specific list: rasterised pixel coverage and
+ * antialiasing, whether a platform honoured a backing-store size it *reported*
+ * honouring, colour management, and whether the rasteriser respects a `clip()`
+ * it was issued. A recorder observes commands and geometry derivable from them;
+ * it does not observe pixels.
  *
  * The plan's first draft asked for symmetry assertions and its own vacuity
  * check forbade the masks it named (N+S = 17 and E+W = 68 are both symmetric
- * under BOTH axes, so a blank tile would have passed). Symmetry was a proxy for
- * "the right spokes are drawn"; every geometric assertion here is instead a
- * **hand-written literal endpoint list**, which says it directly and has no
- * vacuity condition to get wrong.
+ * under BOTH axes, so a blank tile would have passed). Every geometric
+ * assertion here is a **hand-written literal endpoint list** instead.
  */
 
 // ---------------------------------------------------------------------------
@@ -48,7 +55,8 @@ import type { Palette } from '../src/types'
 
 /**
  * One recorded mutation of the drawing surface. This union IS the vocabulary of
- * plan Decision 8 — path commands and state assignments, in issue order.
+ * plan Decision 8 — path commands, clip commands and state assignments, in
+ * issue order.
  *
  * State assignments are recorded through real accessors rather than sampled at
  * the end, which is what makes "`lineCap` is `'round'`" an assertion about an
@@ -57,7 +65,17 @@ import type { Palette } from '../src/types'
  * there and pass a final-value check.
  */
 type Command =
+  | { readonly op: 'save' }
+  | { readonly op: 'restore' }
   | { readonly op: 'beginPath' }
+  | {
+      readonly op: 'rect'
+      readonly x: number
+      readonly y: number
+      readonly w: number
+      readonly h: number
+    }
+  | { readonly op: 'clip' }
   | { readonly op: 'moveTo'; readonly x: number; readonly y: number }
   | { readonly op: 'lineTo'; readonly x: number; readonly y: number }
   | { readonly op: 'stroke' }
@@ -103,8 +121,20 @@ class RecordingContext implements AtlasContext {
     this.log.push({ op: 'set', prop: 'strokeStyle', value: String(value) })
   }
 
+  save(): void {
+    this.log.push({ op: 'save' })
+  }
+  restore(): void {
+    this.log.push({ op: 'restore' })
+  }
   beginPath(): void {
     this.log.push({ op: 'beginPath' })
+  }
+  rect(x: number, y: number, w: number, h: number): void {
+    this.log.push({ op: 'rect', x, y, w, h })
+  }
+  clip(): void {
+    this.log.push({ op: 'clip' })
   }
   moveTo(x: number, y: number): void {
     this.log.push({ op: 'moveTo', x, y })
@@ -171,53 +201,86 @@ interface Segment {
   readonly y2: number
 }
 
+interface Rect {
+  readonly x: number
+  readonly y: number
+  readonly w: number
+  readonly h: number
+}
+
+interface Tile {
+  /** The rect passed to `rect()` immediately before `clip()`, or null if none was. */
+  readonly clip: Rect | null
+  readonly segments: Segment[]
+  /** Every op of the group in order, `save` and `restore` excluded. */
+  readonly ops: string[]
+}
+
 /**
- * The recorded log split into one group per `beginPath`, in issue order.
+ * The recorded log split into one group per `save`/`restore` pair, in issue
+ * order.
  *
  * **This is deliberately not "group by which tile the coordinates fall in".**
  * Grouping by position would use the mask -> tile mapping that is itself under
- * test; grouping by `beginPath` uses only the structure of the recording, so
- * the coordinates in group *m* remain free to be wrong and the hand-written
- * literals below are what pin them. A builder that drew the masks in a
- * different order, or into the wrong tiles, produces literal mismatches here
- * rather than a silently re-labelled group.
+ * test; grouping by the save/restore structure uses only the shape of the
+ * recording, so the coordinates in group *m* remain free to be wrong and the
+ * hand-written literals below are what pin them.
  */
-function groups(log: readonly Command[]): Segment[][] {
-  const out: Segment[][] = []
-  let current: Segment[] | null = null
+function tiles(log: readonly Command[]): Tile[] {
+  const out: Tile[] = []
+  let ops: string[] | null = null
+  let segments: Segment[] = []
+  let clip: Rect | null = null
+  let lastRect: Rect | null = null
   let pendingX = Number.NaN
   let pendingY = Number.NaN
 
   for (const command of log) {
-    if (command.op === 'beginPath') {
-      current = []
-      out.push(current)
+    if (command.op === 'save') {
+      expect(ops, 'a nested save — the previous tile was never restored').toBeNull()
+      ops = []
+      segments = []
+      clip = null
+      lastRect = null
       continue
     }
-    if (command.op === 'moveTo') {
-      expect(current, 'a moveTo was issued before any beginPath').not.toBeNull()
+    if (command.op === 'restore') {
+      expect(ops, 'a restore with no matching save').not.toBeNull()
+      out.push({ clip, segments, ops: ops ?? [] })
+      ops = null
+      continue
+    }
+    if (ops === null) continue // outside any tile group: the four state assignments
+    ops.push(command.op)
+    if (command.op === 'rect') {
+      lastRect = { x: command.x, y: command.y, w: command.w, h: command.h }
+    } else if (command.op === 'clip') {
+      clip = lastRect
+    } else if (command.op === 'moveTo') {
       pendingX = command.x
       pendingY = command.y
-      continue
-    }
-    if (command.op === 'lineTo') {
-      expect(current, 'a lineTo was issued before any beginPath').not.toBeNull()
+    } else if (command.op === 'lineTo') {
       expect(Number.isNaN(pendingX), 'a lineTo with no preceding moveTo').toBe(false)
-      current?.push({ x1: pendingX, y1: pendingY, x2: command.x, y2: command.y })
+      segments.push({ x1: pendingX, y1: pendingY, x2: command.x, y2: command.y })
       pendingX = Number.NaN
       pendingY = Number.NaN
     }
   }
+  expect(ops, 'a save with no matching restore').toBeNull()
   return out
 }
 
-/** Group `mask`, with a hard failure rather than `undefined` if it is missing. */
-function segmentsFor(log: readonly Command[], mask: number): Segment[] {
-  const all = groups(log)
+/** Tile group `mask`, with a hard failure rather than `undefined` if it is missing. */
+function tileFor(log: readonly Command[], mask: number): Tile {
+  const all = tiles(log)
   expect(all.length).toBe(ATLAS_MASK_COUNT)
-  const group = all[mask]
-  if (group === undefined) throw new Error(`test: no recorded group for mask ${mask}`)
-  return group
+  const tile = all[mask]
+  if (tile === undefined) throw new Error(`test: no recorded tile group for mask ${mask}`)
+  return tile
+}
+
+function segmentsFor(log: readonly Command[], mask: number): Segment[] {
+  return tileFor(log, mask).segments
 }
 
 /**
@@ -235,10 +298,8 @@ function localSegments(group: readonly Segment[], tileDevicePx: number): Segment
   if (group.length === 0) return []
   const first = group[0]
   if (first === undefined) throw new Error('test: unreachable — non-empty group with no first')
-  const col = Math.floor(first.x1 / tileDevicePx)
-  const row = Math.floor(first.y1 / tileDevicePx)
-  const ox = col * tileDevicePx
-  const oy = row * tileDevicePx
+  const ox = Math.floor(first.x1 / tileDevicePx) * tileDevicePx
+  const oy = Math.floor(first.y1 / tileDevicePx) * tileDevicePx
   return group.map((s) => ({ x1: s.x1 - ox, y1: s.y1 - oy, x2: s.x2 - ox, y2: s.y2 - oy }))
 }
 
@@ -259,16 +320,56 @@ function popcount(mask: number): number {
   return mask.toString(2).replaceAll('0', '').length
 }
 
+// --- the ink geometry a round cap makes derivable ---------------------------
+
+/** Exact Euclidean distance from a point to a segment. */
+function distanceToSegment(px: number, py: number, s: Segment): number {
+  const dx = s.x2 - s.x1
+  const dy = s.y2 - s.y1
+  const lengthSquared = dx * dx + dy * dy
+  let t = 0
+  if (lengthSquared > 0) {
+    t = ((px - s.x1) * dx + (py - s.y1) * dy) / lengthSquared
+    t = Math.max(0, Math.min(1, t))
+  }
+  return Math.hypot(px - (s.x1 + t * dx), py - (s.y1 + t * dy))
+}
+
+/**
+ * Is `(px, py)` inside the ink an UNCLIPPED stroke of `segments` would lay
+ * down?
+ *
+ * Not an approximation, not a rasterisation, and not a bounding box. A round
+ * cap is a half-disc of diameter `lineWidth` centred on the endpoint and a
+ * round join likewise, so the stroked region is exactly the set of points
+ * within `lineWidth / 2` of the path — the Minkowski sum with a disc. Membership
+ * is therefore one distance comparison per segment, and it is the arithmetic
+ * the first version of this file wrongly called a browser property.
+ */
+function inkedUnclipped(
+  px: number,
+  py: number,
+  segments: readonly Segment[],
+  lineWidth: number,
+): boolean {
+  const radius = lineWidth / 2
+  return segments.some((s) => distanceToSegment(px, py, s) <= radius)
+}
+
+function insideRect(rect: Rect, px: number, py: number): boolean {
+  return px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h
+}
+
 // ---------------------------------------------------------------------------
 // The fixture
 // ---------------------------------------------------------------------------
 
 /**
  * 40 device px per tile — chosen so every hand-written literal below is an
- * integer (`half` = 20) and so the two tile sizes in this file are visibly
- * different. **Not** M2's real 58 px tile, which is used by the second size in
- * the `lineWidth`-varies case; a single-size file cannot see a builder that
- * ignores its argument.
+ * integer (`HALF` = 20, cap radius `R` = 12) and so the two tile sizes in this
+ * file are visibly different. **Not** M2's real 58 px tile, which is used by
+ * the second size in the `lineWidth`-varies case; a single-size file cannot see
+ * a builder that ignores its argument.
  *
  * At T = 40 the surface is 16 * 40 = 640 px on each axis and tile (c, r) spans
  * `x ∈ [40c, 40c + 40)`, `y ∈ [40r, 40r + 40)` with its centre at
@@ -277,6 +378,8 @@ function popcount(mask: number): number {
 const T = 40
 const SURFACE = 640
 const HALF = 20
+/** Half the stroke width — `0.6 * 40 / 2` — and so the reach of a round cap. */
+const R = 12
 
 /**
  * The bit order, verified against `packages/sim/src/roads.ts:92-95` — bit *i* is
@@ -286,15 +389,26 @@ const HALF = 20
  *   170 = 0b1010_1010 = the four diagonals
  *   5   = 0b0000_0101 = N + E, an elbow — asymmetric under both axes
  *
- * The last one matters: the plan's deleted symmetry bullet named 17 (N+S) and
- * 68 (E+W), both of which are symmetric under both axes, which is exactly how a
- * blank tile passes a symmetry test.
+ * **The four single-diagonal masks are review finding C2 and they are not
+ * optional.** The brief's list (0, 1, 5, 85, 170, 255) contains exactly one
+ * mask with any diagonal bit in it, and that mask has ALL FOUR — so it is
+ * invariant under every permutation of the diagonal bits, and a bit permutation
+ * also preserves popcount, tile-local distinctness and the common centre. Every
+ * non-identity permutation of NE/SE/SW/NW survived the whole suite before these
+ * cases existed. Masks 2, 8, 32 and 128 isolate one diagonal each, which is
+ * what makes any permutation move at least one literal.
  */
 const MASK_N = 1
+const MASK_NE = 2
+const MASK_E = 4
 const MASK_N_E = 5
+const MASK_SE = 8
 const MASK_S = 16
 const MASK_N_S = 17
+const MASK_SW = 32
+const MASK_NE_SW = 34
 const MASK_ORTHOGONALS = 85
+const MASK_NW = 128
 const MASK_DIAGONALS = 170
 const MASK_ALL = 255
 
@@ -345,9 +459,12 @@ describe('buildAtlas: the stroke state', () => {
     const sets = log.filter((c) => c.op === 'set')
     const firstDraw = log.findIndex((c) => c.op !== 'set')
 
-    // Four assignments, and every one of them ahead of the first path command:
-    // a builder that sets its state after stroking draws 256 tiles with the
-    // default 1 px butt-capped hairline and the recording says so.
+    // Four assignments, and every one of them ahead of the first drawing
+    // command: a builder that sets its state after stroking draws 256 tiles
+    // with the default 1 px butt-capped hairline and the recording says so.
+    // Once, not per tile — `save`/`restore` around each tile restores exactly
+    // this state, so re-setting it 1,024 times would be 1,024 chances to
+    // invalidate a real context's state cache at boot.
     expect(sets.length).toBe(4)
     expect(firstDraw).toBe(4)
 
@@ -382,15 +499,187 @@ describe('buildAtlas: the stroke state', () => {
     expect(ROAD_STROKE_FRACTION).toBe(0.6)
   })
 
+  it('reports the same stroke width on the Atlas as it assigned to the context', () => {
+    // Review I3: `strokeWidthPx` is public — Task 5 needs it to line anything
+    // up with a road, and the clip arithmetic below is stated in terms of half
+    // of it — and it was returned by the builder and asserted by nobody, so it
+    // could have been any number at all.
+    for (const [size, expected] of [
+      [T, 24],
+      [58, 34.8],
+    ] as const) {
+      const rec = recorder()
+      const atlas = buildAtlas(rec.create, size)
+      const assigned = onlySurface(rec).ctx.log.find((c) => c.op === 'set' && c.prop === 'lineWidth')
+      expect(atlas.strokeWidthPx).toBe(expected)
+      expect(assigned?.op === 'set' ? assigned.value : undefined).toBe(atlas.strokeWidthPx)
+    }
+  })
+
   it('strokes in the palette it is handed, not a hard-coded colour', () => {
-    // The atlas bakes its colour at build time — `drawFrame(ctx, frame, atlas,
-    // palette)` cannot re-tint a blit — so the colour must come from the
-    // palette, and a palette change means a rebuild. Stated in atlas.ts.
     const custom: Palette = { ...PALETTE, road: '#ff00ff' }
     const { log } = buildAt(T, custom)
     const c = log.find((x) => x.op === 'set' && x.prop === 'strokeStyle')
     expect(c?.op === 'set' ? c.value : undefined).toBe('#ff00ff')
     expect(custom.road).not.toBe(PALETTE.road)
+  })
+
+  it('carries the palette it was BAKED with, so a stale atlas is detectable', () => {
+    // Review I2. `drawFrame(ctx, frame, atlas, palette)` takes its own palette
+    // and a blit cannot re-tint, so without this field the two can disagree
+    // silently: the roads keep the colour they were rasterised with while
+    // every other element changes. Identity, because `PALETTE` is frozen and
+    // preallocated and a different object IS a different palette.
+    const custom: Palette = { ...PALETTE, road: '#ff00ff' }
+    const rec = recorder()
+    expect(buildAtlas(rec.create, T, custom).palette).toBe(custom)
+
+    const rec2 = recorder()
+    expect(buildAtlas(rec2.create, T).palette).toBe(PALETTE)
+    expect(custom).not.toBe(PALETTE)
+  })
+})
+
+describe('the clip: a tile’s ink stays inside the rect Task 5 blits', () => {
+  /**
+   * Review finding C1, and the assertion whose absence let a broken atlas pass
+   * 37 green tests.
+   *
+   * The grid has NO gutter and every spoke runs to the tile edge. A round cap
+   * is a half-disc of radius `lineWidth / 2` = `0.3 * tileDevicePx` centred on
+   * that endpoint, so without a clip `0.3 * tileDevicePx` of every spoke's ink
+   * lands in the NEIGHBOUR's rect — which is precisely the rect `drawFrame`
+   * blits. 248 of 256 tiles carried foreign ink, mean 14% of tile area, worst
+   * 37%. A dead end blitted as a through-road and an elbow as a crossing.
+   *
+   * None of this needs a rasteriser: it is a distance comparison against
+   * recorded endpoints and a recorded `lineWidth`.
+   */
+
+  it('issues save -> rect -> clip BEFORE any path command, and restores after the stroke', () => {
+    const tile = tileFor(buildAt(T).log, MASK_N_E)
+    // The exact op sequence of one tile, hand-written. `save` and `restore`
+    // delimit the group and so are not in `ops`; that they are balanced is
+    // asserted by `tiles()` itself, which fails on a nested or unmatched one.
+    expect(tile.ops).toEqual([
+      'beginPath',
+      'rect',
+      'clip',
+      'beginPath',
+      'moveTo',
+      'lineTo',
+      'moveTo',
+      'lineTo',
+      'stroke',
+    ])
+  })
+
+  it('clips EVERY one of the 256 tiles, before every path command it issues', () => {
+    for (const [mask, tile] of tiles(buildAt(T).log).entries()) {
+      expect(tile.ops.slice(0, 3), `mask ${mask}`).toEqual(['beginPath', 'rect', 'clip'])
+      expect(tile.ops.filter((o) => o === 'clip').length, `mask ${mask}`).toBe(1)
+      expect(tile.ops.filter((o) => o === 'stroke').length, `mask ${mask}`).toBe(1)
+      const firstMove = tile.ops.indexOf('moveTo')
+      if (firstMove >= 0) expect(firstMove, `mask ${mask}`).toBeGreaterThan(tile.ops.indexOf('clip'))
+    }
+  })
+
+  it('clips each mask to its OWN tile rect, hand-written', () => {
+    const { log } = buildAt(T)
+    expect(tileFor(log, 0).clip).toEqual({ x: 0, y: 0, w: 40, h: 40 })
+    expect(tileFor(log, MASK_N).clip).toEqual({ x: 40, y: 0, w: 40, h: 40 })
+    expect(tileFor(log, MASK_S).clip).toEqual({ x: 0, y: 40, w: 40, h: 40 })
+    expect(tileFor(log, MASK_N_S).clip).toEqual({ x: 40, y: 40, w: 40, h: 40 })
+    expect(tileFor(log, MASK_ORTHOGONALS).clip).toEqual({ x: 200, y: 200, w: 40, h: 40 })
+    expect(tileFor(log, MASK_DIAGONALS).clip).toEqual({ x: 400, y: 400, w: 40, h: 40 })
+    expect(tileFor(log, MASK_ALL).clip).toEqual({ x: 600, y: 600, w: 40, h: 40 })
+  })
+
+  it('gives the 256 clip rects the exact tiling of the surface: no gap, no overlap', () => {
+    const all = tiles(buildAt(T).log)
+    const origins = new Set<string>()
+    let area = 0
+    for (const [mask, tile] of all.entries()) {
+      const clip = tile.clip
+      expect(clip, `mask ${mask} was not clipped at all`).not.toBeNull()
+      if (clip === null) continue
+      expect([clip.w, clip.h], `mask ${mask}`).toEqual([T, T])
+      expect(clip.x % T, `mask ${mask}`).toBe(0)
+      expect(clip.y % T, `mask ${mask}`).toBe(0)
+      expect(clip.x).toBeGreaterThanOrEqual(0)
+      expect(clip.x + clip.w).toBeLessThanOrEqual(SURFACE)
+      expect(clip.y).toBeGreaterThanOrEqual(0)
+      expect(clip.y + clip.h).toBeLessThanOrEqual(SURFACE)
+      origins.add(`${clip.x},${clip.y}`)
+      area += clip.w * clip.h
+    }
+    expect(origins.size).toBe(ATLAS_MASK_COUNT) // no two tiles share a rect
+    expect(area).toBe(SURFACE * SURFACE) // and together they cover the surface
+  })
+
+  it('proves the clip is LOAD-BEARING: without it mask 4’s cap lands inside mask 5’s rect', () => {
+    // Mask 4 is E only: tile (4, 0), centre (180, 20), spoke to (200, 20) —
+    // which is the shared edge with tile (5, 0), mask 5's rect.
+    const { log } = buildAt(T)
+    const four = tileFor(log, MASK_E)
+    expect(four.segments).toEqual([{ x1: 180, y1: 20, x2: 200, y2: 20 }])
+
+    // (205, 20) is 5 px past that endpoint: well inside a round cap of radius
+    // 12, and 5 px inside mask 5's rect. Hand-written, both halves.
+    expect(inkedUnclipped(205, 20, four.segments, 2 * R)).toBe(true)
+    const fiveRect = tileFor(log, MASK_N_E).clip
+    expect(fiveRect).toEqual({ x: 200, y: 0, w: 40, h: 40 })
+    expect(fiveRect !== null && insideRect(fiveRect, 205, 20)).toBe(true)
+
+    // And the clip is what stops it: the point is outside mask 4's own rect,
+    // so the ink is never laid down. Those two facts together ARE C1.
+    const fourRect = four.clip
+    expect(fourRect).toEqual({ x: 160, y: 0, w: 40, h: 40 })
+    expect(fourRect !== null && insideRect(fourRect, 205, 20)).toBe(false)
+  })
+
+  it('proves it for EVERY spoke of every mask, not just that one pair', () => {
+    // For each spoke, walk half a cap-radius past its far endpoint: that point
+    // is inked by an unclipped stroke (distance R/2 < R) and lies strictly
+    // outside the tile's own rect. So every non-empty tile would contaminate a
+    // neighbour, and the clip is what all 1,024 spokes rely on.
+    const all = tiles(buildAt(T).log)
+    let checked = 0
+    for (const [mask, tile] of all.entries()) {
+      const clip = tile.clip
+      // An `expect`, not a `throw`: a bare Error in a mutation battery's
+      // failure list reads exactly like a crash, which is the one thing a
+      // mutation report must never be ambiguous about.
+      expect(clip, `mask ${mask} was not clipped at all`).not.toBeNull()
+      if (clip === null) continue
+      for (const s of tile.segments) {
+        const length = Math.hypot(s.x2 - s.x1, s.y2 - s.y1)
+        const px = s.x2 + ((s.x2 - s.x1) / length) * (R / 2)
+        const py = s.y2 + ((s.y2 - s.y1) / length) * (R / 2)
+        expect(inkedUnclipped(px, py, tile.segments, 2 * R), `mask ${mask}`).toBe(true)
+        expect(insideRect(clip, px, py), `mask ${mask} spoke leaves its own rect`).toBe(false)
+        checked++
+      }
+    }
+    // Non-vacuity: 8 * 2^7 = 1,024 spokes across the 256 masks, every one
+    // checked. A `segments` array that silently emptied would pass the loop.
+    expect(checked).toBe(1024)
+  })
+
+  it('keeps the centre blob inside the tile, which is why the cap stays ROUND', () => {
+    // The start cap at the tile centre is a disc of radius 12 at (cx, cy), and
+    // 12 < HALF = 20, so it never reaches the tile edge. That is the half of
+    // the round cap the clip does NOT remove, and it is what rounds the
+    // junction where an elbow's two spokes meet.
+    expect(R).toBeLessThan(HALF)
+    const clip = tileFor(buildAt(T).log, MASK_N_E).clip
+    expect(clip).not.toBeNull()
+    for (const [px, py] of [
+      [220 - R, 20 - R],
+      [220 + R, 20 + R],
+    ] as const) {
+      expect(clip !== null && insideRect(clip, px, py)).toBe(true)
+    }
   })
 })
 
@@ -399,25 +688,17 @@ describe('buildAtlas: the recorded segments, against hand-written literals', () 
   // tile (mask % 16, floor(mask / 16)) and the direction table above.
   // Nothing here is derived from the builder's own expressions.
 
-  it('records 256 groups, one per mask, each closed by a stroke', () => {
+  it('records 256 tile groups, one per mask, each closed by a stroke', () => {
     const { log } = buildAt(T)
-    expect(groups(log).length).toBe(ATLAS_MASK_COUNT)
+    expect(tiles(log).length).toBe(ATLAS_MASK_COUNT)
 
     // Without this, "forget to call stroke()" leaves every literal below
     // passing and the device draws a blank atlas — a recorder CAN see it.
-    expect(log.filter((c) => c.op === 'beginPath').length).toBe(ATLAS_MASK_COUNT)
+    expect(log.filter((c) => c.op === 'save').length).toBe(ATLAS_MASK_COUNT)
+    expect(log.filter((c) => c.op === 'restore').length).toBe(ATLAS_MASK_COUNT)
     expect(log.filter((c) => c.op === 'stroke').length).toBe(ATLAS_MASK_COUNT)
-    let open = 0
-    for (const c of log) {
-      if (c.op === 'beginPath') {
-        expect(open, 'a beginPath with the previous path unstroked').toBe(0)
-        open = 1
-      } else if (c.op === 'stroke') {
-        expect(open, 'a stroke with no open path').toBe(1)
-        open = 0
-      }
-    }
-    expect(open).toBe(0)
+    // Two beginPaths per tile: one for the clip rect, one for the spokes.
+    expect(log.filter((c) => c.op === 'beginPath').length).toBe(2 * ATLAS_MASK_COUNT)
   })
 
   it('mask 0 (no neighbours) draws nothing at all', () => {
@@ -493,20 +774,69 @@ describe('buildAtlas: the recorded segments, against hand-written literals', () 
   })
 })
 
+describe('the four diagonals, each isolated in its own mask (review C2)', () => {
+  // Mask 170 has all four diagonals at once and is therefore INVARIANT under
+  // every permutation of them; 0, 1, 5, 85 and 255 pin no diagonal at all. Every
+  // non-identity permutation of NE/SE/SW/NW survived the suite before these
+  // cases existed, because a permutation also preserves popcount, tile-local
+  // distinctness and the common centre. Every literal is hand-computed.
+
+  it('mask 2 = NE alone, to the top-right corner of tile (2, 0)', () => {
+    // centre (100, 20) -> corner (120, 0).
+    expect(segmentsFor(buildAt(T).log, MASK_NE)).toEqual([{ x1: 100, y1: 20, x2: 120, y2: 0 }])
+  })
+
+  it('mask 8 = SE alone, to the bottom-right corner of tile (8, 0)', () => {
+    // centre (340, 20) -> corner (360, 40).
+    expect(segmentsFor(buildAt(T).log, MASK_SE)).toEqual([{ x1: 340, y1: 20, x2: 360, y2: 40 }])
+  })
+
+  it('mask 32 = SW alone, to the bottom-left corner of tile (0, 2)', () => {
+    // centre (20, 100) -> corner (0, 120).
+    expect(segmentsFor(buildAt(T).log, MASK_SW)).toEqual([{ x1: 20, y1: 100, x2: 0, y2: 120 }])
+  })
+
+  it('mask 128 = NW alone, to the top-left corner of tile (0, 8)', () => {
+    // centre (20, 340) -> corner (0, 320).
+    expect(segmentsFor(buildAt(T).log, MASK_NW)).toEqual([{ x1: 20, y1: 340, x2: 0, y2: 320 }])
+  })
+
+  it('mask 34 = NE+SW, a diagonal pair asymmetric under BOTH axes', () => {
+    // tile (2, 2): centre (100, 100). {NE, SW} maps to {NW, SE} under a flip in
+    // either axis, so unlike {NE, SE} or {NE, NW} this pair cannot be satisfied
+    // by a mirrored table.
+    expect(segmentsFor(buildAt(T).log, MASK_NE_SW)).toEqual([
+      { x1: 100, y1: 100, x2: 120, y2: 80 }, // NE
+      { x1: 100, y1: 100, x2: 80, y2: 120 }, // SW
+    ])
+  })
+
+  it('is non-vacuous: the four masks above name four DISTINCT single diagonals', () => {
+    // If two of these constants collided, a permutation could still hide.
+    expect(new Set([MASK_NE, MASK_SE, MASK_SW, MASK_NW]).size).toBe(4)
+    for (const mask of [MASK_NE, MASK_SE, MASK_SW, MASK_NW]) {
+      expect(popcount(mask)).toBe(1)
+      expect(mask & MASK_ORTHOGONALS).toBe(0) // no orthogonal bit in any of them
+    }
+    expect(MASK_NE | MASK_SE | MASK_SW | MASK_NW).toBe(MASK_DIAGONALS)
+    expect(MASK_NE_SW).toBe(MASK_NE | MASK_SW)
+  })
+})
+
 describe('buildAtlas: properties over all 256 masks', () => {
   it('draws one spoke per set bit, counted by an independent formula', () => {
-    const all = groups(buildAt(T).log)
+    const all = tiles(buildAt(T).log)
     for (let mask = 0; mask < ATLAS_MASK_COUNT; mask++) {
-      expect(all[mask]?.length, `mask ${mask}`).toBe(popcount(mask))
+      expect(all[mask]?.segments.length, `mask ${mask}`).toBe(popcount(mask))
     }
     // Non-vacuity: the counts are not all the same number.
-    expect(new Set(all.map((g) => g.length)).size).toBe(9) // 0..8 spokes
+    expect(new Set(all.map((t) => t.segments.length)).size).toBe(9) // 0..8 spokes
   })
 
   it('starts every spoke of a mask at one common point, that tile’s centre', () => {
-    const all = groups(buildAt(T).log)
+    const all = tiles(buildAt(T).log)
     for (let mask = 0; mask < ATLAS_MASK_COUNT; mask++) {
-      const group = all[mask] ?? []
+      const group = all[mask]?.segments ?? []
       for (const segment of group) {
         expect(segment.x1, `mask ${mask}`).toBe(group[0]?.x1)
         expect(segment.y1, `mask ${mask}`).toBe(group[0]?.y1)
@@ -518,9 +848,8 @@ describe('buildAtlas: properties over all 256 masks', () => {
   })
 
   it('keeps every recorded coordinate inside the surface', () => {
-    const all = groups(buildAt(T).log)
-    for (const group of all) {
-      for (const s of group) {
+    for (const tile of tiles(buildAt(T).log)) {
+      for (const s of tile.segments) {
         for (const v of [s.x1, s.y1, s.x2, s.y2]) {
           expect(v).toBeGreaterThanOrEqual(0)
           expect(v).toBeLessThanOrEqual(SURFACE)
@@ -530,8 +859,8 @@ describe('buildAtlas: properties over all 256 masks', () => {
   })
 
   it('gives all 256 masks pairwise-distinct spoke sets, in TILE-LOCAL coordinates', () => {
-    const all = groups(buildAt(T).log)
-    const keys = all.map((g) => key(localSegments(g, T)))
+    const all = tiles(buildAt(T).log)
+    const keys = all.map((t) => key(localSegments(t.segments, T)))
     expect(keys.length).toBe(ATLAS_MASK_COUNT)
     expect(new Set(keys).size).toBe(ATLAS_MASK_COUNT)
 
@@ -539,10 +868,12 @@ describe('buildAtlas: properties over all 256 masks', () => {
     // absolute coordinates, distinctness would be a property of the 256 tile
     // offsets and not of the masks at all. Mask 1 and mask 16 draw in
     // different tiles and must normalise into the SAME frame.
-    const local1 = localSegments(all[MASK_N] ?? [], T)
-    const local16 = localSegments(all[MASK_S] ?? [], T)
-    expect(local1).toEqual([{ x1: HALF, y1: HALF, x2: HALF, y2: 0 }])
-    expect(local16).toEqual([{ x1: HALF, y1: HALF, x2: HALF, y2: T }])
+    expect(localSegments(all[MASK_N]?.segments ?? [], T)).toEqual([
+      { x1: HALF, y1: HALF, x2: HALF, y2: 0 },
+    ])
+    expect(localSegments(all[MASK_S]?.segments ?? [], T)).toEqual([
+      { x1: HALF, y1: HALF, x2: HALF, y2: T },
+    ])
   })
 })
 
@@ -571,18 +902,20 @@ describe('the atlas lookup Task 5 blits from', () => {
     expect([atlasSourceX(atlas, MASK_ALL), atlasSourceY(atlas, MASK_ALL)]).toEqual([600, 600])
   })
 
-  it('agrees with where the segments were actually recorded', () => {
-    // The lookup and the builder are two expressions of the same mapping in the
-    // same file; this is what stops one being changed without the other. It is
-    // NOT the primary check — the hand-written literals above are.
+  it('agrees with the rect each tile was actually CLIPPED to, for all 256', () => {
+    // The lookup is what `drawImage` reads; the clip is what bounded the ink.
+    // If those two disagree, a blit reads a rect the builder confined nothing
+    // to — so this compares them across the whole atlas, not for a sample.
     const rec = recorder()
     const atlas = buildAtlas(rec.create, T)
-    const all = groups(onlySurface(rec).ctx.log)
-    for (const mask of [MASK_N, MASK_N_E, MASK_S, MASK_N_S, MASK_ORTHOGONALS, MASK_ALL]) {
-      const first = (all[mask] ?? [])[0]
-      expect(first, `mask ${mask}`).toBeDefined()
-      expect(Math.floor((first?.x1 ?? -1) / T) * T).toBe(atlasSourceX(atlas, mask))
-      expect(Math.floor((first?.y1 ?? -1) / T) * T).toBe(atlasSourceY(atlas, mask))
+    const all = tiles(onlySurface(rec).ctx.log)
+    for (const [mask, tile] of all.entries()) {
+      expect(tile.clip, `mask ${mask}`).toEqual({
+        x: atlasSourceX(atlas, mask),
+        y: atlasSourceY(atlas, mask),
+        w: atlas.tileDevicePx,
+        h: atlas.tileDevicePx,
+      })
     }
   })
 })
@@ -620,7 +953,7 @@ describe('buildAtlas: the dimension guard', () => {
     const atlas = buildAtlas(rec.create, MAX_ATLAS_DIMENSION_PX / ATLAS_COLS)
     expect(atlas.widthPx).toBe(MAX_ATLAS_DIMENSION_PX)
     expect(atlas.heightPx).toBe(MAX_ATLAS_DIMENSION_PX)
-    expect(groups(onlySurface(rec).ctx.log).length).toBe(ATLAS_MASK_COUNT)
+    expect(tiles(onlySurface(rec).ctx.log).length).toBe(ATLAS_MASK_COUNT)
   })
 })
 
@@ -629,7 +962,7 @@ describe('buildAtlas: the tile-size guard', () => {
   // 1.5 makes 29 * 1.5 = 43.5. A caller that forgets the floor, or measures a
   // transiently zero-height viewport, must not get a silently useless atlas.
   it.each([0, -1, 43.5, Number.NaN, Number.POSITIVE_INFINITY])(
-    'throws on tileDevicePx = %p, naming the value',
+    'throws on tileDevicePx = %s, naming the value',
     (bad) => {
       const rec = recorder()
       expect(() => buildAtlas(rec.create, bad)).toThrow(/tileDevicePx must be a whole number/)
@@ -645,19 +978,35 @@ describe('buildAtlas: the tile-size guard', () => {
 })
 
 describe('buildAtlas: the surface the factory actually returned', () => {
-  it('throws if the factory ignores the size it was asked for', () => {
-    // The shape of a platform that clamps: you ask for 928 and get 300x150.
-    // Without this the atlas builds happily and every blit reads the wrong
-    // tile — a scrambled board with no error anywhere.
+  // Review I1: a single 300x150 fixture fails BOTH halves of the width/height
+  // comparison at once, so neither half had a detector of its own — deleting
+  // either one left the suite green. One fixture per axis fixes that, and it is
+  // the catalogue's "when a mutation touches two symmetric code paths, mutate
+  // them separately" applied to the fixture instead of to the mutation.
+
+  it('throws when the factory gets the WIDTH wrong and the height right', () => {
+    const wrongWidth: AtlasSurfaceFactory = (_widthPx, heightPx) =>
+      new RecordingSurface(300, heightPx)
+    expect(() => buildAtlas(wrongWidth, T)).toThrow(/surface factory returned 300 x 640/)
+    expect(() => buildAtlas(wrongWidth, T)).toThrow(/request of 640 x 640/)
+  })
+
+  it('throws when the factory gets the HEIGHT wrong and the width right', () => {
+    const wrongHeight: AtlasSurfaceFactory = (widthPx) => new RecordingSurface(widthPx, 150)
+    expect(() => buildAtlas(wrongHeight, T)).toThrow(/surface factory returned 640 x 150/)
+    expect(() => buildAtlas(wrongHeight, T)).toThrow(/request of 640 x 640/)
+  })
+
+  it('throws when the factory ignores the size entirely', () => {
+    // The shape of a platform that clamps: you ask for 640 and get 300x150.
     const lying: AtlasSurfaceFactory = () => new RecordingSurface(300, 150)
     expect(() => buildAtlas(lying, T)).toThrow(/surface factory returned 300 x 150/)
-    expect(() => buildAtlas(lying, T)).toThrow(/640 x 640/)
   })
 
   it('throws if the surface has no 2D context', () => {
-    const noContext: AtlasSurfaceFactory = (w, h) => ({
-      width: w,
-      height: h,
+    const noContext: AtlasSurfaceFactory = (widthPx, heightPx) => ({
+      width: widthPx,
+      height: heightPx,
       getContext: (): AtlasContext | null => null,
     })
     expect(() => buildAtlas(noContext, T)).toThrow(/no 2D context/)
@@ -676,6 +1025,8 @@ describe('the direction table render keeps its own copy of', () => {
     expect([...ROAD_DIR_DY]).toEqual([-1, -1, 0, 1, 1, 1, 0, -1])
     // `packages/game/test/renderDirections.test.ts` pins this copy against
     // `sim`'s own DX/DY — `render` may not import `sim`, and `game` imports
-    // both, so that is where the two can be compared.
+    // both, so that is where the two can be compared. It guards the TABLE; the
+    // single-diagonal literals above guard the bit INDEXING, which is a
+    // different thing and was the hole review C2 found.
   })
 })
