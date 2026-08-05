@@ -182,6 +182,7 @@ describe('render imports nothing from sim or shared', () => {
     // "scans the sim and shared sources, not some other directory" idiom:
     // the list must be updated deliberately when a later task adds a file.
     expect(files.map(label).sort()).toEqual([
+      'render/src/atlas.ts', // M2 Task 4
       'render/src/camera.ts',
       'render/src/index.ts',
       'render/src/palette.ts',
