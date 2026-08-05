@@ -572,6 +572,11 @@ Pointer events → tile coordinates (via `render`'s `screenToGrid`, Decision 5) 
 
 ## Task 9: Wire it, play it, deploy it
 
+**Inherited from Task 2, and it is this task's problem — not M1e's.** The hand-authored city takes **378 ticks (~12.6 s) to produce its first pin**, so a fresh launch shows a live board doing visibly nothing for twelve seconds. That is spec-correct pacing, and Task 2 was right not to fix it there — doing so moves the seed golden and every tick assertion built on it. But this is the task that puts the build on a phone, and a first playtest that looks broken is a bad instrument for judging whether the game works.
+
+**The lever, measured:** make destination 0 a **circle** rather than a square and the first pin lands at **tick 292**. Take it here, or state explicitly why the twelve seconds are acceptable for a playtest build. Do not leave it unaddressed — an unexplained dead board is the kind of thing that gets diagnosed as a rendering bug.
+
+
 **Files:**
 - Create: `packages/game/src/main.ts`, `test/integration.test.ts`, `vite.config.ts`, `wrangler.jsonc`, `public/_headers`
 - Modify: `packages/game/package.json` (add `vite` and `wrangler` devDependencies, and `build`/`deploy` scripts)
