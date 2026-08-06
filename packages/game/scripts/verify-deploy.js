@@ -41,8 +41,19 @@ import { fileURLToPath } from 'node:url'
 const PACKAGE_ROOT = new URL('../', import.meta.url)
 const BUILD_ID_FILE = new URL('.build-id', PACKAGE_ROOT)
 
-/** Deployment propagation is not instant; this is a bounded wait, not a hope. */
-const ATTEMPTS = 10
+/**
+ * Deployment propagation is not instant; this is a bounded wait, not a hope.
+ *
+ * **Measured, and the first value was too small.** Across four deploys of this
+ * Worker the live `/` picked up the new build id after roughly 3, 15, 3 and
+ * **more than 30** seconds — the last one exhausted a 10 x 3 s budget and then
+ * passed on a manual re-run twenty seconds later. A check that reports "the
+ * deployment did not activate" when it merely has not activated YET is the same
+ * defect as one that reports success on a stale asset, pointed the other way:
+ * both make the operator stop trusting it. 40 x 3 s is two minutes, which is
+ * longer than any propagation observed and still bounded.
+ */
+const ATTEMPTS = 40
 const RETRY_MS = 3000
 
 function fail(message) {
