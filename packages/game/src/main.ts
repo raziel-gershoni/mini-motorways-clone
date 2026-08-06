@@ -222,6 +222,12 @@ export interface GameDeps {
   readonly seed?: string
   /** Defaults to `WARM_START_TICKS`. 0 disables the warm start entirely. */
   readonly warmStartTicks?: number
+  /**
+   * Force the erase control's DOM fallback even where a `MainButton` exists.
+   * `startGame` reads it from `?fallback=1`; see `EraseControlDeps.preferFallback`
+   * for why the escape hatch is here at all.
+   */
+  readonly preferFallback?: boolean
 }
 
 /**
@@ -339,7 +345,11 @@ export function createGame(deps: GameDeps): Game {
     },
   })
 
-  const erase = createEraseControl({ host: pointer, createFallback: deps.createFallback })
+  const erase = createEraseControl({
+    host: pointer,
+    createFallback: deps.createFallback,
+    preferFallback: deps.preferFallback,
+  })
 
   return {
     state,
@@ -480,6 +490,23 @@ export function createFallbackButton(): HTMLButtonElement {
 export const CANVAS_ELEMENT_ID = 'board'
 
 /**
+ * Whether the player asked for the DOM erase button instead of the native one.
+ *
+ * **The recovery path for Task 8's F5, and a URL rather than a redeploy.**
+ * `mainButton()` is the one Telegram surface in this build that has never run on
+ * a phone, it is what closes this milestone's Critical, and if a client reports
+ * one and then does not render it there is otherwise no way back — the fallback
+ * is never created and `EraseControl` exposes no rebind. Opening the Mini App
+ * with `?fallback=1` binds the DOM pill instead.
+ *
+ * A parameter rather than a read of `location`, so both branches have a
+ * detector; `startGame` passes `location.search`.
+ */
+export function prefersFallback(search: string): boolean {
+  return new URLSearchParams(search).get('fallback') === '1'
+}
+
+/**
  * Whether this module should start the game on import.
  *
  * A predicate rather than an inline `typeof document !== 'undefined'`, so the
@@ -524,6 +551,7 @@ export function startGame(): Game {
     createFallback: createFallbackButton,
     measure: measureViewport,
     settle: rafSettle,
+    preferFallback: prefersFallback(location.search),
   })
 
   wireGame(game, canvas, document, requestAnimationFrame)

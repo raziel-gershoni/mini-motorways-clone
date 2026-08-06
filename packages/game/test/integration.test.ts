@@ -29,6 +29,7 @@ import {
   attachVisibility,
   wireGame,
   createGame,
+  prefersFallback,
   shouldAutoStart,
   type Game,
   type PointerEventLike,
@@ -213,7 +214,9 @@ interface Rig {
   readonly viewportChanged: (stable: boolean) => void
 }
 
-function buildRig(options: { warmStartTicks?: number; fallback?: boolean } = {}): Rig {
+function buildRig(
+  options: { warmStartTicks?: number; fallback?: boolean; preferFallback?: boolean } = {},
+): Rig {
   const ctx = new RecordingContext()
   let view: (typeof M0_VIEW) | (typeof NARROW_VIEW) = M0_VIEW
   const game = createGame({
@@ -240,6 +243,7 @@ function buildRig(options: { warmStartTicks?: number; fallback?: boolean } = {})
       run()
     },
     warmStartTicks: options.warmStartTicks,
+    preferFallback: options.preferFallback,
   })
 
   const camera = (): ReturnType<typeof game.shell.resize> extends never ? never : Game['shell']['camera'] =>
@@ -670,6 +674,57 @@ describe('the assembly boots', () => {
     // No road has been drawn yet, so no blit — which is what makes the four
     // blits after the drag evidence of the drag and not of the board.
     expect(blits(log).length).toBe(0)
+  })
+
+  it('honours ?fallback=1 even where a MainButton exists — Task 8’s F5 escape hatch', () => {
+    // `mainButton()` is the only Telegram surface in this build that has never
+    // run on a phone, and it is the one that closes this milestone's Critical:
+    // if a client reports a MainButton and then does not RENDER it — Telegram's
+    // own fullscreen, which `boot()` requests on every 8.0+ client, is the
+    // obvious candidate — the fallback is never created and there is no rebind,
+    // so erase is unreachable on the NEWEST clients. This is the way back.
+    const telegram = (globalThis as Record<string, unknown>).Telegram
+    ;(globalThis as Record<string, unknown>).Telegram = {
+      WebApp: {
+        isVersionAtLeast: () => true,
+        ready: () => undefined,
+        expand: () => undefined,
+        onEvent: () => undefined,
+        MainButton: {
+          setText: () => undefined,
+          setParams: () => undefined,
+          onClick: () => undefined,
+          show: () => undefined,
+        },
+      },
+    }
+    try {
+      // Vacuity: the SAME client, without the flag, must bind the native button
+      // — otherwise this proves the stub is broken rather than that the flag works.
+      const native = buildRig({ fallback: true })
+      expect(native.game.erase.surface).toBe(EraseControlSurface.MAIN_BUTTON)
+
+      const forced = buildRig({ fallback: true, preferFallback: true })
+      expect(forced.game.erase.surface).toBe(EraseControlSurface.DOM_PREFERRED)
+      // ...and it still drives the mode, which is the whole point of the hatch.
+      expect(forced.game.pointer.eraseMode).toBe(false)
+      expect(forced.game.erase.press()).toBe(true)
+      expect(forced.game.pointer.eraseMode).toBe(true)
+    } finally {
+      if (telegram === undefined) delete (globalThis as Record<string, unknown>).Telegram
+      else (globalThis as Record<string, unknown>).Telegram = telegram
+    }
+  })
+
+  it('reads the hatch from the query string, both ways', () => {
+    expect(prefersFallback('?fallback=1')).toBe(true)
+    expect(prefersFallback('?a=b&fallback=1&c=d')).toBe(true)
+    // Not truthy-coerced: `?fallback=0` and a bare `?fallback` must NOT force it,
+    // or a Telegram-appended parameter could disable the shipping control.
+    expect(prefersFallback('?fallback=0')).toBe(false)
+    expect(prefersFallback('?fallback')).toBe(false)
+    expect(prefersFallback('')).toBe(false)
+    expect(prefersFallback('?tgWebAppData=x')).toBe(false)
   })
 
   it('binds the erase control, and the mode reaches the pointer machine', () => {

@@ -105,6 +105,8 @@ export const EraseControlSurface = Object.freeze({
   DOM_NO_MAIN_BUTTON: 4,
   /** No native button and no fallback element either. The mode still toggles. */
   NONE: 5,
+  /** The caller asked for the fallback even though a `MainButton` was available. */
+  DOM_PREFERRED: 6,
 } as const)
 
 /** An `EraseControlSurface` value, derived from the const rather than written out. */
@@ -254,6 +256,27 @@ export interface EraseControlDeps {
    * reopening into a compile error.
    */
   readonly createFallback: FallbackElementFactory
+  /**
+   * Bind the DOM fallback even on a client that offers a `MainButton`.
+   *
+   * **The escape hatch for Task 8's F5, and it exists because that finding has
+   * no test behind it and cannot get one here.** `grep -rn "MainButton"
+   * spike/src/` returns nothing: every other Telegram surface in `telegram.ts`
+   * is a lift from code that ran on the M0 reference device, and `mainButton()`
+   * is the one that has never been on a phone — while being the single control
+   * that closes this milestone's Critical. Worse, the failure mode has no
+   * recovery: when `mainButton()` returns non-null the fallback is never
+   * created, and there is no way to rebind afterwards, so a client that passes
+   * the shape check and then does not RENDER the button (Telegram's own
+   * fullscreen, which `boot()` requests on every 8.0+ client, is the obvious
+   * candidate) leaves erase unreachable on the **newest** clients.
+   *
+   * `main.ts` drives this from a `?fallback=1` query parameter, so the answer to
+   * "the button is not there" is a URL rather than a redeploy. Optional, and
+   * that is safe in a way `createFallback` was not: the default is the shipping
+   * path, and omitting it degrades to today's behaviour rather than to `NONE`.
+   */
+  readonly preferFallback?: boolean
 }
 
 export interface EraseControl {
@@ -300,7 +323,7 @@ export function createEraseControl(deps: EraseControlDeps): EraseControl {
   let label = MAIN_BUTTON_LABEL_OFF
   let renders = 0
 
-  const mb = mainButton()
+  const mb = deps.preferFallback === true ? null : mainButton()
   const native = mb !== null
 
   let element: FallbackElement | null = null
@@ -317,6 +340,8 @@ export function createEraseControl(deps: EraseControlDeps): EraseControl {
     element = safeCreate(deps.createFallback)
     if (element === null) {
       surface = EraseControlSurface.NONE
+    } else if (deps.preferFallback === true) {
+      surface = EraseControlSurface.DOM_PREFERRED
     } else if (!isTelegram()) {
       surface = EraseControlSurface.DOM_NO_TELEGRAM
     } else if (!atLeast(MAIN_BUTTON_MIN_VERSION)) {
