@@ -27,6 +27,7 @@ import {
   WARM_START_TICKS,
   attachPointerEvents,
   attachVisibility,
+  wireGame,
   createGame,
   shouldAutoStart,
   type Game,
@@ -1112,6 +1113,53 @@ describe('the DOM edge', () => {
 
     state = 'hidden'
     ;(handler as unknown as () => void)()
+    expect(rig.game.pointer.dragging).toBe(false)
+  })
+
+  it('wireGame binds all three sources and reschedules itself every frame', () => {
+    // `startGame` reads `document` and cannot run in Node, so before `wireGame`
+    // existed every call it made was untestable by construction — deleting the
+    // `attachVisibility` line scored 0 detectors across the whole suite. This is
+    // the production entry's wiring, driven with stubs.
+    const rig = buildRig()
+    const target = stubTarget()
+    let visibility = 'visible'
+    let visHandler: (() => void) | null = null
+    const doc = {
+      get visibilityState(): string {
+        return visibility
+      },
+      addEventListener: (_type: 'visibilitychange', handler: () => void) => {
+        visHandler = handler
+      },
+    }
+    const scheduled: ((now: number) => void)[] = []
+    wireGame(rig.game, target, doc, (callback) => scheduled.push(callback))
+
+    // 1. the frame loop is running, and it reschedules — a `raf` called once and
+    //    never again is a game that draws one frame and freezes.
+    expect(scheduled.length).toBe(1)
+    const before = rig.game.state.header[H_TICK] as number
+    ;(scheduled[0] as (now: number) => void)(9_000_000)
+    expect(scheduled.length).toBe(2)
+    // ...and the timestamp it was handed is the loop's clock, so a run that
+    // resumed from a stale reference cannot burst.
+    expect(rig.game.loop.ticksLastFrame).toBe(0)
+    expect(rig.game.state.header[H_TICK] as number).toBe(before)
+    ;(scheduled[1] as (now: number) => void)(9_000_100)
+    expect(rig.game.loop.ticksLastFrame).toBe(2) // Decision 1's table: 100 ms is 2 ticks
+
+    // 2. the pointer events reach the state machine.
+    target.fire('pointerdown', at(rig, 8, 13))
+    expect(rig.game.pointer.dragging).toBe(true)
+    expect(target.captured).toEqual([1])
+
+    // 3. the visibility handler is bound, and only "hidden" aborts.
+    expect(visHandler, 'visibilitychange was never wired').not.toBeNull()
+    ;(visHandler as unknown as () => void)()
+    expect(rig.game.pointer.dragging, 'a visible event ended the stroke').toBe(true)
+    visibility = 'hidden'
+    ;(visHandler as unknown as () => void)()
     expect(rig.game.pointer.dragging).toBe(false)
   })
 

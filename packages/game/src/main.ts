@@ -526,18 +526,42 @@ export function startGame(): Game {
     settle: rafSettle,
   })
 
+  wireGame(game, canvas, document, requestAnimationFrame)
+  return game
+}
+
+/**
+ * Wires a built game to its three event sources and starts the frame loop.
+ *
+ * **Extracted from `startGame` so that it has a detector.** `startGame` reads
+ * `document` and cannot run under vitest's Node environment at all, so every
+ * call it made was untestable by construction — deleting the `attachVisibility`
+ * line from it scored **0 detectors** across the whole 1,236-test suite, which
+ * is the catalogue's "a driver that never enters a branch makes that branch
+ * indistinguishable from dead code" applied to the production entry point.
+ * Every parameter here is structural, so `test/integration.test.ts` drives all
+ * three with stubs.
+ *
+ * What is left in `startGame` and still has no Node-side detector is the two DOM
+ * lookups and their two throws, which is genuinely irreducible: there is no
+ * `document` to look anything up in.
+ */
+export function wireGame(
+  game: Game,
+  canvas: PointerEventTarget,
+  doc: VisibilityTarget,
+  raf: (callback: (now: number) => void) => unknown,
+): void {
   attachPointerEvents(canvas, game.pointer)
-  attachVisibility(document, game.pointer)
+  attachVisibility(doc, game.pointer)
 
   // `requestAnimationFrame`'s own timestamp is the loop's clock — plan Decision
   // 1: there is no second clock anywhere, so `performance.now()` never appears.
   const onFrame = (now: number): void => {
     game.frame(now)
-    requestAnimationFrame(onFrame)
+    raf(onFrame)
   }
-  requestAnimationFrame(onFrame)
-
-  return game
+  raf(onFrame)
 }
 
 if (shouldAutoStart()) startGame()
