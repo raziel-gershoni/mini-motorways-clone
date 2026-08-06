@@ -332,6 +332,24 @@ describe('phases', () => {
     expect(r.y).toBe(12)
   })
 
+  /**
+   * The other half of that single arm, and it had no detector until this case
+   * existed: narrowing `phase !== PHASE_OUTBOUND && phase !== PHASE_RETURNING`
+   * to `phase === PHASE_IDLE` — so an unrecognised byte falls through into the
+   * driving path — survived the whole suite.
+   *
+   * The extra behaviour is fail-safe and it is not hypothetical: M1d adds a
+   * blocking phase. Under the shipped form an unknown phase parks the car; under
+   * the narrowed form it runs `routeStep` on a route that may mean nothing.
+   */
+  it('parks a car whose phase byte this module does not recognise', () => {
+    const { state, world } = rig()
+    setCar(state, 0, { phase: 99, cell: cellOf(11, 12), progress: 1250, cursor: 1, route: [E, SE] })
+    const r = resolveXY(state, world, 0)
+    // Driving it would give (10.5, 12) via OPPOSITE[routeStep(0)] = W.
+    expect(r).toMatchObject({ live: true, x: 11, y: 12 })
+  })
+
   it('reports a PHASE_NONE slot as not live and writes nothing', () => {
     const { state, world } = rig()
     // A dead slot's real bytes: PHASE_NONE with carCell 0. The `out` sentinel

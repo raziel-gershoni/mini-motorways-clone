@@ -18,6 +18,7 @@ import {
   createFlowFields,
   createFieldInputRanges,
   placeHouse,
+  placeDestination,
   packRouteStep,
   weekOfTick,
   dayOfWeek,
@@ -29,6 +30,8 @@ import {
   DEST_KIND_CIRCLE,
   DEST_KIND_SQUARE,
   ORIENTATION_E,
+  ORIENTATION_N,
+  ORIENTATION_S,
   ORIENTATION_W,
   PHASE_NONE,
   PHASE_IDLE,
@@ -230,6 +233,17 @@ describe('the terrain fold', () => {
    * 5's seven 0-detector markers. Poking a sentinel in first and reading it
    * back out makes the WRITE the observable rather than the value, and it works
    * at both ends regardless of what the terrain there happens to be.
+   *
+   * **A trap this sets for M1d, recorded now while the reason is fresh.** The
+   * two markers are cells (0, 0) and (23, 39) — **diagonal corners**, which is
+   * exactly the placement that produced Task 5's seven surviving mutants. It is
+   * sufficient here only because the fold is a flat 1-D `for c < cells` loop,
+   * where "past one bound" is not a distinct case: shrinking either end of a
+   * single range reaches a corner immediately. **The moment M1d makes this fold
+   * 2-D over a dynamic revealed rect, these two markers stop being sufficient**
+   * — a corner sits past two bounds at once, so extending any single bound by
+   * one cell reaches nothing — and each of the four half-plane bounds will need
+   * its own marker, one cell past exactly one of them.
    */
   it('rewrites the first and last cell every frame, whatever terrain they carry', () => {
     const r = rig()
@@ -299,6 +313,47 @@ describe('the destination unpack', () => {
         carparkCell(r.state.destCell[d] as number, destMetaOrientation(meta), r.world.w, r.world.h),
       )
     }
+  })
+
+  /**
+   * The board is 24x40 — non-square, exactly as the plan's vacuity rule
+   * demands — and **that is not enough**, because it is the ORIENTATIONS that
+   * collapse the distinction.
+   *
+   * `carparkCell` decomposes by `w`, offsets, and recomposes by `w`, so it
+   * reduces to `cell + dy*w + dx`. For **E** that is `cell + 3` and for **W**
+   * it is `cell - 1` — **independent of `w` entirely**. Only N (`cell - w`) and
+   * S (`cell + 3w`) read it. Task 2's seed is oriented W, W, E, so before this
+   * case existed *no fixture in the suite reached `w` at all* and swapping
+   * `world.w` for `world.h` at the call site survived all 156 tests.
+   *
+   * The sibling test below cannot help either: it calls `carparkCell(...,
+   * r.world.w, r.world.h)` itself, so it reimplements the thing it checks and
+   * agrees with the mutant.
+   *
+   * N and S are both needed: N is `cell - w` and S is `cell + 3w`, so N alone
+   * cannot separate a `w` / `3w` slip.
+   */
+  it('passes world.w and world.h in the right order — which only an N or S carpark can see', () => {
+    const r = rig()
+    const N_ORIGIN = cellOf(7, 15)
+    const S_ORIGIN = cellOf(7, 21)
+    expect(placeDestination(r.state, r.world, N_ORIGIN, ORIENTATION_N, 0, DEST_KIND_SQUARE)).toBe(true)
+    expect(placeDestination(r.state, r.world, S_ORIGIN, ORIENTATION_S, 1, DEST_KIND_CIRCLE)).toBe(true)
+
+    const frame = build(r, builderFor(r))
+    expect(frame.destCount).toBe(2)
+    // Hand-computed: N puts the carpark one row above the origin, S three below.
+    expect(frame.destCarpark[0] as number).toBe(cellOf(7, 14)) // 343; swapped gives 327
+    expect(frame.destCarpark[1] as number).toBe(cellOf(7, 24)) // 583; swapped gives 631
+
+    // The fixture's own reason for existing, asserted rather than described:
+    // for E and W the two argument orders agree, so no number of E/W fixtures
+    // could ever distinguish them.
+    expect(carparkCell(N_ORIGIN, ORIENTATION_E, 24, 40)).toBe(carparkCell(N_ORIGIN, ORIENTATION_E, 40, 24))
+    expect(carparkCell(N_ORIGIN, ORIENTATION_W, 24, 40)).toBe(carparkCell(N_ORIGIN, ORIENTATION_W, 40, 24))
+    expect(carparkCell(N_ORIGIN, ORIENTATION_N, 24, 40)).not.toBe(carparkCell(N_ORIGIN, ORIENTATION_N, 40, 24))
+    expect(carparkCell(S_ORIGIN, ORIENTATION_S, 24, 40)).not.toBe(carparkCell(S_ORIGIN, ORIENTATION_S, 40, 24))
   })
 
   it('tracks destPins as they change, and reports houseCount and destCount from the header', () => {
@@ -612,6 +667,65 @@ describe('interpolation', () => {
     expect(last - first).toBeGreaterThan(0.12)
   })
 
+  /**
+   * The one interpolated tick where the route TURNS, and the reason it is here
+   * even though it cannot fail.
+   *
+   * A lerp of two resolved points is a convex combination, so overshoot is
+   * unrepresentable in this shape — `lerpCar` never sees `carProgress`, a
+   * direction or a speed. The single-expression form the catalogue warns about
+   * (`progress + alpha * speed`) is at its worst exactly here, at a corner,
+   * measured at up to 0.19 cells past the turn. Every other continuity fixture
+   * in this file drives a straight route, so this is the case a future reader
+   * tempted to re-introduce that form would look for. It is completeness, not
+   * risk, and it is labelled as such.
+   *
+   * The car crosses from (11, 12) heading E onto (12, 12), where the route
+   * turns N. prev = 11 + 2400/2500 = 11.96 on row 12; curr = (12, 12 - 230/2500)
+   * = (12, 11.908). The chord cuts the corner: `hypot(0.04, 0.092)` = 0.10032,
+   * BELOW the 0.132 the same tick would travel along the path, and an
+   * extrapolation along E would instead put the car at x = 12.092 on row 12 —
+   * outside the segment between the two resolved points, which is what "cannot
+   * overshoot" means.
+   */
+  it('cuts the corner rather than overshooting it when the route turns mid-tick', () => {
+    const r = rig()
+    movingCar(r, 2400)
+    // Step 0 is E, step 1 turns N.
+    packRouteStep(r.state, 0, 1, 0 /* N */)
+    const fb = builderFor(r)
+    snapshotPrev(fb.snapshots, r.state, r.world)
+    r.state.carCell[0] = cellOf(12, 12)
+    r.state.carProgress[0] = 230
+    r.state.carRouteCursor[0] = 1
+    snapshotCurr(fb.snapshots, r.state, r.world)
+
+    const at0 = carXY(build(r, fb, 0), 0)
+    const at1 = carXY(build(r, fb, 0.999999), 0)
+    expect(at0[0]).toBeCloseTo(11.96, 6)
+    expect(at0[1]).toBe(12)
+    expect(at1[0]).toBeCloseTo(12, 5)
+    expect(at1[1]).toBeCloseTo(11.908, 5)
+
+    // The chord is shorter than one tick's travel along the path — the corner
+    // is cut, not rounded and not overshot.
+    const chord = Math.hypot(at1[0] - at0[0], at1[1] - at0[1])
+    expect(chord).toBeLessThan(0.132)
+    expect(chord).toBeCloseTo(Math.hypot(0.04, 0.092), 5)
+    expect(chord).toBeCloseTo(0.10032, 4)
+
+    // Every sample lies inside the axis-aligned box spanned by prev and curr,
+    // which is what a convex combination guarantees and an extrapolation along
+    // E (x = 12.092, y = 12) would violate on both axes.
+    for (let a = 0; a <= 1; a += 1 / 32) {
+      const [x, y] = carXY(build(r, fb, Math.min(a, 0.999999)), 0)
+      expect(x, `alpha ${a} x`).toBeGreaterThanOrEqual(11.96 - 1e-5)
+      expect(x, `alpha ${a} x`).toBeLessThanOrEqual(12 + 1e-5)
+      expect(y, `alpha ${a} y`).toBeLessThanOrEqual(12 + 1e-5)
+      expect(y, `alpha ${a} y`).toBeGreaterThanOrEqual(11.908 - 1e-5)
+    }
+  })
+
   it('crosses the mid-line between two cells exactly once across a whole edge traversal', () => {
     // The cell boundary in centre-units sits at x = 11.5 between cells (11, 12)
     // and (12, 12). Sampling every rendered position across the ~7.6 ticks of
@@ -744,6 +858,70 @@ describe('the first frame, and cars that appear later', () => {
     expect(frame.carCount).toBe(8)
     // Lerped, it would sit at (7.5, 13) — half way to the board's corner.
     expect(carXY(frame, 6)).toEqual([15, 26])
+  })
+
+  /**
+   * **The residual aliasing class, demonstrated rather than asserted away.**
+   *
+   * Slot indexing removes the dense-SHIFT class (freeing slot k renumbering
+   * every later car). It does not remove the slot-REUSE class: slot `i` owned
+   * by car A in prev and car B in curr. `prevLive[i]` reads 1, the snap rule
+   * does not fire, there is no distance guard, and the car is drawn on the
+   * segment between two different houses.
+   *
+   * This test exists to PIN that, so the scoped claim in `resolve.ts` is
+   * checkable rather than a comment someone must trust. It asserts the buggy
+   * output on purpose. If a future change closes the class, this test fails and
+   * the reader is sent to the comment — which is the intended outcome.
+   */
+  it('does NOT catch a slot reused by a different car between the two snapshots', () => {
+    const r = rig(true)
+    const fb = builderFor(r)
+    snapshotPrev(fb.snapshots, r.state, r.world) // slot 0 is house 0's car at (8, 24)
+    expect(fb.snapshots.prevLive[0] as number).toBe(1)
+    // A spawner that frees and immediately reuses the slot within one step.
+    r.state.carCell[0] = cellOf(17, 12)
+    r.state.carHome[0] = 2
+    snapshotCurr(fb.snapshots, r.state, r.world)
+
+    const frame = build(r, fb, 0.5)
+    // (8 + 17) / 2, (24 + 12) / 2 — half way between two different houses,
+    // 12.6 cells from where it started. Nothing in this file catches it.
+    expect(carXY(frame, 0)).toEqual([12.5, 18])
+  })
+
+  /**
+   * ...and this is what closes that class TODAY, pinned rather than asserted in
+   * prose. `resolve.ts` cites reachability as the reason the slot-reuse class is
+   * harmless; the catalogue's rule is that a structural defence used to justify
+   * not testing something must itself be pinned.
+   */
+  it('never changes a car slot’s liveness inside step, over a whole scored trip', () => {
+    const r = rig(true)
+    const fb = builderFor(r)
+    const queue = createInputQueue()
+    const loop = createLoop(driverFor(r, fb), queue)
+    const path = [cellOf(8, 13), cellOf(7, 12), cellOf(7, 11), cellOf(8, 10)]
+    for (let i = 0; i + 1 < path.length; i++) {
+      queue.enqueue('place', path[i] as number, path[i + 1] as number)
+    }
+    const slots = r.state.carPhase.length
+    const liveAtStart: number[] = []
+    for (let i = 0; i < slots; i++) liveAtStart.push((r.state.carPhase[i] as number) === PHASE_NONE ? 0 : 1)
+
+    let now = 0
+    for (let f = 0; f < 1000; f++) {
+      now += 16.7
+      loop.frame(now)
+      for (let i = 0; i < slots; i++) {
+        const live = (r.state.carPhase[i] as number) === PHASE_NONE ? 0 : 1
+        expect(live, `slot ${i} changed liveness at tick ${r.state.header[H_TICK]}`).toBe(liveAtStart[i])
+      }
+      if ((r.state.header[H_SCORE] as number) > 0) break
+    }
+    // Vacuity: the run must have gone somewhere, or "nothing changed" is trivial.
+    expect(r.state.header[H_SCORE] as number).toBe(1)
+    expect(liveAtStart.filter((x) => x === 1).length).toBe(6)
   })
 })
 

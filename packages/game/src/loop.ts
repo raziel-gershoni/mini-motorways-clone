@@ -121,10 +121,33 @@ export interface Loop {
   readonly totalTicks: number
 }
 
+/**
+ * The loop's three real-valued slots, held in a `Float64Array` rather than as
+ * closure variables — and this is a measured requirement, not a style.
+ *
+ * A mutable `number` captured by a closure lives in a context slot, which holds
+ * a tagged value; a double outside Smi range therefore allocates a fresh
+ * `HeapNumber` on **every assignment**. `lastTime`, `accumulator` and `alpha`
+ * are assigned once each per frame, so the plain-closure form allocates three
+ * boxed doubles per frame — measured at **~65 B/frame**, which is *more than
+ * one object per frame* and a straight violation of the milestone's "zero, not
+ * small" rule. `test/allocation.test.ts` is what made it visible; before that
+ * it was invisible to five milestones of review.
+ *
+ * `paused`, `resetClock`, `ticksLastFrame` and `totalTicks` stay as closure
+ * variables deliberately: booleans are singletons and small integers are Smis,
+ * so none of them boxes.
+ *
+ * Named slot indices into a typed array is this codebase's own idiom for
+ * exactly this trade (`H_TICK`, `H_SCORE`, … in `sim/state.ts`).
+ */
+const L_LAST_TIME = 0
+const L_ACCUMULATOR = 1
+const L_ALPHA = 2
+const LOOP_SLOT_COUNT = 3
+
 export function createLoop(driver: LoopDriver, queue: InputQueue): Loop {
-  let lastTime = 0
-  let accumulator = 0
-  let alpha = 0
+  const slots = new Float64Array(LOOP_SLOT_COUNT)
   let paused = false
   let ticksLastFrame = 0
   let totalTicks = 0
@@ -133,7 +156,7 @@ export function createLoop(driver: LoopDriver, queue: InputQueue): Loop {
 
   function frame(now: number): void {
     if (resetClock) {
-      lastTime = now
+      slots[L_LAST_TIME] = now
       resetClock = false
     }
     // `Math.max(..., 0)`: a clock that goes backwards would otherwise push the
@@ -141,10 +164,14 @@ export function createLoop(driver: LoopDriver, queue: InputQueue): Loop {
     // timestamp is monotonic, so this is a boundary guard rather than a live
     // branch — and it is exercised directly in `test/loop.test.ts` rather than
     // shipped unobserved.
-    const rawDt = Math.max(now - lastTime, 0)
-    lastTime = now
+    const rawDt = Math.max(now - (slots[L_LAST_TIME] as number), 0)
+    slots[L_LAST_TIME] = now
 
     let ticks = 0
+    // Read once into a local and written back once: a local double lives in a
+    // register, so the drain loop's `accumulator -= TICK_MS` costs nothing even
+    // when it runs eight times.
+    let accumulator = slots[L_ACCUMULATOR] as number
     if (!paused) {
       // Clamped HERE, before accumulating — see the module comment.
       accumulator += Math.min(rawDt, MAX_FRAME_DT_MS)
@@ -168,9 +195,11 @@ export function createLoop(driver: LoopDriver, queue: InputQueue): Loop {
       }
       if (ticks > 0) driver.afterDrain(ticks)
     }
+    slots[L_ACCUMULATOR] = accumulator
 
     // AFTER the drain: computing it before would let `alpha` reach 7.5.
-    alpha = accumulator / TICK_MS
+    const alpha = accumulator / TICK_MS
+    slots[L_ALPHA] = alpha
     ticksLastFrame = ticks
     totalTicks += ticks
     driver.render(alpha, paused)
@@ -191,10 +220,10 @@ export function createLoop(driver: LoopDriver, queue: InputQueue): Loop {
       return paused
     },
     get alpha(): number {
-      return alpha
+      return slots[L_ALPHA] as number
     },
     get accumulator(): number {
-      return accumulator
+      return slots[L_ACCUMULATOR] as number
     },
     get ticksLastFrame(): number {
       return ticksLastFrame

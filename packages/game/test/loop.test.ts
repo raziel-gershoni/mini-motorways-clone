@@ -33,10 +33,18 @@ import { createLoop, MAX_FRAME_DT_MS, TICK_MS, type Loop, type LoopDriver } from
  * `TICK_MS = 33` as a defect in advance: at 33 a nominal 150-second week runs
  * in 148.5 s and every wall-clock claim in the game shifts by 1.01% forever.
  *
- *   100 ms from cold  -> 2 ticks, NOT 3. 3 * TICK_MS = 100.00000000000001, so
- *                        the third subtraction fails by one ulp and the
- *                        accumulator is left at 33.33333333333332 — an alpha of
- *                        0.9999999999999996, which is the point of the case.
+ *   100 ms from cold  -> 2 ticks, NOT 3. The mechanism is repeated
+ *                        SUBTRACTION: 100 - TICK_MS - TICK_MS leaves
+ *                        33.33333333333332, one ulp short of a third tick, so
+ *                        the drain stops at 2 and alpha is 0.9999999999999996.
+ *                        **The plan and an earlier version of this comment both
+ *                        said `3 * TICK_MS = 100.00000000000001`. That is wrong
+ *                        and has no derivation** — verified at 21 digits, BOTH
+ *                        the product `3 * TICK_MS` and repeated addition
+ *                        `TICK_MS + TICK_MS + TICK_MS` are exactly 100, which is
+ *                        asserted below. A comment that contradicts the test
+ *                        three lines away is the same defect class as a test
+ *                        that cannot fail.
  *   105 ms from cold  -> 3 ticks, residual 4.999999999999986.
  *   16.7 ms x4        -> 0, 1, 0, 1 — a 60 Hz display runs zero ticks on half
  *                        its frames, which is the whole reason the queue must
@@ -207,12 +215,13 @@ describe('TICK_MS', () => {
     expect(TICK_MS).toBe(TICK_MS_LITERAL)
     expect(TICK_MS).not.toBe(33)
     // The one bit the whole file rests on, and it is subtler than "three of
-    // them exceed 100": the PRODUCT `3 * TICK_MS` rounds back to exactly 100,
-    // which is precisely why the "a 100 ms frame runs 3 ticks" intuition is so
-    // easy to hold. The drain does not multiply — it subtracts, three times —
-    // and repeated subtraction leaves 33.33333333333332, one ulp short of a
-    // third tick.
+    // them exceed 100": BOTH the product and repeated addition round back to
+    // exactly 100, which is precisely why the "a 100 ms frame runs 3 ticks"
+    // intuition is so easy to hold. The drain neither multiplies nor adds — it
+    // SUBTRACTS, and repeated subtraction leaves 33.33333333333332, one ulp
+    // short of a third tick.
     expect(3 * TICK_MS).toBe(100)
+    expect(TICK_MS + TICK_MS + TICK_MS).toBe(100)
     expect(100 - TICK_MS - TICK_MS).toBe(33.33333333333332)
     expect(100 - TICK_MS - TICK_MS).toBeLessThan(TICK_MS)
   })
@@ -250,6 +259,23 @@ describe('the accumulator table', () => {
     // The near-1 alpha IS the case, not an accident of it: it is the value
     // that breaks first if the drain ever lets alpha reach 1.
     expect(loop.alpha).toBeLessThan(1)
+    // `totalTicks` is a public accessor Task 9's integration test is told to
+    // use, and it had no assertion anywhere until this line: `totalTicks += 0`
+    // survived the whole suite. Pinned here because this is the one case whose
+    // per-frame count (2) differs from `ticksLastFrame` on the frame before it.
+    expect(loop.totalTicks).toBe(2)
+    expect(loop.ticksLastFrame).toBe(2)
+  })
+
+  it('accumulates totalTicks across frames while ticksLastFrame reports only the last', () => {
+    // 50 ms -> 1 tick (residual 16.67); 10 ms -> 0 ticks (26.67, still under
+    // one tick); 105 ms -> 3 ticks. So `ticksLastFrame` is 3 and the running
+    // total is 4, and the middle frame proves the total is not simply the
+    // frame count.
+    const { loop } = rig()
+    expect(runFrames(loop, [50, 10, 105])).toEqual([0, 1, 0, 3])
+    expect(loop.ticksLastFrame).toBe(3)
+    expect(loop.totalTicks).toBe(4)
   })
 
   it('runs 3 ticks on a 105 ms frame, with alpha 0.14999999999999955', () => {
@@ -296,8 +322,9 @@ describe('the accumulator table', () => {
     // Both directions of the drain's bound, at the only operating point where
     // `>=` and `>` differ: the accumulator lands EXACTLY on TICK_MS. The clock
     // origin is 0 so that `rawDt` is TICK_MS to the last bit — from an origin
-    // of 1000 the subtraction loses four digits and lands below the bound,
-    // which would make this fixture agree with the mutant for the wrong reason.
+    // of 1000 the subtraction gives 33.3333333333332575, which is BELOW the
+    // bound, and the fixture would then agree with the mutant for the wrong
+    // reason.
     const { loop } = rig()
     expect(runFrames(loop, [TICK_MS], 0)).toEqual([0, 1])
     expect(loop.accumulator).toBe(0)
@@ -591,62 +618,90 @@ describe('the queue across frames', () => {
   })
 
   /**
-   * The state-visible half of "never clear the queue at all", and the fixture
-   * is not the one the plan named.
+   * The state-visible half of "never clear the queue at all", and neither the
+   * brief's fixture nor this file's first attempt at one could see it.
    *
-   * The plan's fixture — place at T, erase at T+40, "the stale place action
-   * resurrects the road at T+41" — cannot see the mutation. A never-cleared
-   * queue holds `[place, erase]` in enqueue order, and *both* run on every
-   * later tick: the place re-creates the segment and the erase removes it
-   * again, inside the same phase-2 loop, before `syncFields` or anything else
-   * can observe it. The end-of-tick buffer is byte-identical. That is the same
-   * last-write-wins argument Decision 9 uses to reject "feed input to step
-   * twice", and it applies to every place/erase pair.
+   * **The brief's fixture is blind.** It prescribes place at T, erase at T+40,
+   * "the stale place action resurrects the road at T+41". A never-cleared queue
+   * holds `[place, erase]` in enqueue order and runs *both* on every later
+   * tick: the place re-creates the segment and the erase removes it again,
+   * inside the same phase-2 loop, before `syncFields` or anything else can
+   * observe it. Verified by comparing `hashState` at the end of every tick —
+   * byte-identical throughout. It is the same last-write-wins argument
+   * Decision 9 uses to reject "feed input to `step` twice", and it applies to
+   * every place/erase pair.
    *
-   * What is NOT idempotent is a placement that was **refused for budget** and
-   * later becomes affordable: the stale action retries every tick, and the
-   * tick after a refund it succeeds. A road the player's finger never drew
-   * appears two ticks after they lifted it.
+   * What is NOT idempotent is a placement **refused for budget** that later
+   * becomes affordable: the stale action retries every tick, and the first tick
+   * on which the budget covers it, it lands. A road the player's finger never
+   * drew appears seconds after they lifted it.
+   *
+   * **The trap this fixture originally fell into, recorded because it is
+   * subtle.** The first version laid X-Y *through the queue*. That put a stale
+   * `place X-Y` at the FRONT of the never-cleared batch, so on every later tick
+   * it re-spent the two tiles the erase had just refunded — before the stale
+   * `place A-B` was reached — and A-B was never affordable. The fixture's own
+   * first action defeated its last assertion, and it was a 0-detector for the
+   * mutation it was written for. The catalogue's exact shape: *"a test written
+   * specifically to catch a thing can still be blind to it… always run it under
+   * the mutation it was written for."*
+   *
+   * So X-Y is laid **out of band**, and the budget is granted out of band too —
+   * which is not a contrivance: `H_TILES` is deliberately in the mutable header
+   * rather than in `mapIdentity` precisely because "M1e's upgrade cards grant
+   * tiles with no road change" (`sim/state.ts`).
    */
-  it('does not resurrect a budget-refused placement once a later erase refunds the tiles', () => {
+  it('does not resurrect a budget-refused placement once tiles are granted later', () => {
     const sim = simRig()
     const queue = createInputQueue()
     const loop = createLoop(simDriver(sim), queue)
 
-    const X = 10 * 24 + 8
-    const Y = 10 * 24 + 9
     const A = 20 * 24 + 8
     const B = 20 * 24 + 9
 
     loop.frame(1000)
 
-    // Tick 1: lay X-Y normally, then squeeze the budget to a single tile.
-    queue.enqueue('place', X, Y)
-    loop.frame(1040)
-    expect(sim.state.roads[X] as number).not.toBe(0)
+    // Tick 1: two fresh cells cost 2, and the player has 1 tile. Refused.
     sim.state.header[H_TILES] = 1
-
-    // Tick 2: A-B costs 2 on two fresh cells, so it is refused for budget.
     queue.enqueue('place', A, B)
-    loop.frame(1080)
+    loop.frame(1040)
+    expect(sim.state.header[H_TICK] as number).toBe(1)
     expect(sim.state.roads[A] as number, 'the refused placement must not have landed').toBe(0)
     expect(tilesLeft(sim.state)).toBe(1)
 
-    // Tick 3: erasing X-Y refunds 2, taking the budget to 3.
-    queue.enqueue('erase', X, Y)
-    loop.frame(1120)
-    expect(tilesLeft(sim.state)).toBe(3)
-    expect(sim.state.roads[A] as number).toBe(0)
+    // Between frames, out of band: the budget grows to 3.
+    sim.state.header[H_TILES] = 3
 
-    // Tick 4 onwards: the queue is empty, so nothing more happens. A queue
-    // that was never cleared would retry the stale `place A-B` here, now
-    // affordable, and lay a road nobody asked for.
+    // Ticks 2..5: the queue is empty, so nothing happens. A queue that was
+    // never cleared retries the stale `place A-B` here — now affordable — and
+    // lays a road nobody asked for.
+    loop.frame(1080)
+    loop.frame(1120)
     loop.frame(1160)
     loop.frame(1200)
     expect(sim.state.header[H_TICK] as number).toBeGreaterThanOrEqual(5)
     expect(sim.state.roads[A] as number, 'a stale place action resurrected itself').toBe(0)
     expect(sim.state.roads[B] as number).toBe(0)
     expect(tilesLeft(sim.state)).toBe(3)
+  })
+
+  /**
+   * The other half of the same rule, and the reason the clear is unconditional
+   * rather than "clear the actions that succeeded".
+   *
+   * A refused action is CONSUMED, not retried. Without this, "clear only what
+   * `step` acted on" reads like a reasonable refinement and reintroduces
+   * exactly the defect above.
+   */
+  it('consumes an action the sim refused, rather than holding it for a later tick', () => {
+    const sim = simRig()
+    const queue = createInputQueue()
+    const loop = createLoop(simDriver(sim), queue)
+    loop.frame(1000)
+    sim.state.header[H_TILES] = 1
+    queue.enqueue('place', 20 * 24 + 8, 20 * 24 + 9)
+    loop.frame(1040)
+    expect(queue.length).toBe(0)
   })
 })
 

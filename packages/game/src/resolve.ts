@@ -107,7 +107,22 @@ import {
  * lerp each of them against a DIFFERENT car's previous position. A board-wide
  * teleport with no phase transition anywhere and nothing in this file's rule to
  * catch it. Slot indexing costs `maxCars * 2` floats (640 B at `firstCity`) and
- * removes the whole class.
+ * removes that class.
+ *
+ * **Scoped precisely, because the wider claim would discharge an obligation
+ * that is M1e's.** Slot indexing removes the dense-*shift* class. It does NOT
+ * remove the slot-*reuse* class: slot `i` owned by car A in `prev` and car B in
+ * `curr`. There `prevLive[i]` reads 1, so the snap rule does not fire, there is
+ * no distance guard, and the car is drawn on the segment between two different
+ * houses — constructed and measured at 12.6 cells. That class is closed **today
+ * only by reachability**: nothing inside `step`'s seven phases frees or creates
+ * a car, and out-of-band removal-then-placement happens between frames, so the
+ * next `snapshotPrev` resolves the slot as car B and the lerp is B to B.
+ *
+ * **An in-`step` spawner that reuses a freed slot re-opens it, and nothing here
+ * will catch it.** The fix then is either a car-identity term in the snapshot
+ * (`prevHome[i]`, compared before lerping) or a spawner that never reuses a
+ * slot within one step. Recorded here rather than left for M1e to rediscover.
  *
  * **Nothing here allocates.** Every buffer is caller-owned and every write is
  * into a preallocated typed array.
