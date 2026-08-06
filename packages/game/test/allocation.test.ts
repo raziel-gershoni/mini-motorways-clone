@@ -13,8 +13,9 @@ import { fitCamera, type RenderFrame } from '@laneways/render'
 import { seedStartingCity } from '../src/startingCity'
 import { createFrameBuilder, createFrameDriver } from '../src/frame'
 import { initCarSnapshots } from '../src/resolve'
-import { createInputQueue } from '../src/inputs'
+import { createInputQueue, type InputQueue } from '../src/inputs'
 import { createLoop } from '../src/loop'
+import { PointerOutcome, createPointerInput, type PointerInput } from '../src/pointer'
 
 /**
  * **"Nothing allocates inside the frame loop" is a MEASURED constraint here,
@@ -201,16 +202,59 @@ function offenders(
   const out: string[] = []
   for (const [file, bytes] of byFile) {
     const perFrame = bytes / frames
-    const budget = budgets[file.slice(file.lastIndexOf('/') + 1)] ?? 0
+    const budget = budgets[file.slice(file.lastIndexOf('/') + 1)] ?? NOISE_FLOOR_BYTES_PER_FRAME
     if (perFrame > budget) out.push(`${file} at ${perFrame.toFixed(2)} B/frame (budget ${budget})`)
   }
   return out.sort()
 }
 
 /**
- * See the module comment. **Every other file's budget is 0, and that is the
- * assertion doing the work** — over 12 consecutive runs no `game/src` file
- * other than `loop.ts` appeared even once.
+ * The default budget for every file with no entry in `BUDGETS`. It is a
+ * SAMPLING floor, not an allowance, and Task 7 measured why it cannot be 0.
+ *
+ * One stack is recorded per `SAMPLING_INTERVAL_BYTES` (512) of allocation, so
+ * the smallest non-zero figure this instrument can report over
+ * `PROFILED_FRAMES` frames is one sample: 512 / 3,000 = **0.17 B/frame**. That
+ * is what a ONE-OFF allocation looks like — a lazily allocated feedback vector,
+ * an IC transition, a deopt landing inside the profiled window — not a
+ * per-frame one. A budget of exactly 0 therefore fails on a single stray
+ * sample, which the catalogue calls "a threshold set inside the noise band" and
+ * which this file's own `loop.ts` budget was once guilty of.
+ *
+ * **Measured before it was chosen, on the drag profile — the noisier of the
+ * two, because a live drag varies the code paths and V8 does more one-off work
+ * inside them.** Over 40 consecutive runs the whole of `packages/game/src`
+ * reported, per run: nothing at all 24 times; `loop.ts` 0.18 (x5) and 0.35;
+ * `resolve.ts` 0.18 and 0.54; `pointer.ts` 0.19 and 0.58; `frame.ts` 1.94 once.
+ * `pointer.ts` and `inputs.ts` never exceeded 0.58 while ~9,000 actions went
+ * through them, and every figure above is a handful of samples, not a rate.
+ *
+ * **4 is 2x the worst observed and still 9x below the 37-77 B/frame a single
+ * escaping object per frame costs.** It catches an object allocated as rarely
+ * as once every ten frames, and a leaked pooled action under this drag would
+ * be ~120 B/frame — thirty times the floor. Do not raise it to make a change
+ * pass; the whole point is that the gap between 4 and 37 is empty.
+ */
+const NOISE_FLOOR_BYTES_PER_FRAME = 4
+
+/** Every `game/src` file that allocated above the sampling floor, `loop.ts` aside. */
+function dirtyFiles(all: readonly Allocator[], frames: number): string[] {
+  const byFile = new Map<string, number>()
+  for (const a of all) {
+    if (!a.file.startsWith(GAME_SRC)) continue
+    byFile.set(a.file, (byFile.get(a.file) ?? 0) + a.bytes)
+  }
+  return [...byFile]
+    .filter(([f, b]) => !f.endsWith('/loop.ts') && b / frames > NOISE_FLOOR_BYTES_PER_FRAME)
+    .map(([f]) => f)
+    .sort()
+}
+
+/**
+ * See the module comment. **Every other file gets `NOISE_FLOOR_BYTES_PER_FRAME`,
+ * and that is the assertion doing the work** — over 12 consecutive runs no
+ * `game/src` file other than `loop.ts` appeared above the sampling floor even
+ * once.
  *
  * `loop.ts`'s own residual is **bimodal**, which is the attribution instability
  * made visible: over those same 12 runs it measured
@@ -235,8 +279,17 @@ const GAME_PKG = 'packages/game/'
 const PROFILED_FRAMES = 3000
 /** Outside the profiling window, so JIT warm-up is not charged to the frame path. */
 const WARMUP_FRAMES = 1200
+/** The positive control's clean half. B/frame normalises, so this only has to establish "near zero". */
+const CONTROL_BASELINE_FRAMES = 3000
 
-function buildLoop(draw: (frame: RenderFrame) => void): ReturnType<typeof createLoop> {
+interface Rig {
+  readonly loop: ReturnType<typeof createLoop>
+  readonly pointer: PointerInput
+  readonly queue: InputQueue
+  readonly camera: ReturnType<typeof fitCamera>
+}
+
+function buildRig(draw: (frame: RenderFrame) => void): Rig {
   const map = firstCity()
   const world = createWorld(map)
   const state = createState('m2-alloc', map)
@@ -249,10 +302,29 @@ function buildLoop(draw: (frame: RenderFrame) => void): ReturnType<typeof create
   )
   const builder = createFrameBuilder(state, world, camera)
   initCarSnapshots(builder.snapshots, state, world)
-  return createLoop(
+  const queue = createInputQueue()
+  const loop = createLoop(
     createFrameDriver({ state, world, fields, scratch, builder, camera: () => camera, draw }),
-    createInputQueue(),
+    queue,
   )
+  // The pointer is wired to the SAME queue the loop drains, exactly as Task 9's
+  // `main.ts` will. `paused` is backed by the loop, which owns it.
+  const pointer = createPointerInput({
+    camera: () => camera,
+    canvasLeft: () => 11,
+    canvasTop: () => 7,
+    gridW: world.w,
+    queue,
+    paused: () => loop.paused,
+    setPaused: (next: boolean) => {
+      loop.setPaused(next)
+    },
+  })
+  return { loop, pointer, queue, camera }
+}
+
+function buildLoop(draw: (frame: RenderFrame) => void): ReturnType<typeof createLoop> {
+  return buildRig(draw).loop
 }
 
 /**
@@ -266,6 +338,80 @@ function drive(loop: ReturnType<typeof createLoop>, count: number, start: number
   for (let i = 0; i < count; i++) {
     now += 16.7
     loop.frame(now)
+  }
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * THE INPUT PATH (Task 7)
+ * ---------------------------------------------------------------------------
+ *
+ * `drive` above profiles an IDLE queue: the loop hands `step` an empty batch
+ * every tick and neither `pointer.ts` nor `inputs.ts` ever runs. That is the
+ * frame path, not the input path, and the input path is the one with a
+ * per-EVENT allocation risk — a pooled action object, a `GridHit`, a `HudRects`,
+ * a boxed `pointerId`.
+ *
+ * So this driver runs a live drag alongside the loop, on the same queue Task 9's
+ * `main.ts` will wire: one stroke every `STROKE_FRAMES` frames, in the shape a
+ * finger actually makes — a `pointerdown`, a run of `pointermove`s that mostly
+ * SKIP tiles (so the 8-connected walk runs, not just the one-cell case), one
+ * move that re-enters the cell it is already on, one long backtrack, and a
+ * `pointerup`.
+ *
+ * Per stroke: 3 + 3 + 3 + 3 + 0 + 12 = **24 actions**, so 3,000 profiled frames
+ * enqueue about 9,000 of them. At ~40 B for one small object that is ~120 B per
+ * frame of signal if the pool ever leaked one — three times the threshold that
+ * separates the loop's own noise from a real object.
+ */
+const STROKE_FRAMES = 8
+/** Board rows the stroke walks through, so it stays inside the revealed rect. */
+const STROKE_ROWS = 18
+
+/**
+ * Where each `pointermove` of a stroke lands, as offsets from the cell the
+ * `pointerdown` took (the revealed rect's `x0`, and `row`). Four (+3, +1) jumps,
+ * one repeat of the cell the drag is already on, then a (-12, -4) backtrack.
+ */
+const STROKE_COLS: readonly number[] = [3, 6, 9, 12, 12, 0]
+const STROKE_DY: readonly number[] = [1, 2, 3, 4, 4, 0]
+/** 3 + 3 + 3 + 3 + 0 + 12, by the Chebyshev distance between consecutive entries. */
+const ACTIONS_PER_STROKE = 24
+
+/** Counts, so the assertions below cannot be satisfied by a driver that did nothing. */
+interface DragCounters {
+  downs: number
+  draws: number
+  ups: number
+  actions: number
+}
+
+function driveWithDrag(rig: Rig, count: number, start: number, counters: DragCounters): void {
+  let now = start
+  const camera = rig.camera
+  const half = camera.tileSize / 2
+  for (let i = 0; i < count; i++) {
+    const phase = i % STROKE_FRAMES
+    const row = camera.y0 + (((i / STROKE_FRAMES) | 0) % STROKE_ROWS)
+    if (phase === 0) {
+      if (rig.pointer.up(1) === PointerOutcome.DRAG_END) counters.ups++
+      const x = camera.originX + half + 11
+      const y = camera.originY + (row - camera.y0) * camera.tileSize + half + 7
+      if (rig.pointer.down(1, x, y) === PointerOutcome.DRAG_START) counters.downs++
+    } else if (phase <= STROKE_COLS.length) {
+      const gx = camera.x0 + (STROKE_COLS[phase - 1] as number)
+      const gy = row + (STROKE_DY[phase - 1] as number)
+      const x = camera.originX + (gx - camera.x0) * camera.tileSize + half + 11
+      const y = camera.originY + (gy - camera.y0) * camera.tileSize + half + 7
+      const before = rig.queue.length
+      if (rig.pointer.move(1, x, y) === PointerOutcome.DRAW) counters.draws++
+      const after = rig.queue.length
+      // `after - before` is negative on a frame whose tick already drained the
+      // batch; the loop runs after the input, so that cannot happen here.
+      counters.actions += after - before
+    }
+    now += 16.7
+    rig.loop.frame(now)
   }
 }
 
@@ -306,7 +452,11 @@ describe('the frame loop allocates nothing, measured', () => {
     // one: raising a budget to make a failing change pass now turns two tests
     // red, and the second names the rule.
     expect(BUDGETS).toEqual({ 'loop.ts': 32 })
+    expect(NOISE_FLOOR_BYTES_PER_FRAME).toBe(4)
     expect(PROFILED_FRAMES).toBeGreaterThanOrEqual(3000)
+    // The floor is only a floor if it stays far below one object per frame:
+    // 37 B/frame is the smallest figure a single escaping object has measured.
+    expect(NOISE_FLOOR_BYTES_PER_FRAME * 8).toBeLessThan(37)
   })
 
   it('sees transient allocation at all — without the minor-GC flag this file cannot fail', () => {
@@ -350,12 +500,76 @@ describe('the frame loop allocates nothing, measured', () => {
     // not an equality. Every other file's budget is 0, so `offenders` above
     // already reports any appearance; this restates it at file granularity for
     // the failure message.
-    const files = [...new Set(all.filter((a) => a.file.startsWith(GAME_SRC)).map((a) => a.file))]
-    expect(files.filter((f) => !f.endsWith('/loop.ts')), 'a game/src file allocated').toEqual([])
+    expect(dirtyFiles(all, PROFILED_FRAMES), 'a game/src file allocated').toEqual([])
 
     // Named, because these are the functions the rule is really about.
-    const names = all.filter((a) => a.file.startsWith(GAME_SRC)).map((a) => a.functionName)
+    const names = all
+      .filter((a) => a.file.startsWith(GAME_SRC) && a.bytes / PROFILED_FRAMES > NOISE_FLOOR_BYTES_PER_FRAME)
+      .map((a) => a.functionName)
     for (const fn of ['buildFrame', 'resolveCar', 'lerpCar', 'snapshotPrev', 'snapshotCurr', 'enqueue']) {
+      expect(names, `${fn} allocated`).not.toContain(fn)
+    }
+  })
+
+  /**
+   * **Task 7's paths, measured rather than reasoned about.**
+   *
+   * The guard above profiles an idle queue, so it says nothing at all about
+   * `pointer.ts` or `inputs.ts` — neither file even runs in it. This one drives
+   * a live drag through the real handlers into the real pool while the real
+   * loop drains it, and holds both files to the same budget of **0**.
+   *
+   * Measured over 10 consecutive runs: **neither `pointer.ts` nor `inputs.ts`
+   * appeared in the profile even once**, at 0.00 B/frame, while ~9,000 actions
+   * went through them. So the budget is 0 rather than a measured band — there is
+   * no residual to leave room for, and a distribution with no non-zero mode
+   * needs no slack. See the report for the run-by-run figures.
+   *
+   * The three allocations this is really watching for, all of which a plausible
+   * implementation would have: a `{ kind, a, b }` per enqueued action, a
+   * `GridHit`/`HudRects` per event, and a boxed `HeapNumber` per `pointerId`
+   * assignment (the exact defect the harness found in `loop.ts`, which is why
+   * the drag's three mutable numbers live in an `Int32Array`).
+   */
+  it('charges nothing to pointer.ts or inputs.ts under a live drag', () => {
+    let drawn = 0
+    const rig = buildRig(() => {
+      drawn++
+    })
+    const warm: DragCounters = { downs: 0, draws: 0, ups: 0, actions: 0 }
+    driveWithDrag(rig, WARMUP_FRAMES, 0, warm)
+
+    // The pool's high-water mark is reached during warm-up; the profiled window
+    // must not grow it again, or "the pool grows only past the high-water mark"
+    // is not what is being measured.
+    const poolAfterWarmup = rig.queue.poolSize
+    const counters: DragCounters = { downs: 0, draws: 0, ups: 0, actions: 0 }
+    const all = profileAllocations(() => {
+      driveWithDrag(rig, PROFILED_FRAMES, 1e6, counters)
+    })
+
+    // Vacuity, in the shape the catalogue asks for: a driver that quietly
+    // stopped drawing would satisfy every allocation assertion below.
+    const strokes = PROFILED_FRAMES / STROKE_FRAMES
+    expect(drawn).toBe(WARMUP_FRAMES + PROFILED_FRAMES)
+    expect(counters.downs, 'no drag ever started').toBe(strokes)
+    expect(counters.ups).toBe(strokes)
+    // 5 of the 6 moves per stroke draw; the sixth re-enters its own cell.
+    expect(counters.draws).toBe(strokes * 5)
+    expect(counters.actions, 'the walk enqueued nothing').toBe(strokes * ACTIONS_PER_STROKE)
+    expect(counters.actions).toBeGreaterThan(8000)
+    expect(all.length, 'the profile was empty').toBeGreaterThan(3)
+    expect(rig.queue.poolSize, 'the pool was still growing').toBe(poolAfterWarmup)
+
+    const bad = offenders(all, PROFILED_FRAMES, GAME_SRC, BUDGETS)
+    expect(bad, `unbudgeted per-frame allocation:\n${bad.join('\n')}`).toEqual([])
+
+    expect(dirtyFiles(all, PROFILED_FRAMES), 'a game/src file allocated').toEqual([])
+
+    const names = all
+      .filter((a) => a.file.startsWith(GAME_SRC) && a.bytes / PROFILED_FRAMES > NOISE_FLOOR_BYTES_PER_FRAME)
+      .map((a) => a.functionName)
+    for (const fn of ['down', 'move', 'endDrag', 'enqueue', 'inRect']) {
       expect(names, `${fn} allocated`).not.toContain(fn)
     }
   })
@@ -375,8 +589,64 @@ describe('the frame loop allocates nothing, measured', () => {
    * `packages/game/src/frame.ts` at **53.51 B/frame**, against a clean run where
    * that file does not appear at all — so the guard above catches the real
    * mutation, not merely this one.
+   *
+   * ---------------------------------------------------------------------------
+   * TASK 7 REWROTE HOW THIS IS MEASURED, AND THE REASON IS A DEFECT SHAPE
+   * ---------------------------------------------------------------------------
+   *
+   * It used to search the profile for the allocator whose `functionName` was
+   * `draw`. That is the one granularity this file's own module comment calls
+   * unstable, and Task 7 broke it **without touching the control**: adding a
+   * second profiled run to the file gave TurboFan enough feedback to inline
+   * `draw` into `drive`, so the deliberate allocation appeared as
+   * `drive @ test/allocation.test.ts` at 77.4 B/frame and the `find` returned
+   * `undefined`. A control that flips red when an unrelated test is added was
+   * reporting the inliner's choices, not the allocation.
+   *
+   * It is now a **delta between two profiles of the same rig**, one with an
+   * allocating `draw` and one without, summed over the two places the residual
+   * can land — this test file and `src/loop.ts`. Summing both is what makes it
+   * attribution-proof: `loop.ts`'s boxed residual is bimodally charged to one or
+   * the other, and counting both cancels the bimodality instead of inheriting
+   * it. Measured over 10 consecutive runs at 3,000 frames each side:
+   *
+   *   clean  29.6 30.5 29.7 29.8 31.2 31.6 32.1 32.9 33.3 33.7   (spread 4.1)
+   *   delta  35.0 38.9 39.0 39.6 42.3 43.2 43.5 43.8 43.8 44.5   (min 35.0)
+   *
+   * so a bound of 20 sits at 1.75x below the worst observed delta, well outside
+   * the noise band rather than inside its upper cluster — the mistake the
+   * catalogue records against this very file's `loop.ts` budget.
    */
   it('DOES report one escaping object per frame — the guard can fail', () => {
+    /**
+     * Bytes charged per frame to the two files the frame path's own allocation
+     * can land in. See the comment above for why it is the sum and not either
+     * one.
+     */
+    const residualPerFrame = (all: readonly Allocator[], frames: number): number => {
+      let bytes = 0
+      for (const a of all) {
+        if (a.file.endsWith('test/allocation.test.ts') || a.file.endsWith('src/loop.ts')) {
+          bytes += a.bytes
+        }
+      }
+      return bytes / frames
+    }
+
+    // The clean half: the identical rig and the identical driver, with a draw
+    // that allocates nothing. Same frame count as the dirty half, so the two
+    // estimates carry the same sampling error.
+    let clean = 0
+    const cleanLoop = buildLoop(() => {
+      clean++
+    })
+    drive(cleanLoop, WARMUP_FRAMES, 0)
+    const cleanProfile = profileAllocations(() => {
+      drive(cleanLoop, CONTROL_BASELINE_FRAMES, 1e6)
+    })
+    expect(clean, 'the clean half never ran').toBe(WARMUP_FRAMES + CONTROL_BASELINE_FRAMES)
+    const cleanPerFrame = residualPerFrame(cleanProfile, CONTROL_BASELINE_FRAMES)
+
     let n = 0
     const loop = buildLoop(function draw(frame: RenderFrame): void {
       sink = { a: frame.carCount, b: n++ }
@@ -388,18 +658,19 @@ describe('the frame loop allocates nothing, measured', () => {
     expect(sink).not.toBeNull()
     expect(n).toBe(WARMUP_FRAMES + PROFILED_FRAMES)
 
-    // (a) the instrument sees it, by name.
-    const control = all.find((a) => a.functionName === 'draw' && a.file.endsWith('allocation.test.ts'))
-    expect(control, 'the deliberate per-frame allocation was not seen').toBeDefined()
-    const perFrame = (control as Allocator).bytes / PROFILED_FRAMES
-    // Measured at 39-42 B/frame for a two-field object. The bound is loose on
-    // purpose: the claim is the order of magnitude, which is what separates
-    // "an object per frame" from "a few boxed doubles".
-    expect(perFrame).toBeGreaterThan(20)
+    // (a) the instrument sees it, as a delta. This is the discriminating half.
+    const dirtyPerFrame = residualPerFrame(all, PROFILED_FRAMES)
+    expect(
+      dirtyPerFrame - cleanPerFrame,
+      `the deliberate per-frame allocation was not seen (clean ${cleanPerFrame.toFixed(2)}, ` +
+        `dirty ${dirtyPerFrame.toFixed(2)})`,
+    ).toBeGreaterThan(20)
 
-    // (b) the guard's own predicate fires on it. Scope widened to the whole
-    // package so the test file is in range; `loop.ts` keeps its budget, so the
-    // only thing this can report is the deliberate allocator's file.
+    // (b) the guard's own predicate reaches the file and formats a report.
+    // **Labelled non-discriminating on its own, deliberately** — at `GAME_PKG`
+    // scope `loop.ts`'s residual is also charged to this test file, so the clean
+    // half produces the same match. What it pins is that `offenders` still walks
+    // the profile and still names the file; (a) is what says the file is dirty.
     const bad = offenders(all, PROFILED_FRAMES, GAME_PKG, BUDGETS)
     expect(bad.join('\n')).toMatch(/packages\/game\/test\/allocation\.test\.ts at \d/)
   })

@@ -97,13 +97,26 @@ export function createInputQueue(initialCapacity: number = INPUT_POOL_INITIAL_CA
       actions.push(action)
     },
 
-    // `actions.length = 0` rather than `actions.splice(0, n)`: the two are
-    // behaviourally identical (a CHECKED 0-detector no-op — same array, same
-    // resulting length) and `splice` allocates the array of removed elements it
-    // returns, once per tick, which is the one thing this module exists to
-    // avoid. Recorded so the equivalence is not mistaken for a missing test.
+    // **A pop loop, and the shape is measured rather than stylistic.**
+    //
+    // The obvious `actions.length = 0` is a 152 B allocation per call, every
+    // call: V8's length setter RIGHT-TRIMS the elements backing store, so the
+    // next `push` re-grows it from zero and allocates a fresh 17-element
+    // `FixedArray` (17 x 8 + 16 header = 152 bytes — the measurement matches to
+    // the byte). `splice(0, n)` is worse: it also allocates the array of removed
+    // elements it returns. `pop` does not trim, so the backing store stays at
+    // the batch's high-water capacity and the whole cycle allocates **0.00
+    // B/call**, measured over 200,000 clears of a 6-action batch.
+    //
+    // This module's first version said the re-growth was "the one allocation
+    // this module cannot avoid ... there is no allocation-free array shape with
+    // a `.length` `step` can iterate". That was wrong, and it was invisible for
+    // a whole task because `test/allocation.test.ts` profiled an IDLE queue —
+    // the loop drains an empty batch every tick, so `clear()` never had anything
+    // to trim. Task 7 drove a live drag through the same harness and it showed
+    // up immediately, at 64.30 B/frame charged to the inlined caller.
     clear(): void {
-      actions.length = 0
+      for (let i = actions.length - 1; i >= 0; i--) actions.pop()
     },
 
     get length(): number {
