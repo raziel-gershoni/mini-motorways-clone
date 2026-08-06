@@ -135,6 +135,21 @@ function call(name: BootMethod, minVersion?: string): void {
   }
 }
 
+/**
+ * Is there a Telegram WebApp object at all?
+ *
+ * Exported because `eraseControl.ts` needs to tell "running in a browser" from
+ * "running in a Telegram client too old for `MainButton`", and every other
+ * signal is ambiguous: `clientVersion()` returns `'none'` both when there is no
+ * WebApp and when a WebApp publishes no `version`, and `platformName()` returns
+ * `'browser'` for a client that publishes no `platform`. Those two refusals want
+ * different codes, so the distinction has to come from the one thing that is
+ * unambiguous.
+ */
+export function isTelegram(): boolean {
+  return webApp() !== null
+}
+
 export function platformName(): string {
   return webApp()?.platform ?? 'browser'
 }
