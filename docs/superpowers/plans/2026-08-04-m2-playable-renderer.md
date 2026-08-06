@@ -562,7 +562,7 @@ Pointer events → tile coordinates (via `render`'s `screenToGrid`, Decision 5) 
 >
 > **The contract Task 7 exposes for it**, and the one guarantee that goes with it: `setEraseMode(boolean)`, `toggleEraseMode(): boolean`, `eraseMode` (the pending mode, for the button's label and colour) and `strokeEraseMode` (what the stroke in progress is committing). Because `MainButton` sits outside the webview's content area, a second finger **can** press it mid-stroke, which a DOM button under pointer capture could not — so `pointer.ts` latches a stroke's mode at `pointerdown`: a toggle during a drag changes the button immediately and applies from the next stroke, and never splits one stroke into half road and half erasure.
 >
-> **Also fix here:** `packages/render/src/camera.ts`'s `hudRects` still carries the "there is no allocation profiler in this toolchain" comment. That claim has now been refuted twice and a working harness ships in `packages/game/test/allocation.test.ts`.
+> **Stale as of Task 8's review — Task 7 already fixed `camera.ts` in `e13f0f7`.** The claim turned out to exist in **four** places, not one; three fix rounds each found a copy and missed another, and the fourth sat four lines from the third in the same doc comment. When a false claim is repeated in prose, grep the whole repo and fix every occurrence in one pass — fixing them one review at a time is how it survived this long.
 
 ## Task 8: The Telegram shell — boot, the HTML, sizing, and the rebuild trigger
 
