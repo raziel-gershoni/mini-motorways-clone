@@ -423,15 +423,25 @@ function frameB(paused = false): RenderFrame {
   roads[3 * B_W + 1] = 1 //  (1, 3), N    — the rect's first COLUMN
   roads[4 * B_W + 3] = 4 //  (3, 4), E    — the rect's last ROW, under a car
   roads[4 * B_W + 6] = 2 //  (6, 4), NE   — the rect's last COLUMN, on a house
-  roads[3 * B_W + 0] = 5 //  (0, 3), N|E  — OUTSIDE, and non-zero on purpose
+  // The one-cell RING outside the rect, one per bound. Four cells outside on a
+  // diagonal (the first version's (0, 0) and (7, 5)) are unreachable by any
+  // single one-cell over-extension, so all four of those mutants survived; a
+  // cell must sit directly past each bound to have a detector.
+  roads[3 * B_W + 0] = 5 //  (0, 3), N|E  — one column BEFORE x0
+  roads[3 * B_W + 7] = 3 //  (7, 3), N|NE — one column PAST x0 + cols
+  roads[0 * B_W + 3] = 6 //  (3, 0), NE|E — one row BEFORE y0
+  roads[5 * B_W + 3] = 9 //  (3, 5), N|SE — one row PAST y0 + rows
 
   const terrainClass = new Uint8Array(B_CELLS)
   terrainClass[1 * B_W + 2] = TerrainClass.WATER // (2, 1) — the rect's first row
   terrainClass[2 * B_W + 1] = TerrainClass.TREE // (1, 2) — its first column
   terrainClass[3 * B_W + 6] = TerrainClass.MOUNTAIN // (6, 3) — its last column
   terrainClass[4 * B_W + 2] = TerrainClass.WATER // (2, 4) — its last row
-  terrainClass[0] = TerrainClass.WATER // (0, 0) — OUTSIDE
-  terrainClass[5 * B_W + 7] = TerrainClass.TREE // (7, 5) — OUTSIDE
+  // The same one-cell ring for terrain, one cell directly past each bound.
+  terrainClass[2 * B_W + 0] = TerrainClass.WATER // (0, 2) — one column BEFORE x0
+  terrainClass[2 * B_W + 7] = TerrainClass.WATER // (7, 2) — one column PAST x0 + cols
+  terrainClass[0 * B_W + 2] = TerrainClass.TREE // (2, 0) — one row BEFORE y0
+  terrainClass[5 * B_W + 2] = TerrainClass.TREE // (2, 5) — one row PAST y0 + rows
 
   // Two live houses, two dead slots at (1, 1).
   const houseCell = new Int32Array([4 * B_W + 1, 4 * B_W + 6, 1 * B_W + 1, 1 * B_W + 1])
@@ -563,14 +573,23 @@ function painted(log: readonly Command[]): Painted[] {
  * `drawFrame`'s structure. Every caller asserts the count is 3, which is what
  * makes it a non-vacuous filter.
  */
+function isBand(p: Painted, camera: Camera): boolean {
+  // Full canvas width **in device pixels**, because the band edges are snapped
+  // to the device grid and `w` is therefore `round(cssW × dpr) / dpr` rather
+  // than `cssW` itself (411 becomes 411.333 at DPR 1.5). Still camera-derived
+  // and still unambiguous: the widest content rect is a 3-tile destination
+  // footprint, 198 of 400+ CSS px.
+  return p.x === 0 && Math.round(p.w * camera.dpr) === Math.round(camera.cssW * camera.dpr)
+}
+
 function bands(log: readonly Command[], camera: Camera): Painted[] {
-  return painted(log).filter((p) => p.x === 0 && p.w === camera.cssW)
+  return painted(log).filter((p) => isBand(p, camera))
 }
 
 /** Everything painted that is NOT one of the three bands. */
 function content(log: readonly Command[], camera: Camera): Painted[] {
   const all = painted(log)
-  const rest = all.filter((p) => !(p.x === 0 && p.w === camera.cssW))
+  const rest = all.filter((p) => !isBand(p, camera))
   expect(all.length - rest.length, 'exactly three full-width band fills').toBe(3)
   return rest
 }
@@ -951,6 +970,57 @@ describe('the bands tile the DEVICE grid too, which the DPR-1.5 cap breaks (revi
       { x0: 5, y0: 9, cols: 14, rows: 22 },
     )
 
+  /**
+   * A second LOW device where **all four** snapped values are odd, and therefore
+   * all four are fractional in device space.
+   *
+   * The sweep needed it: on `cameraC` the grid top (102) and the canvas width
+   * (412) are both even, so `102 × 1.5 = 153` and `412 × 1.5 = 618` are already
+   * whole and *not snapping them* passed every test. One fixture per device
+   * shape is not enough when the property is a parity — the catalogue's "a
+   * fixture that cannot distinguish the variables", arriving through the
+   * arithmetic rather than through the geometry.
+   *
+   * ```
+   * availableH = 915 − 25 − 72 − 24 = 794 ... tile = floor(min(411/14, 794/22)) = 29
+   * originY = 25 + floor((794 − 638)/2) = 103   hudTop = 915 − 24 − 72 = 819
+   * 411 × 1.5 = 616.5   103 × 1.5 = 154.5   819 × 1.5 = 1228.5   915 × 1.5 = 1372.5
+   * ```
+   */
+  const cameraD = (): Camera =>
+    fitCamera(
+      { cssW: 411, cssH: 915, topInset: 25, bottomInset: 24, rawDpr: 3, performanceClass: 'LOW' },
+      { x0: 5, y0: 9, cols: 14, rows: 22 },
+    )
+
+  it('is not vacuous: the second LOW fixture has all four edges on half device pixels', () => {
+    const camera = cameraD()
+    expect(camera.dpr).toBe(1.5)
+    expect([camera.cssW, camera.originY, camera.hudTop, camera.cssH]).toEqual([411, 103, 819, 915])
+    for (const value of [camera.cssW, camera.originY, camera.hudTop, camera.cssH]) {
+      expect(value * 1.5 - Math.floor(value * 1.5), `${value} is already integral at 1.5`).toBe(0.5)
+    }
+  })
+
+  it('snaps ALL FOUR edges, not only the two that happen to be odd on one device', () => {
+    const camera = cameraD()
+    const strip = bands(draw(frameOn(camera, 24, 40), atlasAt(43)), camera)
+    const dev = (v: number): number => Math.round(v * camera.dpr)
+
+    expect(strip.length).toBe(3)
+    // Hand-computed: round(411×1.5) = 617 wide; cuts at round(154.5) = 155,
+    // round(1228.5) = 1229, round(1372.5) = 1373.
+    expect(dev(camera.cssW)).toBe(617)
+    expect(strip.map((b) => dev(b.y))).toEqual([0, 155, 1229])
+    expect(dev((strip[2]?.y ?? 0) + (strip[2]?.h ?? 0))).toBe(1373)
+    for (const band of strip) {
+      for (const edge of [band.x, band.y, band.x + band.w, band.y + band.h]) {
+        const device = edge * camera.dpr
+        expect(Math.abs(device - Math.round(device)), `CSS ${edge} -> device ${device}`).toBeLessThan(1e-9)
+      }
+    }
+  })
+
   it('is the viewport that proves it: a Pixel at LOW puts hudTop on a half device pixel', () => {
     // Integer CSS in, fractional device out — no fixture trickery.
     const camera = cameraC()
@@ -1257,23 +1327,76 @@ describe('roads: one blit per road cell, from that mask’s own atlas tile', () 
 })
 
 describe('culling: only cells inside the revealed rect are drawn', () => {
-  it('issues exactly one blit, though a NON-ZERO mask sits outside the rect', () => {
-    // "What else could prevent the blit": an empty mask. So the out-of-rect cell
-    // (0, 3) carries mask 5 and the in-rect cell (3, 2) mask 17 — both non-zero
-    // — and the count is what separates "culled" from "there was nothing there".
+  it('issues exactly five blits, though a NON-ZERO mask sits past every bound', () => {
+    // "What else could prevent the blit": an empty mask. So all four out-of-rect
+    // road cells carry non-zero masks and so do the five inside — the count is
+    // what separates "culled" from "there was nothing there".
+    //
+    // **One cell past each bound, not two in the diagonal corners.** The first
+    // version put its out-of-rect roads at (0, 3) and nowhere else, so
+    // extending the loop by one column to the right, or one row either way,
+    // reached nothing and three over-iteration mutants survived the suite.
     const frame = frameB()
-    expect(frame.roads[3 * B_W + 0] as number).toBe(5)
+    const outside = [
+      [0, 3],
+      [7, 3],
+      [3, 0],
+      [3, 5],
+    ] as const
+    for (const [x, y] of outside) {
+      expect(frame.roads[y * B_W + x] as number, `(${x}, ${y}) must carry a mask`).toBeGreaterThan(0)
+    }
     expect(frame.roads[2 * B_W + 3] as number).toBe(17)
     expect(blits(draw(frame, atlasAt(B_TILE_DEVICE))).length).toBe(5)
   })
 
-  it('fills no terrain outside the rect, though two non-LAND cells sit there', () => {
+  it('fills no terrain outside the rect, though a non-LAND cell sits past every bound', () => {
     const frame = frameB()
-    expect(frame.terrainClass[0] as number).toBe(TerrainClass.WATER)
-    expect(frame.terrainClass[5 * B_W + 7] as number).toBe(TerrainClass.TREE)
+    const outside = [
+      [0, 2],
+      [7, 2],
+      [2, 0],
+      [2, 5],
+    ] as const
+    for (const [x, y] of outside) {
+      expect(
+        frame.terrainClass[y * B_W + x] as number,
+        `(${x}, ${y}) must be non-LAND`,
+      ).not.toBe(TerrainClass.LAND)
+    }
     const log = draw(frame, atlasAt(B_TILE_DEVICE))
     expect(fillsStyled(log, WATER).length).toBe(2) // the two in-rect ones only
     expect(fillsStyled(log, TREE).length).toBe(1)
+  })
+
+  it('is not vacuous: every out-of-rect marker is one cell past exactly one bound', () => {
+    // The property that separates this fixture from the one that let four
+    // over-iteration mutants live: a marker in a diagonal corner is past TWO
+    // bounds at once and is therefore unreachable by any single one-cell
+    // extension, which is why it detects none of them.
+    const frame = frameB()
+    const c = frame.camera
+    const markers = [
+      [0, 2],
+      [7, 2],
+      [2, 0],
+      [2, 5],
+      [0, 3],
+      [7, 3],
+      [3, 0],
+      [3, 5],
+    ] as const
+    for (const [x, y] of markers) {
+      const past = [
+        x < c.x0,
+        x >= c.x0 + c.cols,
+        y < c.y0,
+        y >= c.y0 + c.rows,
+      ].filter(Boolean).length
+      expect(past, `(${x}, ${y}) is outside on ${past} bounds, not 1`).toBe(1)
+      // ...and exactly one cell past it, so a one-cell extension reaches it.
+      expect(Math.max(c.x0 - x, x - (c.x0 + c.cols - 1), c.y0 - y, y - (c.y0 + c.rows - 1))).toBe(1)
+    }
   })
 
   it('lets a car on the rect’s last row spill into the letterbox, and the HUD band covers it', () => {
