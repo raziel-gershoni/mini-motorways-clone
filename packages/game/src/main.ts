@@ -1,0 +1,565 @@
+import {
+  FIRST_PIN_DELAY_TICKS,
+  REVEALED_H,
+  REVEALED_W,
+  REVEALED_X0,
+  REVEALED_Y0,
+  firstCity,
+} from '@laneways/shared'
+import {
+  createFieldInputRanges,
+  createFlowFields,
+  createScratch,
+  createState,
+  createWorld,
+  step,
+  type FlowField,
+  type GameState,
+  type Scratch,
+  type WorldData,
+} from '@laneways/sim'
+import {
+  PALETTE,
+  buildAtlas,
+  drawFrame,
+  type Atlas,
+  type AtlasSurface,
+  type AtlasSurfaceFactory,
+  type DrawContext,
+  type ViewportMetrics,
+} from '@laneways/render'
+import { createFrameBuilder, createFrameDriver, type FrameBuilder } from './frame'
+import { initCarSnapshots } from './resolve'
+import { createInputQueue, type InputQueue } from './inputs'
+import { createLoop, type Loop } from './loop'
+import { PointerOutcome, createPointerInput, type PointerInput } from './pointer'
+import {
+  bootShell,
+  measureViewport,
+  rafSettle,
+  type ScalableContext,
+  type Shell,
+  type SizableCanvas,
+} from './shell'
+import { createEraseControl, type EraseControl, type FallbackElementFactory } from './eraseControl'
+import { seedStartingCity } from './startingCity'
+
+/**
+ * The wiring — plan Task 9. Everything the previous eight tasks built, assembled
+ * into a thing you can open on a phone.
+ *
+ * ---------------------------------------------------------------------------
+ * THE ASSEMBLY IS A FUNCTION AND THE ENTRY POINT IS FOUR LINES
+ * ---------------------------------------------------------------------------
+ *
+ * `createGame(deps)` touches no global: the canvas, the 2D context, the atlas
+ * surface factory, the erase-control fallback factory, the viewport measurement
+ * and the settle scheduler are all injected, in plan Decision 8's idiom. That is
+ * what lets `test/integration.test.ts` drive **the real loop** headlessly —
+ * injected clock in, synthetic pointer events in, a recording context out — over
+ * the same code path a phone runs, rather than over a rig that resembles it.
+ *
+ * `startGame()` is the part that cannot be tested in Node: it reads
+ * `document`, builds the three production factories, wires the DOM events and
+ * starts `requestAnimationFrame`. Everything inside it that CAN be extracted
+ * has been — `attachPointerEvents` and `attachVisibility` both take a
+ * structural target, so the event names and the capture calls have a detector.
+ *
+ * ---------------------------------------------------------------------------
+ * THE BOOT ORDER, AND WHY IT IS THIS ORDER
+ * ---------------------------------------------------------------------------
+ *
+ * ```
+ * 1  world, state, scratch, fields          nothing can be seeded before state exists
+ * 2  seedStartingCity                       BEFORE the shell: the frame builder sizes
+ *                                           its arrays off state, and M2 has no spawner
+ * 3  bootShell                              calls boot() ITSELF — see the note below —
+ *                                           then measures, sizes, and builds the atlas
+ * 4  createFrameBuilder                     needs a camera, which step 3 produced
+ * 5  the warm start                         WARM_START_TICKS steps, see below
+ * 6  initCarSnapshots                       AFTER the warm start, so frame 1 lerps from
+ *                                           the launch state and not from cell (0, 0)
+ * 7  queue, loop, pointer, erase control
+ * ```
+ *
+ * **`bootShell` calls `boot()` itself.** Calling `boot()` again from here
+ * re-runs `ready`/`expand`/`requestFullscreen`, which is why this file never
+ * imports it. Task 8's handoff names it first of the three things not to get
+ * wrong; the other two are `rebuildAtlas` reassigning the atlas the draw path
+ * actually reads (it does — `atlas` is a `let` and `draw` closes over it), and
+ * the pointer reading the shell's **cached** canvas offset rather than calling
+ * `getBoundingClientRect` per event (it does — `shell.canvasLeft`).
+ *
+ * ---------------------------------------------------------------------------
+ * THE WARM START: WHAT IT IS FOR, AND WHAT IT IS NOT
+ * ---------------------------------------------------------------------------
+ *
+ * See `WARM_START_TICKS`. In one line: a fresh board takes 378 ticks to show its
+ * first pin, and this runs 258 of them before the first frame so the player
+ * waits the sim's own designed 4 seconds instead of 12.6.
+ *
+ * ---------------------------------------------------------------------------
+ * NOTHING HERE RUNS PER FRAME EXCEPT `Game.frame`
+ * ---------------------------------------------------------------------------
+ *
+ * `frame(now)` is `loop.frame(now)` and nothing else, and every closure it
+ * reaches was built once at boot. `test/allocation.test.ts` has profiled that
+ * assembly since Task 6; what Task 9 adds is the **real draw path** — until this
+ * file existed the harness passed a no-op `draw`, so `render/src/canvas.ts`'s
+ * own "review is the only check of this file specifically" was literally true.
+ * The integration test's allocation case closes it.
+ */
+
+/**
+ * The tick on which Task 2's seeded city produces its first pin, **measured**.
+ *
+ * The one literal the warm start rests on, and `test/integration.test.ts`
+ * re-measures it by stepping the real seeded city until a pin appears — so a
+ * change to the city, to `PIN_PERIOD_TICKS` or to `FIRST_PIN_DELAY_TICKS` fails
+ * loudly here instead of silently making `WARM_START_TICKS` the wrong number.
+ * `packages/game/test/startingCity.test.ts` holds the same 378 as its own
+ * hand-derived `FIRST_PIN_TICK`.
+ *
+ * How many ticks to run before the first frame is drawn.
+ *
+ * **Derived, not tuned.** Task 2's hand-authored city produces its first pin at
+ * tick **378**, which is 12.6 s at 30 Hz — so a fresh launch shows a live board
+ * with no pin, no dispatch and no moving car for twelve seconds. That is
+ * spec-correct pacing and Task 2 was right not to change it, but it is a bad
+ * instrument for a first playtest and an unexplained dead board gets diagnosed
+ * as a rendering bug.
+ *
+ * 378 decomposes exactly, and only one of the two parts is a design decision:
+ *
+ * ```
+ * 378 = FIRST_PIN_DELAY_TICKS (120)          a destination waits 4 s for its first
+ *                                            customer — spec-correct, and KEPT
+ *     + ceil(PIN_PERIOD_TICKS / slotCount)   the colour accumulator climbing 518 at
+ *       - 1  =  ceil(518 / 2) - 1 = 258      2 slots a tick (two square colour-0
+ *                                            destinations) from an EMPTY start
+ * ```
+ *
+ * The second term is not pacing, it is the cost of the accumulator starting at
+ * zero on a board that is handed three destinations at once. Running those 258
+ * ticks before the first frame removes exactly that term and keeps exactly the
+ * designed delay: **the first pin then lands 120 ticks — 4.00 s — after launch.**
+ *
+ * **It moves no golden**, and that is why it is the lever this task took. The
+ * plan's own suggestion — make destination 0 a circle, `slotCount` 3, first pin
+ * at tick 292 — was measured and **rejected**: it changes `destMeta[0]`, so
+ * `hashState` after seeding moves from `2505371110` to `4171132894`, and the
+ * task's constraints say to stop and report rather than re-bless. It is also the
+ * weaker lever: 292 ticks is still **9.7 s** of dead board, against 4.0 s here.
+ *
+ * **What it costs, measured:** 258 `step` calls at boot, 6.8 ms on the
+ * development machine, once. Nothing visible changes across those ticks — no
+ * pin, no car moves, no road, no score, and `weekOfTick(258)`/`dayOfWeek(258)`
+ * are still 0/0, so the HUD reads exactly as it does at tick 0. The only state
+ * that moves is `pinAccum`, which is what the wait was for. `test/integration.test.ts`
+ * re-derives 258 from `FIRST_PIN_DELAY_TICKS` and a live measurement of the
+ * seed's first-pin tick, so if either the city or the constants move, this
+ * number fails rather than silently becoming wrong.
+ *
+ * **What it is not:** a substitute for M1e's authored spawn schedule. A run that
+ * begins at tick 258 is still the out-of-band, non-replayable seed
+ * `startingCity.ts` documents; M2 submits nothing to a leaderboard either way.
+ */
+/**
+ * The build id `vite.config.ts` mints, or `'dev'` where there is no bundler.
+ *
+ * **This is what the deploy check greps the live bundle for**, and it is only
+ * ever reachable through `define`: `typeof` on an undeclared identifier is safe
+ * in JS, so this is `'dev'` under vitest and under `pnpm dev`, and the real id
+ * in a `vite build`. It is published on `globalThis` two lines down for two
+ * reasons — the assignment is a side effect, so the constant cannot be
+ * tree-shaken out of the bundle the check is about to grep, and "which build is
+ * this phone running" is the first question a playtest raises.
+ */
+declare const __LANEWAYS_BUILD_ID__: string
+export const BUILD_ID: string =
+  typeof __LANEWAYS_BUILD_ID__ === 'string' ? __LANEWAYS_BUILD_ID__ : 'dev'
+;(globalThis as Record<string, unknown>).lanewaysBuild = BUILD_ID
+
+export const SEED_FIRST_PIN_TICK = 378
+
+/** See `SEED_FIRST_PIN_TICK`. 378 - 120 = 258. */
+export const WARM_START_TICKS = SEED_FIRST_PIN_TICK - FIRST_PIN_DELAY_TICKS
+
+/**
+ * The RNG seed every M2 run uses.
+ *
+ * Fixed rather than random, deliberately: M2 submits nothing to a leaderboard
+ * (`startingCity.ts` explains why), and a playtest build where every launch is
+ * the same board is a better instrument than one where it is not. M3's
+ * persistence is what gives a run its own seed.
+ */
+export const RUN_SEED = 'laneways-m2'
+
+/** The canvas members this file needs: the shell's, plus a pointer-event target. */
+export type GameCanvas = SizableCanvas
+
+/** The context members this file needs: the shell's DPR scale, plus the draw path's. */
+export type GameContext = ScalableContext & DrawContext
+
+export interface GameDeps {
+  readonly canvas: GameCanvas
+  readonly context: GameContext
+  /** Makes the atlas's offscreen surface. Production: `createCanvasSurface`. */
+  readonly createSurface: AtlasSurfaceFactory
+  /**
+   * Makes the erase control's DOM fallback. Production: `createFallbackButton`.
+   *
+   * **Required, and Task 8 made it so on purpose**: an optional factory meant
+   * `createEraseControl({ host })` compiled, reported `NONE`, and shipped a build
+   * where the player can draw roads and never remove one — this milestone's
+   * Critical, reopened by one omitted property in this very file.
+   */
+  readonly createFallback: FallbackElementFactory
+  /** Production: `measureViewport`. */
+  readonly measure: () => ViewportMetrics
+  /** Production: `rafSettle`. */
+  readonly settle: (run: () => void) => void
+  readonly seed?: string
+  /** Defaults to `WARM_START_TICKS`. 0 disables the warm start entirely. */
+  readonly warmStartTicks?: number
+}
+
+/**
+ * The assembled game. Every field is the live object, exposed so the integration
+ * test can drive and observe the real thing rather than a copy of it.
+ */
+export interface Game {
+  readonly state: GameState
+  readonly world: WorldData
+  readonly fields: readonly FlowField[]
+  readonly scratch: Scratch
+  readonly builder: FrameBuilder
+  readonly shell: Shell
+  readonly loop: Loop
+  readonly pointer: PointerInput
+  readonly queue: InputQueue
+  readonly erase: EraseControl
+  /** The CURRENT atlas. A getter, because the shell rebuilds it on a tile-size change. */
+  readonly atlas: Atlas
+  /** How many ticks ran before the first frame. See `WARM_START_TICKS`. */
+  readonly warmStartTicks: number
+  /** One frame. `now` is `requestAnimationFrame`'s own timestamp — there is no second clock. */
+  readonly frame: (now: number) => void
+}
+
+export function createGame(deps: GameDeps): Game {
+  const map = firstCity()
+  const world = createWorld(map)
+  const state = createState(deps.seed ?? RUN_SEED, map)
+  const scratch = createScratch(
+    world.cells,
+    map.groupCount,
+    map.maxDestinations,
+    createFieldInputRanges(map),
+  )
+  const fields = createFlowFields(map.groupCount, world.cells)
+
+  // Before anything else that reads state: `placeHouse`/`placeDestination` have
+  // no other production caller and `step`'s seven phases contain no spawner, so
+  // without this the build renders terrain and roads and nothing else.
+  seedStartingCity(state, world)
+
+  // `let`, and read through the `draw` closure below rather than captured by
+  // value: the shell calls `rebuildAtlas` at boot AND on every device-tile
+  // change, and a draw path holding the boot atlas would blit source rects of
+  // the wrong size for the rest of the session.
+  let atlas: Atlas | null = null
+
+  const shell = bootShell({
+    canvas: deps.canvas,
+    context: deps.context,
+    reveal: { x0: REVEALED_X0, y0: REVEALED_Y0, cols: REVEALED_W, rows: REVEALED_H },
+    measure: deps.measure,
+    settle: deps.settle,
+    rebuildAtlas: (tileDevicePx: number): void => {
+      atlas = buildAtlas(deps.createSurface, tileDevicePx, PALETTE)
+    },
+  })
+
+  // `bootShell` calls `rebuildAtlas` unconditionally on its first fit, so this
+  // is unreachable — and it is a named throw rather than a `!` because the
+  // alternative failure is `drawFrame` reading `null.tileDevicePx` sixty times a
+  // second with nothing saying why.
+  if (atlas === null) {
+    throw new Error(
+      'createGame: bootShell returned without building an atlas — the draw path has no ' +
+        'source surface, so every road would be missing. rebuildAtlas must be called at boot.',
+    )
+  }
+
+  const builder = createFrameBuilder(state, world, shell.camera)
+  const queue = createInputQueue()
+
+  // The warm start (see `WARM_START_TICKS`), through `sim`'s own `step` with an
+  // empty batch — byte-identical to the player having had the app open for 8.6
+  // seconds longer, which is exactly what it is standing in for.
+  const warmStartTicks = deps.warmStartTicks ?? WARM_START_TICKS
+  for (let t = 0; t < warmStartTicks; t++) step(state, world, fields, scratch, queue.inputs)
+
+  // AFTER the warm start and before the first frame. An unwritten `Float32Array`
+  // is all-zero, which is grid cell (0, 0), so without this the whole city
+  // streaks in from the board's top-left corner on frame 1.
+  initCarSnapshots(builder.snapshots, state, world)
+
+  const loop = createLoop(
+    createFrameDriver({
+      state,
+      world,
+      fields,
+      scratch,
+      builder,
+      // A function, so a stable `viewportChanged` re-fit is picked up without
+      // the driver being rebuilt.
+      camera: () => shell.camera,
+      draw: (frame) => {
+        drawFrame(deps.context, frame, atlas as Atlas, PALETTE)
+      },
+    }),
+    queue,
+  )
+
+  const pointer = createPointerInput({
+    camera: () => shell.camera,
+    // The shell's CACHED offset. `getBoundingClientRect()` allocates a `DOMRect`
+    // per call, and this is read on every pointer event.
+    canvasLeft: () => shell.canvasLeft,
+    canvasTop: () => shell.canvasTop,
+    gridW: world.w,
+    queue,
+    // The loop owns `paused`, because resuming has to reset its clock reference
+    // (Decision 1b) and a second copy here would let the two disagree.
+    paused: () => loop.paused,
+    setPaused: (next: boolean) => {
+      loop.setPaused(next)
+    },
+  })
+
+  const erase = createEraseControl({ host: pointer, createFallback: deps.createFallback })
+
+  return {
+    state,
+    world,
+    fields,
+    scratch,
+    builder,
+    shell,
+    loop,
+    pointer,
+    queue,
+    erase,
+    warmStartTicks,
+    get atlas(): Atlas {
+      return atlas as Atlas
+    },
+    frame: loop.frame,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The DOM edge, extracted so it has a detector
+// ---------------------------------------------------------------------------
+
+/** The three fields the pointer machine reads off a `PointerEvent`. */
+export interface PointerEventLike {
+  readonly pointerId: number
+  readonly clientX: number
+  readonly clientY: number
+}
+
+/**
+ * The slice of `HTMLCanvasElement` the event wiring uses. Structural, so
+ * `test/integration.test.ts` can drive every branch with a stub — a real canvas
+ * satisfies it, pinned at the bottom of this file.
+ */
+export interface PointerEventTarget {
+  addEventListener(type: string, handler: (event: PointerEventLike) => void): void
+  setPointerCapture(pointerId: number): void
+  releasePointerCapture(pointerId: number): void
+}
+
+/**
+ * Wires the five pointer events to the state machine, and pointer capture to the
+ * two outcomes that ask for it.
+ *
+ * **Capture is why `pointermove` keeps arriving once a finger leaves the
+ * canvas**, which on a drag-to-draw surface is most of a stroke's second half.
+ * `DRAG_START` and `DRAG_END` are the only two `PointerOutcome` codes production
+ * consumes, and that is the whole reason the enum has them.
+ *
+ * **`lostpointercapture` is wired to `cancel`, not to `up`**, and the
+ * `releasePointerCapture` call is guarded. The browser fires
+ * `lostpointercapture` *after* it has already dropped the capture, so releasing
+ * again throws `InvalidPointerId` on a conforming implementation — an exception
+ * out of an event handler, on the happy path, once per stroke. `try`/`catch` is
+ * the honest shape here: `hasPointerCapture` is not on every target this
+ * interface accepts, and the failure being swallowed is precisely "it was
+ * already released".
+ */
+export function attachPointerEvents(target: PointerEventTarget, pointer: PointerInput): void {
+  const release = (pointerId: number): void => {
+    try {
+      target.releasePointerCapture(pointerId)
+    } catch {
+      // Already released — `lostpointercapture` is exactly this case.
+    }
+  }
+
+  target.addEventListener('pointerdown', (event) => {
+    if (pointer.down(event.pointerId, event.clientX, event.clientY) === PointerOutcome.DRAG_START) {
+      target.setPointerCapture(event.pointerId)
+    }
+  })
+  target.addEventListener('pointermove', (event) => {
+    pointer.move(event.pointerId, event.clientX, event.clientY)
+  })
+  target.addEventListener('pointerup', (event) => {
+    if (pointer.up(event.pointerId) === PointerOutcome.DRAG_END) release(event.pointerId)
+  })
+  target.addEventListener('pointercancel', (event) => {
+    if (pointer.cancel(event.pointerId) === PointerOutcome.DRAG_END) release(event.pointerId)
+  })
+  target.addEventListener('lostpointercapture', (event) => {
+    pointer.cancel(event.pointerId)
+  })
+}
+
+/** The slice of `document` the visibility wiring uses. */
+export interface VisibilityTarget {
+  readonly visibilityState: string
+  addEventListener(type: 'visibilitychange', handler: () => void): void
+}
+
+/**
+ * Ends any drag in progress when the webview is backgrounded.
+ *
+ * A hidden webview may never deliver the `pointerup`, and a drag with no end
+ * event latches: the single-pointer rule then refuses every subsequent
+ * `pointerdown`, including the owner's, and input is dead for the rest of the
+ * session. `pointer.abort()` is the out-of-band recovery path Task 7 added for
+ * exactly this, and this is its production caller.
+ */
+export function attachVisibility(target: VisibilityTarget, pointer: PointerInput): void {
+  target.addEventListener('visibilitychange', () => {
+    if (target.visibilityState === 'hidden') pointer.abort()
+  })
+}
+
+// ---------------------------------------------------------------------------
+// The production factories — the only three `document` references in `game`
+// ---------------------------------------------------------------------------
+
+/** `buildAtlas`'s surface factory. Three lines, and `atlas.ts` prescribes them. */
+export function createCanvasSurface(widthPx: number, heightPx: number): AtlasSurface {
+  const surface = document.createElement('canvas')
+  surface.width = widthPx
+  surface.height = heightPx
+  return surface
+}
+
+/**
+ * The erase control's DOM fallback: development outside Telegram, and clients
+ * below the `MainButton` gate. `eraseControl.ts` owns the styling and the
+ * placement derivation; this only has to exist and be attached.
+ */
+export function createFallbackButton(): HTMLButtonElement {
+  const button = document.createElement('button')
+  document.body.appendChild(button)
+  return button
+}
+
+// ---------------------------------------------------------------------------
+// The entry point
+// ---------------------------------------------------------------------------
+
+/** The canvas `index.html` ships. Task 8's shell test pins that the two agree. */
+export const CANVAS_ELEMENT_ID = 'board'
+
+/**
+ * Whether this module should start the game on import.
+ *
+ * A predicate rather than an inline `typeof document !== 'undefined'`, so the
+ * guard has a detector: under vitest's default Node environment `document` is
+ * undefined and importing this file must be inert, and a future switch to a DOM
+ * environment must not silently boot a game inside every test file. Both
+ * directions are asserted in `test/integration.test.ts`.
+ */
+export function shouldAutoStart(scope: { document?: unknown } = globalThis): boolean {
+  return typeof scope.document !== 'undefined'
+}
+
+/**
+ * Reads the DOM, builds the production dependencies, and starts the frame loop.
+ *
+ * Both lookups throw rather than degrade. A missing canvas or a refused 2D
+ * context is a build or a platform failure that no amount of continuing makes
+ * better — and on iOS a refused context is how the platform reports having run
+ * out of canvas memory (spec §8.5), which is the failure mode that is otherwise
+ * completely silent.
+ */
+export function startGame(): Game {
+  const canvas = document.getElementById(CANVAS_ELEMENT_ID)
+  if (!(canvas instanceof HTMLCanvasElement)) {
+    throw new Error(
+      `startGame: no <canvas id="${CANVAS_ELEMENT_ID}"> in the document — index.html and ` +
+        'CANVAS_ELEMENT_ID have diverged, and the board would never appear',
+    )
+  }
+  const context = canvas.getContext('2d')
+  if (context === null) {
+    throw new Error(
+      'startGame: the canvas returned no 2D context — on iOS this is how the platform reports ' +
+        'having run out of canvas memory, and nothing would ever be drawn',
+    )
+  }
+
+  const game = createGame({
+    canvas,
+    context,
+    createSurface: createCanvasSurface,
+    createFallback: createFallbackButton,
+    measure: measureViewport,
+    settle: rafSettle,
+  })
+
+  attachPointerEvents(canvas, game.pointer)
+  attachVisibility(document, game.pointer)
+
+  // `requestAnimationFrame`'s own timestamp is the loop's clock — plan Decision
+  // 1: there is no second clock anywhere, so `performance.now()` never appears.
+  const onFrame = (now: number): void => {
+    game.frame(now)
+    requestAnimationFrame(onFrame)
+  }
+  requestAnimationFrame(onFrame)
+
+  return game
+}
+
+if (shouldAutoStart()) startGame()
+
+/**
+ * Compile-time pins for the three DOM-touching wirings above, in the idiom
+ * `atlas.ts`, `shell.ts` and `eraseControl.ts` already use: a real canvas is a
+ * `GameCanvas` and a `PointerEventTarget`, a real 2D context is a `GameContext`,
+ * and a real `Document` is a `VisibilityTarget`.
+ *
+ * The `Assert<T extends true>` wrapper is load-bearing — `type X = A extends B ?
+ * true : never` pins nothing, because `never` is a perfectly good type.
+ */
+type Assert<T extends true> = T
+export type _RealCanvasIsAGameCanvas = Assert<HTMLCanvasElement extends GameCanvas ? true : false>
+export type _RealCanvasIsAPointerTarget = Assert<
+  HTMLCanvasElement extends PointerEventTarget ? true : false
+>
+export type _RealContextIsAGameContext = Assert<
+  CanvasRenderingContext2D extends GameContext ? true : false
+>
+export type _RealDocumentIsAVisibilityTarget = Assert<Document extends VisibilityTarget ? true : false>
+export type _RealPointerEventIsPointerEventLike = Assert<
+  PointerEvent extends PointerEventLike ? true : false
+>

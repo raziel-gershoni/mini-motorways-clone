@@ -19,15 +19,37 @@ import type { Camera, HudRects, Palette, Rect, RenderFrame } from './types'
  *
  * ## Three rules this file exists to keep
  *
- * **1. No `clearRect`, ever** (plan Decision 4). Three opaque fills cover the
- * canvas exactly once — the top band, the grid land band, the HUD band — and
- * everything else draws on top. A `clearRect` plus a land fill covers it twice;
- * at M2's regime on the M0 device that is a wasted full-canvas pass of
- * **1,412,880 device px, ~0.141 ms — more than the entire road layer costs**.
- * The rule this creates is unforgiving: *every* pixel of the canvas must be
- * covered by one of those three fills each frame, or the previous frame ghosts.
- * `DrawContext` below deliberately does not declare `clearRect`, so reaching for
- * it is a type error as well as a test failure.
+ * **1. No `clearRect`, ever** (plan Decision 4). **Five** opaque fills cover the
+ * canvas exactly once — the top band, the two letterbox columns, the playfield,
+ * and the bottom band — and everything else draws on top. A `clearRect` plus a
+ * land fill covers it twice; at M2's regime on the M0 device that is a wasted
+ * full-canvas pass of **1,412,880 device px, ~0.141 ms — more than the entire
+ * road layer costs**. The rule this creates is unforgiving: *every* pixel of the
+ * canvas must be covered by one of those five fills each frame, or the previous
+ * frame ghosts. `DrawContext` below deliberately does not declare `clearRect`,
+ * so reaching for it is a type error as well as a test failure.
+ *
+ * **Five, not three — Task 9, and the pixel budget was RECOMPUTED rather than
+ * assumed.** The three-band form painted the letterbox in the **land** colour,
+ * so land ran to the screen edge and nothing on screen distinguished a tap on
+ * the rect's first column from a tap in the letterbox, which does nothing. On a
+ * phone that reads as an unresponsive game — an input-affordance defect, not a
+ * styling one. The playfield is now exactly the grid rect and everything outside
+ * it is `palette.background`, which is what that palette entry has always
+ * claimed to be (`palette.ts`: *"The letterbox outside the grid rect, and the top
+ * band"*). **A partition of the same canvas into more rectangles paints the same
+ * pixels**: the M0 device is still 812 x 1740 = 1,412,880 device px covered
+ * exactly once, and the whole cost of the change is **two extra `fillRect`
+ * calls** — 5 x 0.16 us + 1,412,880 / 10 Gpx/s = 0.1421 ms against 0.1418 ms, a
+ * 0.23% increase on a pass the plan already charges at 0.141 ms. Both figures are
+ * recomputed from the recording in `test/canvas.test.ts` rather than carried over.
+ *
+ * On the M0 device `originX` is 0 (406 = 14 x 29 exactly), so the two letterbox
+ * columns are zero-width there and the change is visible only at the grid rect's
+ * **bottom** edge — 40 CSS px on the M0 device, 49 on a 390 x 844 one, which is
+ * the strip a finger can actually land in. The zero-area fills are still issued,
+ * so the fill count does not vary with the viewport and the tiling assertion
+ * stays uniform; a `fillRect` of zero width paints nothing on a real context.
  *
  * **2. Nothing allocates here.** No array literal, no object literal, no closure,
  * no string concatenation. The two places that would have — `hudRects`'s output
@@ -271,22 +293,33 @@ function tilesText(tilesLeft: number): string {
  * Draws one frame. Nine phases, in this order, and the order is load-bearing:
  *
  * ```
- * 1 top band fill      2 grid land fill    3 non-land terrain
- * 4 roads              5 destinations      6 houses
- * 7 cars               8 HUD band fill     9 HUD content
+ * 1 top band + letterbox fills    2 playfield fill    3 non-land terrain
+ * 4 roads                         5 destinations      6 houses
+ * 7 cars                          8 bottom band fill  9 HUD content
  * ```
  *
- * **The three fills are three full-width horizontal bands, and that is forced
- * rather than chosen.** Plan Decision 4 requires the three to cover the canvas
- * *exactly once* — its own frame model charges them at 1,412,880 device px,
- * which is the M0 device's entire backing store — and three rectangles can
- * partition a rectangle only as three bands. The consequence, stated rather than
- * discovered: the horizontal letterbox beside the grid rect (6 CSS px a side on
- * a 390 px viewport, 0 on the M0 device) and the vertical gap between the grid
- * rect and the HUD band are painted in the **land** colour rather than the
- * background one. Task 3's "the leftover is background" describes the fit, not
- * the fill; making it literally true costs either five fills or an overlap, and
- * an overlap is the thing Decision 4 struck out.
+ * **The five fills partition the canvas, and the count is forced rather than
+ * chosen.** Plan Decision 4 requires them to cover the canvas *exactly once* —
+ * its own frame model charges that at 1,412,880 device px, the M0 device's whole
+ * backing store — and the complement of an interior rectangle inside a rectangle
+ * needs **four** rectangles, so painting the playfield as its own rect is five
+ * fills, not the "fourth fill" Task 9's brief names. The four background pieces
+ * would be five if the vertical gap below the grid rect and the HUD band were
+ * kept apart, and they are not: both are `palette.background`, so one fill from
+ * the grid rect's bottom edge to the canvas bottom covers the gap, the HUD band
+ * and the bottom safe-area inset together.
+ *
+ * **The bottom fill stays after the cars, which is where the old HUD band fill
+ * was, and that is load-bearing.** It is the only thing stopping a sprite that
+ * overhangs the grid rect from painting into the HUD band and staying there
+ * forever — there is no `clearRect` coming. The consequence is new and
+ * deliberate: a car driving off the rect's **bottom** edge is now clipped at that
+ * edge (up to 3/4 of a tile of overhang) instead of trailing across the gap, so
+ * the playfield reads as a hard rectangle. The two letterbox columns are painted
+ * *before* the content, so a car at the left or right edge still straddles it —
+ * asymmetric, inherited rather than introduced, and 0 CSS px wide on the M0
+ * device anyway. This also implements half of what the note below says M1d must
+ * do when the revealed rect becomes dynamic.
  *
  * **The band edges are snapped to whole device pixels, and that is a fix for a
  * real ghosting seam rather than tidiness.** `fitCamera` works in integer CSS
@@ -313,12 +346,13 @@ function tilesText(tilesLeft: number): string {
  * would also stop a partially-visible building painting into the HUD band).
  *
  * **Cars are culled by their own position and not by anything the buildings do,
- * and a car in the rect's last column or row paints up to `tileSize / 4` CSS px
- * into the letterbox.** That is correct — the letterbox is part of band 2, and
- * the sprite is centred on a position the sim genuinely put at the edge — and
- * the reason it never reaches the HUD is the **draw order**: the HUD band is
- * phase 8 and cars are phase 7, so the band paints over anything that spilled.
- * Not anchor culling, which is the buildings' protection and not the cars'.
+ * and a car near the rect's last column or row overhangs it by up to
+ * `3 * tileSize / 4` CSS px.** That is correct — the sprite is centred on a
+ * position the sim genuinely put at the edge — and the reason it never reaches
+ * the HUD is the **draw order**: the bottom band is phase 8 and cars are phase
+ * 7, so it paints over anything that spilled below the grid rect. Not anchor
+ * culling, which is the buildings' protection and not the cars'. Sideways the
+ * overhang survives, because the two letterbox columns are phase 1.
  */
 export function drawFrame(
   ctx: DrawContext,
@@ -335,21 +369,38 @@ export function drawFrame(
   // same rounding, or the last device row/column is outside every band.
   const right = deviceEdge(camera.cssW, dpr)
   const bottom = deviceEdge(camera.cssH, dpr)
-  // Clamped into `[0, bottom]` and kept monotone, so the three bands tile the
-  // ON-CANVAS area for every viewport including the degenerate ones `fitCamera`
-  // clamps for: at `cssH = 0` the plain formula gives `originY = -41` and a
-  // negative-height fill, which the canvas normalises but which is a wasted
-  // call and a geometry no test should have to reason about.
+  // Clamped and kept monotone, so the five fills tile the ON-CANVAS area for
+  // every viewport including the degenerate ones `fitCamera` clamps for: at
+  // `cssH = 0` the plain formula gives `originY = -41` and a negative-height
+  // fill, which the canvas normalises but which is a wasted call and a geometry
+  // no test should have to reason about. At `cssW = 0` the same happens
+  // horizontally — `originX = -7` at a clamped tile of 1 — and the two letterbox
+  // clamps collapse the playfield to zero width rather than to a negative one.
   const gridTop = clamp(deviceEdge(camera.originY, dpr), 0, bottom)
-  const bandTop = clamp(deviceEdge(camera.hudTop, dpr), gridTop, bottom)
+  const gridBottom = clamp(
+    deviceEdge(camera.originY + camera.rows * camera.tileSize, dpr),
+    gridTop,
+    bottom,
+  )
+  const gridLeft = clamp(deviceEdge(camera.originX, dpr), 0, right)
+  const gridRight = clamp(
+    deviceEdge(camera.originX + camera.cols * camera.tileSize, dpr),
+    gridLeft,
+    right,
+  )
 
-  // 1. The top band: the canvas top down to the grid rect's top edge.
+  // 1. The background matte, in three pieces: the top band down to the grid
+  //    rect, then the letterbox column on each side of it. The fourth piece is
+  //    phase 8, because it has to paint over the cars.
   ctx.fillStyle = palette.background
   ctx.fillRect(0, 0, right, gridTop)
+  ctx.fillRect(0, gridTop, gridLeft, gridBottom - gridTop)
+  ctx.fillRect(gridRight, gridTop, right - gridRight, gridBottom - gridTop)
 
-  // 2. The grid land band: down to the HUD band's top edge.
+  // 2. The playfield: exactly the grid rect, and the only land on the canvas.
+  //    `drawTerrain` relies on this having covered every LAND cell already.
   ctx.fillStyle = palette.land
-  ctx.fillRect(0, gridTop, right, bandTop - gridTop)
+  ctx.fillRect(gridLeft, gridTop, gridRight - gridLeft, gridBottom - gridTop)
 
   drawTerrain(ctx, frame, palette)
   drawRoads(ctx, frame, atlas)
@@ -357,12 +408,15 @@ export function drawFrame(
   drawHouses(ctx, frame, palette)
   drawCars(ctx, frame, palette)
 
-  // 8. The HUD band: down to the canvas BOTTOM, not merely to the band's own
-  // height. The bottom safe-area inset lives under the band, and a fill that
-  // stops at `hudTop + hudHeight` leaves it holding the previous frame forever
-  // — there is no clearRect coming to fix it.
+  // 8. The bottom band: from the grid rect's bottom edge down to the canvas
+  // BOTTOM, not merely to the HUD band's own height. It covers three things at
+  // once — the vertical gap between the grid rect and the band, the band, and
+  // the bottom safe-area inset under it. A fill that started at `hudTop` would
+  // leave the gap painted land (the defect this task closes) and one that
+  // stopped at `hudTop + hudHeight` would leave the inset holding the previous
+  // frame forever; there is no clearRect coming to fix either.
   ctx.fillStyle = palette.background
-  ctx.fillRect(0, bandTop, right, bottom - bandTop)
+  ctx.fillRect(0, gridBottom, right, bottom - gridBottom)
 
   drawHud(ctx, frame, palette)
 }

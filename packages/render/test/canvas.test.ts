@@ -565,33 +565,134 @@ function painted(log: readonly Command[]): Painted[] {
 }
 
 /**
- * The three full-canvas-width band fills, in issue order.
- *
- * Classified by `x === 0 && w === cssW` and nothing else — no content rect can
- * be that wide (the widest is a 3-tile destination footprint, 198 of 400 CSS
- * px), and the classifier therefore uses the camera rather than any knowledge of
- * `drawFrame`'s structure. Every caller asserts the count is 3, which is what
- * makes it a non-vacuous filter.
+ * How many opaque fills partition the canvas. **Five since Task 9**, and the
+ * count is derived rather than chosen: the complement of an interior rectangle
+ * inside a rectangle needs four rectangles, so painting the playfield as its own
+ * rect is 1 + 4. Two of the four (the vertical gap below the grid rect and the
+ * HUD band) are merged into one fill because both are `palette.background`.
  */
-function isBand(p: Painted, camera: Camera): boolean {
-  // Full canvas width **in device pixels**, because the band edges are snapped
-  // to the device grid and `w` is therefore `round(cssW × dpr) / dpr` rather
-  // than `cssW` itself (411 becomes 411.333 at DPR 1.5). Still camera-derived
-  // and still unambiguous: the widest content rect is a 3-tile destination
-  // footprint, 198 of 400+ CSS px.
-  return p.x === 0 && Math.round(p.w * camera.dpr) === Math.round(camera.cssW * camera.dpr)
+const FILL_COUNT = 5
+
+/**
+ * The opaque matte fills that partition the canvas, in issue order.
+ *
+ * **Classified by fill STYLE, not by geometry, and that is a change Task 9
+ * forced.** The three-band form could be classified by `x === 0 && w === cssW`;
+ * the two letterbox columns are 2 CSS px wide on fixture B and 0 on the M0
+ * device, so no width test separates them from content.
+ *
+ * `background` and `land` are the only two palette entries the matte uses and
+ * the only two no content path can ever produce: `drawTerrain` *skips* every
+ * LAND cell precisely because the playfield fill has already covered it, water /
+ * mountain / tree / roadEdge / uiText / groups are the rest of the palette, and
+ * `groupColour`'s out-of-range fallback is `uiText`. So the partition is exact
+ * in both directions, and every caller asserts the count is `FILL_COUNT`, which
+ * is what keeps the filter non-vacuous.
+ */
+function isMatte(p: Painted): boolean {
+  return (
+    p.command.op === 'fillRect' &&
+    (p.command.fillStyle === PALETTE.background || p.command.fillStyle === PALETTE.land)
+  )
 }
 
-function bands(log: readonly Command[], camera: Camera): Painted[] {
-  return painted(log).filter((p) => isBand(p, camera))
+function bands(log: readonly Command[]): Painted[] {
+  return painted(log).filter(isMatte)
 }
 
-/** Everything painted that is NOT one of the three bands. */
-function content(log: readonly Command[], camera: Camera): Painted[] {
+/** Everything painted that is NOT one of the matte fills. */
+function content(log: readonly Command[]): Painted[] {
   const all = painted(log)
-  const rest = all.filter((p) => !isBand(p, camera))
-  expect(all.length - rest.length, 'exactly three full-width band fills').toBe(3)
+  const rest = all.filter((p) => !isMatte(p))
+  expect(all.length - rest.length, `exactly ${FILL_COUNT} matte fills`).toBe(FILL_COUNT)
   return rest
+}
+
+/** A rectangle in whole DEVICE pixels, half-open on the right and bottom. */
+interface DeviceRect {
+  readonly x0: number
+  readonly y0: number
+  readonly x1: number
+  readonly y1: number
+}
+
+/**
+ * A matte fill's rect in device px, **asserting on the way that every edge is
+ * already whole there**.
+ *
+ * That assertion is the Task 5 ghosting fix, generalised to four edges instead
+ * of two: `fitCamera` works in integer CSS px and `DPR_CAP_LOW` is 1.5, so an
+ * odd CSS edge lands on a half device pixel and the device row underneath gets
+ * two source-over passes at alpha 0.5 instead of one opaque pass — it keeps 25%
+ * of the previous frame. CSS-space tiling cannot see it.
+ */
+function deviceRect(p: Painted, dpr: number): DeviceRect {
+  const edges = [p.x, p.y, p.x + p.w, p.y + p.h]
+  for (const edge of edges) {
+    const device = edge * dpr
+    expect(
+      Math.abs(device - Math.round(device)),
+      `CSS ${edge} is device ${device}, a half pixel`,
+    ).toBeLessThan(1e-9)
+  }
+  return {
+    x0: Math.round(p.x * dpr),
+    y0: Math.round(p.y * dpr),
+    x1: Math.round((p.x + p.w) * dpr),
+    y1: Math.round((p.y + p.h) * dpr),
+  }
+}
+
+function deviceArea(r: DeviceRect): number {
+  return Math.max(0, r.x1 - r.x0) * Math.max(0, r.y1 - r.y0)
+}
+
+function overlapArea(a: DeviceRect, b: DeviceRect): number {
+  return (
+    Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0)) *
+    Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0))
+  )
+}
+
+/**
+ * The whole tiling proof, in **device** space, for any arrangement of fills.
+ *
+ * Three properties together are what "covered exactly once" means, and no two of
+ * them imply the third: every fill is on-canvas, no two overlap, and the areas
+ * sum to the backing store. The old cursor walk could only express a vertical
+ * strip and would have accepted a run of negative-height fills; this cannot.
+ *
+ * Returns the total device area, which is Decision 4's own budget figure.
+ */
+function assertExactTiling(strip: readonly Painted[], camera: Camera): number {
+  const dpr = camera.dpr
+  const width = Math.round(camera.cssW * dpr)
+  const height = Math.round(camera.cssH * dpr)
+  expect(strip.length, `${FILL_COUNT} matte fills`).toBe(FILL_COUNT)
+
+  const rects = strip.map((p) => deviceRect(p, dpr))
+  let area = 0
+  for (const r of rects) {
+    expect(r.x0, 'a fill starts left of the canvas').toBeGreaterThanOrEqual(0)
+    expect(r.y0, 'a fill starts above the canvas').toBeGreaterThanOrEqual(0)
+    expect(r.x1, 'a fill runs past the canvas width').toBeLessThanOrEqual(width)
+    expect(r.y1, 'a fill runs past the canvas height').toBeLessThanOrEqual(height)
+    expect(r.x1 - r.x0, 'a negative-width fill').toBeGreaterThanOrEqual(0)
+    expect(r.y1 - r.y0, 'a negative-height fill').toBeGreaterThanOrEqual(0)
+    area += deviceArea(r)
+  }
+  for (let i = 0; i < rects.length; i++) {
+    for (let j = i + 1; j < rects.length; j++) {
+      expect(
+        overlapArea(rects[i] as DeviceRect, rects[j] as DeviceRect),
+        `fills ${i} and ${j} overlap`,
+      ).toBe(0)
+    }
+  }
+  // With every fill on-canvas and no two overlapping, an area equal to the
+  // backing store is exactly "no gap".
+  expect(area, 'a gap: the fills do not cover the whole backing store').toBe(width * height)
+  return area
 }
 
 /** The content paints covering a CSS point, half-open on the right and bottom. */
@@ -683,12 +784,18 @@ describe('drawFrame: the entire recorded frame, hand-written', () => {
     const log = draw(frameB(), atlas)
 
     expect(log).toEqual([
-      // 1. the top band: canvas top down to the grid rect
+      // 1. the background matte, in three pieces: the top band down to the grid
+      //    rect, then a letterbox column on each side of it. `originX` is 2 on
+      //    this fixture, so both columns have real width and a dropped one is
+      //    visible here rather than only on a 390 px phone.
       set('fillStyle', BACKGROUND),
       fill(BACKGROUND, 0, 0, 400, 192),
-      // 2. the grid land band: down to the HUD band's top edge
+      fill(BACKGROUND, 0, 192, 2, 264),
+      fill(BACKGROUND, 398, 192, 2, 264),
+      // 2. the playfield: EXACTLY the grid rect (2, 192)-(398, 456), and the
+      //    only land on the canvas. 6 cols x 66 = 396 wide, 4 rows x 66 = 264 high.
       set('fillStyle', LAND),
-      fill(LAND, 0, 192, 400, 416),
+      fill(LAND, 2, 192, 396, 264),
       // 3. non-land terrain, row-major over the revealed rect only, and with a
       //    cell on each of the four bounds (review I1)
       set('fillStyle', WATER),
@@ -724,9 +831,12 @@ describe('drawFrame: the entire recorded frame, hand-written', () => {
       fill(GROUP[1] as string, 150.5, 406.5, 33, 33),
       set('fillStyle', GROUP[3] as string),
       fill(GROUP[3] as string, 315.5, 340.5, 33, 33),
-      // 8. the HUD band, down to the canvas bottom (the safe-area inset included)
+      // 8. the bottom band: from the grid rect's bottom edge (456) down to the
+      //    canvas bottom — the vertical gap, the HUD band and the safe-area
+      //    inset in one fill, and issued after the cars so nothing spilling out
+      //    of the playfield survives into the HUD.
       set('fillStyle', BACKGROUND),
-      fill(BACKGROUND, 0, 608, 400, 92),
+      fill(BACKGROUND, 0, 456, 400, 244),
       // 9. HUD content
       set('font', HUD_FONT),
       set('textAlign', 'center'),
@@ -828,17 +938,21 @@ describe('the draw order the plan calls load-bearing', () => {
     const log = draw(frameB(), atlas)
 
     const topBand = indexOfRect(log, 0, 0, 400, 192)
-    const landBand = indexOfRect(log, 0, 192, 400, 416)
+    const leftBox = indexOfRect(log, 0, 192, 2, 264)
+    const rightBox = indexOfRect(log, 398, 192, 2, 264)
+    const landBand = indexOfRect(log, 2, 192, 396, 264)
     const terrain = indexOfRect(log, 68, 192, 66, 66) // the water cell
     const road = indexOfRect(log, 134, 258, 66, 66) // the blit
     const dest = indexOfRect(log, 200, 192, 198, 132) // the footprint
     const carpark = indexOfRect(log, 150.5, 208.5, 33, 33)
     const house = indexOfRect(log, 13, 401, 44, 44)
     const car = indexOfRect(log, 150.5, 406.5, 33, 33)
-    const hudBand = indexOfRect(log, 0, 608, 400, 92)
+    const hudBand = indexOfRect(log, 0, 456, 400, 244)
     const hudText = log.findIndex((c) => c.op === 'fillText')
 
-    expect(topBand).toBeLessThan(landBand)
+    expect(topBand).toBeLessThan(leftBox)
+    expect(leftBox).toBeLessThan(rightBox)
+    expect(rightBox).toBeLessThan(landBand)
     expect(landBand).toBeLessThan(terrain)
     expect(terrain).toBeLessThan(road)
     expect(road).toBeLessThan(dest) // a road is legal on a carpark cell
@@ -851,7 +965,7 @@ describe('the draw order the plan calls load-bearing', () => {
   })
 })
 
-describe('no clearRect, and three opaque fills that tile the canvas exactly', () => {
+describe('no clearRect, and five opaque fills that tile the canvas exactly', () => {
   it('issues no clearRect anywhere', () => {
     // Plan Decision 4: a clearRect plus a land fill covers the canvas twice. At
     // M2's regime on the M0 device that is a wasted full-canvas pass —
@@ -873,80 +987,147 @@ describe('no clearRect, and three opaque fills that tile the canvas exactly', ()
     expect(ctx.log).toEqual([{ op: 'clearRect', x: 1, y: 2, w: 3, h: 4 }])
   })
 
-  it('tiles the canvas with exactly three bands: no gap, no overlap, asserted against the camera', () => {
+  it('tiles the canvas with exactly five fills: no gap, no overlap, asserted against the camera', () => {
     const camera = cameraB()
-    const strip = bands(draw(frameB(), atlasAt(B_TILE_DEVICE)), camera)
+    const strip = bands(draw(frameB(), atlasAt(B_TILE_DEVICE)))
 
-    expect(strip.length).toBe(3)
-    // Every band spans the full width, and the three heights partition [0, cssH).
-    let cursor = 0
-    let area = 0
-    for (const band of strip) {
-      expect(band.x).toBe(0)
-      expect(band.w).toBe(camera.cssW)
-      expect(band.y, 'a gap or an overlap between two bands').toBe(cursor)
-      expect(band.h).toBeGreaterThan(0)
-      cursor = band.y + band.h
-      area += band.w * band.h
-    }
-    expect(cursor, 'the last band must reach the canvas bottom').toBe(camera.cssH)
-    expect(area).toBe(camera.cssW * camera.cssH)
+    assertExactTiling(strip, camera)
 
-    // And the two cut lines are the camera's own, not free parameters: the grid
-    // rect's top edge and the HUD band's top edge.
-    expect(strip.map((b) => b.y)).toEqual([0, camera.originY, camera.hudTop])
-    expect(strip.map((b) => b.h)).toEqual([
-      camera.originY,
-      camera.hudTop - camera.originY,
-      camera.cssH - camera.hudTop,
+    // Every cut line is the camera's own, not a free parameter: the grid rect's
+    // four edges. `originX = 2` and `originY = 192` differ, and neither equals
+    // the far edge, so a swapped axis and a dropped origin both move a literal.
+    const gridRight = camera.originX + camera.cols * camera.tileSize
+    const gridBottom = camera.originY + camera.rows * camera.tileSize
+    expect(strip.map((b) => [b.x, b.y, b.w, b.h])).toEqual([
+      [0, 0, camera.cssW, camera.originY],
+      [0, camera.originY, camera.originX, gridBottom - camera.originY],
+      [gridRight, camera.originY, camera.cssW - gridRight, gridBottom - camera.originY],
+      [camera.originX, camera.originY, gridRight - camera.originX, gridBottom - camera.originY],
+      [0, gridBottom, camera.cssW, camera.cssH - gridBottom],
     ])
-    // Hand-written, so the camera fields above cannot both drift together.
-    expect(strip.map((b) => [b.y, b.h])).toEqual([
-      [0, 192],
-      [192, 416],
-      [608, 92],
+    // Hand-written, so the camera fields above cannot all drift together.
+    expect(strip.map((b) => [b.x, b.y, b.w, b.h])).toEqual([
+      [0, 0, 400, 192],
+      [0, 192, 2, 264],
+      [398, 192, 2, 264],
+      [2, 192, 396, 264],
+      [0, 456, 400, 244],
     ])
   })
 
-  it('covers the M0 device’s whole backing store — plan Decision 4’s own 1,412,880 device px', () => {
-    // The plan's frame model charges exactly one full-canvas fill for the three
-    // bands. This is that number, recomputed from the recording: 406 x 870 CSS
-    // at the DPR-2 cap is 812 x 1740 device px.
-    const camera = cameraA()
-    const strip = bands(draw(frameA(), atlasAt(58)), camera)
-
-    expect(strip.length).toBe(3)
-    expect(strip.map((b) => [b.y, b.h])).toEqual([
-      [0, A_ORIGIN_Y],
-      [A_ORIGIN_Y, A_HUD_TOP - A_ORIGIN_Y],
-      [A_HUD_TOP, 870 - A_HUD_TOP],
-    ])
-    expect(strip.map((b) => [b.y, b.h])).toEqual([
-      [0, 86],
-      [86, 678],
-      [764, 106],
-    ])
-
-    const cssArea = strip.reduce((sum, b) => sum + b.w * b.h, 0)
-    expect(cssArea).toBe(406 * 870)
-    expect(camera.dpr).toBe(2)
-    expect(cssArea * camera.dpr * camera.dpr).toBe(1_412_880)
-    // The bottom band covers the 34 px home-indicator inset as well as the 72 px
-    // HUD band — 106, not 72. A band of exactly `hudHeight` leaves the inset
-    // holding the previous frame forever, and no clearRect is coming to fix it.
-    expect(strip[2]?.h).toBe(camera.hudHeight + 34)
-  })
-
-  it('fills all three bands with opaque palette colours', () => {
-    // "Opaque" is the property the whole no-clearRect design rests on: a
-    // translucent band would composite the previous frame instead of replacing
-    // it. Every palette entry is a preallocated #rrggbb literal with no alpha
-    // channel, and these three are asserted to be palette entries rather than
-    // some other string.
-    const strip = bands(draw(frameB(), atlasAt(B_TILE_DEVICE)), cameraB())
+  it('paints the playfield in LAND and everything outside it in BACKGROUND — the affordance itself', () => {
+    // Task 9's defect: the middle fill used to span the full canvas width, so
+    // land ran to the screen edge and nothing on screen told a player that a tap
+    // beside or below the board does nothing. `palette.background`'s own doc has
+    // always said it is "the letterbox outside the grid rect"; until this fill
+    // structure existed, no pixel was ever painted in it outside the two bands.
+    const camera = cameraB()
+    const strip = bands(draw(frameB(), atlasAt(B_TILE_DEVICE)))
     const styles = strip.map((b) => (b.command.op === 'fillRect' ? b.command.fillStyle : ''))
-    expect(styles).toEqual([BACKGROUND, LAND, BACKGROUND])
+    expect(styles).toEqual([BACKGROUND, BACKGROUND, BACKGROUND, LAND, BACKGROUND])
+
+    // Exactly one fill is land, and its rect IS the grid rect.
+    const land = strip.filter((_, i) => styles[i] === LAND)
+    expect(land.length).toBe(1)
+    expect([land[0]?.x, land[0]?.y, land[0]?.w, land[0]?.h]).toEqual([
+      camera.originX,
+      camera.originY,
+      camera.cols * camera.tileSize,
+      camera.rows * camera.tileSize,
+    ])
+
+    // "Opaque" is the property the whole no-clearRect design rests on: a
+    // translucent fill would composite the previous frame instead of replacing
+    // it. Every palette entry is a preallocated #rrggbb literal with no alpha.
     for (const style of styles) expect(style).toMatch(/^#[0-9a-f]{6}$/)
+    // And the two colours differ, or "its own colour" is not a distinction at all.
+    expect(BACKGROUND).not.toBe(LAND)
+  })
+
+  it('leaves NOTHING land-coloured in the letterbox or below the grid rect', () => {
+    // The other direction of the bullet above, and the one a reader would
+    // otherwise have to take on trust: no matte fill paints land at a CSS point
+    // that is not a board cell. Four probes, one past each edge of the grid
+    // rect and each exactly one CSS px outside it, so a fill one pixel too big
+    // is caught and a fill one pixel too small is caught by the tiling proof.
+    const camera = cameraB()
+    const strip = bands(draw(frameB(), atlasAt(B_TILE_DEVICE)))
+    const gridRight = camera.originX + camera.cols * camera.tileSize
+    const gridBottom = camera.originY + camera.rows * camera.tileSize
+    const probes: readonly (readonly [number, number, string])[] = [
+      [camera.originX - 1, camera.originY + 1, 'left letterbox'],
+      [gridRight, camera.originY + 1, 'right letterbox'],
+      [camera.originX + 1, camera.originY - 1, 'above the grid rect'],
+      [camera.originX + 1, gridBottom, 'below the grid rect'],
+    ]
+    for (const [px, py, where] of probes) {
+      const hit = covering(strip, px, py)
+      expect(hit.length, `${where} (${px}, ${py}) is covered by ${hit.length} fills, not 1`).toBe(1)
+      const style = hit[0]?.command.op === 'fillRect' ? hit[0].command.fillStyle : ''
+      expect(style, `${where} is painted land`).toBe(BACKGROUND)
+    }
+    // ...and the mirror probes, one CSS px INSIDE each edge, are land — without
+    // these the four above pass on a renderer that paints the whole canvas
+    // background and never draws a playfield at all.
+    const inside: readonly (readonly [number, number, string])[] = [
+      [camera.originX, camera.originY, 'the rect’s top-left cell'],
+      [gridRight - 1, camera.originY, 'the rect’s top-right cell'],
+      [camera.originX, gridBottom - 1, 'the rect’s bottom-left cell'],
+      [gridRight - 1, gridBottom - 1, 'the rect’s bottom-right cell'],
+    ]
+    for (const [px, py, where] of inside) {
+      const hit = covering(strip, px, py)
+      expect(hit.length, `${where} (${px}, ${py}) is covered by ${hit.length} fills, not 1`).toBe(1)
+      const style = hit[0]?.command.op === 'fillRect' ? hit[0].command.fillStyle : ''
+      expect(style, `${where} is not painted land`).toBe(LAND)
+    }
+  })
+
+  it('covers the M0 device’s whole backing store — plan Decision 4’s own 1,412,880 device px, RECOMPUTED', () => {
+    // Plan Decision 4 charges the matte at exactly one full-canvas fill:
+    // 406 x 870 CSS at the DPR-2 cap is 812 x 1740 = 1,412,880 device px.
+    //
+    // **Task 9 split the matte from three fills into five and the figure did not
+    // move, which is the whole point of recomputing it rather than assuming it:
+    // a partition of the same canvas into more rectangles paints the same
+    // pixels.** What changed is the CALL count, 3 -> 5, and under M0's own cost
+    // model (calls x 0.16 us + pixels / 10 Gpx/s) that is
+    // 0.1418 ms -> 0.1421 ms, a 0.23% increase on the pass.
+    const camera = cameraA()
+    const strip = bands(draw(frameA(), atlasAt(58)))
+
+    const deviceArea = assertExactTiling(strip, camera)
+    expect(camera.dpr).toBe(2)
+    expect(deviceArea).toBe(1_412_880)
+    expect(deviceArea).toBe(812 * 1740)
+    expect(deviceArea).toBe(406 * 870 * 2 * 2)
+
+    // On the M0 device `originX` is 0 — 406 = 14 x 29 exactly — so both
+    // letterbox columns are ZERO WIDTH and the whole visible change is at the
+    // grid rect's bottom edge. Recorded rather than left as a surprise: the
+    // fixture that exercises the columns is B, and it has to be.
+    expect(camera.originX).toBe(0)
+    expect(strip.map((b) => [b.x, b.y, b.w, b.h])).toEqual([
+      [0, 0, 406, A_ORIGIN_Y],
+      [0, A_ORIGIN_Y, 0, 638],
+      [406, A_ORIGIN_Y, 0, 638],
+      [0, A_ORIGIN_Y, 406, 638],
+      [0, A_ORIGIN_Y + 638, 406, 870 - A_ORIGIN_Y - 638],
+    ])
+    expect(strip.map((b) => [b.x, b.y, b.w, b.h])).toEqual([
+      [0, 0, 406, 86],
+      [0, 86, 0, 638],
+      [406, 86, 0, 638],
+      [0, 86, 406, 638],
+      [0, 724, 406, 146],
+    ])
+
+    // The bottom fill covers three things at once: the 40 CSS px gap between the
+    // grid rect and the HUD band — the strip a finger can land in, and the one
+    // this task's colour change is actually about — plus the 72 px band and the
+    // 34 px home-indicator inset. 40 + 72 + 34 = 146.
+    expect(A_HUD_TOP - (A_ORIGIN_Y + 638)).toBe(40)
+    expect(strip[4]?.h).toBe(40 + camera.hudHeight + 34)
   })
 })
 
@@ -1002,23 +1183,26 @@ describe('the bands tile the DEVICE grid too, which the DPR-1.5 cap breaks (revi
     }
   })
 
-  it('snaps ALL FOUR edges, not only the two that happen to be odd on one device', () => {
+  it('snaps ALL SIX cut lines, not only the two that happen to be odd on one device', () => {
     const camera = cameraD()
-    const strip = bands(draw(frameOn(camera, 24, 40), atlasAt(43)), camera)
+    const strip = bands(draw(frameOn(camera, 24, 40), atlasAt(43)))
     const dev = (v: number): number => Math.round(v * camera.dpr)
 
-    expect(strip.length).toBe(3)
-    // Hand-computed: round(411×1.5) = 617 wide; cuts at round(154.5) = 155,
-    // round(1228.5) = 1229, round(1372.5) = 1373.
+    // `assertExactTiling` checks every edge of every fill is whole in device
+    // space, which is six distinct cut lines now rather than four: canvas
+    // right/bottom, grid top/bottom, grid left/right.
+    assertExactTiling(strip, camera)
+
+    // Hand-computed at DPR 1.5, all six: 411 x 1.5 = 616.5 -> 617;
+    // 915 x 1.5 = 1372.5 -> 1373; originY 103 x 1.5 = 154.5 -> 155;
+    // gridBottom (103 + 22 x 29 = 741) x 1.5 = 1111.5 -> 1112;
+    // originX floor((411 - 406)/2) = 2, 2 x 1.5 = 3 (already whole);
+    // gridRight 408 x 1.5 = 612 (already whole).
+    expect([camera.originX, camera.originY, camera.tileSize]).toEqual([2, 103, 29])
     expect(dev(camera.cssW)).toBe(617)
-    expect(strip.map((b) => dev(b.y))).toEqual([0, 155, 1229])
-    expect(dev((strip[2]?.y ?? 0) + (strip[2]?.h ?? 0))).toBe(1373)
-    for (const band of strip) {
-      for (const edge of [band.x, band.y, band.x + band.w, band.y + band.h]) {
-        const device = edge * camera.dpr
-        expect(Math.abs(device - Math.round(device)), `CSS ${edge} -> device ${device}`).toBeLessThan(1e-9)
-      }
-    }
+    expect(dev(camera.cssH)).toBe(1373)
+    expect(strip.map((b) => dev(b.y))).toEqual([0, 155, 155, 155, 1112])
+    expect(strip.map((b) => dev(b.x))).toEqual([0, 0, 612, 3, 0])
   })
 
   it('is the viewport that proves it: a Pixel at LOW puts hudTop on a half device pixel', () => {
@@ -1030,24 +1214,16 @@ describe('the bands tile the DEVICE grid too, which the DPR-1.5 cap breaks (revi
     expect(915 * 1.5).toBe(1372.5)
   })
 
-  it('lands every band edge on a whole device pixel there', () => {
+  it('lands every fill edge on a whole device pixel there', () => {
     const camera = cameraC()
-    const strip = bands(draw(frameOn(camera, 24, 40), atlasAt(43)), camera)
-    expect(strip.length).toBe(3)
-    for (const band of strip) {
-      for (const edge of [band.x, band.y, band.x + band.w, band.y + band.h]) {
-        const device = edge * camera.dpr
-        expect(
-          Math.abs(device - Math.round(device)),
-          `CSS ${edge} is device ${device}, a half pixel`,
-        ).toBeLessThan(1e-9)
-      }
-    }
+    // `deviceRect`, called for every fill inside `assertExactTiling`, is the
+    // half-pixel assertion; this test exists so its failure names this viewport.
+    assertExactTiling(bands(draw(frameOn(camera, 24, 40), atlasAt(43))), camera)
   })
 
   it('tiles the backing store exactly in DEVICE pixels: 618 x 1373, no gap, no overlap', () => {
     const camera = cameraC()
-    const strip = bands(draw(frameOn(camera, 24, 40), atlasAt(43)), camera)
+    const strip = bands(draw(frameOn(camera, 24, 40), atlasAt(43)))
     const dev = (v: number): number => Math.round(v * camera.dpr)
 
     // The backing store Task 8 must allocate, hand-computed:
@@ -1055,61 +1231,79 @@ describe('the bands tile the DEVICE grid too, which the DPR-1.5 cap breaks (revi
     const width = dev(camera.cssW)
     const height = dev(camera.cssH)
     expect([width, height]).toEqual([618, 1373])
+    expect(assertExactTiling(strip, camera)).toBe(width * height)
 
-    let cursor = 0
-    let area = 0
-    for (const band of strip) {
-      expect(dev(band.x)).toBe(0)
-      expect(dev(band.x + band.w)).toBe(width)
-      expect(dev(band.y), 'a gap or an overlap in DEVICE space').toBe(cursor)
-      cursor = dev(band.y + band.h)
-      area += width * (cursor - dev(band.y))
-    }
-    expect(cursor).toBe(height)
-    expect(area).toBe(width * height)
-    // The device rows the seam used to split: 153 (clean either way) and 1229.
-    expect(strip.map((b) => dev(b.y))).toEqual([0, 153, 1229])
+    // The device rows the seam used to split: 153 (clean either way) and the
+    // grid rect's bottom, 102 + 22 x 29 = 740, 740 x 1.5 = 1110.
+    expect(strip.map((b) => dev(b.y))).toEqual([0, 153, 153, 153, 1110])
   })
 
   it('still tiles exactly in CSS space at DPR 2, where the snapping is the identity', () => {
     // The fix must not perturb the integral case: at the universal cap of 2 with
     // an integer CSS camera, round(v * 2) / 2 === v, so every literal in this
     // file is unchanged by it.
-    expect(bands(draw(frameA(), atlasAt(58)), cameraA()).map((b) => [b.y, b.h])).toEqual([
-      [0, 86],
-      [86, 678],
-      [764, 106],
+    expect(bands(draw(frameA(), atlasAt(58))).map((b) => [b.x, b.y, b.w, b.h])).toEqual([
+      [0, 0, 406, 86],
+      [0, 86, 0, 638],
+      [406, 86, 0, 638],
+      [0, 86, 406, 638],
+      [0, 724, 406, 146],
     ])
-    expect(bands(draw(frameB(), atlasAt(B_TILE_DEVICE)), cameraB()).map((b) => [b.y, b.h])).toEqual([
-      [0, 192],
-      [192, 416],
-      [608, 92],
+    expect(bands(draw(frameB(), atlasAt(B_TILE_DEVICE))).map((b) => [b.x, b.y, b.w, b.h])).toEqual([
+      [0, 0, 400, 192],
+      [0, 192, 2, 264],
+      [398, 192, 2, 264],
+      [2, 192, 396, 264],
+      [0, 456, 400, 244],
     ])
   })
 
-  it('keeps the three bands on-canvas and contiguous on a degenerate viewport (review M2)', () => {
+  it('keeps all five fills on-canvas and non-overlapping on a degenerate viewport (review M2)', () => {
     // `fitCamera` clamps `tileSize` to 1 on a transiently zero-sized viewport —
-    // a hidden webview, a measurement mid-rotation — and the plain band formula
-    // then gives `originY = -41` and a negative-height fill. The canvas
-    // normalises it, so this was never a coverage hole, but the shipped tiling
-    // walk PASSED on it with `cursor` running negative, which means the test
-    // was one assertion away from accepting a geometry it never saw.
-    const camera = fitCamera(
+    // a hidden webview, a measurement mid-rotation — and the plain formula then
+    // gives `originY = -41` and a negative-height fill. The canvas normalises
+    // it, so this was never a coverage hole, but the shipped tiling walk PASSED
+    // on it with `cursor` running negative, which means the test was one
+    // assertion away from accepting a geometry it never saw.
+    //
+    // Task 9 adds the horizontal half of the same hazard, and it is NOT the same
+    // fixture: `cssH = 0` alone leaves `originX` positive. `cssW = 0` is what
+    // drives `originX` negative — floor((0 - 6)/2) = -3 at a clamped tile of 1 —
+    // and without the `gridLeft`/`gridRight` clamps that is a negative-width
+    // letterbox fill and a playfield running off the left of the canvas.
+    for (const [cssW, cssH] of [
+      [40, 0],
+      [0, 40],
+      [0, 0],
+    ] as const) {
+      const camera = fitCamera(
+        { cssW, cssH, topInset: 0, bottomInset: 0, rawDpr: 2, performanceClass: null },
+        { x0: 1, y0: 1, cols: 6, rows: 4 },
+      )
+      expect(camera.tileSize, `${cssW}x${cssH}`).toBe(1)
+      const strip = bands(draw(frameOn(camera, B_W, B_H), atlasAt(2)))
+      expect(assertExactTiling(strip, camera), `${cssW}x${cssH}`).toBe(
+        Math.round(camera.cssW * camera.dpr) * Math.round(camera.cssH * camera.dpr),
+      )
+    }
+  })
+
+  it('is not vacuous: the degenerate viewports really do drive an origin negative on each axis', () => {
+    // Without this the loop above passes on three viewports that never reach the
+    // clamps at all, which is the fixture-too-permissive shape.
+    const tall = fitCamera(
       { cssW: 40, cssH: 0, topInset: 0, bottomInset: 0, rawDpr: 2, performanceClass: null },
       { x0: 1, y0: 1, cols: 6, rows: 4 },
     )
-    expect(camera.tileSize).toBe(1)
-    expect(camera.originY).toBeLessThan(0)
+    expect(tall.originY, 'cssH = 0 must drive originY negative').toBeLessThan(0)
+    expect(tall.originX, 'cssH = 0 leaves originX positive — it cannot test the columns').toBeGreaterThanOrEqual(0)
 
-    const strip = bands(draw(frameOn(camera, B_W, B_H), atlasAt(2)), camera)
-    expect(strip.length).toBe(3)
-    let cursor = 0
-    for (const band of strip) {
-      expect(band.y).toBe(cursor)
-      expect(band.h, 'a negative-height fill').toBeGreaterThanOrEqual(0)
-      cursor = band.y + band.h
-    }
-    expect(cursor).toBe(Math.max(0, camera.cssH))
+    const narrow = fitCamera(
+      { cssW: 0, cssH: 40, topInset: 0, bottomInset: 0, rawDpr: 2, performanceClass: null },
+      { x0: 1, y0: 1, cols: 6, rows: 4 },
+    )
+    expect(narrow.originX, 'cssW = 0 must drive originX negative').toBeLessThan(0)
+    expect(narrow.originX + narrow.cols * narrow.tileSize, 'and gridRight past the canvas').toBeGreaterThan(0)
   })
 })
 
@@ -1123,7 +1317,7 @@ describe('the transform: a car at a fractional grid position', () => {
     // resolved this position before the frame was handed over, and drawing it
     // is one multiply.
     const camera = cameraA()
-    const paints = content(draw(frameA(), atlasAt(58)), camera)
+    const paints = content(draw(frameA(), atlasAt(58)))
     expect(paints.length).toBe(1)
     expect(paints[0]?.command).toEqual({
       op: 'fillRect',
@@ -1145,8 +1339,7 @@ describe('the transform: a car at a fractional grid position', () => {
     // the CSS centre is `gridToScreen(cell) + tileSize / 2` — the one place in
     // `render` where the two coordinate conventions meet.
     const frame = frameB()
-    const camera = frame.camera
-    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)), camera)
+    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)))
     // Car 0 sits at exactly (3, 4). Its rect must be centred in that cell.
     const car = paints.find((p) => p.w === 33 && p.h === 33 && p.y === 406.5)
     expect(car).toBeDefined()
@@ -1181,7 +1374,7 @@ describe('the liveness prefixes: counts, not array lengths', () => {
     // Only reading `[0, count)` can.
     const frame = frameB()
     const camera = frame.camera
-    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)), camera)
+    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)))
     const px = bx(camera.x0) + B_TILE / 2
     const py = by(camera.y0) + B_TILE / 2
     expect([px, py]).toEqual([35, 225])
@@ -1233,19 +1426,21 @@ describe('terrain: the drawing half of the fold', () => {
     // time per cell is the double-coverage plan Decision 4 exists to remove.
     const frame = frameB()
     frame.terrainClass[2 * B_W + 1] = TerrainClass.LAND // (1, 2) was a tree
-    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)), frame.camera)
+    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)))
     const centre = covering(paints, bx(1) + 33, by(2) + 33)
     expect(centre).toEqual([])
 
-    // The other half of the claim: that point IS covered, by the land band.
-    const landBand = bands(draw(frame, atlasAt(B_TILE_DEVICE)), frame.camera)[1]
+    // The other half of the claim: that point IS covered, by the playfield fill
+    // — index 3 of the matte since Task 9 (top band, two letterbox columns,
+    // playfield, bottom band).
+    const landBand = bands(draw(frame, atlasAt(B_TILE_DEVICE)))[3]
     expect(landBand?.command.op === 'fillRect' ? landBand.command.fillStyle : '').toBe(LAND)
     expect(covering(landBand === undefined ? [] : [landBand], bx(1) + 33, by(2) + 33).length).toBe(1)
   })
 
   it('draws a tree on the same cell when the class is TREE, inset so land shows around it', () => {
     const frame = frameB() // (1, 2) is TREE
-    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)), frame.camera)
+    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)))
     const centre = covering(paints, bx(1) + 33, by(2) + 33)
     expect(centre.length).toBe(1)
     expect(centre[0]?.command).toEqual(fill(TREE, 18.5, 274.5, 33, 33))
@@ -1273,7 +1468,7 @@ describe('terrain: the drawing half of the fold', () => {
     // states a behaviour with no test behind it reads exactly like coverage.
     const frame = frameB()
     frame.terrainClass[1 * B_W + 2] = 9 // the water cell
-    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)), frame.camera)
+    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)))
     expect(covering(paints, bx(2) + 33, by(1) + 33)).toEqual([])
   })
 
@@ -1399,36 +1594,57 @@ describe('culling: only cells inside the revealed rect are drawn', () => {
     }
   })
 
-  it('lets a car on the rect’s last row spill into the letterbox, and the HUD band covers it', () => {
-    // Review M6, and it corrects an attribution the first report got wrong. A
-    // car is centred on its resolved position, so one at the rect's last row
-    // paints `tileSize / 4` CSS px BELOW the grid rect — into the letterbox,
-    // which is part of band 2 and was drawn earlier, so the spill persists.
-    // That is correct: the sim genuinely put the car there. What stops it
-    // reaching the HUD is the DRAW ORDER — the band is phase 8 and cars are
-    // phase 7 — and not the anchor culling, which is the buildings' protection
-    // and does not apply to cars at all.
-    const frame = frameB()
-    // 4.75 is inside the rect (`gy < y0 + rows` = 5) and dyadic, so exact in a
-    // Float32Array. Centre y = 390 + 0.75 × 66 + 33 = 472.5; the sprite spans
-    // [456, 489] and the grid rect ends at 456.
-    frame.carXY[1] = 4.75
-    const camera = frame.camera
+  it('CLIPS a car overhanging the rect’s bottom edge, and lets one overhanging a side edge stand', () => {
+    // Review M6 established that a car is centred on its resolved position, so
+    // one near the rect's far row or column overhangs the grid rect. It is NOT
+    // culled — `insideRevealed` is half-open — and what happens to the overhang
+    // is decided entirely by the DRAW ORDER of the matte fill on that side.
+    //
+    // **Task 9 made the two sides differ, deliberately, and this pins it as a
+    // rule rather than leaving it an accident.** The bottom fill is phase 8,
+    // after the cars, because it is the only thing keeping a sprite out of the
+    // HUD band — so the bottom overhang is now clipped at the playfield edge,
+    // which is what makes the playfield read as a hard rectangle. The two
+    // letterbox columns are phase 1, before the cars, so a side overhang stands.
+    const camera = cameraB()
     const gridBottom = by(camera.y0 + camera.rows - 1) + B_TILE
-    expect(gridBottom).toBe(456)
+    const gridRight = bx(camera.x0 + camera.cols - 1) + B_TILE
+    expect([gridBottom, gridRight]).toEqual([456, 398])
 
-    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)), camera)
-    const car = paints.find((p) => p.w === 33 && p.h === 33 && p.y === 456)
-    expect(car, 'the car at the rect’s last row').toBeDefined()
-    expect((car?.y ?? 0) + (car?.h ?? 0), 'the car spills past the grid rect').toBe(489)
-    expect(489).toBeGreaterThan(gridBottom)
+    // --- the bottom edge: drawn, then painted over ---
+    // 4.75 is inside the rect (`gy < y0 + rows` = 5) and dyadic, so exact in a
+    // Float32Array. Centre y = 390 + 0.75 x 66 + 33 = 472.5; the sprite spans
+    // [456, 489], entirely below the grid rect.
+    const below = frameB()
+    below.carXY[1] = 4.75
+    const belowLog = draw(below, atlasAt(B_TILE_DEVICE))
+    const belowCar = content(belowLog).find((p) => p.w === 33 && p.h === 33 && p.y === 456)
+    expect(belowCar, 'the car at the rect’s last row').toBeDefined()
+    expect((belowCar?.y ?? 0) + (belowCar?.h ?? 0), 'the car spills past the grid rect').toBe(489)
 
-    // It is NOT culled — `insideRevealed` is half-open and 4.75 < 5 — and what
-    // keeps the spill out of the HUD is the draw order, asserted as an index.
-    const log = draw(frame, atlasAt(B_TILE_DEVICE))
-    const hudBand = bands(log, camera)[2]
-    expect(hudBand?.y).toBe(camera.hudTop)
-    expect(hudBand?.index ?? -1).toBeGreaterThan(car?.index ?? 0)
+    const bottomFill = bands(belowLog)[4]
+    expect(bottomFill?.y, 'the bottom fill must start at the grid rect, not at hudTop').toBe(gridBottom)
+    expect(bottomFill?.index ?? -1, 'the bottom fill must be issued AFTER the cars').toBeGreaterThan(
+      belowCar?.index ?? 0,
+    )
+    // ...and it really does cover the overhang, both ends of it.
+    expect(covering(bands(belowLog), 200, 456).length).toBe(1)
+    expect(covering(bands(belowLog), 200, 488).length).toBe(1)
+
+    // --- a side edge: drawn, and NOT painted over ---
+    // 6.75 is inside the rect (`gx < x0 + cols` = 7). Centre x = 2 + 5.75 x 66
+    // + 33 = 414.5; the sprite spans [398, 431], starting exactly at gridRight.
+    const beside = frameB()
+    beside.carXY[0] = 6.75
+    beside.carXY[1] = 3
+    const besideLog = draw(beside, atlasAt(B_TILE_DEVICE))
+    const besideCar = content(besideLog).find((p) => p.w === 33 && p.h === 33 && p.x === 398)
+    expect(besideCar, 'the car at the rect’s last column').toBeDefined()
+    const rightBox = bands(besideLog)[2]
+    expect(rightBox?.x, 'the right letterbox column').toBe(gridRight)
+    expect(rightBox?.index ?? 0, 'the letterbox must be issued BEFORE the cars').toBeLessThan(
+      besideCar?.index ?? 0,
+    )
   })
 
   it('draws no house, destination or car whose cell is outside the rect', () => {

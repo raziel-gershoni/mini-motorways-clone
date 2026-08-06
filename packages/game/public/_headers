@@ -1,0 +1,15 @@
+# Spec §8.5. Telegram Desktop caches Mini App bundles somewhere its own
+# cache-clear does not reach, and `index.html` is the one file in this build
+# whose URL never changes — Vite content-hashes every asset it links to. A
+# cached `index.html` therefore pins a client to a dead asset hash permanently,
+# and the player sees a blank board with no way to fix it from their side.
+#
+# Both `/` and `/index.html` are listed because they are two URLs for one
+# document and a rule on one does not cover the other. Everything else — the
+# hashed `/assets/*.js` and `/assets/*.css` — is immutable by construction and
+# deliberately left to the default long cache.
+/
+  Cache-Control: no-store, must-revalidate
+
+/index.html
+  Cache-Control: no-store, must-revalidate

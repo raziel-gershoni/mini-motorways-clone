@@ -222,3 +222,129 @@ describe('the root "lint" script is not silently narrowed (M7)', () => {
     expect(rootPkg.scripts?.lint).toBe('eslint .')
   })
 })
+
+/**
+ * **The root scripts reach five packages, and none of them shadows another.**
+ *
+ * Task 9's own coverage bullet, and the thing that replaced the plan's deleted
+ * "the sim's four goldens are unchanged by anything in `game` or `render`" —
+ * which could not fail, because `packages/sim/test/loop.test.ts` already reads
+ * the golden literals off disk on every run and no code path in the new packages
+ * can reach a sim golden.
+ *
+ * This one CAN fail. The root scripts are
+ * `pnpm -r --filter './packages/*' --filter './tools/*' <script>`, and `pnpm -r
+ * run` matches by **directory glob** but resolves by **package name**: two
+ * workspace packages sharing a `name` is not an error at install time and the
+ * second silently shadows the first in every dependent's `node_modules`. With
+ * four `@laneways/*` packages sharing a prefix, a copy-pasted `package.json` is
+ * one keystroke away from it, and the symptom is a suite that still exits 0
+ * while one package's sources are never imported by anybody.
+ */
+describe('the workspace resolves every package distinctly, and the root scripts reach all of them', () => {
+  const PROJECTS = [
+    'packages/shared',
+    'packages/sim',
+    'packages/render',
+    'packages/game',
+    'tools/eslint-rules',
+  ] as const
+
+  it('every workspace package has a DISTINCT name', () => {
+    const names = PROJECTS.map(
+      (dir) => (readPackageJsonAt(join(REPO_ROOT, dir, 'package.json')) as { name?: string }).name,
+    )
+    // Vacuity: five real names, not five `undefined`s from a mistyped path.
+    for (const [i, name] of names.entries()) {
+      expect(name, `${PROJECTS[i]}/package.json has no "name"`).toBeTruthy()
+    }
+    expect(new Set(names).size, `duplicate package names: ${names.join(', ')}`).toBe(PROJECTS.length)
+  })
+
+  it('every workspace package declares the two scripts the root scripts run', () => {
+    // `pnpm -r run` SKIPS a package with no such script and fails only if NONE
+    // has it — verified live in this file's earlier block. So a package can ship
+    // with zero tests and a green CI, and the only detector is reading each
+    // package.json directly. The `render`/`game` pair is asserted above and
+    // duplicated into `boundary.test.ts`; this is the same check widened to the
+    // two packages that predate this milestone plus the eslint rules.
+    for (const dir of PROJECTS) {
+      const scripts = readPackageJsonAt(join(REPO_ROOT, dir, 'package.json')).scripts ?? {}
+      expect(scripts.test, `${dir} has no "test" script`).toBeDefined()
+      expect(scripts.typecheck, `${dir} has no "typecheck" script`).toBeDefined()
+    }
+  })
+
+  it('the root scripts still filter on both globs, so neither tree is dropped', () => {
+    const root = readPackageJsonAt(join(REPO_ROOT, 'package.json'))
+    for (const script of ['test', 'typecheck'] as const) {
+      const value = root.scripts?.[script] ?? ''
+      expect(value, `root "${script}" no longer covers packages/*`).toContain("'./packages/*'")
+      expect(value, `root "${script}" no longer covers tools/*`).toContain("'./tools/*'")
+    }
+  })
+
+  it('packages/game declares the build and deploy toolchain as DEV dependencies only', () => {
+    // The Global Constraint is **zero runtime dependencies**. `vite` and
+    // `wrangler` exist for `pnpm build` and `pnpm deploy` and must never be
+    // reachable from a `dependencies` graph, or the claim stops being true the
+    // first time somebody bundles the package.
+    const pkg = readPackageJsonAt(join(REPO_ROOT, 'packages', 'game', 'package.json')) as {
+      scripts?: Record<string, string>
+      dependencies?: Record<string, string>
+      devDependencies?: Record<string, string>
+    }
+    expect(Object.keys(pkg.devDependencies ?? {}).sort()).toEqual(['vite', 'wrangler'])
+    // Every runtime dependency is a workspace sibling — no third-party code at all.
+    for (const [name, range] of Object.entries(pkg.dependencies ?? {})) {
+      expect(range, `${name} is not a workspace dependency`).toMatch(/^workspace:/)
+    }
+    expect(pkg.scripts?.build).toBe('vite build')
+    expect(pkg.scripts?.deploy).toContain('wrangler deploy')
+  })
+
+  it('the deployed Worker is OURS and does not repoint the M0 spike', () => {
+    // Plan Decision 10. `spike/wrangler.jsonc` is `laneways-spike`, is still
+    // deployed, and still accepts `POST /api/result` into a live D1 database;
+    // `wrangler deploy` keys on `name`, so sharing one would replace it.
+    // `spike/` is also outside this workspace and outside `eslint.config.js`'s
+    // scope, so nothing else in this suite would notice.
+    // Read as CONFIG, not as text: both files are JSONC and this one explains
+    // itself at length in `//` comments, which name `laneways-spike` in prose.
+    // Asserting over the raw bytes would make the negative below true only until
+    // somebody documented why it is there.
+    const strip = (jsonc: string): string =>
+      jsonc
+        .split('\n')
+        .filter((line) => !line.trimStart().startsWith('//'))
+        .join('\n')
+    const ours = strip(readFileSync(join(REPO_ROOT, 'packages', 'game', 'wrangler.jsonc'), 'utf8'))
+    const spike = strip(readFileSync(join(REPO_ROOT, 'spike', 'wrangler.jsonc'), 'utf8'))
+    expect(ours).toContain('"name": "laneways"')
+    expect(spike).toContain('"name": "laneways-spike"')
+    expect(ours, 'this config names the spike — deploying it would REPLACE it').not.toContain(
+      'laneways-spike',
+    )
+    // Vacuity: the stripper must not have eaten the file. Both configs still
+    // parse as JSON once the comments are gone, and both still declare a name.
+    expect((JSON.parse(ours) as { name: string }).name).toBe('laneways')
+    expect((JSON.parse(spike) as { name: string }).name).toBe('laneways-spike')
+    // Static assets only: no Worker script and no database binding.
+    expect(ours, 'a static-asset deploy must declare no `main`').not.toMatch(/"main"\s*:/)
+    expect(ours, 'M2 stores nothing; D1 is M3').not.toContain('d1_databases')
+    expect(spike, 'the spike is the one with the D1 binding, and must keep it').toContain('d1_databases')
+  })
+
+  it('the no-store rule ships, on both URLs for the one document', () => {
+    // Spec §8.5: Telegram Desktop caches Mini App bundles somewhere its own
+    // cache-clear does not reach, and `index.html` is the only file in the build
+    // whose URL never changes. Vite copies `public/` verbatim into `dist/`.
+    const headers = readFileSync(join(REPO_ROOT, 'packages', 'game', 'public', '_headers'), 'utf8')
+    const rules = headers
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'))
+      .join('\n')
+    expect(rules).toMatch(/^\/\s*\n\s+Cache-Control: no-store, must-revalidate/m)
+    expect(rules).toMatch(/^\/index\.html\s*\n\s+Cache-Control: no-store, must-revalidate/m)
+  })
+})

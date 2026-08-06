@@ -506,7 +506,7 @@ describe('two passes, and the rebuild driven by the tile device size', () => {
  * live — the same reason `renderDirections.test.ts` and
  * `renderFootprint.test.ts` live here.
  */
-describe('the three bands tile the backing store the shell actually created', () => {
+describe('the five matte fills tile the backing store the shell actually created', () => {
   interface Fill {
     x: number
     y: number
@@ -595,20 +595,55 @@ describe('the three bands tile the backing store the shell actually created', ()
     it(`covers every device pixel exactly once on ${name}`, () => {
       const { fills, canvas } = bandsFor(view)
       // An empty board: all terrain LAND, no roads, no buildings, no cars, not
-      // paused. So the only fills are the three bands.
-      expect(fills.length).toBe(3)
+      // paused. So the only fills are the five matte fills — the top band, a
+      // letterbox column each side of the playfield, the playfield, and the
+      // bottom band.
+      expect(fills.length).toBe(5)
       const dpr = view.performanceClass === 'LOW' ? Math.min(view.rawDpr, 1.5) : Math.min(view.rawDpr, 2)
 
-      let y = 0
-      for (const fill of fills) {
-        expect(fill.x).toBe(0)
-        // Every band spans the full backing-store width, to the device pixel.
-        expect(Math.round(fill.w * dpr)).toBe(canvas.width)
-        expect(Math.round(fill.y * dpr)).toBe(y)
-        y = Math.round((fill.y + fill.h) * dpr)
+      // **A partition proof, not a strip walk.** Since Task 9 the fills are not
+      // a vertical strip, so the cursor form cannot express them — and it could
+      // never express "no overlap" either, only "each starts where the last
+      // ended". Three properties, none implied by the other two: every fill is
+      // on the backing store, no two overlap, and the areas sum to it.
+      const rects = fills.map((f) => {
+        for (const edge of [f.x, f.y, f.x + f.w, f.y + f.h]) {
+          const device = edge * dpr
+          expect(
+            Math.abs(device - Math.round(device)),
+            `CSS ${edge} is device ${device}, a half pixel — Task 5's ghosting seam`,
+          ).toBeLessThan(1e-9)
+        }
+        return {
+          x0: Math.round(f.x * dpr),
+          y0: Math.round(f.y * dpr),
+          x1: Math.round((f.x + f.w) * dpr),
+          y1: Math.round((f.y + f.h) * dpr),
+        }
+      })
+      let area = 0
+      for (const r of rects) {
+        expect(r.x0).toBeGreaterThanOrEqual(0)
+        expect(r.y0).toBeGreaterThanOrEqual(0)
+        expect(r.x1, 'a fill runs past the backing store').toBeLessThanOrEqual(canvas.width)
+        expect(r.y1, 'a fill runs past the backing store').toBeLessThanOrEqual(canvas.height)
+        area += Math.max(0, r.x1 - r.x0) * Math.max(0, r.y1 - r.y0)
       }
-      // and the last one ends exactly at the last device row the shell created.
-      expect(y).toBe(canvas.height)
+      for (let i = 0; i < rects.length; i++) {
+        for (let j = i + 1; j < rects.length; j++) {
+          const a = rects[i] as { x0: number; y0: number; x1: number; y1: number }
+          const b = rects[j] as { x0: number; y0: number; x1: number; y1: number }
+          const overlap =
+            Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0)) *
+            Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0))
+          expect(overlap, `fills ${i} and ${j} overlap — a doubly-covered device row`).toBe(0)
+        }
+      }
+      // Exactly the backing store the SHELL created, which is the whole point of
+      // this file owning the assertion: `round(cssW * dpr) x round(cssH * dpr)`.
+      expect(area, 'a gap — device pixels holding the previous frame forever').toBe(
+        canvas.width * canvas.height,
+      )
     })
   }
 

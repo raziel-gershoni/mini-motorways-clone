@@ -5,11 +5,19 @@
   "main": "./src/index.ts",
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dev": "vite",
+    "build": "vite build",
+    "deploy": "vite build && wrangler deploy",
+    "verify-deploy": "node scripts/verify-deploy.js"
   },
   "dependencies": {
     "@laneways/render": "workspace:*",
     "@laneways/shared": "workspace:*",
     "@laneways/sim": "workspace:*"
+  },
+  "devDependencies": {
+    "vite": "^7.3.6",
+    "wrangler": "^4.118.0"
   }
 }

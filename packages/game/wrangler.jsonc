@@ -1,0 +1,38 @@
+{
+  // Plan Decision 10: **a new Worker of our own, outside `spike/`.**
+  //
+  // There is exactly one other Worker config in this repo — `spike/wrangler.jsonc`,
+  // `name: laneways-spike` — and it is still deployed, still serving the M0
+  // measurement harness, and still accepting `POST /api/result` into a live D1
+  // database. The Global Constraints forbid touching `spike/`, so "modify the
+  // existing Worker config" was either forbidden by this plan's own rule or a
+  // repoint of a deployed artefact somebody is still collecting data from.
+  //
+  // This one is a **different `name`**, which is what makes it a different
+  // Worker: `wrangler deploy` keys on it. `laneways-spike` stays where it is.
+  "name": "laneways",
+
+  // **No `main`, and that is the deliberate difference from the spike.** M2 is a
+  // static-asset deploy: there is no server-side code, no route handler and
+  // nothing to store until M3's persistence. Adding `main` here would also mean
+  // adding an `assets.binding`, which only exists so a Worker script can serve
+  // assets itself — and the whole point is that no script runs.
+  //
+  // **No `d1_databases`, for the same reason and one more.** The spike's binding
+  // names a real database with real rows in it; declaring the same binding here
+  // would put a second Worker on it, and M2 submits nothing to a leaderboard
+  // anyway (the starting city is out of band, so an M2 run is not replayable —
+  // see `src/startingCity.ts`).
+  "compatibility_date": "2026-08-06",
+
+  "assets": {
+    // Vite's `build.outDir`. `public/_headers` is copied in here verbatim and is
+    // what Cloudflare's static-asset server reads for the `no-store` rule on
+    // `/` and `/index.html` (spec §8.5).
+    "directory": "./dist"
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}
