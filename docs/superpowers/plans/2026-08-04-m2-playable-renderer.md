@@ -552,6 +552,16 @@ Pointer events → tile coordinates (via `render`'s `screenToGrid`, Decision 5) 
 
 ---
 
+> **Critical gap inherited from Task 7 — M2 as planned is not playable, and this task closes it.**
+>
+> **There is no way for a player to reach erase mode.** Task 7 implemented `toggleEraseMode` correctly and made erase an orthogonal mode flag that no gesture can reach — which is right, because spec §7.3 forbids erase-on-tap and erase-on-long-press. But `hudRects` has exactly three elements (clock, score, tiles-left), **none of them a toggle**, and §8.3 bars putting a control in the top band. So the shipped build can draw roads and never remove one.
+>
+> This is the same class as the missing spawner the plan review caught: every task correct in isolation, and the milestone unable to meet its goal. It was invisible because Task 7 owns the *mechanism* and Task 8 owns the *surface*, and neither brief owned the connection.
+>
+> **Wire a DOM button to `toggleEraseMode`, outside the canvas.** Not a fourth canvas rect — that would move Task 5's fill-tiling arithmetic, which is asserted in device space and was the source of a ghosting seam. A DOM element sits above the canvas, needs no hit-test, and costs nothing in the frame loop. It must show which mode is active: an erase mode you cannot see you are in is worse than no erase mode, because roads vanish under a drag the player thinks is drawing.
+>
+> **Also fix here:** `packages/render/src/camera.ts`'s `hudRects` still carries the "there is no allocation profiler in this toolchain" comment. That claim has now been refuted twice and a working harness ships in `packages/game/test/allocation.test.ts`.
+
 ## Task 8: The Telegram shell — boot, the HTML, sizing, and the rebuild trigger
 
 **Files:**
