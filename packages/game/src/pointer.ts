@@ -64,11 +64,45 @@ import type { InputQueue } from './inputs'
  * **The affordance does not exist yet, and that is a gap in the plan rather
  * than an oversight here.** `hudRects` lays out exactly three elements — clock,
  * score, tiles — and none of them is a mode toggle, so in M2 as planned a
- * player has no way to reach erase mode at all. Adding a fourth canvas rect
- * would move Task 5's "the three opaque fills tile the canvas" arithmetic, so
- * the cheap fix belongs to Task 8/9: a DOM button in `index.html`, outside the
- * canvas (`touch-action: none` is on the canvas only), wired to
- * `toggleEraseMode`. Recorded at the API rather than discovered on a phone.
+ * player has no way to reach erase mode at all. A fourth canvas rect would move
+ * Task 5's "the three opaque fills tile the canvas" arithmetic, which is
+ * asserted, so the surface belongs to Task 8.
+ *
+ * **It must be Telegram's `MainButton`, not a DOM button, and the arithmetic
+ * says so.** `fitCamera` leaves **49 CSS px** of free strip on PHONE_390 and
+ * **40** on the M0 reference device, both below a 44 px touch target — "outside
+ * the canvas" is not a location on a phone. `MainButton` is native chrome: it
+ * reserves its own space so it costs no canvas geometry, it is thumb-reachable
+ * by construction, and it renders its own label and colour, which solves the
+ * real hazard here — an erase mode you cannot see you are in. Task 8 owns the
+ * wiring and must version-gate it like every other Telegram surface, with a
+ * plain DOM fallback for development outside Telegram and for clients below the
+ * gate.
+ *
+ * **The contract this module owes it** is three members and one guarantee:
+ * `setEraseMode(boolean)` and `toggleEraseMode(): boolean` to drive it,
+ * `eraseMode` to render its label and colour from, and — because `MainButton`
+ * is native chrome that a second finger CAN reach mid-stroke, unlike the
+ * canvas — the guarantee below.
+ *
+ * ---------------------------------------------------------------------------
+ * A STROKE'S MODE IS LATCHED AT `pointerdown`
+ * ---------------------------------------------------------------------------
+ *
+ * An earlier comment here claimed mid-stroke toggling was unreachable because
+ * the toggle lived outside the canvas and pointer capture held the stroke. That
+ * was true of a DOM button and is **false of `MainButton`**, which sits outside
+ * the webview's content area entirely. So rather than leave the claim
+ * contradicted by the control that ships:
+ *
+ *   - `move` uses `strokeErase`, latched from `erase` at `pointerdown`. A mode
+ *     change during a stroke never splits it into half road and half erasure.
+ *   - `setEraseMode`/`toggleEraseMode` still take effect immediately as the
+ *     *pending* mode, so the button's own label stays truthful the instant it
+ *     is pressed, and the new mode applies to the next stroke.
+ *
+ * Refusing the toggle outright would have been the other option and is worse:
+ * the button would show one state while the module held another.
  *
  * ---------------------------------------------------------------------------
  * THE DRAG WALKS CELLS, NOT SAMPLES
@@ -217,31 +251,69 @@ export interface PointerInput {
   readonly up: (pointerId: number) => PointerOutcomeCode
   /** `pointercancel`, and `lostpointercapture`. See the module comment. */
   readonly cancel: (pointerId: number) => PointerOutcomeCode
-  /** Erase mode — a MODE, set from outside. No gesture in this file changes it. */
+  /**
+   * Erase mode — a MODE, set from outside. No gesture in this file changes it.
+   * Takes effect immediately as the PENDING mode; a stroke already in progress
+   * finishes in the mode it started in. See the module comment.
+   */
   readonly setEraseMode: (erase: boolean) => void
-  /** Flips the mode and returns the new value, for a UI toggle to render. */
+  /** Flips the pending mode and returns the new value, for `MainButton` to render. */
   readonly toggleEraseMode: () => boolean
+  /** The pending mode — what `MainButton`'s label and colour should show. */
   readonly eraseMode: boolean
+  /**
+   * The mode the stroke in progress is committing, latched at `pointerdown`.
+   * Equal to `eraseMode` whenever no stroke is in progress. Exposed so the
+   * latch is observable rather than an internal detail nothing can check.
+   */
+  readonly strokeEraseMode: boolean
   /** True while a pointer owns the drag. */
   readonly dragging: boolean
   /** The owning `pointerId`, or -1 when no drag is active. */
   readonly activePointerId: number
   /** The cell the drag is currently standing on, or -1 when no drag is active. */
   readonly lastCell: number
+  /**
+   * Ends any drag in progress, unconditionally. The out-of-band recovery path:
+   * `main.ts` calls it on a Telegram `deactivated` event or a
+   * `visibilitychange` to hidden, where the webview may never deliver the
+   * `pointerup`. Returns `DRAG_END` if a drag was ended, `IGNORED` otherwise,
+   * and is idempotent.
+   */
+  readonly abort: () => PointerOutcomeCode
 }
 
 /**
- * The drag's three mutable numbers, in an `Int32Array` rather than closure
- * `let`s — see the module comment's allocation note. Named slot indices into a
- * typed array is this codebase's own idiom for exactly this trade (`H_TICK`,
- * `H_SCORE`, ... in `sim/state.ts`; `L_ACCUMULATOR` in `loop.ts`).
+ * The drag's three mutable numbers. Named slot indices into a typed array is
+ * this codebase's own idiom (`H_TICK`, `H_SCORE`, ... in `sim/state.ts`;
+ * `L_ACCUMULATOR` in `loop.ts`), and like those it never boxes.
+ *
+ * **`Float64Array`, not `Int32Array`, and that is a bug fix rather than a
+ * preference.** An `Int32Array` COERCES on write: `slots[0] = 2 ** 31` stores
+ * -2147483648, so a `pointerdown` carrying an id at or past 2^31 started a drag
+ * that **no `move`, `up` or `cancel` could ever match** — the comparison in
+ * `endDrag` and `move` fails forever, `dragging` stays true, and the
+ * single-pointer rule then refuses every subsequent `pointerdown`. Input died
+ * for the rest of the session, from one event.
+ *
+ * `PointerEvent.pointerId` is a WebIDL `long`, so a conforming browser cannot
+ * produce that id — which is exactly why the first version reasoned it away
+ * instead of testing it. A renderer must never be the thing that bricks the
+ * game on an out-of-contract input, and a `Float64Array` is exact for every
+ * value a `double` can hold, allocates nothing (measured 0.000 B/call over
+ * 500,000 assignments), and removes the coercion entirely. The recovery path in
+ * `down` below is the second half of the fix: even a latched drag now clears.
  */
 const D_POINTER_ID = 0
 const D_LAST_GX = 1
 const D_LAST_GY = 2
 const DRAG_SLOT_COUNT = 3
 
-/** No pointer owns the drag. Distinct from every real `pointerId`, which is >= 0. */
+/**
+ * No pointer owns the drag. Never compared against a real id without `dragging`
+ * being checked first, so an exotic client that really did send `pointerId = -1`
+ * would still work — `dragging` is the authority, this is a tidy-up value.
+ */
 const NO_POINTER = -1
 
 function inRect(rect: Rect, x: number, y: number): boolean {
@@ -249,7 +321,7 @@ function inRect(rect: Rect, x: number, y: number): boolean {
 }
 
 export function createPointerInput(host: PointerHost): PointerInput {
-  const slots = new Int32Array(DRAG_SLOT_COUNT)
+  const slots = new Float64Array(DRAG_SLOT_COUNT)
   slots[D_POINTER_ID] = NO_POINTER
 
   // Allocated once. `screenToGrid` and `hudRects` both take a caller-owned
@@ -259,7 +331,10 @@ export function createPointerInput(host: PointerHost): PointerInput {
 
   // Booleans are singletons and never box, so these stay as closure variables.
   let dragging = false
+  /** The mode the NEXT stroke will use. Set from outside; never by a gesture. */
   let erase = false
+  /** The mode the CURRENT stroke is using, latched at `pointerdown`. See below. */
+  let strokeErase = false
 
   function endDrag(pointerId: number): PointerOutcomeCode {
     if (!dragging || pointerId !== (slots[D_POINTER_ID] as number)) return PointerOutcome.IGNORED
@@ -269,9 +344,23 @@ export function createPointerInput(host: PointerHost): PointerInput {
   }
 
   function down(pointerId: number, clientX: number, clientY: number): PointerOutcomeCode {
-    // The single-pointer rule, ahead of everything: while a drag is live, a
-    // second finger cannot start a second drag AND cannot reach the HUD.
-    if (dragging) return PointerOutcome.REFUSED_SECOND_POINTER
+    if (dragging) {
+      // The single-pointer rule: while a drag is live, a second finger cannot
+      // start a second drag AND cannot reach the HUD.
+      if (pointerId !== (slots[D_POINTER_ID] as number)) {
+        return PointerOutcome.REFUSED_SECOND_POINTER
+      }
+      // **The recovery path.** A conforming browser cannot deliver two
+      // `pointerdown`s for the same active `pointerId` without an intervening
+      // `pointerup`/`pointercancel`, so receiving one means the end event was
+      // LOST — a backgrounded webview, a dropped Telegram event, a capture that
+      // went away without firing anything. Before this existed the drag was
+      // latched and the rule above refused every future tap, including the
+      // owner's, so the only recovery was reloading the Mini App. Ending the
+      // stale drag and falling through to start a fresh one at the new cell is
+      // what the player is asking for anyway.
+      endDrag(pointerId)
+    }
 
     const camera = host.camera()
     const left = host.canvasLeft()
@@ -301,6 +390,9 @@ export function createPointerInput(host: PointerHost): PointerInput {
       // rather than an accident.
       if (host.paused()) return PointerOutcome.REFUSED_PAUSED
       dragging = true
+      // Latched here, once. See `setEraseMode` for why a stroke does not change
+      // mode half way through.
+      strokeErase = erase
       slots[D_POINTER_ID] = pointerId
       slots[D_LAST_GX] = hit.gx
       slots[D_LAST_GY] = hit.gy
@@ -340,11 +432,9 @@ export function createPointerInput(host: PointerHost): PointerInput {
     // 27 CSS px tiles most of them land on the cell the drag is already on.
     if (gx === targetX && gy === targetY) return PointerOutcome.IGNORED
 
-    // Read once per move rather than once per drag: `main.ts`'s toggle lives
-    // outside the canvas and pointer capture means it cannot be pressed
-    // mid-stroke, so the two are equivalent today. Per-move is the form that
-    // stays correct if a future UI makes it reachable.
-    const kind: TickActionKind = erase ? 'erase' : 'place'
+    // The STROKE's mode, latched at `pointerdown` — not the live one. See
+    // `setEraseMode`.
+    const kind: TickActionKind = strokeErase ? 'erase' : 'place'
     const w = host.gridW
     const queue = host.queue
 
@@ -373,6 +463,11 @@ export function createPointerInput(host: PointerHost): PointerInput {
       return endDrag(pointerId)
     },
 
+    abort(): PointerOutcomeCode {
+      if (!dragging) return PointerOutcome.IGNORED
+      return endDrag(slots[D_POINTER_ID] as number)
+    },
+
     setEraseMode(next: boolean): void {
       erase = next
     },
@@ -383,11 +478,15 @@ export function createPointerInput(host: PointerHost): PointerInput {
     get eraseMode(): boolean {
       return erase
     },
+    get strokeEraseMode(): boolean {
+      return dragging ? strokeErase : erase
+    },
     get dragging(): boolean {
       return dragging
     },
     get activePointerId(): number {
-      return slots[D_POINTER_ID] as number
+      // -1 when idle, so the getter cannot be read as naming a live pointer.
+      return dragging ? (slots[D_POINTER_ID] as number) : NO_POINTER
     },
     get lastCell(): number {
       if (!dragging) return -1

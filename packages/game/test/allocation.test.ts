@@ -15,6 +15,7 @@ import { createFrameBuilder, createFrameDriver } from '../src/frame'
 import { initCarSnapshots } from '../src/resolve'
 import { createInputQueue, type InputQueue } from '../src/inputs'
 import { createLoop } from '../src/loop'
+import { CHECKOUT_ROOT, repoRelative } from './allocationPaths'
 import { PointerOutcome, createPointerInput, type PointerInput } from '../src/pointer'
 
 /**
@@ -119,7 +120,26 @@ interface Allocator {
   readonly bytes: number
 }
 
-const REPO_MARKER = '/mini-motorways-clone/'
+/**
+ * **The harness must fail loudly when it resolves nothing.** A measurement
+ * instrument that reports "clean" while measuring zero files is worse than no
+ * instrument, and that is exactly how the worktree failure hid: two guards
+ * passed vacuously and only the positive control noticed.
+ *
+ * Every profile of the real rig contains allocations from this test file itself
+ * (`drive`, `profileAllocations`), so `packages/game/` always resolves when the
+ * derivation is correct — which makes this a liveness check on the path
+ * arithmetic, not on the code under test.
+ */
+function assertScopeResolves(all: readonly Allocator[], scope: string): void {
+  if (all.some((a) => a.file.startsWith(scope))) return
+  throw new Error(
+    `allocation harness: nothing in the profile resolved under "${scope}", so every ` +
+      'budget assertion is vacuous — the path derivation is broken, not the code. ' +
+      `CHECKOUT_ROOT=${CHECKOUT_ROOT} sample files: ` +
+      all.slice(0, 4).map((a) => a.file).join(' | '),
+  )
+}
 
 /**
  * Runs `body` under the heap sampling profiler and returns every stack frame
@@ -167,9 +187,7 @@ function profileAllocations(body: () => void): Allocator[] {
   const walk = (node: ProfileNode): void => {
     if (node.selfSize > 0) {
       const fn = node.callFrame.functionName === '' ? '<top-level>' : node.callFrame.functionName
-      const url = node.callFrame.url
-      const at = url.lastIndexOf(REPO_MARKER)
-      const file = at === -1 ? url : url.slice(at + REPO_MARKER.length)
+      const file = repoRelative(node.callFrame.url)
       const key = `${fn} @ ${file}`
       totals.set(key, { key, functionName: fn, file, bytes: (totals.get(key)?.bytes ?? 0) + node.selfSize })
     }
@@ -492,6 +510,9 @@ describe('the frame loop allocates nothing, measured', () => {
     // assertion below. There is always inspector and module-loader noise in it.
     expect(all.length, 'the profile was empty').toBeGreaterThan(3)
 
+    // The scope must resolve something, or every assertion below is vacuous.
+    assertScopeResolves(all, GAME_PKG)
+
     const bad = offenders(all, PROFILED_FRAMES, GAME_SRC, BUDGETS)
     expect(bad, `unbudgeted per-frame allocation:\n${bad.join('\n')}`).toEqual([])
 
@@ -560,6 +581,7 @@ describe('the frame loop allocates nothing, measured', () => {
     expect(counters.actions).toBeGreaterThan(8000)
     expect(all.length, 'the profile was empty').toBeGreaterThan(3)
     expect(rig.queue.poolSize, 'the pool was still growing').toBe(poolAfterWarmup)
+    assertScopeResolves(all, GAME_PKG)
 
     const bad = offenders(all, PROFILED_FRAMES, GAME_SRC, BUDGETS)
     expect(bad, `unbudgeted per-frame allocation:\n${bad.join('\n')}`).toEqual([])
@@ -666,11 +688,17 @@ describe('the frame loop allocates nothing, measured', () => {
         `dirty ${dirtyPerFrame.toFixed(2)})`,
     ).toBeGreaterThan(20)
 
-    // (b) the guard's own predicate reaches the file and formats a report.
-    // **Labelled non-discriminating on its own, deliberately** — at `GAME_PKG`
-    // scope `loop.ts`'s residual is also charged to this test file, so the clean
-    // half produces the same match. What it pins is that `offenders` still walks
-    // the profile and still names the file; (a) is what says the file is dirty.
+    // (b) **the scope guard, and calling it anything less is what let a Critical
+    // through.** This is the only assertion in the file that requires
+    // `offenders` to resolve a real repo-relative path and name it; when the
+    // path derivation broke in a worktree, the two guards above passed
+    // vacuously and THIS is what went red. Task 7's report downgraded it to
+    // "non-discriminating" on the grounds that `loop.ts`'s residual also lands
+    // on this file — true, and beside the point: it does not discriminate
+    // DIRTINESS, it discriminates the harness pointing at something from the
+    // harness pointing at nothing. `assertScopeResolves` now states that
+    // directly at every call site; this stays as the end-to-end form of it.
+    assertScopeResolves(all, GAME_PKG)
     const bad = offenders(all, PROFILED_FRAMES, GAME_PKG, BUDGETS)
     expect(bad.join('\n')).toMatch(/packages\/game\/test\/allocation\.test\.ts at \d/)
   })

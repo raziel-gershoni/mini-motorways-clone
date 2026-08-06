@@ -32,8 +32,11 @@ import type { Camera, HudRects, Palette, Rect, RenderFrame } from './types'
  * **2. Nothing allocates here.** No array literal, no object literal, no closure,
  * no string concatenation. The two places that would have — `hudRects`'s output
  * and the HUD's four formatted numbers — are a module-level scratch object and a
- * value-keyed text cache respectively. There is no allocation profiler in this
- * toolchain and this file does not pretend otherwise: a Task 3 reviewer
+ * value-keyed text cache respectively. There IS an allocation profiler —
+ * `packages/game/test/allocation.test.ts`, built in Task 6 and pointed at the
+ * input path in Task 7 — and this file's draw path runs under it whenever
+ * `game` supplies the context; what it cannot see is a `render`-only call with
+ * no `game` caller. A Task 3 reviewer
  * reinstated an allocation and watched all 82 tests pass. Review is the only
  * check, so the rule is written where the code is.
  *

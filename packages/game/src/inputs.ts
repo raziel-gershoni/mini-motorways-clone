@@ -32,11 +32,14 @@ import type { TickAction, TickActionKind, TickInputs } from '@laneways/sim'
  * `loop.ts` owns the clear and calls it only once a tick has actually consumed
  * the batch.
  *
- * The one allocation this module cannot avoid is inside the JS engine:
- * `actions.length = 0` followed by re-growth may re-trim and re-grow the
- * array's backing store. That is not an object this code creates and there is
- * no allocation-free array shape with a `.length` `step` can iterate, so it is
- * recorded rather than hidden.
+ * **This module used to claim an unavoidable allocation, and it was wrong.**
+ * The header said `actions.length = 0` "may re-trim and re-grow the array's
+ * backing store … there is no allocation-free array shape with a `.length`
+ * `step` can iterate". It re-trims every time, at **152 bytes per clear**, and a
+ * pop loop measures 0.00 — see `clear()` below. The claim survived a whole task
+ * because `test/allocation.test.ts` profiled an IDLE queue and `clear()` never
+ * had anything to trim. **Nothing in this module allocates**, and the harness
+ * now drives a live drag through it to say so.
  */
 
 /** `TickAction` with its `readonly` modifiers dropped. Never exposed outside this module. */

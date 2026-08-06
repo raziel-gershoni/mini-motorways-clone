@@ -713,10 +713,16 @@ describe('allocation across a long drag', () => {
   /**
    * This kills the two allocations that exist on this path — "a fresh action
    * object per pointer event" and "a fresh `TickInputs` wrapper per tick" —
-   * and it proves nothing about global allocation-freedom. There is no
-   * allocation profiler in this toolchain, and a `process.memoryUsage()` delta
-   * across 1,000 frames is dominated by GC timing rather than by anything this
-   * code does. Construction and review are the rest of the enforcement.
+   * and it proves nothing about global allocation-freedom. A
+   * `process.memoryUsage()` delta across 1,000 frames would be dominated by GC
+   * timing rather than by anything this code does.
+   *
+   * **The rest of the enforcement is not "construction and review", which is
+   * what this comment used to say.** `test/allocation.test.ts` is a real
+   * sampling profile of 3,000 frames — with a live drag through `pointer.ts`
+   * since Task 7 — and it is what caught `clear()` allocating 152 bytes a tick
+   * on a path this identity test walks straight past: the pool is respected
+   * exactly as asserted below, and the ARRAY holding it was being re-grown.
    */
   it('passes an identity-equal TickInputs and only ever previously-seen actions', () => {
     const { loop, queue, rec } = rig()

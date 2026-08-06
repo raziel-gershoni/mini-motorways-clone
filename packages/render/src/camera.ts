@@ -298,9 +298,13 @@ export function hudRects(camera: Camera, out: HudRects): HudRects {
 
   // Written out rather than looped over `[out.clock, out.score, out.tiles]`:
   // that array literal is itself an allocation, once per call, in a function
-  // whose whole point is not to allocate. Caught by review of this file, not by
-  // a test — there is no allocation profiler in this toolchain and the plan
-  // does not pretend otherwise (Task 6 states the same limit).
+  // whose whole point is not to allocate.
+  //
+  // This comment used to end "caught by review of this file, not by a test —
+  // there is no allocation profiler in this toolchain". That claim was false
+  // and has now been refuted twice; `packages/game/test/allocation.test.ts`
+  // profiles this call under a live drag through `pointer.ts` and holds it to
+  // the same budget as everything else.
   setRect(out.clock, HUD_PAD_CSS, y, w, h)
   setRect(out.score, HUD_PAD_CSS + stride, y, w, h)
   setRect(out.tiles, HUD_PAD_CSS + 2 * stride, y, w, h)

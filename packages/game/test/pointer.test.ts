@@ -759,6 +759,35 @@ describe('erase is a MODE, never a tap and never a long-press', () => {
     ])
   })
 
+  it('latches the stroke’s mode at pointerdown — MainButton is reachable mid-stroke', () => {
+    // `MainButton` is native chrome outside the webview's content area, so
+    // unlike a DOM button a second finger CAN press it during a stroke. A
+    // stroke must not end up half road and half erasure.
+    const r = rig()
+    r.input.down(1, T8_14_X, T8_14_Y)
+    r.input.move(1, T9_14_X, T9_14_Y)
+    expect(r.input.toggleEraseMode()).toBe(true)
+    // the pending mode changed immediately, so the button's label stays honest
+    expect(r.input.eraseMode).toBe(true)
+    // ...and the stroke in progress did not
+    expect(r.input.strokeEraseMode).toBe(false)
+    r.input.move(1, T9_15_X, T9_15_Y)
+    expect(queued(r.queue).map((a) => a.kind)).toEqual(['place', 'place'])
+  })
+
+  it('applies the new mode to the NEXT stroke', () => {
+    // The other half: latching must not mean the toggle is ignored.
+    const r = rig()
+    r.input.down(1, T8_14_X, T8_14_Y)
+    r.input.move(1, T9_14_X, T9_14_Y)
+    r.input.toggleEraseMode()
+    r.input.up(1)
+    expect(r.input.strokeEraseMode).toBe(true)
+    r.input.down(2, T9_14_X, T9_14_Y)
+    r.input.move(2, T9_15_X, T9_15_Y)
+    expect(queued(r.queue).map((a) => a.kind)).toEqual(['place', 'erase'])
+  })
+
   it('is not entered or left by any gesture in this module', () => {
     // Spec §7.3's whole point: no tap and no long-press changes the mode, so a
     // player trying to move the camera cannot delete a road by accident.
@@ -837,6 +866,114 @@ describe('pointercancel ends the drag', () => {
     expect(viaUp.input.dragging).toBe(viaCancel.input.dragging)
     expect(viaUp.input.activePointerId).toBe(viaCancel.input.activePointerId)
     expect(viaUp.queue.length).toBe(viaCancel.queue.length)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The latch, and its recovery
+// ---------------------------------------------------------------------------
+
+describe('a pointerId that does not fit an int32', () => {
+  /**
+   * The bug this fixture exists for: the drag slots were an `Int32Array`, which
+   * COERCES on write, so `down(2**31)` stored -2147483648 and no later event
+   * could match. `dragging` stayed true forever and the single-pointer rule then
+   * refused every subsequent `pointerdown` — **input died for the rest of the
+   * session, from one event.**
+   *
+   * A conforming browser cannot send this: `PointerEvent.pointerId` is a WebIDL
+   * `long`. That is precisely why it was reasoned away instead of tested, and
+   * why the test is here now — a renderer must never be the thing that bricks
+   * the game on an out-of-contract input.
+   */
+  const HUGE = 2 ** 31
+  const HUGER = 2 ** 40 + 3
+
+  for (const id of [HUGE, HUGER, -7, 0]) {
+    it(`round-trips a drag owned by pointerId ${id}`, () => {
+      const r = rig()
+      expect(r.input.down(id, T8_14_X, T8_14_Y)).toBe(PointerOutcome.DRAG_START)
+      expect(r.input.activePointerId).toBe(id)
+      expect(r.input.move(id, T9_14_X, T9_14_Y)).toBe(PointerOutcome.DRAW)
+      expect(queued(r.queue)).toEqual([{ kind: 'place', a: CELL_8_14, b: CELL_9_14 }])
+      expect(r.input.up(id)).toBe(PointerOutcome.DRAG_END)
+      expect(r.input.dragging).toBe(false)
+    })
+  }
+
+  it('does not confuse two ids that an int32 would collapse together', () => {
+    // -2147483648 is what `Int32Array` turned 2**31 into. The two must stay
+    // distinct owners, or the coercion bug is back in a different shape.
+    const r = rig()
+    r.input.down(HUGE, T8_14_X, T8_14_Y)
+    expect(r.input.move(-2147483648, T9_14_X, T9_14_Y)).toBe(PointerOutcome.IGNORED)
+    expect(r.queue.length).toBe(0)
+    expect(r.input.up(-2147483648)).toBe(PointerOutcome.IGNORED)
+    expect(r.input.dragging).toBe(true)
+  })
+
+  it('does not brick the session — a later ordinary drag still works', () => {
+    // The end-to-end form: the failure mode was never "this one drag broke", it
+    // was "everything after it broke".
+    const r = rig()
+    r.input.down(HUGE, T8_14_X, T8_14_Y)
+    r.input.up(HUGE)
+    expect(r.input.down(1, T11_15_X, T11_15_Y)).toBe(PointerOutcome.DRAG_START)
+    expect(r.input.move(1, T9_18_X, T9_18_Y)).toBe(PointerOutcome.DRAW)
+    expect(r.queue.length).toBe(3)
+  })
+})
+
+describe('a drag whose end event was lost has a recovery path', () => {
+  it('lets the OWNING pointer’s next down end the stale drag and start a fresh one', () => {
+    // A conforming browser cannot deliver two `pointerdown`s for the same active
+    // pointerId, so one means the up/cancel was lost — a backgrounded webview, a
+    // dropped Telegram event. Before this, the drag latched and the
+    // single-pointer rule refused even its owner: the only recovery was
+    // reloading the Mini App.
+    const r = rig()
+    r.input.down(1, T8_14_X, T8_14_Y)
+    expect(r.input.down(1, T11_15_X, T11_15_Y)).toBe(PointerOutcome.DRAG_START)
+    expect(r.input.dragging).toBe(true)
+    expect(r.input.activePointerId).toBe(1)
+    // and it restarts AT THE NEW CELL, not from the abandoned one
+    expect(r.input.lastCell).toBe(CELL_11_15)
+    expect(r.queue.length).toBe(0)
+    r.input.move(1, T9_18_X, T9_18_Y)
+    expect(queued(r.queue)[0]?.a).toBe(CELL_11_15)
+  })
+
+  it('still refuses a DIFFERENT pointer, so the recovery is not a hole in the rule', () => {
+    // Discriminator: the recovery must key on the owning id, or it is just the
+    // single-pointer rule deleted.
+    const r = rig()
+    r.input.down(1, T8_14_X, T8_14_Y)
+    expect(r.input.down(2, T11_15_X, T11_15_Y)).toBe(PointerOutcome.REFUSED_SECOND_POINTER)
+    expect(r.input.activePointerId).toBe(1)
+    expect(r.input.lastCell).toBe(CELL_8_14)
+  })
+
+  it('abort() ends a drag out of band, and is idempotent', () => {
+    // `main.ts` calls this on a Telegram `deactivated` or a visibilitychange,
+    // where the webview may never deliver the pointerup.
+    const r = rig()
+    expect(r.input.abort()).toBe(PointerOutcome.IGNORED)
+    r.input.down(1, T8_14_X, T8_14_Y)
+    expect(r.input.abort()).toBe(PointerOutcome.DRAG_END)
+    expect(r.input.dragging).toBe(false)
+    expect(r.input.abort()).toBe(PointerOutcome.IGNORED)
+    // and it does not latch: a distant move after the abort draws nothing
+    expect(r.input.move(1, T14_20_X, T14_20_Y)).toBe(PointerOutcome.IGNORED)
+    expect(r.queue.length).toBe(0)
+  })
+
+  it('reports activePointerId as -1 when idle rather than a stale owner', () => {
+    const r = rig()
+    expect(r.input.activePointerId).toBe(-1)
+    r.input.down(9, T8_14_X, T8_14_Y)
+    expect(r.input.activePointerId).toBe(9)
+    r.input.cancel(9)
+    expect(r.input.activePointerId).toBe(-1)
   })
 })
 
@@ -952,6 +1089,26 @@ describe('board input while paused', () => {
 // The transform is reused, not reimplemented
 // ---------------------------------------------------------------------------
 
+/**
+ * **What the scan catches, stated narrowly, because it was oversold.**
+ *
+ * Task 7's review verified three evasions that pass all four scan assertions
+ * and all of the behavioural tests: a helper in a sibling file, computed
+ * property keys (`camera['tile' + 'Size']`), and re-deriving the HUD layout from
+ * `cssW`/`hudTop`/`hudHeight`, which were not on the forbidden list. Two are
+ * closed below — the forbidden list now includes the camera's canvas and band
+ * fields, and the relative-import set is pinned so a sibling helper cannot
+ * appear without the scan seeing it. Computed keys are not closed and cannot be
+ * by a name scan.
+ *
+ * So: **the scan's unique catch is one narrow shape** — a plainly-written second
+ * inverse appearing in this file — and it is worth exactly that. It does not
+ * catch a *buggy* second inverse; the behavioural probes do, and they are the
+ * real guard. The 308-cell sweep, the six-region agreement probe and the HUD
+ * band sweep all compare the module's answers against `render`'s own functions
+ * on the same inputs, so any second implementation that disagrees anywhere in
+ * the revealed rect or the HUD band fails regardless of how it was written.
+ */
 describe('pointer.ts reuses render’s inverse rather than writing a second one', () => {
   const src = readFileSync(new URL('../src/pointer.ts', import.meta.url), 'utf8')
   /** Comments stripped, so prose naming a field is not mistaken for arithmetic on it. */
@@ -973,11 +1130,41 @@ describe('pointer.ts reuses render’s inverse rather than writing a second one'
   })
 
   it('does no arithmetic on any camera field the inverse owns', () => {
-    for (const field of ['tileSize', 'originX', 'originY', 'x0', 'y0', 'cols', 'rows']) {
+    // `cssW`, `cssH`, `hudTop` and `hudHeight` are on the list because the
+    // review demonstrated the third evasion with them: they are enough to
+    // re-derive `hudRects`' three columns without touching a single field the
+    // original list named.
+    const owned = [
+      'tileSize',
+      'originX',
+      'originY',
+      'x0',
+      'y0',
+      'cols',
+      'rows',
+      'cssW',
+      'cssH',
+      'hudTop',
+      'hudHeight',
+    ]
+    for (const field of owned) {
       expect(code, `pointer.ts touches camera.${field} — a second inverse is forming`).not.toMatch(
         new RegExp(`\\b${field}\\b`),
       )
     }
+    // Vacuity: the list must be able to fire at all. `camera.tileSize` is what
+    // a second inverse would reach for first.
+    expect(`const t = camera.tileSize`).toMatch(new RegExp(`\\b${owned[0] as string}\\b`))
+  })
+
+  it('imports no sibling module that could hold the arithmetic instead', () => {
+    // The first evasion the review verified: move the transform into a new
+    // `game/src` file and call it. A helper has to be imported, so pinning the
+    // relative-import set is what sees it — the scan above never would.
+    const relative = [...code.matchAll(/from '(\.[^']*)'/g)].map((m) => m[1])
+    expect(relative).toEqual(['./inputs'])
+    const packages = [...code.matchAll(/from '(@laneways\/[^']*)'/g)].map((m) => m[1])
+    expect([...new Set(packages)].sort()).toEqual(['@laneways/render', '@laneways/sim'])
   })
 
   it('does not reach for the forward transform either', () => {
@@ -1016,6 +1203,36 @@ describe('pointer.ts reuses render’s inverse rather than writing a second one'
     }
     // Vacuity: the probe set must actually reach more than one region.
     expect(seen.size).toBeGreaterThanOrEqual(5)
+  })
+
+  it('agrees with render’s own hudRects across the whole HUD band, not just the clock', () => {
+    // The behavioural half of the third evasion: a second HUD layout derived
+    // from `cssW`/`hudTop`/`hudHeight` passes the scan, and disagreeing with
+    // `hudRects` anywhere in the band fails here. Swept at 3 px, which is finer
+    // than the 8 px padding and the 8 px gaps.
+    const camera = phone390()
+    const rects = hudRects(camera, createHudRects())
+    let inClock = 0
+    let outside = 0
+    for (let cssY = HUD_TOP; cssY < HUD_TOP + 72; cssY += 3) {
+      for (let cssX = 0; cssX < 390; cssX += 3) {
+        const r = rig(camera)
+        const outcome = r.input.down(1, cssX + CANVAS_LEFT, cssY + CANVAS_TOP)
+        const expectedClock =
+          cssX >= rects.clock.x &&
+          cssX < rects.clock.x + rects.clock.w &&
+          cssY >= rects.clock.y &&
+          cssY < rects.clock.y + rects.clock.h
+        expect(outcome, `(${cssX}, ${cssY})`).toBe(
+          expectedClock ? PointerOutcome.PAUSE_TOGGLED : PointerOutcome.HUD_INERT,
+        )
+        if (expectedClock) inClock++
+        else outside++
+      }
+    }
+    // Vacuity: the sweep must land on both sides of every edge of the rect.
+    expect(inClock).toBeGreaterThan(100)
+    expect(outside).toBeGreaterThan(100)
   })
 })
 
