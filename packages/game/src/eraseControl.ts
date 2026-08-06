@@ -185,6 +185,29 @@ const FALLBACK_STYLE_OFF = fallbackStyle(ERASE_OFF_BG, ERASE_OFF_FG)
 const FALLBACK_STYLE_ON = fallbackStyle(ERASE_ON_BG, ERASE_ON_FG)
 
 /**
+ * `MainButton.setParams`'s two argument objects, **preallocated**.
+ *
+ * A press is not a frame, so this is not the frame-loop rule — but the harness
+ * profiles a press twice per stroke inside the profiled window, and an object
+ * literal built per render measured above the sampling floor there. Two frozen
+ * constants cost nothing and make the measured claim a real one instead of a
+ * budget written to fit. `setParams` reads its argument synchronously, so
+ * handing the same object twice is safe.
+ */
+const MAIN_BUTTON_PARAMS_OFF = Object.freeze({
+  color: ERASE_OFF_BG,
+  text_color: ERASE_OFF_FG,
+  is_active: true,
+  is_visible: true,
+})
+const MAIN_BUTTON_PARAMS_ON = Object.freeze({
+  color: ERASE_ON_BG,
+  text_color: ERASE_ON_FG,
+  is_active: true,
+  is_visible: true,
+})
+
+/**
  * The slice of `HTMLButtonElement` the fallback uses, and nothing more. A real
  * button satisfies it structurally — pinned at the bottom of this file.
  */
@@ -283,12 +306,7 @@ export function createEraseControl(deps: EraseControlDeps): EraseControl {
       // colour can be published by different methods, and a button whose colour
       // says erase while its label says draw is worse than either.
       mb.setText?.(label)
-      mb.setParams?.({
-        color: erase ? ERASE_ON_BG : ERASE_OFF_BG,
-        text_color: erase ? ERASE_ON_FG : ERASE_OFF_FG,
-        is_active: true,
-        is_visible: true,
-      })
+      mb.setParams?.(erase ? MAIN_BUTTON_PARAMS_ON : MAIN_BUTTON_PARAMS_OFF)
       mb.show?.()
       return
     }

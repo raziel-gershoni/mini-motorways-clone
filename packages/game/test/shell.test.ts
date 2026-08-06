@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { REVEALED_X0, REVEALED_Y0, REVEALED_W, REVEALED_H } from '@laneways/shared'
-import type { RevealedRect, ViewportMetrics } from '@laneways/render'
+import { PALETTE, buildAtlas, drawFrame, fitCamera } from '@laneways/render'
+import type { DrawContext, RenderFrame, RevealedRect, ViewportMetrics } from '@laneways/render'
 import {
   SETTLE_FRAMES,
   SizingOutcome,
@@ -479,6 +480,137 @@ describe('two passes, and the rebuild driven by the tile device size', () => {
     expect(rig.shell.rebuilds - before).toBe(1)
     expect(rig.shell.camera.tileSize).toBe(29)
     expect(rig.builds.at(-1)).toBe(43)
+  })
+})
+
+/**
+ * **The one place Task 5 and Task 8 have to agree, and neither package can see
+ * the other.**
+ *
+ * `canvas.ts` says it at the top of `drawFrame`: *"Task 8 MUST size the canvas
+ * with the same rounding, or the last device row/column is outside every band"*
+ * — and outside every band means holding the previous frame forever, because
+ * Decision 4 removed the `clearRect`. Up to here that was a comment in one
+ * package and an implementation in another. This is the assertion.
+ *
+ * `game` is the only package that imports both, which is where this test has to
+ * live — the same reason `renderDirections.test.ts` and
+ * `renderFootprint.test.ts` live here.
+ */
+describe('the three bands tile the backing store the shell actually created', () => {
+  interface Fill {
+    x: number
+    y: number
+    w: number
+    h: number
+  }
+
+  function emptyFrame(camera: ReturnType<typeof fitCamera>): RenderFrame {
+    return {
+      camera,
+      gridW: 24,
+      roads: new Uint8Array(24 * 40),
+      terrainClass: new Uint8Array(24 * 40),
+      houseCount: 0,
+      houseCell: new Int32Array(0),
+      houseColour: new Uint8Array(0),
+      destCount: 0,
+      destCell: new Int32Array(0),
+      destColour: new Uint8Array(0),
+      destKind: new Uint8Array(0),
+      destOrientation: new Uint8Array(0),
+      destPins: new Uint8Array(0),
+      destCarpark: new Int32Array(0),
+      carCount: 0,
+      carXY: new Float32Array(0),
+      carColour: new Uint8Array(0),
+      week: 1,
+      day: 1,
+      score: 0,
+      tilesLeft: 0,
+      paused: false,
+    }
+  }
+
+  function bandsFor(view: ViewportMetrics): { fills: Fill[]; canvas: CanvasRecorder } {
+    const rig = buildRig({ first: view })
+    const fills: Fill[] = []
+    const ctx: DrawContext = {
+      fillStyle: '',
+      font: '',
+      textAlign: 'center',
+      textBaseline: 'middle',
+      fillRect: (x, y, w, h) => {
+        fills.push({ x, y, w, h })
+      },
+      fillText: () => undefined,
+      drawImage: () => undefined,
+    }
+    const atlas = buildAtlas(
+      (w, h) => ({
+        width: w,
+        height: h,
+        getContext: () => ({
+          lineWidth: 0,
+          lineCap: 'round' as const,
+          lineJoin: 'round' as const,
+          strokeStyle: '',
+          save: () => undefined,
+          restore: () => undefined,
+          beginPath: () => undefined,
+          rect: () => undefined,
+          clip: () => undefined,
+          moveTo: () => undefined,
+          lineTo: () => undefined,
+          stroke: () => undefined,
+        }),
+      }),
+      rig.shell.tileDevicePx,
+      PALETTE,
+    )
+    drawFrame(ctx, emptyFrame(rig.shell.camera), atlas, PALETTE)
+    return { fills, canvas: rig.canvas }
+  }
+
+  /**
+   * `413 x 871 at DPR 1.5` — integer CSS inputs, a real device shape, and the
+   * exact case that produced Task 5's ghosting seam: `819 x 1.5 = 1228.5`.
+   */
+  const CASES: ReadonlyArray<readonly [string, ViewportMetrics]> = [
+    ['the M0 device at DPR 2', M0_DEVICE],
+    ['a LOW-class Pixel at DPR 1.5', { cssW: 413, cssH: 871, topInset: 24, bottomInset: 24, rawDpr: 1.5, performanceClass: 'LOW' }],
+    ['a 390 px phone', { cssW: 390, cssH: 844, topInset: 47, bottomInset: 34, rawDpr: 3, performanceClass: null }],
+  ]
+
+  for (const [name, view] of CASES) {
+    it(`covers every device pixel exactly once on ${name}`, () => {
+      const { fills, canvas } = bandsFor(view)
+      // An empty board: all terrain LAND, no roads, no buildings, no cars, not
+      // paused. So the only fills are the three bands.
+      expect(fills.length).toBe(3)
+      const dpr = view.performanceClass === 'LOW' ? Math.min(view.rawDpr, 1.5) : Math.min(view.rawDpr, 2)
+
+      let y = 0
+      for (const fill of fills) {
+        expect(fill.x).toBe(0)
+        // Every band spans the full backing-store width, to the device pixel.
+        expect(Math.round(fill.w * dpr)).toBe(canvas.width)
+        expect(Math.round(fill.y * dpr)).toBe(y)
+        y = Math.round((fill.y + fill.h) * dpr)
+      }
+      // and the last one ends exactly at the last device row the shell created.
+      expect(y).toBe(canvas.height)
+    })
+  }
+
+  it('would fail if the shell floored instead of rounding — the mutation is representable', () => {
+    // Not a mutation of the shipped code: an arithmetic statement that the two
+    // roundings genuinely differ on this viewport, so the assertions above are
+    // discriminating rather than trivially true at every DPR.
+    expect(Math.round(413 * 1.5)).toBe(620)
+    expect(Math.floor(413 * 1.5)).toBe(619)
+    expect(Math.round(871 * 1.5)).toBe(1307)
+    expect(Math.floor(871 * 1.5)).toBe(1306)
   })
 })
 

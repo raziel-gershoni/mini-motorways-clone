@@ -17,6 +17,8 @@ import { createInputQueue, type InputQueue } from '../src/inputs'
 import { createLoop } from '../src/loop'
 import { CHECKOUT_ROOT, repoRelative } from './allocationPaths'
 import { PointerOutcome, createPointerInput, type PointerInput } from '../src/pointer'
+import { SizingOutcome, bootShell, type ScalableContext, type Shell, type SizableCanvas } from '../src/shell'
+import { EraseControlSurface, createEraseControl, type EraseControl } from '../src/eraseControl'
 
 /**
  * **"Nothing allocates inside the frame loop" is a MEASURED constraint here,
@@ -305,11 +307,65 @@ interface Rig {
   readonly pointer: PointerInput
   readonly queue: InputQueue
   readonly camera: ReturnType<typeof fitCamera>
+  /** Task 8's shell, so the no-change viewport path is measured rather than reasoned about. */
+  readonly shell: Shell
+  /** Task 8's erase control, bound to the pointer through the native MainButton path. */
+  readonly erase: EraseControl
   /** Client CSS point at the centre of the HUD clock rect, precomputed. */
   readonly clockX: number
   readonly clockY: number
   /** Client CSS point inside the HUD band but on the inert score readout. */
   readonly scoreX: number
+}
+
+/**
+ * The M0 device, as `bootShell` will measure it. Identical to the metrics the
+ * rig used to pass straight to `fitCamera`, so the camera — and therefore every
+ * figure in this file's tables — is unchanged by the shell being added.
+ */
+const RIG_VIEW = {
+  cssW: 406,
+  cssH: 870,
+  topInset: 46,
+  bottomInset: 34,
+  rawDpr: 3,
+  performanceClass: null,
+} as const
+
+/**
+ * A canvas and a context that record nothing. The shell writes six properties
+ * per applied resize and this rig never changes geometry, so after boot they are
+ * never written again — which is the property being measured.
+ */
+function stubCanvas(): SizableCanvas {
+  return {
+    width: 0,
+    height: 0,
+    style: { width: '', height: '' },
+    getBoundingClientRect: () => ({ left: 11, top: 7 }),
+  }
+}
+
+function stubContext(): ScalableContext {
+  return { setTransform: () => undefined }
+}
+
+/** A MainButton that does the least a real one does: hold the handler. */
+function installMainButton(): void {
+  ;(globalThis as Record<string, unknown>).Telegram = {
+    WebApp: {
+      isVersionAtLeast: () => true,
+      ready: () => undefined,
+      expand: () => undefined,
+      onEvent: () => undefined,
+      MainButton: {
+        setText: () => undefined,
+        setParams: () => undefined,
+        onClick: () => undefined,
+        show: () => undefined,
+      },
+    },
+  }
 }
 
 function buildRig(draw: (frame: RenderFrame) => void): Rig {
@@ -319,10 +375,20 @@ function buildRig(draw: (frame: RenderFrame) => void): Rig {
   seedStartingCity(state, world)
   const scratch = createScratch(world.cells, map.groupCount, map.maxDestinations, createFieldInputRanges(map))
   const fields = createFlowFields(map.groupCount, world.cells)
-  const camera = fitCamera(
-    { cssW: 406, cssH: 870, topInset: 46, bottomInset: 34, rawDpr: 3, performanceClass: null },
-    { x0: REVEALED_X0, y0: REVEALED_Y0, cols: REVEALED_W, rows: REVEALED_H },
-  )
+  installMainButton()
+  const shell = bootShell({
+    canvas: stubCanvas(),
+    context: stubContext(),
+    reveal: { x0: REVEALED_X0, y0: REVEALED_Y0, cols: REVEALED_W, rows: REVEALED_H },
+    measure: () => RIG_VIEW,
+    rebuildAtlas: () => undefined,
+    // The settle pass is run inline: it measures the same viewport, so it is a
+    // no-op, and deferring it would leave the second pass outside the window.
+    settle: (run) => {
+      run()
+    },
+  })
+  const camera = shell.camera
   const builder = createFrameBuilder(state, world, camera)
   initCarSnapshots(builder.snapshots, state, world)
   const queue = createInputQueue()
@@ -347,11 +413,17 @@ function buildRig(draw: (frame: RenderFrame) => void): Rig {
   // caller-owned object, but building one per frame would charge this file's own
   // noise to the measurement it is taking.
   const rects = hudRects(camera, createHudRects())
+  const erase = createEraseControl({ host: pointer })
+  if (erase.surface !== EraseControlSurface.MAIN_BUTTON) {
+    throw new Error('the rig bound the erase control to the wrong surface — it is not measuring the shipped path')
+  }
   return {
     loop,
     pointer,
     queue,
     camera,
+    shell,
+    erase,
     clockX: rects.clock.x + rects.clock.w / 2 + 11,
     clockY: rects.clock.y + rects.clock.h / 2 + 7,
     scoreX: rects.score.x + rects.score.w / 2 + 11,
@@ -436,6 +508,16 @@ const PHASE_OFF_GRID = PHASE_DOWN + 1 + 6
 const PHASE_SECOND = PHASE_OFF_GRID + 1
 
 /**
+ * The phase at which the erase control is pressed — **twice**, so the pending
+ * mode nets back to `place` and the rest of this driver's arithmetic is
+ * unchanged. It is deliberately mid-stroke: that is the case `MainButton` makes
+ * reachable (native chrome a second finger can hit), and the stroke's latch is
+ * what keeps the actions `place`.
+ */
+const PHASE_ERASE_PRESS = 5
+const PRESSES_PER_STROKE = 2
+
+/**
  * Where each `pointermove` of a stroke lands, as offsets from the cell the
  * `pointerdown` took (the revealed rect's `x0`, and `row`). Four (+3, +1) jumps,
  * one repeat of the cell the drag is already on, then a (-12, -4) backtrack.
@@ -460,6 +542,8 @@ interface DragCounters {
   offGrid: number
   refusedSecond: number
   actions: number
+  presses: number
+  unchangedResizes: number
 }
 
 function newCounters(): DragCounters {
@@ -473,6 +557,8 @@ function newCounters(): DragCounters {
     offGrid: 0,
     refusedSecond: 0,
     actions: 0,
+    presses: 0,
+    unchangedResizes: 0,
   }
 }
 
@@ -485,6 +571,34 @@ function driveWithDrag(rig: Rig, count: number, start: number, counters: DragCou
     const phase = i % STROKE_FRAMES
     const stroke = (i / STROKE_FRAMES) | 0
     const row = camera.y0 + (stroke % STROKE_ROWS)
+
+    /**
+     * **Task 8's no-change resize path, driven once per frame as a STRESS.**
+     *
+     * No client emits `viewportChanged` at 60 Hz, and the comment says so rather
+     * than implying otherwise: the property under test is per EVENT, and the
+     * rate is a measurement choice — 3,000 repetitions is what gives a sampling
+     * profiler enough signal to see a per-event allocation at all. What it
+     * catches is an `applySize()` that runs unconditionally, which builds two
+     * template-literal CSS strings every time.
+     *
+     * `fitCamera` itself allocates one `Camera` per measurement, by design and
+     * with Task 3's blessing ("it runs at boot, after the fullscreen settle, and
+     * on a stable viewportChanged — never per frame"). That allocation lands in
+     * `packages/render/src/camera.ts`, outside this harness's `packages/game/src`
+     * scope, so it is neither measured here nor claimed to be.
+     */
+    if (rig.shell.viewportChanged(true) === SizingOutcome.UNCHANGED) counters.unchangedResizes++
+
+    // Task 8's erase control, pressed mid-stroke on the native path. Twice, so
+    // the pending mode nets out and every other count below is unaffected.
+    if (phase === PHASE_ERASE_PRESS) {
+      for (let p = 0; p < PRESSES_PER_STROKE; p++) {
+        rig.erase.press()
+        counters.presses++
+      }
+    }
+
     if (phase === 0) {
       // Alternating, so the `pointercancel` path is a live branch rather than
       // an untaken one. Both must leave the machine in the same state.
@@ -684,6 +798,14 @@ describe('the frame loop allocates nothing, measured', () => {
     expect(counters.hudInert, 'the inert-HUD branch was never entered').toBe(strokes)
     expect(counters.offGrid, 'the off-grid branch was never entered').toBe(strokes)
     expect(counters.refusedSecond, 'the second-pointer branch was never entered').toBe(strokes)
+    // Task 8's two paths, counted for the same reason as everything above it: a
+    // driver that quietly stopped entering one would leave `shell.ts` and
+    // `eraseControl.ts` measured clean while being unreachable, which is
+    // indistinguishable from dead code.
+    expect(counters.presses, 'the erase control was never pressed').toBe(strokes * PRESSES_PER_STROKE)
+    expect(counters.unchangedResizes, 'the no-change resize path was never entered').toBe(PROFILED_FRAMES)
+    // The presses must net out, or the strokes below are erasing.
+    expect(rig.pointer.eraseMode).toBe(false)
     // and the pause pair must net out, or the loop stopped ticking.
     expect(rig.loop.paused).toBe(false)
     expect(counters.actions, 'the walk enqueued nothing').toBe(strokes * ACTIONS_PER_STROKE)
@@ -700,7 +822,7 @@ describe('the frame loop allocates nothing, measured', () => {
     const names = all
       .filter((a) => a.file.startsWith(GAME_SRC) && a.bytes / PROFILED_FRAMES > NOISE_FLOOR_BYTES_PER_FRAME)
       .map((a) => a.functionName)
-    for (const fn of ['down', 'move', 'endDrag', 'enqueue', 'inRect']) {
+    for (const fn of ['down', 'move', 'endDrag', 'enqueue', 'inRect', 'press', 'render', 'resize']) {
       expect(names, `${fn} allocated`).not.toContain(fn)
     }
   })

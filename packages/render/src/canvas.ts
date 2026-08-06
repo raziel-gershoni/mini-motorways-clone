@@ -207,11 +207,20 @@ const HUD_SCRATCH: HudRects = createHudRects()
  * times a minute, the day every 643 ticks, the tile count only when the player
  * draws.
  *
- * **What is and is not testable about this, said plainly.** The saving is not
- * observable — JavaScript strings are values, so two equal strings are
- * indistinguishable no matter how many were allocated, and this toolchain has no
- * allocation profiler. The *staleness* is observable, and it is the failure mode
- * that matters: a cache that never invalidates draws last week's score forever.
+ * **What is and is not testable about this, said plainly — and this paragraph
+ * used to end "this toolchain has no allocation profiler", which is false and
+ * contradicted the top of this very file.** There is one:
+ * `packages/game/test/allocation.test.ts`, built in Task 6 and pointed at the
+ * input path in Task 7. What is genuinely unobservable is narrower and it is a
+ * property of *strings*, not of the toolchain: two equal strings are
+ * indistinguishable no matter how many were allocated, so no assertion on the
+ * recorded text can tell a memoised cache from a re-formatted one. The profiler
+ * WOULD see it — as bytes charged to this file — but only through a `game`-side
+ * caller that actually calls `drawFrame`, which the harness's no-op `draw` is
+ * not. Task 9's integration is where that closes.
+ *
+ * The *staleness* is observable here and now, and it is the failure mode that
+ * matters: a cache that never invalidates draws last week's score forever.
  * `test/canvas.test.ts` changes every value between two frames and asserts the
  * text follows, then changes them back.
  */
