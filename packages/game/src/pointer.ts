@@ -157,8 +157,18 @@ import type { InputQueue } from './inputs'
  * and `inputs.ts` to the same budget every other `game/src` file gets.
  *
  * The `GridHit` and the `HudRects` are allocated once, at construction, and
- * rewritten in place. That one IS load-bearing: allocating a `GridHit` per event
- * is measurable and the harness catches it.
+ * rewritten in place. **Only the `GridHit` half of that is pinned, and the other
+ * half is unpinnable rather than merely untested** — a distinction worth the
+ * sentence, because claiming both would be claiming coverage that does not
+ * exist. Allocating a `GridHit` per event is caught by the harness (3/3 runs).
+ * Allocating a `HudRects` per event is **not**, at 0.00 B/frame across 3/3 runs
+ * of a driver that taps the HUD three times per stroke: `rects` is written by
+ * `hudRects` and read by `inRect` entirely inside `down`, both of which inline,
+ * so it never escapes and TurboFan scalar-replaces it — the exact trap
+ * `test/allocation.test.ts`'s own module comment names. The construction-time
+ * `createHudRects()` is therefore kept on the same principle as the `GridHit`
+ * (and because a future caller that DID let it escape would allocate), not
+ * because a test would notice its removal.
  *
  * **The `Int32Array` for the drag's three mutable numbers is NOT, and saying so
  * is the point.** It reads like `loop.ts`'s `Float64Array`, which exists because

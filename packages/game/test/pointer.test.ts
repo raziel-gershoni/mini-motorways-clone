@@ -76,6 +76,30 @@ const GRID_RIGHT = 384 // 6 + 14*27
 const GRID_BOTTOM = 689 // 95 + 22*27
 const HUD_TOP = 738
 
+/**
+ * The M0 reference device — the one the whole milestone's pixel budget is
+ * computed against, and the one Task 9 deploys to. It is driven behaviourally
+ * below rather than only asserted about, because **its `originX` is 0**: the
+ * horizontal letterbox vanishes, so a dropped `originX` term is invisible on it
+ * and a fixture that only ever uses PHONE_390 never checks that the module works
+ * where the letterbox is absent. The two together cover both.
+ *
+ *   availableH = 870 - 46 - 72 - 34            = 718
+ *   tileSize   = floor(min(406/14, 718/22))
+ *              = floor(min(29, 32.63))         = 29
+ *   grid px    = 14*29 = 406  and  22*29 = 638
+ *   originX    = floor((406 - 406)/2)          = 0     <- no left letterbox
+ *   originY    = 46 + floor((718 - 638)/2)     = 86
+ *   grid rect  = cssX in [0, 406), cssY in [86, 724)
+ *   hudTop     = max(86 + 638, 870 - 34 - 72) = max(724, 764) = 764
+ */
+function m0Device(): Camera {
+  return fitCamera(
+    { cssW: 406, cssH: 870, topInset: 46, bottomInset: 34, rawDpr: 3, performanceClass: null },
+    { x0: REVEALED_X0, y0: REVEALED_Y0, cols: REVEALED_W, rows: REVEALED_H },
+  )
+}
+
 function phone390(): Camera {
   return fitCamera(
     { cssW: 390, cssH: 844, topInset: 47, bottomInset: 34, rawDpr: 2.625, performanceClass: 'LOW' },
@@ -221,6 +245,16 @@ describe('the fixture cannot hide a variable', () => {
     expect(camera.y0).toBeGreaterThan(0)
   })
 
+  it('has a revealed rect that is not square either — cols != rows', () => {
+    // A 14x22 rect: without this, `cols` and `rows` could be swapped in the
+    // bounds arithmetic and every fixture point would still classify the same.
+    // The viewport being non-square does not imply the RECT is.
+    const camera = phone390()
+    expect(camera.cols).toBe(14)
+    expect(camera.rows).toBe(22)
+    expect(camera.cols).not.toBe(camera.rows)
+  })
+
   it('puts the HUD band strictly below the grid rect — this task’s premise, from fitCamera', () => {
     const camera = phone390()
     expect(camera.hudTop).toBe(HUD_TOP)
@@ -331,6 +365,69 @@ describe('a tap on the board', () => {
   })
 })
 
+describe('the M0 reference device, where there is no horizontal letterbox', () => {
+  it('fits to the hand-computed 29 px tile at originX 0', () => {
+    const camera = m0Device()
+    expect(camera.tileSize).toBe(29)
+    expect(camera.originX).toBe(0)
+    expect(camera.originY).toBe(86)
+    expect(camera.hudTop).toBe(764)
+    // and the parities differ from PHONE_390's in every term that matters:
+    // 29 vs 27 (both odd), origin 0/86 (both even) vs 6/95 (even/odd).
+    expect(camera.tileSize % 2).toBe(1)
+    expect(camera.originY % 2).toBe(0)
+  })
+
+  it('maps a hand-computed client point inside tile (8, 14) to that tile', () => {
+    // cssX in [0 + 3*29, +29) = [87, 116), centre 101.5 -> client 141.5
+    // cssY in [86 + 5*29, +29) = [231, 260), centre 245.5 -> client 268.5
+    const r = rig(m0Device())
+    expect(r.input.down(1, 101.5 + CANVAS_LEFT, 245.5 + CANVAS_TOP)).toBe(PointerOutcome.DRAG_START)
+    expect(r.input.lastCell).toBe(CELL_8_14)
+  })
+
+  it('has no left letterbox at all — cssX 0 is already the board', () => {
+    // The property PHONE_390 cannot check: with originX 0 the LEFT region is
+    // empty, and the first column starts at the canvas edge.
+    const camera = m0Device()
+    const hit = createGridHit()
+    screenToGrid(camera, CANVAS_LEFT, 245.5 + CANVAS_TOP, CANVAS_LEFT, CANVAS_TOP, hit)
+    expect(hit.region).toBe(HitRegion.GRID)
+    expect(hit.gx).toBe(REVEALED_X0)
+    const r = rig(camera)
+    expect(r.input.down(1, CANVAS_LEFT, 245.5 + CANVAS_TOP)).toBe(PointerOutcome.DRAG_START)
+    expect(r.input.lastCell).toBe(14 * GRID_W + 5)
+  })
+
+  it('drags and walks on it exactly as on the letterboxed fixture', () => {
+    // (8,14) -> (11,15): the same (+3, +1) jump, different camera. A transform
+    // that only works when originX != 0 fails here.
+    const camera = m0Device()
+    const r = rig(camera)
+    r.input.down(1, 101.5 + CANVAS_LEFT, 245.5 + CANVAS_TOP)
+    // (11,15) centre: cssX = 0 + 6*29 + 14.5 = 188.5, cssY = 86 + 6*29 + 14.5 = 274.5
+    expect(r.input.move(1, 188.5 + CANVAS_LEFT, 274.5 + CANVAS_TOP)).toBe(PointerOutcome.DRAW)
+    expect(queued(r.queue)).toEqual([
+      { kind: 'place', a: CELL_8_14, b: CELL_9_15 },
+      { kind: 'place', a: CELL_9_15, b: CELL_10_15 },
+      { kind: 'place', a: CELL_10_15, b: CELL_11_15 },
+    ])
+  })
+
+  it('pauses on its own clock rect, which is a different rectangle from PHONE_390’s', () => {
+    // w = floor((406 - 16 - 16)/3) = 124, so clock cssX in [8, 132), y in [772, 828).
+    // Centre (70, 800). On PHONE_390 the clock is [8, 127) x [746, 802) — the y
+    // ranges do not even overlap, so this cannot pass by reusing that fixture.
+    const camera = m0Device()
+    const rects = hudRects(camera, createHudRects())
+    expect(rects.clock).toEqual({ x: 8, y: 772, w: 124, h: 56 })
+    const r = rig(camera)
+    expect(r.input.down(1, 70 + CANVAS_LEFT, 800 + CANVAS_TOP)).toBe(PointerOutcome.PAUSE_TOGGLED)
+    expect(r.paused).toBe(true)
+    expect(r.queue.length).toBe(0)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Taps that are not the board
 // ---------------------------------------------------------------------------
@@ -355,6 +452,22 @@ describe('a tap outside the grid rect', () => {
       expect(r.setPausedCalls).toEqual([])
     })
   }
+
+  it('gives the top band NOTHING, even directly above an interactive HUD rect', () => {
+    // Spec §8.3 bars any interactive element from the top band, and §7.2's
+    // preference for a clock up there is what M2 resolved against. This uses
+    // the clock rect's own x, so a tap that is only "not the board" would still
+    // be caught by the parametrised cases above — what this adds is that
+    // routing ABOVE anywhere near the HUD cannot reach the pause control.
+    const r = rig()
+    expect(r.input.down(1, CLOCK_X, ORIGIN_Y - 1 + CANVAS_TOP)).toBe(PointerOutcome.IGNORED)
+    expect(r.paused).toBe(false)
+    expect(r.setPausedCalls).toEqual([])
+    expect(r.input.dragging).toBe(false)
+    // discriminator: the same x IS the pause control down in the band
+    const p = rig()
+    expect(p.input.down(1, CLOCK_X, CLOCK_Y)).toBe(PointerOutcome.PAUSE_TOGGLED)
+  })
 
   it('is not merely refusing everything — the SAME y one px lower IS the board', () => {
     // Vacuity for the "above" marker: the bound is real and one-sided.

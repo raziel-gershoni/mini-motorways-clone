@@ -9,7 +9,7 @@ import {
   createFlowFields,
   createFieldInputRanges,
 } from '@laneways/sim'
-import { fitCamera, type RenderFrame } from '@laneways/render'
+import { createHudRects, fitCamera, hudRects, type RenderFrame } from '@laneways/render'
 import { seedStartingCity } from '../src/startingCity'
 import { createFrameBuilder, createFrameDriver } from '../src/frame'
 import { initCarSnapshots } from '../src/resolve'
@@ -305,6 +305,11 @@ interface Rig {
   readonly pointer: PointerInput
   readonly queue: InputQueue
   readonly camera: ReturnType<typeof fitCamera>
+  /** Client CSS point at the centre of the HUD clock rect, precomputed. */
+  readonly clockX: number
+  readonly clockY: number
+  /** Client CSS point inside the HUD band but on the inert score readout. */
+  readonly scoreX: number
 }
 
 function buildRig(draw: (frame: RenderFrame) => void): Rig {
@@ -338,7 +343,19 @@ function buildRig(draw: (frame: RenderFrame) => void): Rig {
       loop.setPaused(next)
     },
   })
-  return { loop, pointer, queue, camera }
+  // Precomputed OUTSIDE the profiled window: `hudRects` writes into a
+  // caller-owned object, but building one per frame would charge this file's own
+  // noise to the measurement it is taking.
+  const rects = hudRects(camera, createHudRects())
+  return {
+    loop,
+    pointer,
+    queue,
+    camera,
+    clockX: rects.clock.x + rects.clock.w / 2 + 11,
+    clockY: rects.clock.y + rects.clock.h / 2 + 7,
+    scoreX: rects.score.x + rects.score.w / 2 + 11,
+  }
 }
 
 function buildLoop(draw: (frame: RenderFrame) => void): ReturnType<typeof createLoop> {
@@ -372,19 +389,51 @@ function drive(loop: ReturnType<typeof createLoop>, count: number, start: number
  *
  * So this driver runs a live drag alongside the loop, on the same queue Task 9's
  * `main.ts` will wire: one stroke every `STROKE_FRAMES` frames, in the shape a
- * finger actually makes — a `pointerdown`, a run of `pointermove`s that mostly
- * SKIP tiles (so the 8-connected walk runs, not just the one-cell case), one
- * move that re-enters the cell it is already on, one long backtrack, and a
- * `pointerup`.
+ * finger actually makes.
+ *
+ * ---------------------------------------------------------------------------
+ * IT DRIVES EVERY BRANCH, AND THAT IS A CORRECTION FROM REVIEW
+ * ---------------------------------------------------------------------------
+ *
+ * The first version drove `down` / `move` / `up` on the board and nothing else,
+ * so the HUD, `pointercancel`, pause, the second-pointer refusal and the
+ * off-grid path were never entered — **the counters below could not distinguish
+ * those branches from dead code.** That is the same shape as the harness that
+ * resolved zero files and reported "clean": an instrument whose scope silently
+ * excludes the thing it is supposed to watch. Each of those branches is now
+ * driven and counted, and every count is asserted, so deleting one turns this
+ * file red rather than leaving it quietly measuring less.
+ *
+ * One stroke, twelve frames:
+ *
+ * | phase | event                                          | outcome                  |
+ * |-------|------------------------------------------------|--------------------------|
+ * | 0     | `up` or `cancel` (alternating) of the last drag | `DRAG_END`               |
+ * | 1     | tap the HUD clock                              | `PAUSE_TOGGLED` (paused) |
+ * | 2     | tap the HUD clock again, then the score readout| `PAUSE_TOGGLED`, `HUD_INERT` |
+ * | 3     | `down` on the board                            | `DRAG_START`             |
+ * | 4-9   | six `move`s: four (+3,+1) jumps, one repeat of  | `DRAW` x5, `IGNORED` x1  |
+ * |       | the current cell, one (-12,-4) backtrack        |                          |
+ * | 10    | `move` above the grid rect                     | `IGNORED`                |
+ * | 11    | `down` from a second `pointerId`               | `REFUSED_SECOND_POINTER` |
  *
  * Per stroke: 3 + 3 + 3 + 3 + 0 + 12 = **24 actions**, so 3,000 profiled frames
- * enqueue about 9,000 of them. At ~40 B for one small object that is ~120 B per
- * frame of signal if the pool ever leaked one — three times the threshold that
- * separates the loop's own noise from a real object.
+ * enqueue 6,000 of them. At ~40 B for one small object that is ~80 B per frame
+ * of signal if the pool ever leaked one — twenty times the sampling floor.
+ *
+ * The pause pair in phases 1 and 2 is deliberate: it exercises `setPaused` in
+ * both directions AND leaves the loop running, so one frame in twelve drains no
+ * ticks and the rest are unaffected.
  */
-const STROKE_FRAMES = 8
+const STROKE_FRAMES = 12
 /** Board rows the stroke walks through, so it stays inside the revealed rect. */
 const STROKE_ROWS = 18
+/** The phase at which the board `pointerdown` happens; moves run from the next. */
+const PHASE_DOWN = 3
+/** The phase at which the off-grid move happens (just past the last board move). */
+const PHASE_OFF_GRID = PHASE_DOWN + 1 + 6
+/** The phase at which a second pointer tries to take over. */
+const PHASE_SECOND = PHASE_OFF_GRID + 1
 
 /**
  * Where each `pointermove` of a stroke lands, as offsets from the cell the
@@ -396,37 +445,86 @@ const STROKE_DY: readonly number[] = [1, 2, 3, 4, 4, 0]
 /** 3 + 3 + 3 + 3 + 0 + 12, by the Chebyshev distance between consecutive entries. */
 const ACTIONS_PER_STROKE = 24
 
-/** Counts, so the assertions below cannot be satisfied by a driver that did nothing. */
+/**
+ * Counts, so the assertions below cannot be satisfied by a driver that did
+ * nothing — one per branch the driver enters, which is what makes "this branch
+ * is exercised" checkable rather than assumed.
+ */
 interface DragCounters {
   downs: number
   draws: number
   ups: number
+  cancels: number
+  pauses: number
+  hudInert: number
+  offGrid: number
+  refusedSecond: number
   actions: number
+}
+
+function newCounters(): DragCounters {
+  return {
+    downs: 0,
+    draws: 0,
+    ups: 0,
+    cancels: 0,
+    pauses: 0,
+    hudInert: 0,
+    offGrid: 0,
+    refusedSecond: 0,
+    actions: 0,
+  }
 }
 
 function driveWithDrag(rig: Rig, count: number, start: number, counters: DragCounters): void {
   let now = start
   const camera = rig.camera
   const half = camera.tileSize / 2
+  const p = rig.pointer
   for (let i = 0; i < count; i++) {
     const phase = i % STROKE_FRAMES
-    const row = camera.y0 + (((i / STROKE_FRAMES) | 0) % STROKE_ROWS)
+    const stroke = (i / STROKE_FRAMES) | 0
+    const row = camera.y0 + (stroke % STROKE_ROWS)
     if (phase === 0) {
-      if (rig.pointer.up(1) === PointerOutcome.DRAG_END) counters.ups++
+      // Alternating, so the `pointercancel` path is a live branch rather than
+      // an untaken one. Both must leave the machine in the same state.
+      if (stroke % 2 === 0) {
+        if (p.up(1) === PointerOutcome.DRAG_END) counters.ups++
+      } else if (p.cancel(1) === PointerOutcome.DRAG_END) {
+        counters.cancels++
+      }
+    } else if (phase === 1) {
+      if (p.down(1, rig.clockX, rig.clockY) === PointerOutcome.PAUSE_TOGGLED) counters.pauses++
+    } else if (phase === 2) {
+      if (p.down(1, rig.clockX, rig.clockY) === PointerOutcome.PAUSE_TOGGLED) counters.pauses++
+      if (p.down(1, rig.scoreX, rig.clockY) === PointerOutcome.HUD_INERT) counters.hudInert++
+    } else if (phase === PHASE_DOWN) {
       const x = camera.originX + half + 11
       const y = camera.originY + (row - camera.y0) * camera.tileSize + half + 7
-      if (rig.pointer.down(1, x, y) === PointerOutcome.DRAG_START) counters.downs++
-    } else if (phase <= STROKE_COLS.length) {
-      const gx = camera.x0 + (STROKE_COLS[phase - 1] as number)
-      const gy = row + (STROKE_DY[phase - 1] as number)
+      if (p.down(1, x, y) === PointerOutcome.DRAG_START) counters.downs++
+    } else if (phase > PHASE_DOWN && phase < PHASE_OFF_GRID) {
+      const k = phase - PHASE_DOWN - 1
+      const gx = camera.x0 + (STROKE_COLS[k] as number)
+      const gy = row + (STROKE_DY[k] as number)
       const x = camera.originX + (gx - camera.x0) * camera.tileSize + half + 11
       const y = camera.originY + (gy - camera.y0) * camera.tileSize + half + 7
       const before = rig.queue.length
-      if (rig.pointer.move(1, x, y) === PointerOutcome.DRAW) counters.draws++
-      const after = rig.queue.length
-      // `after - before` is negative on a frame whose tick already drained the
-      // batch; the loop runs after the input, so that cannot happen here.
-      counters.actions += after - before
+      if (p.move(1, x, y) === PointerOutcome.DRAW) counters.draws++
+      // `after - before` cannot be negative: the loop runs after the input.
+      counters.actions += rig.queue.length - before
+    } else if (phase === PHASE_OFF_GRID) {
+      // One CSS px above the grid rect, x inside it: the `region !== GRID`
+      // branch in `move`, which nothing used to enter.
+      const before = rig.queue.length
+      if (p.move(1, camera.originX + half + 11, camera.originY - 1 + 7) === PointerOutcome.IGNORED) {
+        counters.offGrid++
+      }
+      counters.actions += rig.queue.length - before
+    } else if (phase === PHASE_SECOND) {
+      const y = camera.originY + (row - camera.y0) * camera.tileSize + half + 7
+      if (p.down(2, camera.originX + half + 11, y) === PointerOutcome.REFUSED_SECOND_POINTER) {
+        counters.refusedSecond++
+      }
     }
     now += 16.7
     rig.loop.frame(now)
@@ -557,28 +655,39 @@ describe('the frame loop allocates nothing, measured', () => {
     const rig = buildRig(() => {
       drawn++
     })
-    const warm: DragCounters = { downs: 0, draws: 0, ups: 0, actions: 0 }
+    const warm = newCounters()
     driveWithDrag(rig, WARMUP_FRAMES, 0, warm)
 
     // The pool's high-water mark is reached during warm-up; the profiled window
     // must not grow it again, or "the pool grows only past the high-water mark"
     // is not what is being measured.
     const poolAfterWarmup = rig.queue.poolSize
-    const counters: DragCounters = { downs: 0, draws: 0, ups: 0, actions: 0 }
+    const counters = newCounters()
     const all = profileAllocations(() => {
       driveWithDrag(rig, PROFILED_FRAMES, 1e6, counters)
     })
 
-    // Vacuity, in the shape the catalogue asks for: a driver that quietly
-    // stopped drawing would satisfy every allocation assertion below.
+    // Vacuity, one assertion per branch the driver claims to enter. A driver
+    // that quietly stopped entering one would otherwise satisfy every
+    // allocation assertion below while measuring less — the same shape as a
+    // harness that resolves zero files and reports "clean".
     const strokes = PROFILED_FRAMES / STROKE_FRAMES
     expect(drawn).toBe(WARMUP_FRAMES + PROFILED_FRAMES)
     expect(counters.downs, 'no drag ever started').toBe(strokes)
-    expect(counters.ups).toBe(strokes)
-    // 5 of the 6 moves per stroke draw; the sixth re-enters its own cell.
+    // up and cancel alternate, so both end-of-drag branches are live.
+    expect(counters.ups, 'the pointerup branch was never entered').toBe(strokes / 2)
+    expect(counters.cancels, 'the pointercancel branch was never entered').toBe(strokes / 2)
+    expect(counters.ups + counters.cancels).toBe(strokes)
+    // 5 of the 6 board moves per stroke draw; the sixth re-enters its own cell.
     expect(counters.draws).toBe(strokes * 5)
+    expect(counters.pauses, 'the HUD clock branch was never entered').toBe(strokes * 2)
+    expect(counters.hudInert, 'the inert-HUD branch was never entered').toBe(strokes)
+    expect(counters.offGrid, 'the off-grid branch was never entered').toBe(strokes)
+    expect(counters.refusedSecond, 'the second-pointer branch was never entered').toBe(strokes)
+    // and the pause pair must net out, or the loop stopped ticking.
+    expect(rig.loop.paused).toBe(false)
     expect(counters.actions, 'the walk enqueued nothing').toBe(strokes * ACTIONS_PER_STROKE)
-    expect(counters.actions).toBeGreaterThan(8000)
+    expect(counters.actions).toBeGreaterThan(5000)
     expect(all.length, 'the profile was empty').toBeGreaterThan(3)
     expect(rig.queue.poolSize, 'the pool was still growing').toBe(poolAfterWarmup)
     assertScopeResolves(all, GAME_PKG)
