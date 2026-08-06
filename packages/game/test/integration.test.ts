@@ -21,12 +21,14 @@ import { PALETTE, type AtlasContext, type AtlasSurface } from '@laneways/render'
 import { TICK_MS } from '../src/loop'
 import { PointerOutcome } from '../src/pointer'
 import { EraseControlSurface } from '../src/eraseControl'
+import { SizingOutcome } from '../src/shell'
 import {
   CANVAS_ELEMENT_ID,
   SEED_FIRST_PIN_TICK,
   WARM_START_TICKS,
   attachPointerEvents,
   attachVisibility,
+  attachViewport,
   wireGame,
   createGame,
   prefersFallback,
@@ -1189,7 +1191,17 @@ describe('the DOM edge', () => {
       },
     }
     const scheduled: ((now: number) => void)[] = []
-    wireGame(rig.game, target, doc, (callback) => scheduled.push(callback))
+    const viewportHandlers = new Map<string, () => void>()
+    wireGame(
+      rig.game,
+      target,
+      doc,
+      (callback) => scheduled.push(callback),
+      { addEventListener: (type, handler) => viewportHandlers.set(type, handler) },
+      (run) => {
+        run()
+      },
+    )
 
     // 1. the frame loop is running, and it reschedules — a `raf` called once and
     //    never again is a game that draws one frame and freezes.
@@ -1216,6 +1228,78 @@ describe('the DOM edge', () => {
     visibility = 'hidden'
     ;(visHandler as unknown as () => void)()
     expect(rig.game.pointer.dragging).toBe(false)
+
+    // 4. the viewport sources. There is no Telegram in Node, so `bootShell`
+    //    could not subscribe — `attachViewport` reads that and wires `resize`
+    //    as well, which is the case that was silently unwired before.
+    expect(rig.game.shell.subscribed).toBe(false)
+    expect([...viewportHandlers.keys()].sort()).toEqual(['orientationchange', 'resize'])
+  })
+
+  it('attachViewport reads shell.subscribed, and wires resize only when it is false', () => {
+    // `Shell.subscribed` was a diagnostic no caller read. On a client with no
+    // Telegram object — `pnpm dev`, or an iOS client where the SDK script failed
+    // to load, which spec §8.5 says happens silently — nothing was subscribed to
+    // any viewport event, so the canvas never resized for the life of the
+    // session. Both branches, because wiring `resize` unconditionally is a spec
+    // §8.3 violation on a real client (it fires through a keyboard animation
+    // against the transient height) and wiring it never is the gap.
+    for (const subscribed of [true, false]) {
+      const seen: string[] = []
+      let measured = 0
+      const wired = attachViewport(
+        { addEventListener: (type) => seen.push(type) },
+        {
+          subscribed,
+          viewportChanged: () => {
+            measured++
+            return SizingOutcome.UNCHANGED
+          },
+        },
+        (run) => {
+          run()
+        },
+      )
+      expect(wired, `subscribed=${subscribed}`).toEqual(
+        subscribed ? ['orientationchange'] : ['orientationchange', 'resize'],
+      )
+      expect(seen).toEqual(wired)
+      expect(measured, 'wiring must not measure').toBe(0)
+    }
+  })
+
+  it('routes an orientation change to the shell, through the settle', () => {
+    // Plan Decision 5 lists orientation change as a measurement trigger beside
+    // boot, the settle and stable `viewportChanged`. It fires BEFORE the new
+    // metrics are published, so it goes through `settle` — deferred, then
+    // measured, and reported as a STABLE event because a rotation is not a
+    // transition frame.
+    const rig = buildRig()
+    rig.advance(0)
+    expect(rig.game.shell.rebuilds).toBe(1)
+
+    let handler: (() => void) | null = null
+    const deferred: (() => void)[] = []
+    attachViewport(
+      { addEventListener: (type, h) => {
+        if (type === 'orientationchange') handler = h
+      } },
+      rig.game.shell,
+      (run) => deferred.push(run),
+    )
+    expect(handler, 'orientationchange was never wired').not.toBeNull()
+
+    // A rotation that changes the tile size, 406 -> 320 CSS px wide.
+    rig.setView(NARROW_VIEW)
+    ;(handler as unknown as () => void)()
+    // Deferred, not measured inline — reading the viewport now would fit against
+    // the pre-rotation rectangle.
+    expect(deferred.length).toBe(1)
+    expect(rig.game.shell.camera.tileSize, 'measured before the settle').toBe(29)
+    ;(deferred[0] as () => void)()
+    expect(rig.game.shell.camera.tileSize).toBe(22)
+    expect(rig.game.shell.rebuilds).toBe(2)
+    expect(rig.game.atlas.tileDevicePx).toBe(44)
   })
 
   it('auto-starts only where a document exists', () => {

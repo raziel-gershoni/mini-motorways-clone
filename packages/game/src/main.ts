@@ -77,8 +77,10 @@ import { seedStartingCity } from './startingCity'
  *                                           then measures, sizes, and builds the atlas
  * 4  createFrameBuilder                     needs a camera, which step 3 produced
  * 5  the warm start                         WARM_START_TICKS steps, see below
- * 6  initCarSnapshots                       AFTER the warm start, so frame 1 lerps from
- *                                           the launch state and not from cell (0, 0)
+ * 6  initCarSnapshots                       LAST, so frame 1 lerps from the launch
+ *                                           state and not from cell (0, 0). Equivalent
+ *                                           to running it earlier today, and not under
+ *                                           M3's restore — see the call site
  * 7  queue, loop, pointer, erase control
  * ```
  *
@@ -307,9 +309,29 @@ export function createGame(deps: GameDeps): Game {
   const warmStartTicks = deps.warmStartTicks ?? WARM_START_TICKS
   for (let t = 0; t < warmStartTicks; t++) step(state, world, fields, scratch, queue.inputs)
 
-  // AFTER the warm start and before the first frame. An unwritten `Float32Array`
-  // is all-zero, which is grid cell (0, 0), so without this the whole city
-  // streaks in from the board's top-left corner on frame 1.
+  // Before the first frame, always: an unwritten `Float32Array` is all-zero,
+  // which is grid cell (0, 0), so without this call the whole city streaks in
+  // from the board's top-left corner on frame 1.
+  //
+  // **Placed after the warm start, and TODAY that ordering is an equivalence
+  // rather than a requirement — the reason matters more than the fact.** Moving
+  // this call above the warm-start loop survives every test, and the honest
+  // reason is not "the snapshots are refreshed each frame" (they are, but only
+  // for slots the driver resolves) — it is that **no car moves during the warm
+  // start at all**. `seedStartingCity` lays no roads, so no route exists, so
+  // `runDispatch` never leaves any car in `PHASE_IDLE`; the resolver returns
+  // each car's own house cell on every tick of the ramp. Measured to 9,000
+  // warm-start ticks: the two orderings produce byte-identical snapshots.
+  //
+  // **What makes it stop being equivalent, so nobody reorders it on the strength
+  // of that survival.** The equivalence is a property of the STATE this function
+  // is handed, not of the code: it holds exactly while every car is parked when
+  // the snapshot is taken. Two things in flight break it. **M3's restore** hands
+  // `createGame` a state with cars mid-route, and a snapshot taken before the
+  // ramp would then lerp every one of them across up to 258 ticks of motion on
+  // frame 1 — the streak this call exists to prevent, reintroduced at a
+  // different scale. **M1e's in-`step` spawner** breaks it the same way, by
+  // making a car appear during the ramp with no prev entry. Keep the call last.
   initCarSnapshots(builder.snapshots, state, world)
 
   const loop = createLoop(
@@ -438,6 +460,72 @@ export function attachPointerEvents(target: PointerEventTarget, pointer: Pointer
   })
 }
 
+/**
+ * The slice of `window` the viewport wiring uses.
+ *
+ * Two event names rather than one, and which of them is wired depends on
+ * `shell.subscribed` — see `attachViewport`.
+ */
+export interface ViewportEventTarget {
+  addEventListener(type: 'orientationchange' | 'resize', handler: () => void): void
+}
+
+/**
+ * Routes the viewport sources `bootShell` cannot subscribe to itself at
+ * `shell.viewportChanged`.
+ *
+ * **`Shell.subscribed` was a diagnostic no caller read, and that made a real gap
+ * invisible.** `bootShell` subscribes to Telegram's `viewportChanged` and returns
+ * whether the subscription was actually installed; nothing ever looked. On a
+ * client with no `Telegram` object — `pnpm dev` in a browser, and any client
+ * where the SDK script failed to load, which spec §8.5 says fails silently on
+ * iOS — that subscription does not exist, so **the canvas never resizes for the
+ * life of the session**: rotate the device and the board keeps the old camera
+ * while every pointer event is transformed through it. Reading the flag is what
+ * turns that from a silent degradation into a wired fallback.
+ *
+ * **`orientationchange` is wired unconditionally**, because plan Decision 5 lists
+ * it alongside boot, the fullscreen settle and stable `viewportChanged` as a
+ * measurement trigger, and because a rotation is the one viewport change that
+ * always moves the tile size. **`resize` is wired only when the Telegram
+ * subscription is absent**, and that condition is the whole of spec §8.3's
+ * compliance: on a real client `resize` fires continuously through a keyboard
+ * animation and would re-measure against the transient height, which is exactly
+ * what §8.3 forbids and what `stableHeight()` exists to avoid. Where there is no
+ * Telegram there is no transient height and no stable event to prefer.
+ *
+ * Both go through `settle` rather than measuring inline: `orientationchange`
+ * fires before the new viewport metrics are published on every browser this
+ * targets. An early read is self-correcting — a measurement that agrees costs
+ * nothing (`SizingOutcome.UNCHANGED` does not touch the canvas) and a later
+ * event fixes it if it does not — but paying three animation frames is cheaper
+ * than a guaranteed-wrong camera.
+ *
+ * Returns the event names it wired, so a test asserts a list rather than a
+ * property and dropping one is visible.
+ */
+export function attachViewport(
+  target: ViewportEventTarget,
+  shell: Pick<Shell, 'viewportChanged' | 'subscribed'>,
+  settle: (run: () => void) => void,
+): string[] {
+  const wired: string[] = ['orientationchange']
+  target.addEventListener('orientationchange', () => {
+    settle(() => {
+      shell.viewportChanged(true)
+    })
+  })
+  if (!shell.subscribed) {
+    wired.push('resize')
+    target.addEventListener('resize', () => {
+      settle(() => {
+        shell.viewportChanged(true)
+      })
+    })
+  }
+  return wired
+}
+
 /** The slice of `document` the visibility wiring uses. */
 export interface VisibilityTarget {
   readonly visibilityState: string
@@ -554,7 +642,7 @@ export function startGame(): Game {
     preferFallback: prefersFallback(location.search),
   })
 
-  wireGame(game, canvas, document, requestAnimationFrame)
+  wireGame(game, canvas, document, requestAnimationFrame, window, rafSettle)
   return game
 }
 
@@ -579,9 +667,12 @@ export function wireGame(
   canvas: PointerEventTarget,
   doc: VisibilityTarget,
   raf: (callback: (now: number) => void) => unknown,
+  viewport: ViewportEventTarget,
+  settle: (run: () => void) => void,
 ): void {
   attachPointerEvents(canvas, game.pointer)
   attachVisibility(doc, game.pointer)
+  attachViewport(viewport, game.shell, settle)
 
   // `requestAnimationFrame`'s own timestamp is the loop's clock — plan Decision
   // 1: there is no second clock anywhere, so `performance.now()` never appears.
