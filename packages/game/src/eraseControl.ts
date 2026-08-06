@@ -238,7 +238,22 @@ export interface EraseControlHost {
 
 export interface EraseControlDeps {
   readonly host: EraseControlHost
-  readonly createFallback?: FallbackElementFactory
+  /**
+   * **Required, and that is this milestone's Critical held shut by the type
+   * system rather than by anyone remembering.**
+   *
+   * It was optional in the first version, which meant `createEraseControl({
+   * host })` compiled, ran, reported `NONE`, and produced a build where **the
+   * player can draw roads and never remove one** — the exact defect this file
+   * exists to close, reopened by one omitted property in `main.ts`, a file this
+   * task does not write. No compile error, no test failure, silent green.
+   *
+   * `NONE` is defensible as a **runtime** outcome: the factory may still return
+   * `null`, and in Node it always does. It is not defensible as a **static**
+   * one. Making this required costs a caller nothing and converts a silent
+   * reopening into a compile error.
+   */
+  readonly createFallback: FallbackElementFactory
 }
 
 export interface EraseControl {
@@ -271,6 +286,15 @@ export interface EraseControl {
  * still toggles through `press()`, because a control that cannot render is not a
  * reason to break the game.
  */
+/** See the call site: a factory that throws is treated as one that declined. */
+function safeCreate(factory: FallbackElementFactory): FallbackElement | null {
+  try {
+    return factory() ?? null
+  } catch {
+    return null
+  }
+}
+
 export function createEraseControl(deps: EraseControlDeps): EraseControl {
   const host = deps.host
   let label = MAIN_BUTTON_LABEL_OFF
@@ -284,7 +308,13 @@ export function createEraseControl(deps: EraseControlDeps): EraseControl {
   if (native) {
     surface = EraseControlSurface.MAIN_BUTTON
   } else {
-    element = deps.createFallback?.() ?? null
+    // **Guarded, because the doc comment on this function says it never throws
+    // and an injected factory is somebody else's code.** Production's factory is
+    // three DOM lines and will not throw; a future one that queries a container
+    // or touches a shadow root might, and an exception escaping a constructor
+    // here takes down boot for a control that is allowed to be absent. A
+    // throwing factory is treated exactly as a declining one.
+    element = safeCreate(deps.createFallback)
     if (element === null) {
       surface = EraseControlSurface.NONE
     } else if (!isTelegram()) {
@@ -367,6 +397,17 @@ export function createEraseControl(deps: EraseControlDeps): EraseControl {
 type Assert<T extends true> = T
 export type _PointerInputIsAnEraseControlHost = Assert<
   PointerInput extends EraseControlHost ? true : false
+>
+/**
+ * `createFallback` is REQUIRED, pinned so that relaxing it back to optional is a
+ * compile error here rather than a silently reachable `NONE` in `main.ts`. See
+ * the property's own comment for what that costs when it is wrong.
+ *
+ * `undefined extends T` is the test for optionality: on a required property it
+ * is false, and on `createFallback?: F` the property type includes `undefined`.
+ */
+export type _FallbackFactoryIsRequired = Assert<
+  undefined extends EraseControlDeps['createFallback'] ? false : true
 >
 export type _RealButtonIsAFallbackElement = Assert<
   HTMLButtonElement extends FallbackElement ? true : false

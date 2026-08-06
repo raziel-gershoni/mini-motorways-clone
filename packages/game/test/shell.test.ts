@@ -254,8 +254,17 @@ describe('rafSettle(): three frames, which is what the spike measured', () => {
     rafSettle(() => {
       ran++
     })
+    // **The bound is the literal 3, not `SETTLE_FRAMES`, and that one word is
+    // the difference between a behavioural detector and a pinned constant.**
+    // Driving `SETTLE_FRAMES` frames passes for ANY value of it, so the only
+    // thing that could catch `3 -> 2` was the pin below — which is a fact about
+    // the constant, not about the code. With the literal here, `SETTLE_FRAMES =
+    // 2` fails with "ran after only 2 frames".
+    //
+    // The pin stays as well: it says the shipped value is the spike's, which is
+    // the part that has provenance.
     expect(SETTLE_FRAMES).toBe(3)
-    for (let i = 0; i < SETTLE_FRAMES; i++) {
+    for (let i = 0; i < 3; i++) {
       expect(ran, `ran after only ${i} frames`).toBe(0)
       const next = pending.shift()
       expect(next, `no frame ${i} was requested`).toBeDefined()

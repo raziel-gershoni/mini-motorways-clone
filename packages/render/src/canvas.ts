@@ -36,9 +36,17 @@ import type { Camera, HudRects, Palette, Rect, RenderFrame } from './types'
  * `packages/game/test/allocation.test.ts`, built in Task 6 and pointed at the
  * input path in Task 7 — and this file's draw path runs under it whenever
  * `game` supplies the context; what it cannot see is a `render`-only call with
- * no `game` caller. A Task 3 reviewer
- * reinstated an allocation and watched all 82 tests pass. Review is the only
- * check, so the rule is written where the code is.
+ * no `game` caller.
+ *
+ * **This paragraph used to end "Review is the only check", four lines below the
+ * sentence saying a profiler exists.** That is the fourth copy of the same
+ * refuted claim found on this milestone, in three rounds of fixing it, and two
+ * of them were in this one doc comment. What is true is narrower and is now
+ * stated as such: a Task 3 reviewer reinstated an allocation here and watched
+ * all 82 tests pass, which was a fact about the coverage of the day rather than
+ * about the toolchain. Today the harness reaches this file through a `game`-side
+ * caller; Task 9's integration is what supplies one, and until then review is
+ * the only check **of this file specifically** — not of the rule.
  *
  * **3. The draw order is load-bearing, not cosmetic.** Buildings draw above
  * roads because a road is legal on a house cell and on a carpark cell and would

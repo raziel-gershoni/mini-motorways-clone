@@ -413,7 +413,7 @@ function buildRig(draw: (frame: RenderFrame) => void): Rig {
   // caller-owned object, but building one per frame would charge this file's own
   // noise to the measurement it is taking.
   const rects = hudRects(camera, createHudRects())
-  const erase = createEraseControl({ host: pointer })
+  const erase = createEraseControl({ host: pointer, createFallback: () => null })
   if (erase.surface !== EraseControlSurface.MAIN_BUTTON) {
     throw new Error('the rig bound the erase control to the wrong surface — it is not measuring the shipped path')
   }

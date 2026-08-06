@@ -107,6 +107,14 @@ function fallbackRecorder(): FallbackRecorder {
   }
 }
 
+/**
+ * A factory that declines. `createFallback` is REQUIRED — omitting it used to
+ * compile and produce a build with no way to reach erase mode at all — so the
+ * MainButton fixtures below have to say explicitly that they want no fallback,
+ * which is the point: it is now a decision rather than an omission.
+ */
+const NO_FALLBACK = (): null => null
+
 /** A minimal host: the two members `PointerInput` exposes for this control. */
 function fakeHost(): { eraseMode: boolean; toggleEraseMode: () => boolean } {
   let erase = false
@@ -130,7 +138,7 @@ afterEach(() => {
 describe('the erase control picks a surface, and says which and why', () => {
   it('uses the MainButton on a client at the gate', () => {
     installTelegram('8.0')
-    const control = createEraseControl({ host: fakeHost() })
+    const control = createEraseControl({ host: fakeHost(), createFallback: NO_FALLBACK })
     expect(control.surface).toBe(EraseControlSurface.MAIN_BUTTON)
   })
 
@@ -161,13 +169,33 @@ describe('the erase control picks a surface, and says which and why', () => {
   })
 
   it('reports NONE when there is no MainButton and no fallback factory either', () => {
-    const control = createEraseControl({ host: fakeHost() })
+    const control = createEraseControl({ host: fakeHost(), createFallback: NO_FALLBACK })
     expect(control.surface).toBe(EraseControlSurface.NONE)
   })
 
   it('reports NONE when the fallback factory itself declines', () => {
     const control = createEraseControl({ host: fakeHost(), createFallback: () => null })
     expect(control.surface).toBe(EraseControlSurface.NONE)
+  })
+
+  /**
+   * The doc comment says "never throws, on any client", and an injected factory
+   * is somebody else's code. An exception escaping this constructor takes down
+   * boot for a control that is allowed to be absent, so a throwing factory is
+   * treated exactly as a declining one.
+   */
+  it('treats a factory that THROWS as one that declined, rather than propagating', () => {
+    let control: ReturnType<typeof createEraseControl> | null = null
+    expect(() => {
+      control = createEraseControl({
+        host: fakeHost(),
+        createFallback: () => {
+          throw new Error('no document in this environment')
+        },
+      })
+    }).not.toThrow()
+    expect(control).not.toBeNull()
+    expect((control as unknown as { surface: number }).surface).toBe(EraseControlSurface.NONE)
   })
 
   it('gives every refusal its own code, so a negative assertion names the reason', () => {
@@ -182,7 +210,7 @@ describe('the erase control picks a surface, and says which and why', () => {
 describe('the control is reachable and its state is visible', () => {
   it('renders itself at construction, so the button exists before the first press', () => {
     const mb = installTelegram('8.0')
-    const control = createEraseControl({ host: fakeHost() })
+    const control = createEraseControl({ host: fakeHost(), createFallback: NO_FALLBACK })
     expect(mb.calls).toContain('onClick')
     expect(mb.calls).toContain('show')
     expect(mb.calls).toContain(`setText:${MAIN_BUTTON_LABEL_OFF}`)
@@ -193,7 +221,7 @@ describe('the control is reachable and its state is visible', () => {
   it('a press on the NATIVE button toggles the mode — the whole point of the task', () => {
     const mb = installTelegram('8.0')
     const host = fakeHost()
-    const control = createEraseControl({ host })
+    const control = createEraseControl({ host, createFallback: NO_FALLBACK })
     expect(host.eraseMode).toBe(false)
     mb.press()
     expect(host.eraseMode).toBe(true)
@@ -220,7 +248,7 @@ describe('the control is reachable and its state is visible', () => {
    */
   it('changes both the label and the colour on the native button', () => {
     const mb = installTelegram('8.0')
-    const control = createEraseControl({ host: fakeHost() })
+    const control = createEraseControl({ host: fakeHost(), createFallback: NO_FALLBACK })
     const atBoot = mb.calls.join('\n')
     expect(atBoot).toContain(`setText:${MAIN_BUTTON_LABEL_OFF}`)
     expect(atBoot).toContain(ERASE_OFF_BG)
@@ -234,9 +262,20 @@ describe('the control is reachable and its state is visible', () => {
     expect(pressed).toContain(ERASE_ON_FG)
     expect(control.label).toBe(MAIN_BUTTON_LABEL_ON)
 
+    // **The return trip, and it is the half that was missing.** A colour that
+    // latches ON survives every assertion above while the label reverts
+    // correctly — which is precisely the failure `eraseControl.ts` names as its
+    // reason for calling both `setText` and `setParams`: "a button whose colour
+    // says erase while its label says draw is worse than either". The comment
+    // stated the hazard and nothing could see it.
     mb.calls.length = 0
     mb.press()
-    expect(mb.calls.join('\n')).toContain(`setText:${MAIN_BUTTON_LABEL_OFF}`)
+    const reverted = mb.calls.join('\n')
+    expect(reverted).toContain(`setText:${MAIN_BUTTON_LABEL_OFF}`)
+    expect(reverted).toContain(ERASE_OFF_BG)
+    expect(reverted).toContain(ERASE_OFF_FG)
+    expect(reverted).not.toContain(ERASE_ON_BG)
+    expect(control.label).toBe(MAIN_BUTTON_LABEL_OFF)
   })
 
   it('changes both the label and the colour on the DOM fallback', () => {
@@ -249,6 +288,19 @@ describe('the control is reachable and its state is visible', () => {
     expect(el.textContent).toBe(FALLBACK_LABEL_ON)
     expect(el.calls.join('\n')).toContain(ERASE_ON_BG)
     expect(control.label).toBe(FALLBACK_LABEL_ON)
+
+    // The return trip, for the same reason as the native button above: the
+    // first version pressed this surface ONCE, so a pill that latched on
+    // `ERASING` and stayed red while the pointer drew roads normally passed the
+    // whole suite.
+    el.calls.length = 0
+    el.press()
+    expect(el.textContent).toBe(FALLBACK_LABEL_OFF)
+    const back = el.calls.join('\n')
+    expect(back).toContain(ERASE_OFF_BG)
+    expect(back).toContain(ERASE_OFF_FG)
+    expect(back).not.toContain(ERASE_ON_BG)
+    expect(control.label).toBe(FALLBACK_LABEL_OFF)
   })
 
   it('the two states are visually distinct — a control that renders the same twice shows nothing', () => {
@@ -266,7 +318,7 @@ describe('the control is reachable and its state is visible', () => {
   it('sync() re-renders from the host without toggling anything', () => {
     const mb = installTelegram('8.0')
     const host = fakeHost()
-    const control = createEraseControl({ host })
+    const control = createEraseControl({ host, createFallback: NO_FALLBACK })
     host.toggleEraseMode()
     // The host changed underneath the control: the label is now stale.
     expect(control.label).toBe(MAIN_BUTTON_LABEL_OFF)
@@ -279,7 +331,7 @@ describe('the control is reachable and its state is visible', () => {
 
   it('counts its renders, so "it re-rendered" is a count rather than an impression', () => {
     installTelegram('8.0')
-    const control = createEraseControl({ host: fakeHost() })
+    const control = createEraseControl({ host: fakeHost(), createFallback: NO_FALLBACK })
     expect(control.renders).toBe(1)
     control.press()
     expect(control.renders).toBe(2)
@@ -289,7 +341,7 @@ describe('the control is reachable and its state is visible', () => {
 
   it('still toggles the mode when there is no surface at all, so the game is never wedged', () => {
     const host = fakeHost()
-    const control = createEraseControl({ host })
+    const control = createEraseControl({ host, createFallback: NO_FALLBACK })
     expect(control.surface).toBe(EraseControlSurface.NONE)
     expect(control.press()).toBe(true)
     expect(host.eraseMode).toBe(true)
@@ -325,7 +377,7 @@ describe('wired to the real PointerInput', () => {
   it('makes erase reachable: a press then a drag queues erase actions and no place actions', () => {
     const mb = installTelegram('8.0')
     const { pointer, queue } = build()
-    createEraseControl({ host: pointer })
+    createEraseControl({ host: pointer, createFallback: NO_FALLBACK })
 
     mb.press()
     pointer.down(1, cellX(REVEALED_X0 + 2), cellY(REVEALED_Y0 + 2))
@@ -337,7 +389,7 @@ describe('wired to the real PointerInput', () => {
   it('negative control: without the press the same drag queues place actions', () => {
     installTelegram('8.0')
     const { pointer, queue } = build()
-    createEraseControl({ host: pointer })
+    createEraseControl({ host: pointer, createFallback: NO_FALLBACK })
     pointer.down(1, cellX(REVEALED_X0 + 2), cellY(REVEALED_Y0 + 2))
     pointer.move(1, cellX(REVEALED_X0 + 4), cellY(REVEALED_Y0 + 2))
     expect(queue.length).toBe(2)
@@ -355,7 +407,7 @@ describe('wired to the real PointerInput', () => {
   it('a press mid-stroke changes the button at once and applies from the NEXT stroke', () => {
     const mb = installTelegram('8.0')
     const { pointer, queue } = build()
-    const control = createEraseControl({ host: pointer })
+    const control = createEraseControl({ host: pointer, createFallback: NO_FALLBACK })
 
     pointer.down(1, cellX(REVEALED_X0 + 2), cellY(REVEALED_Y0 + 2))
     mb.press()

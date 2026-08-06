@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import {
   MAIN_BUTTON_MIN_VERSION,
   atLeast,
@@ -506,8 +507,19 @@ describe('index.html — the shell nothing else can check', () => {
     )
   })
 
-  it('sets touch-action: none on the canvas — the whole swipe mitigation below 7.7', () => {
-    expect(html).toMatch(/touch-action:\s*none/)
+  it('sets touch-action: none ON THE CANVAS, and not on the body', () => {
+    // **Scoped, and the scope is the assertion.** `touch-action: none` on
+    // `body` is the legacy workaround spec §8.3 explicitly forbids — it is the
+    // approach reported broken and it kills legitimate scrolling everywhere
+    // else on the page. An unscoped `toMatch` passes for that mutation, which
+    // is why the rule blocks are parsed rather than the file searched.
+    const canvasRule = /canvas\s*\{([^}]*)\}/.exec(html)?.[1]
+    expect(canvasRule, 'there is no canvas rule at all').toBeDefined()
+    expect(canvasRule).toMatch(/touch-action:\s*none/)
+
+    const bodyRule = /html,\s*\n?\s*body\s*\{([^}]*)\}/.exec(html)?.[1]
+    expect(bodyRule, 'there is no html/body rule at all').toBeDefined()
+    expect(bodyRule).not.toMatch(/touch-action/)
   })
 
   it('sets overscroll-behavior: contain (spec §8.3)', () => {
@@ -527,8 +539,34 @@ describe('index.html — the shell nothing else can check', () => {
     expect(external).toEqual(['telegram.org/js/telegram-web-app.js'])
   })
 
-  it('has the canvas the shell sizes and the module that boots it', () => {
+  it('has the canvas the shell sizes and exactly one root-absolute entry module', () => {
     expect(html).toContain('id="board"')
-    expect(html).toContain('src="/src/main.ts"')
+    const modules = [...html.matchAll(/<script type="module" src="([^"]+)"/g)].map((m) => m[1] as string)
+    expect(modules).toEqual(['/src/main.ts'])
+    // Root-absolute, not relative: a relative specifier resolves against the
+    // request path, so a Mini App opened at anything but `/` 404s its whole
+    // bundle — and spec §8.5 says iOS reports that as a blank screen.
+    expect(modules[0]?.startsWith('/')).toBe(true)
+  })
+
+  /**
+   * **The half of the entry-point check that is not self-referential, stated
+   * with its own vacuity.** Asserting the literal `/src/main.ts` above pins the
+   * agreed name and nothing more — nothing checks the file will exist, because
+   * at Task 8 it does not. This closes the other direction: the moment Task 9
+   * creates an entry module, the shell must point at THAT file. A Task 9 that
+   * names it `index.ts`, or moves it, turns this red instead of shipping a
+   * blank screen.
+   */
+  it('points at the entry module Task 9 actually creates, once one exists', () => {
+    const srcDir = fileURLToPath(new URL('../src/', import.meta.url))
+    const entries = readdirSync(srcDir).filter((f) => /^main.*\.tsx?$/.test(f))
+    if (entries.length === 0) {
+      // Vacuous today, deliberately and visibly: `src/main.ts` is Task 9's file.
+      expect(readdirSync(srcDir).length, 'src/ is empty, so this test proves nothing').toBeGreaterThan(0)
+      return
+    }
+    const referenced = /<script type="module" src="\/src\/([^"]+)"/.exec(html)?.[1]
+    expect(entries, `index.html points at ${String(referenced)}`).toContain(referenced)
   })
 })
