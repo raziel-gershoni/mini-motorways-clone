@@ -22,7 +22,7 @@ Note the invariant is **per call, not per frame**: a per-frame figure encodes th
 
 There are **two** copies of the cell-stepping bounds logic — private at `cars.ts:155` and exported at `dispatch.ts:324`. (M1c's note said three; M2's final review checked and it is two.) `roads.ts` is the right home because it already owns `OPPOSITE`, `dirBetween` and `inBounds`. During M1c I ruled to keep the duplication rather than refactor mid-milestone, which was defensible and had a price: the whole-milestone review found `cars.ts`'s copy had four dedicated tests and **`dispatch.ts`'s copy had zero — all four bounds survived.** The copy that got tested was not the copy dispatch used.
 
-Fold all three into `roads.ts` before adding a fourth caller. M1d's blocking logic will want one.
+Fold both into `roads.ts` before adding a third caller. M1d's blocking logic will want one.
 
 ### 2. Two phase transpositions are 0-detector no-ops, and M1d/M1e will make them real
 
@@ -64,4 +64,6 @@ M1d is where the multipliers get a caller. The unit test is already there; wire 
 
 **Demonstrated, by execution:** 7 determinism comparisons byte-identical on whole buffers, including snapshot + restore with fields and scratch **cold-rebuilt on every single tick** for 900 ticks, a rollback across a throwing tick, warm-vs-cold field reuse, `2×(N/2)` fast-forward, and roads erased under in-flight cars. Plus 5 fixtures × 20,000 ticks with `sum(destReserved) === count(PHASE_OUTBOUND)` holding every tick and no counter drift.
 
-**Not demonstrated:** anything about performance under load, anything on a real device since M0, and any behaviour with more than a handful of cars. M1d's blocking is the first feature whose cost scales with traffic density.
+**Not demonstrated:** anything about performance under load, and any behaviour with more than a handful of cars. M1d's blocking is the first feature whose cost scales with traffic density.
+
+**Updated after M2:** the game now runs on a real phone in Telegram and a human reports it feels smooth — but that is one device, qualitative, with a handful of cars and no numbers. No Android, no `performanceClass: LOW`, no frame timings. Treat it as evidence the architecture is viable, not as a measured budget.
