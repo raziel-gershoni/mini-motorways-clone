@@ -1,0 +1,1156 @@
+import { describe, it, expect } from 'vitest'
+import {
+  firstCity,
+  TERRAIN,
+  TICKS_PER_WEEK,
+  DAYS_PER_WEEK,
+  CARS_PER_HOUSE,
+  REVEALED_X0,
+  REVEALED_Y0,
+  REVEALED_W,
+  REVEALED_H,
+  type MapData,
+} from '@laneways/shared'
+import {
+  createState,
+  createWorld,
+  createScratch,
+  createFlowFields,
+  createFieldInputRanges,
+  placeHouse,
+  packRouteStep,
+  weekOfTick,
+  dayOfWeek,
+  tilesLeft,
+  carparkCell,
+  destMetaColour,
+  destMetaKind,
+  destMetaOrientation,
+  DEST_KIND_CIRCLE,
+  DEST_KIND_SQUARE,
+  ORIENTATION_E,
+  ORIENTATION_W,
+  PHASE_NONE,
+  PHASE_IDLE,
+  PHASE_OUTBOUND,
+  PHASE_RETURNING,
+  H_DEST_COUNT,
+  H_HOUSE_COUNT,
+  H_SCORE,
+  H_TICK,
+  H_TILES,
+  type FlowField,
+  type GameState,
+  type Scratch,
+  type TickAction,
+  type WorldData,
+} from '@laneways/sim'
+import { fitCamera, TerrainClass, type Camera, type RenderFrame } from '@laneways/render'
+import { seedStartingCity } from '../src/startingCity'
+import {
+  createFrameBuilder,
+  buildFrame,
+  createFrameDriver,
+  terrainClassOf,
+  type FrameBuilder,
+} from '../src/frame'
+import { initCarSnapshots, snapshotPrev, snapshotCurr, resolveCar } from '../src/resolve'
+import { createInputQueue } from '../src/inputs'
+import { createLoop, type Loop } from '../src/loop'
+
+/**
+ * `frame.ts` — the terrain fold, the destination unpack, the dense car array,
+ * the HUD scalars, and the interpolation the whole milestone's motion rests on.
+ * Plan Decision 3, and the second half of Decision 2.
+ *
+ * ---------------------------------------------------------------------------
+ * THE HUD OWNS NO CLOCK ARITHMETIC
+ * ---------------------------------------------------------------------------
+ *
+ * `week` and `day` are `weekOfTick(H_TICK)` and `dayOfWeek(H_TICK)`, called
+ * from `sim`. `clock.ts` derives the day from position within the week
+ * precisely because 4500/7 = 642.857... is not an integer, and a second
+ * float-permitted copy in `game` would disagree at boundaries. The boundary
+ * case below is what makes that a test rather than a claim.
+ *
+ * ---------------------------------------------------------------------------
+ * THE FOLD AND THE UNPACK RUN EVERY FRAME
+ * ---------------------------------------------------------------------------
+ *
+ * 960 byte writes and at most 16 building unpacks, allocation-free, and they
+ * cannot go stale. A dirty-flag scheme would be cheaper and would carry a
+ * staleness bug waiting for the first mid-run building change; the cost is not
+ * worth the class of defect.
+ */
+
+const GRID_W = 24
+
+/** The M0 device, as Task 3's camera tests use it: 406x870 CSS, insets 46/34, DPR 3 -> capped to 2. */
+function m0Camera(): Camera {
+  return fitCamera(
+    { cssW: 406, cssH: 870, topInset: 46, bottomInset: 34, rawDpr: 3, performanceClass: null },
+    { x0: REVEALED_X0, y0: REVEALED_Y0, cols: REVEALED_W, rows: REVEALED_H },
+  )
+}
+
+interface Rig {
+  readonly map: MapData
+  readonly world: WorldData
+  readonly state: GameState
+  readonly scratch: Scratch
+  readonly fields: FlowField[]
+  readonly camera: Camera
+}
+
+function rig(seed = false): Rig {
+  const map = firstCity()
+  const world = createWorld(map)
+  const state = createState('m2-frame', map)
+  if (seed) seedStartingCity(state, world)
+  return {
+    map,
+    world,
+    state,
+    scratch: createScratch(world.cells, map.groupCount, map.maxDestinations, createFieldInputRanges(map)),
+    fields: createFlowFields(map.groupCount, world.cells),
+    camera: m0Camera(),
+  }
+}
+
+function builderFor(r: Rig): FrameBuilder {
+  const fb = createFrameBuilder(r.state, r.world, r.camera)
+  initCarSnapshots(fb.snapshots, r.state, r.world)
+  return fb
+}
+
+function build(r: Rig, fb: FrameBuilder, alpha = 0, paused = false): RenderFrame {
+  return buildFrame(fb, r.state, r.world, r.camera, alpha, paused)
+}
+
+function cellOf(x: number, y: number): number {
+  return y * GRID_W + x
+}
+
+function carXY(frame: RenderFrame, n: number): [number, number] {
+  return [frame.carXY[n * 2] as number, frame.carXY[n * 2 + 1] as number]
+}
+
+// ---------------------------------------------------------------------------
+// 1. The terrain fold, and the copied-numbering watcher
+// ---------------------------------------------------------------------------
+
+describe('the terrain fold', () => {
+  /**
+   * `render` keeps its own `TerrainClass` because spec §4 forbids it importing
+   * `shared`, so the numbering exists twice. `game` is the only package that
+   * can see both copies, which is why the watcher lives here — the same
+   * reasoning, and the same file placement, as `renderDirections.test.ts`.
+   */
+  it('agrees with shared’s TERRAIN code for code, so the two copies cannot drift', () => {
+    expect(TerrainClass.LAND).toBe(TERRAIN.LAND)
+    expect(TerrainClass.WATER).toBe(TERRAIN.WATER)
+    expect(TerrainClass.MOUNTAIN).toBe(TERRAIN.MOUNTAIN)
+    expect(TerrainClass.TREE).toBe(TERRAIN.TREE)
+    expect(Object.keys(TerrainClass).length).toBe(Object.keys(TERRAIN).length)
+  })
+
+  it('maps every terrain code with nothing cleared', () => {
+    expect(terrainClassOf(TERRAIN.LAND, 0)).toBe(TerrainClass.LAND)
+    expect(terrainClassOf(TERRAIN.WATER, 0)).toBe(TerrainClass.WATER)
+    expect(terrainClassOf(TERRAIN.MOUNTAIN, 0)).toBe(TerrainClass.MOUNTAIN)
+    expect(terrainClassOf(TERRAIN.TREE, 0)).toBe(TerrainClass.TREE)
+  })
+
+  it('folds a CLEARED tree to land — the whole reason the fold exists', () => {
+    // `world.terrain` is never mutated; a tree destroyed by a road sets
+    // `state.cleared[cell] = 1`. A renderer reading `world.terrain` alone draws
+    // a tree under every road the player lays through a forest, permanently.
+    expect(terrainClassOf(TERRAIN.TREE, 1)).toBe(TerrainClass.LAND)
+  })
+
+  it('leaves a cleared WATER or MOUNTAIN cell alone', () => {
+    // `placeRoad` only ever sets `cleared` on a TREE cell, so this is off the
+    // reachable manifold today and is stated as such. It is guarded rather than
+    // written as "cleared implies land" because the unguarded form turns any
+    // future writer of `cleared` into a river that silently becomes a road.
+    expect(terrainClassOf(TERRAIN.WATER, 1)).toBe(TerrainClass.WATER)
+    expect(terrainClassOf(TERRAIN.MOUNTAIN, 1)).toBe(TerrainClass.MOUNTAIN)
+  })
+
+  it('writes the fold at index y * gridW + x for the whole board', () => {
+    const r = rig()
+    const fb = builderFor(r)
+    const frame = build(r, fb)
+    expect(frame.gridW).toBe(GRID_W)
+    expect(frame.terrainClass.length).toBe(r.world.cells)
+
+    // Three markers, each unique in its row AND its column, so a transposed or
+    // mis-strided read lands on land and fails.
+    const river = cellOf(12, 17) // the river column
+    const tree = cellOf(16, 10) // a tree, per firstCity's row 10
+    const mountain = cellOf(3, 5) // the mountain cluster, rows 5-7
+    expect(r.world.terrain[river] as number).toBe(TERRAIN.WATER)
+    expect(r.world.terrain[tree] as number).toBe(TERRAIN.TREE)
+    expect(r.world.terrain[mountain] as number).toBe(TERRAIN.MOUNTAIN)
+
+    expect(frame.terrainClass[river] as number).toBe(TerrainClass.WATER)
+    expect(frame.terrainClass[tree] as number).toBe(TerrainClass.TREE)
+    expect(frame.terrainClass[mountain] as number).toBe(TerrainClass.MOUNTAIN)
+    // The transposed cells are land, so a swapped decomposition is visible.
+    expect(frame.terrainClass[cellOf(17, 12)] as number).toBe(TerrainClass.LAND)
+    expect(frame.terrainClass[cellOf(10, 16)] as number).toBe(TerrainClass.LAND)
+  })
+
+  it('folds cells OUTSIDE the revealed rect too, so M1d’s expansion needs no change here', () => {
+    // The mountain cluster (rows 5-7, columns 3-4) is entirely outside the
+    // revealed rect. Folding only the drawn rect would pass every visible
+    // assertion and break the day M1d reveals more board.
+    const r = rig()
+    const frame = build(r, builderFor(r))
+    expect(cellOf(3, 5) % GRID_W).toBeLessThan(REVEALED_X0)
+    expect(frame.terrainClass[cellOf(3, 5)] as number).toBe(TerrainClass.MOUNTAIN)
+  })
+
+  it('is recomputed every frame, so a felled tree updates on the next frame', () => {
+    const r = rig()
+    const fb = builderFor(r)
+    const tree = cellOf(16, 10)
+    expect(build(r, fb).terrainClass[tree] as number).toBe(TerrainClass.TREE)
+    r.state.cleared[tree] = 1
+    expect(build(r, fb).terrainClass[tree] as number).toBe(TerrainClass.LAND)
+  })
+
+  /**
+   * The UNDER-iteration half of the fold's bound, and it cannot be written the
+   * obvious way.
+   *
+   * `firstCity`'s first and last cells are both LAND, and LAND is 0 — the value
+   * an unwritten `Uint8Array` already holds. So "assert the last cell is LAND"
+   * passes whether the loop reached it or not, which is the same shape as Task
+   * 5's seven 0-detector markers. Poking a sentinel in first and reading it
+   * back out makes the WRITE the observable rather than the value, and it works
+   * at both ends regardless of what the terrain there happens to be.
+   */
+  it('rewrites the first and last cell every frame, whatever terrain they carry', () => {
+    const r = rig()
+    const fb = builderFor(r)
+    const last = r.world.cells - 1
+    expect(r.world.terrain[0] as number).toBe(TERRAIN.LAND)
+    expect(r.world.terrain[last] as number).toBe(TERRAIN.LAND)
+    const SENTINEL = 200
+    fb.frame.terrainClass[0] = SENTINEL
+    fb.frame.terrainClass[last] = SENTINEL
+    const frame = build(r, fb)
+    expect(frame.terrainClass[0] as number, 'the fold skipped cell 0').toBe(TerrainClass.LAND)
+    expect(frame.terrainClass[last] as number, 'the fold skipped the last cell').toBe(TerrainClass.LAND)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2. The destination unpack
+// ---------------------------------------------------------------------------
+
+describe('the destination unpack', () => {
+  it('unpacks colour, kind and orientation and computes the carpark, per destination', () => {
+    const r = rig(true)
+    const frame = build(r, builderFor(r))
+    expect(frame.destCount).toBe(3)
+
+    // Hand-written from the seed table, not read back through destMeta:
+    //   D0 (9, 10) colour 0, square, W  -> carpark (8, 10)
+    //   D1 (9, 18) colour 0, square, W  -> carpark (8, 18)
+    //   D2 (14, 14) colour 1, circle, E -> carpark (17, 14)
+    expect(Array.from(frame.destColour.subarray(0, 3))).toEqual([0, 0, 1])
+    expect(Array.from(frame.destKind.subarray(0, 3))).toEqual([
+      DEST_KIND_SQUARE,
+      DEST_KIND_SQUARE,
+      DEST_KIND_CIRCLE,
+    ])
+    expect(Array.from(frame.destOrientation.subarray(0, 3))).toEqual([
+      ORIENTATION_W,
+      ORIENTATION_W,
+      ORIENTATION_E,
+    ])
+    expect(Array.from(frame.destCarpark.subarray(0, 3))).toEqual([
+      cellOf(8, 10),
+      cellOf(8, 18),
+      cellOf(17, 14),
+    ])
+    expect(Array.from(frame.destCell.subarray(0, 3))).toEqual([
+      cellOf(9, 10),
+      cellOf(9, 18),
+      cellOf(14, 14),
+    ])
+    // Vacuity: colour, kind and orientation must not all be constant across the
+    // three, or a unpack that returns the same byte for every field passes.
+    expect(new Set(Array.from(frame.destKind.subarray(0, 3))).size).toBe(2)
+    expect(new Set(Array.from(frame.destOrientation.subarray(0, 3))).size).toBe(2)
+  })
+
+  it('agrees with sim’s own unpackers rather than re-deriving the bit layout', () => {
+    const r = rig(true)
+    const frame = build(r, builderFor(r))
+    for (let d = 0; d < frame.destCount; d++) {
+      const meta = r.state.destMeta[d] as number
+      expect(frame.destColour[d] as number).toBe(destMetaColour(meta))
+      expect(frame.destKind[d] as number).toBe(destMetaKind(meta))
+      expect(frame.destOrientation[d] as number).toBe(destMetaOrientation(meta))
+      expect(frame.destCarpark[d] as number).toBe(
+        carparkCell(r.state.destCell[d] as number, destMetaOrientation(meta), r.world.w, r.world.h),
+      )
+    }
+  })
+
+  it('tracks destPins as they change, and reports houseCount and destCount from the header', () => {
+    const r = rig(true)
+    const fb = builderFor(r)
+    expect(build(r, fb).destPins[1] as number).toBe(0)
+    r.state.destPins[1] = 4
+    const frame = build(r, fb)
+    expect(frame.destPins[1] as number).toBe(4)
+    expect(frame.houseCount).toBe(r.state.header[H_HOUSE_COUNT] as number)
+    expect(frame.destCount).toBe(r.state.header[H_DEST_COUNT] as number)
+    expect(frame.houseCount).toBe(3)
+  })
+
+  /**
+   * The seeded city has three houses AND three destinations, so every
+   * assertion above passes with the two counts swapped. That is a lucky-value
+   * accident of exactly the parity kind the catalogue names, and it was a live
+   * 0-detector until this case existed: `frame.houseCount = destCount` survived
+   * the whole suite.
+   */
+  it('keeps houseCount and destCount apart on a board where they differ', () => {
+    const r = rig()
+    expect(placeHouse(r.state, r.world, cellOf(8, 24), 0)).toBe(true)
+    expect(placeHouse(r.state, r.world, cellOf(11, 20), 1)).toBe(true)
+    const frame = build(r, builderFor(r))
+    expect(frame.houseCount).toBe(2)
+    expect(frame.destCount).toBe(0)
+    expect(frame.houseCount).not.toBe(frame.destCount)
+  })
+
+  it('exposes the raw house views, whose live prefix is houseCount', () => {
+    const r = rig(true)
+    const frame = build(r, builderFor(r))
+    expect(frame.houseCell).toBe(r.state.houseCell)
+    expect(frame.houseColour).toBe(r.state.houseColour)
+    expect(frame.roads).toBe(r.state.roads)
+    expect(Array.from(frame.houseCell.subarray(0, 3))).toEqual([
+      cellOf(8, 24),
+      cellOf(8, 13),
+      cellOf(17, 18),
+    ])
+    expect(Array.from(frame.houseColour.subarray(0, 3))).toEqual([0, 0, 1])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 3. The dense car array
+// ---------------------------------------------------------------------------
+
+describe('the dense car array', () => {
+  /**
+   * The sim has no index-based car count: an unused slot is `PHASE_NONE` with
+   * `carCell = 0`, a real in-bounds cell. `game` densifies, so a phantom is
+   * unrepresentable at the interface rather than merely undrawn.
+   *
+   * The fixture puts a DEAD slot between two live ones, which is off the
+   * reachable manifold today (`placeHouse` only ever appends) and is exactly
+   * what M1e's building removal produces. Without a gap in the middle, "copy
+   * slot i to dense i" passes.
+   */
+  it('packs live cars at the front, skipping a dead slot in the middle', () => {
+    const r = rig()
+    // Two houses, four car slots: 0, 1 (house 0, colour 0) and 2, 3 (house 1,
+    // colour 3). Colours differ so a constant-colour bug is visible; the dense
+    // index differs from the slot index so an index confusion is too.
+    expect(placeHouse(r.state, r.world, cellOf(8, 24), 0)).toBe(true)
+    expect(placeHouse(r.state, r.world, cellOf(11, 20), 3)).toBe(true)
+    r.state.carPhase[1] = PHASE_NONE // slot 1 dies
+
+    const fb = builderFor(r)
+    const frame = build(r, fb)
+    expect(frame.carCount).toBe(3)
+    expect(carXY(frame, 0)).toEqual([8, 24]) // slot 0
+    expect(carXY(frame, 1)).toEqual([11, 20]) // slot 2, packed to dense 1
+    expect(carXY(frame, 2)).toEqual([11, 20]) // slot 3, packed to dense 2
+    expect(Array.from(frame.carColour.subarray(0, 3))).toEqual([0, 3, 3])
+  })
+
+  it('takes each car’s colour from ITS OWN house, not from the dense index', () => {
+    // Reading `houseColour[denseIndex]` would give [0, 0, 3] above and [0, 0,
+    // 3, 3] here — indistinguishable in the second case, which is why the gap
+    // fixture exists. This one pins the same rule with no gap, so the two
+    // together separate "houseColour[carHome[slot]]" from every neighbour.
+    const r = rig()
+    expect(placeHouse(r.state, r.world, cellOf(8, 24), 4)).toBe(true)
+    expect(placeHouse(r.state, r.world, cellOf(11, 20), 1)).toBe(true)
+    const frame = build(r, builderFor(r))
+    expect(frame.carCount).toBe(2 * CARS_PER_HOUSE)
+    expect(Array.from(frame.carColour.subarray(0, 4))).toEqual([4, 4, 1, 1])
+  })
+
+  it('reports carCount 0 on a board with no houses, and leaves the buffer alone', () => {
+    const r = rig()
+    const frame = build(r, builderFor(r))
+    expect(frame.carCount).toBe(0)
+    expect(frame.carXY.length).toBeGreaterThan(0)
+  })
+
+  /**
+   * The UNDER-iteration half of the snapshot's bound. `firstCity` has 40
+   * `maxHouses` and therefore 80 car slots, of which the seed uses six — so a
+   * snapshot loop that stops one slot short reaches nothing, draws nothing, and
+   * passes every other test in this file. A car parked in the LAST slot is the
+   * only fixture that can see it.
+   *
+   * `carHome` is set to house 2 (colour 1) rather than 0, so the same case also
+   * separates "the last slot is drawn" from "the last slot is drawn as some
+   * other car".
+   */
+  it('resolves and draws a car in the LAST slot', () => {
+    const r = rig(true)
+    const last = r.state.carPhase.length - 1
+    expect(last).toBe(79)
+    r.state.carPhase[last] = PHASE_IDLE
+    r.state.carHome[last] = 2
+    r.state.carCell[last] = cellOf(6, 29)
+    const frame = build(r, builderFor(r))
+    expect(frame.carCount).toBe(7)
+    expect(carXY(frame, 6)).toEqual([6, 29])
+    expect(frame.carColour[6] as number).toBe(1)
+  })
+
+  it('sizes carXY for every slot, so carXY.length / 2 is NOT the car count', () => {
+    const r = rig(true)
+    const frame = build(r, builderFor(r))
+    expect(frame.carCount).toBe(3 * CARS_PER_HOUSE)
+    expect(frame.carXY.length).toBe(r.state.carPhase.length * 2)
+    expect(frame.carXY.length / 2).toBeGreaterThan(frame.carCount)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 4. The HUD scalars
+// ---------------------------------------------------------------------------
+
+describe('the HUD scalars', () => {
+  it('reads week and day from sim’s clock at a boundary a stored ticks-per-day would miss', () => {
+    // 4500 / 7 = 642.857..., so day 1 starts at tick 643, not 642. A `game`-side
+    // `floor(tick / 642)` reads day 1 at tick 642 and drifts six ticks a week
+    // from there.
+    const r = rig()
+    const fb = builderFor(r)
+    expect(TICKS_PER_WEEK).toBe(4500)
+    expect(DAYS_PER_WEEK).toBe(7)
+
+    r.state.header[H_TICK] = 642
+    expect(build(r, fb).day).toBe(0)
+    r.state.header[H_TICK] = 643
+    expect(build(r, fb).day).toBe(1)
+    // The last day of the week, and the first tick of the next week.
+    r.state.header[H_TICK] = 4499
+    let frame = build(r, fb)
+    expect(frame.day).toBe(6)
+    expect(frame.week).toBe(0)
+    r.state.header[H_TICK] = 4500
+    frame = build(r, fb)
+    expect(frame.day).toBe(0)
+    expect(frame.week).toBe(1)
+  })
+
+  it('agrees with weekOfTick/dayOfWeek across a whole week, tick for tick', () => {
+    // The strongest available statement that the HUD owns no clock arithmetic
+    // of its own: not one tick in a week may disagree.
+    const r = rig()
+    const fb = builderFor(r)
+    for (let t = 0; t < TICKS_PER_WEEK + 3; t += 7) {
+      r.state.header[H_TICK] = t
+      const frame = build(r, fb)
+      expect(frame.week, `week at tick ${t}`).toBe(weekOfTick(t))
+      expect(frame.day, `day at tick ${t}`).toBe(dayOfWeek(t))
+    }
+  })
+
+  it('carries score, tilesLeft and paused', () => {
+    const r = rig(true)
+    const fb = builderFor(r)
+    let frame = build(r, fb, 0, false)
+    expect(frame.score).toBe(0)
+    expect(frame.tilesLeft).toBe(tilesLeft(r.state))
+    expect(frame.tilesLeft).toBe(30)
+    expect(frame.paused).toBe(false)
+
+    r.state.header[H_SCORE] = 7
+    r.state.header[H_TILES] = 12
+    frame = build(r, fb, 0, true)
+    expect(frame.score).toBe(7)
+    expect(frame.tilesLeft).toBe(12)
+    expect(frame.paused).toBe(true)
+  })
+
+  it('carries the camera it was handed, so a viewport change reaches the renderer', () => {
+    const r = rig()
+    const fb = builderFor(r)
+    const narrow = fitCamera(
+      { cssW: 390, cssH: 844, topInset: 46, bottomInset: 34, rawDpr: 3, performanceClass: null },
+      { x0: REVEALED_X0, y0: REVEALED_Y0, cols: REVEALED_W, rows: REVEALED_H },
+    )
+    expect(narrow.tileSize).not.toBe(r.camera.tileSize)
+    expect(build(r, fb).camera).toBe(r.camera)
+    expect(buildFrame(fb, r.state, r.world, narrow, 0, false).camera).toBe(narrow)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 5. The frame object is rewritten in place
+// ---------------------------------------------------------------------------
+
+describe('preallocation', () => {
+  it('returns the same frame object and the same typed arrays every time', () => {
+    const r = rig(true)
+    const fb = builderFor(r)
+    const a = build(r, fb)
+    const b = build(r, fb)
+    expect(b).toBe(a)
+    expect(b.terrainClass).toBe(a.terrainClass)
+    expect(b.carXY).toBe(a.carXY)
+    expect(b.destCarpark).toBe(a.destCarpark)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 6. Interpolation
+// ---------------------------------------------------------------------------
+
+describe('interpolation', () => {
+  /** A car mid-edge: slot 0 outbound, cell (11, 12), heading E, half a cell along. */
+  function movingCar(r: Rig, progress: number): void {
+    r.state.carPhase[0] = PHASE_OUTBOUND
+    r.state.carCell[0] = cellOf(11, 12)
+    r.state.carProgress[0] = progress
+    r.state.carRouteCursor[0] = 0
+    r.state.carRouteLen[0] = 4
+    for (let k = 0; k < 4; k++) packRouteStep(r.state, 0, k, 2 /* E */)
+  }
+
+  /**
+   * THE observable that separates interpolated rendering from tick-quantised
+   * rendering, and the only one that kills "pass alpha = 0 always".
+   *
+   * With progress-resolved positions a car is strictly between two cells on
+   * roughly seven ticks in eight regardless of alpha, so "drawn between two
+   * cells" and ">= 10 distinct positions" both survive that mutation. It is
+   * also the only observer of "snapshot prev AFTER step", which collapses
+   * `prevXY` onto `currXY` and makes the lerp constant within a tick.
+   */
+  it('renders two different positions for two frames inside the same tick', () => {
+    const r = rig()
+    movingCar(r, 800)
+    const fb = builderFor(r)
+
+    snapshotPrev(fb.snapshots, r.state, r.world)
+    r.state.carProgress[0] = 1130 // one tick of movement: +330
+    snapshotCurr(fb.snapshots, r.state, r.world)
+
+    const early = carXY(build(r, fb, 0.1), 0)
+    const late = carXY(build(r, fb, 0.9), 0)
+    expect(early[0]).not.toBe(late[0])
+    expect(late[0]).toBeGreaterThan(early[0])
+    // ...and both are strictly inside the tick's own displacement.
+    expect(early[0]).toBeGreaterThan(800 / 2500 + 11)
+    expect(late[0]).toBeLessThan(1130 / 2500 + 11)
+  })
+
+  it('renders the exact midpoint at alpha 0.5 on a tick where carCell did NOT change', () => {
+    // The 86.8% case. prev = 11 + 800/2500 = 11.32, curr = 11 + 1130/2500 =
+    // 11.452, midpoint 11.386. Both are on cell (11, 12): no crossing, and the
+    // interpolation still has to do real work.
+    const r = rig()
+    movingCar(r, 800)
+    const fb = builderFor(r)
+    snapshotPrev(fb.snapshots, r.state, r.world)
+    r.state.carProgress[0] = 1130
+    snapshotCurr(fb.snapshots, r.state, r.world)
+    expect(r.state.carCell[0] as number).toBe(cellOf(11, 12))
+
+    const [x, y] = carXY(build(r, fb, 0.5), 0)
+    expect(x).toBeCloseTo(11.386, 6)
+    expect(y).toBe(12)
+  })
+
+  it('crosses a cell boundary continuously: prev at alpha 0, curr at alpha ~1, no jump', () => {
+    // The crossing tick: progress 2400 -> +330 = 2730 >= 2500, so carCell
+    // advances to (12, 12) and the carry is 230.
+    //   prev = 11 + 2400/2500 = 11.96
+    //   curr = 12 + 230/2500  = 12.092
+    // Displacement 0.132 cells — one ordinary tick, with no discontinuity at
+    // the cell change at all.
+    const r = rig()
+    movingCar(r, 2400)
+    const fb = builderFor(r)
+    snapshotPrev(fb.snapshots, r.state, r.world)
+    r.state.carCell[0] = cellOf(12, 12)
+    r.state.carProgress[0] = 230
+    r.state.carRouteCursor[0] = 1
+    snapshotCurr(fb.snapshots, r.state, r.world)
+
+    expect(carXY(build(r, fb, 0), 0)[0]).toBeCloseTo(11.96, 6)
+    expect(carXY(build(r, fb, 0.999999), 0)[0]).toBeCloseTo(12.092, 5)
+    let last = carXY(build(r, fb, 0), 0)[0]
+    const first = last
+    for (let a = 1 / 64; a < 1; a += 1 / 64) {
+      const x = carXY(build(r, fb, a), 0)[0]
+      expect(x - last, `alpha ${a}`).toBeGreaterThan(0)
+      expect(x - last, `alpha ${a}`).toBeLessThan(0.132)
+      last = x
+    }
+    // The whole tick's displacement is one ordinary tick of motion. A cell
+    // change is not a discontinuity here, which is the point.
+    expect(last - first).toBeLessThan(0.132)
+    expect(last - first).toBeGreaterThan(0.12)
+  })
+
+  it('crosses the mid-line between two cells exactly once across a whole edge traversal', () => {
+    // The cell boundary in centre-units sits at x = 11.5 between cells (11, 12)
+    // and (12, 12). Sampling every rendered position across the ~7.6 ticks of
+    // the edge, the car must pass 11.5 once and never come back — which is what
+    // rules out both a jittering cell-to-cell lerp and an extrapolation that
+    // overshoots and snaps back.
+    const r = rig()
+    movingCar(r, 0)
+    const fb = builderFor(r)
+    const xs: number[] = []
+    for (let t = 0; t < 12; t++) {
+      snapshotPrev(fb.snapshots, r.state, r.world)
+      // One tick of movement, applied by hand exactly as `advanceCar` does.
+      let p = (r.state.carProgress[0] as number) + 330
+      if (p >= 2500) {
+        p -= 2500
+        r.state.carCell[0] = (r.state.carCell[0] as number) + 1
+        r.state.carRouteCursor[0] = (r.state.carRouteCursor[0] as number) + 1
+      }
+      r.state.carProgress[0] = p
+      snapshotCurr(fb.snapshots, r.state, r.world)
+      for (let a = 0; a < 1; a += 0.25) xs.push(carXY(build(r, fb, a), 0)[0])
+    }
+    let crossings = 0
+    for (let i = 1; i < xs.length; i++) {
+      const before = xs[i - 1] as number
+      const after = xs[i] as number
+      expect(after, `sample ${i} went backwards`).toBeGreaterThan(before)
+      if (before < 11.5 && after >= 11.5) crossings++
+    }
+    expect(crossings).toBe(1)
+    // Vacuity: the traversal must actually reach past the mid-line.
+    expect(xs[xs.length - 1] as number).toBeGreaterThan(11.5)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 7. Frame 1, and a car that appears mid-run
+// ---------------------------------------------------------------------------
+
+describe('the first frame, and cars that appear later', () => {
+  it('draws every car at its house before a single tick has run', () => {
+    const r = rig(true)
+    const fb = builderFor(r) // includes initCarSnapshots
+    const frame = build(r, fb, 0.5)
+    expect(frame.carCount).toBe(6)
+    // Hand-written from the seed: houses at (8, 24), (8, 13), (17, 18), two
+    // cars each.
+    const expected: [number, number][] = [
+      [8, 24],
+      [8, 24],
+      [8, 13],
+      [8, 13],
+      [17, 18],
+      [17, 18],
+    ]
+    for (let n = 0; n < 6; n++) expect(carXY(frame, n), `car ${n}`).toEqual(expected[n])
+    // Vacuity: none of these houses is near grid cell (0, 0), so "lerped in
+    // from the origin" and "at the house" are far apart. The revealed rect
+    // starting at (5, 9) is what Task 2 already guarantees.
+    for (let n = 0; n < 6; n++) {
+      const [x, y] = carXY(frame, n)
+      expect(Math.hypot(x, y)).toBeGreaterThan(10)
+    }
+  })
+
+  /**
+   * Without `initCarSnapshots` the failure is NOT a streak from (0, 0) — the
+   * dense array is gated on `currLive`, so an unresolved snapshot means the
+   * cars are simply absent. That matters more than a streak, not less: pause is
+   * a tap away from tick 0, and a game paused before its first tick would show
+   * a city with no cars in it, indefinitely, with nothing to point at.
+   */
+  it('draws no cars at all if the snapshots were never initialised — the reason init exists', () => {
+    const r = rig(true)
+    const fb = createFrameBuilder(r.state, r.world, r.camera) // deliberately NOT initialised
+    expect(build(r, fb, 0.5).carCount).toBe(0)
+    initCarSnapshots(fb.snapshots, r.state, r.world)
+    expect(build(r, fb, 0.5).carCount).toBe(6)
+  })
+
+  it('draws a house placed mid-run at the house, not lerping in from a stale prev', () => {
+    const r = rig(true)
+    const fb = builderFor(r)
+    const queue = createInputQueue()
+    const loop = createLoop(driverFor(r, fb), queue)
+    loop.frame(0)
+    loop.frame(200) // several ticks
+
+    // Out-of-band placement, exactly as M1e's spawner will do it in-band.
+    expect(placeHouse(r.state, r.world, cellOf(15, 26), 2)).toBe(true)
+    const newSlot = 3 * CARS_PER_HOUSE
+    expect(r.state.carPhase[newSlot] as number).toBe(PHASE_IDLE)
+
+    loop.frame(240) // one more tick: prev and curr both resolve the new slot
+    const frame = build(r, fb, 0.5)
+    expect(frame.carCount).toBe(8)
+    expect(carXY(frame, 6)).toEqual([15, 26])
+    expect(carXY(frame, 7)).toEqual([15, 26])
+  })
+
+  /**
+   * The snap rule itself, driven through the sequence that produces it.
+   *
+   * **Its production trigger does not exist yet, and that is worth stating
+   * plainly.** `prevLive[i] === 0 && currLive[i] === 1` requires a slot to
+   * become live BETWEEN `snapshotPrev` and `snapshotCurr` — i.e. inside a
+   * `step`. Nothing in `step`'s seven phases creates a car today; M1e's
+   * in-`step` spawner is what will. Out-of-band placement happens between
+   * frames, so `snapshotPrev` already sees the new car (the test above).
+   *
+   * Testing it here, through the same two calls the loop makes in the same
+   * order, is the `assertSingleCrossing` idiom: make the branch reachable from
+   * a test rather than leave it as the one thing nothing executes.
+   */
+  it('snaps a car that becomes live BETWEEN the two snapshots straight to its curr position', () => {
+    const r = rig(true)
+    const fb = builderFor(r)
+    const newSlot = 3 * CARS_PER_HOUSE
+
+    snapshotPrev(fb.snapshots, r.state, r.world)
+    expect(fb.snapshots.prevLive[newSlot] as number).toBe(0)
+    // The stale prev is grid cell (0, 0) — an unwritten Float32Array.
+    expect(fb.snapshots.prevXY[newSlot * 2] as number).toBe(0)
+    expect(placeHouse(r.state, r.world, cellOf(15, 26), 2)).toBe(true)
+    snapshotCurr(fb.snapshots, r.state, r.world)
+    expect(fb.snapshots.currLive[newSlot] as number).toBe(1)
+
+    const frame = build(r, fb, 0.5)
+    expect(frame.carCount).toBe(8)
+    // Lerped, it would sit at (7.5, 13) — half way to the board's corner.
+    expect(carXY(frame, 6)).toEqual([15, 26])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 8. A full round trip through the real sim
+// ---------------------------------------------------------------------------
+
+/** The wiring Task 9's `main.ts` assembles. Kept in production code so its ORDER can be mutated. */
+function driverFor(r: Rig, fb: FrameBuilder, draw?: (f: RenderFrame) => void): ReturnType<typeof createFrameDriver> {
+  return createFrameDriver({
+    state: r.state,
+    world: r.world,
+    fields: r.fields,
+    scratch: r.scratch,
+    builder: fb,
+    camera: () => r.camera,
+    draw: draw ?? ((): void => {}),
+  })
+}
+
+describe('a full round trip on the seeded city', () => {
+  /** (8,13) -> (7,12) -> (7,11) -> (8,10): the path Task 2's trip test draws. */
+  const TRIP_PATH = [cellOf(8, 13), cellOf(7, 12), cellOf(7, 11), cellOf(8, 10)]
+  const FIRST_PIN_TICK = 378
+  const FIRST_SCORE_TICK = 435
+  /** House 1's first car — the one Task 2's trip test follows. */
+  const CAR = 2
+
+  interface TripSample {
+    readonly tick: number
+    readonly phase: number
+    readonly x: number
+    readonly y: number
+  }
+
+  /**
+   * Samples the car's resolved position ONCE PER TICK by hooking `beforeStep`,
+   * which the loop calls exactly once before each `step`.
+   *
+   * Sampling per FRAME would be wrong twice over: a 60 Hz frame runs zero ticks
+   * half the time (duplicate samples) and a catch-up burst runs several
+   * (skipped ones), and the gap assertion below is defined between consecutive
+   * TICKS. Hooking the driver also keeps the real `createFrameDriver` in the
+   * path rather than replacing it.
+   */
+  function driveTrip(): { samples: TripSample[]; scoreTick: number; state: GameState } {
+    const r = rig(true)
+    const fb = builderFor(r)
+    const queue = createInputQueue()
+    const samples: TripSample[] = []
+    const out = new Float32Array(2)
+
+    const base = driverFor(r, fb)
+    const sample = (): void => {
+      resolveCar(r.state, r.world, CAR, out, 0)
+      samples.push({
+        tick: r.state.header[H_TICK] as number,
+        phase: r.state.carPhase[CAR] as number,
+        x: out[0] as number,
+        y: out[1] as number,
+      })
+    }
+    const loop = createLoop(
+      {
+        beforeStep(): void {
+          sample()
+          base.beforeStep()
+        },
+        advance: base.advance,
+        afterDrain: base.afterDrain,
+        render: base.render,
+      },
+      queue,
+    )
+
+    for (let i = 0; i + 1 < TRIP_PATH.length; i++) {
+      queue.enqueue('place', TRIP_PATH[i] as number, TRIP_PATH[i + 1] as number)
+    }
+
+    let scoreTick = -1
+    let now = 0
+    loop.frame(now) // the clock reference
+    // 16.7 ms frames: a real 60 Hz display, so every frame runs 0 or 1 ticks
+    // and the tick a score lands on is unambiguous.
+    for (let f = 0; f < 1200; f++) {
+      now += 16.7
+      loop.frame(now)
+      if ((r.state.header[H_SCORE] as number) > 0 && scoreTick === -1) {
+        expect(loop.ticksLastFrame).toBeLessThanOrEqual(1)
+        scoreTick = r.state.header[H_TICK] as number
+      }
+      if (scoreTick !== -1 && (r.state.header[H_TICK] as number) > scoreTick + 3) break
+    }
+    sample() // the state after the last tick that ran
+    return { samples, scoreTick, state: r.state }
+  }
+
+  /**
+   * The three transition indices, each asserted to exist before it is used.
+   *
+   * Indexing a `findIndex` result straight into the array turns "the trip never
+   * happened" into a `TypeError` on `samples[-1]`, and a crash reads exactly
+   * like a kill in a mutation table. Every consumer goes through here so a
+   * broken fixture fails with a sentence instead.
+   */
+  function transitions(samples: readonly TripSample[]): {
+    dispatchAt: number
+    flipAt: number
+    endAt: number
+  } {
+    const dispatchAt = samples.findIndex((s) => s.phase === PHASE_OUTBOUND)
+    expect(dispatchAt, 'the car was never dispatched').toBeGreaterThan(0)
+    const flipAt = samples.findIndex((s) => s.phase === PHASE_RETURNING)
+    expect(flipAt, 'the car never reached the destination').toBeGreaterThan(dispatchAt)
+    const endAt = samples.findIndex((s, i) => i > flipAt && s.phase === PHASE_IDLE)
+    expect(endAt, 'the car never got home').toBeGreaterThan(flipAt)
+    return { dispatchAt, flipAt, endAt }
+  }
+
+  it('scores at tick 435, with the loop driving step exactly once per frame', () => {
+    const { scoreTick, state } = driveTrip()
+    expect(scoreTick).toBe(FIRST_SCORE_TICK)
+    expect(state.header[H_SCORE] as number).toBe(1)
+  })
+
+  /**
+   * The assertion that keeps Decision 2's table honest if a constant changes,
+   * and the one that would have caught the first draft's imaginary teleports.
+   *
+   * The bound is 0.14 cells: the largest on-manifold per-tick displacement is
+   * `330/3500 * sqrt(2)` = 0.1333 on a diagonal, and every arrival transition
+   * is bounded by the same quantity.
+   */
+  it('never moves the car more than 0.14 cells between consecutive ticks', () => {
+    const { samples } = driveTrip()
+    let maxGap = 0
+    let maxAt = -1
+    for (let i = 1; i < samples.length; i++) {
+      const a = samples[i - 1] as TripSample
+      const b = samples[i] as TripSample
+      const gap = Math.hypot(b.x - a.x, b.y - a.y)
+      if (gap > maxGap) {
+        maxGap = gap
+        maxAt = b.tick
+      }
+    }
+    expect(maxGap, `largest gap at tick ${maxAt}`).toBeLessThanOrEqual(0.14)
+    // Vacuity: the car must actually have moved, or a frozen resolver passes.
+    expect(maxGap).toBeGreaterThan(0.12)
+  })
+
+  it('covers dispatch, the flip and trip end inside the sampled window', () => {
+    // Without this the gap assertion above could be measuring a window that
+    // contains none of the three transitions it exists to check.
+    const { samples } = driveTrip()
+    const phases = samples.map((s) => s.phase)
+    expect(phases).toContain(PHASE_IDLE)
+    expect(phases).toContain(PHASE_OUTBOUND)
+    expect(phases).toContain(PHASE_RETURNING)
+    const { dispatchAt, flipAt, endAt } = transitions(samples)
+    expect((samples[dispatchAt] as TripSample).tick).toBe(FIRST_PIN_TICK)
+    expect(flipAt).toBeGreaterThan(dispatchAt)
+    expect(endAt).toBeGreaterThan(flipAt)
+    expect((samples[endAt] as TripSample).tick).toBe(FIRST_SCORE_TICK)
+  })
+
+  it('ends the trip on the house cell, with no discontinuity at the flip either', () => {
+    const { samples } = driveTrip()
+    const { flipAt, endAt } = transitions(samples)
+    const beforeFlip = samples[flipAt - 1] as TripSample
+    const atFlip = samples[flipAt] as TripSample
+    const flipGap = Math.hypot(atFlip.x - beforeFlip.x, atFlip.y - beforeFlip.y)
+    // Bounded by one tick of ordinary motion, and NOT zero — the reversed
+    // direction consumes the carry from the other side of the carpark cell.
+    expect(flipGap).toBeGreaterThan(0)
+    expect(flipGap).toBeLessThanOrEqual(0.14)
+    // Measured: 0.07677 cells, FORWARD, at tick 406 — `(330 - 2r) / threshold`
+    // along the diagonal with a carry of r = 70. Plan Decision 2's table gives
+    // "2 * carProgress / threshold <= 0.076 cells, BACKWARDS" for this row,
+    // which is neither the magnitude nor the sign; see the task report.
+    expect(flipGap).toBeCloseTo(0.07677, 4)
+
+    const last = samples[endAt] as TripSample
+    expect(last.x).toBe(8)
+    expect(last.y).toBe(13)
+  })
+
+  it('renders the car strictly between two cells on most ticks, which is why cell-lerping strobes', () => {
+    // Decision 2's premise, measured: `carCell` changes about once in 7.576
+    // ticks, so a prev-cell -> curr-cell lerp is motionless most of the time.
+    const { samples } = driveTrip()
+    const driving = samples.filter((s) => s.phase === PHASE_OUTBOUND || s.phase === PHASE_RETURNING)
+    const fractional = driving.filter((s) => !Number.isInteger(s.x) || !Number.isInteger(s.y))
+    expect(driving.length).toBeGreaterThan(40)
+    expect(fractional.length / driving.length).toBeGreaterThan(0.8)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 9. The driver: the snapshot ORDER, in production code
+// ---------------------------------------------------------------------------
+
+describe('createFrameDriver', () => {
+  it('snapshots prev BEFORE the step and curr after, so a frame inside a tick moves', () => {
+    const r = rig(true)
+    const fb = builderFor(r)
+    const drawn: RenderFrame[] = []
+    const queue = createInputQueue()
+    const loop: Loop = createLoop(
+      driverFor(r, fb, (f) => {
+        drawn.push(f)
+      }),
+      queue,
+    )
+    // Drive to a tick where house 1's first car is mid-edge.
+    for (let i = 0; i + 1 < 4; i++) {
+      queue.enqueue(
+        'place',
+        [cellOf(8, 13), cellOf(7, 12), cellOf(7, 11), cellOf(8, 10)][i] as number,
+        [cellOf(8, 13), cellOf(7, 12), cellOf(7, 11), cellOf(8, 10)][i + 1] as number,
+      )
+    }
+    let now = 0
+    for (let t = 0; t < 390; t++) {
+      now += 1000 / 30
+      loop.frame(now)
+    }
+    expect(r.state.carPhase[2] as number).toBe(PHASE_OUTBOUND)
+
+    // Two frames with no tick between them: 8 ms apart, well under TICK_MS.
+    now += 8
+    loop.frame(now)
+    const a = carXY(drawn[drawn.length - 1] as RenderFrame, 2)
+    now += 8
+    loop.frame(now)
+    const b = carXY(drawn[drawn.length - 1] as RenderFrame, 2)
+    expect(loop.ticksLastFrame).toBe(0)
+    expect(a).not.toEqual(b)
+  })
+
+  /**
+   * The driver's two snapshot calls must write DIFFERENT buffers, and "two
+   * frames inside a tick move" cannot see it.
+   *
+   * If `beforeStep` resolved `curr` instead of `prev`, `prevXY` would keep the
+   * boot positions forever: every car would lerp from its own house toward
+   * wherever it currently is, and the within-a-tick test would still pass —
+   * alpha still varies, the two frames still differ. Only an ABSOLUTE
+   * comparison against the previous tick's resolved position sees it. (Measured:
+   * that mutation survived the whole suite until this case existed.)
+   */
+  it('anchors alpha 0 on the PREVIOUS tick’s position and alpha ~1 on this tick’s', () => {
+    const r = rig(true)
+    const fb = builderFor(r)
+    const queue = createInputQueue()
+    const base = driverFor(r, fb)
+    const preStep = new Float32Array(2)
+    const loop = createLoop(
+      {
+        beforeStep(): void {
+          resolveCar(r.state, r.world, 2, preStep, 0)
+          base.beforeStep()
+        },
+        advance: base.advance,
+        afterDrain: base.afterDrain,
+        render: base.render,
+      },
+      queue,
+    )
+    const path = [cellOf(8, 13), cellOf(7, 12), cellOf(7, 11), cellOf(8, 10)]
+    for (let i = 0; i + 1 < path.length; i++) {
+      queue.enqueue('place', path[i] as number, path[i + 1] as number)
+    }
+    let now = 0
+    loop.frame(now)
+    // Past dispatch (tick 378) and several cells along the route, so the car is
+    // a long way from its house — which is what separates "prev" from "the boot
+    // position".
+    while ((r.state.header[H_TICK] as number) < 400) {
+      now += 1000 / 30
+      loop.frame(now)
+    }
+    expect(r.state.carPhase[2] as number).toBe(PHASE_OUTBOUND)
+    const postStep = new Float32Array(2)
+    resolveCar(r.state, r.world, 2, postStep, 0)
+    // The car has genuinely left home, or prev and the boot position coincide.
+    expect(Math.hypot((postStep[0] as number) - 8, (postStep[1] as number) - 13)).toBeGreaterThan(1)
+
+    const atZero = carXY(build(r, fb, 0), 2)
+    const atOne = carXY(build(r, fb, 0.999999), 2)
+    expect(atZero[0]).toBeCloseTo(preStep[0] as number, 5)
+    expect(atZero[1]).toBeCloseTo(preStep[1] as number, 5)
+    expect(atOne[0]).toBeCloseTo(postStep[0] as number, 5)
+    expect(atOne[1]).toBeCloseTo(postStep[1] as number, 5)
+    // Vacuity: prev and curr must differ, or both assertions are the same one.
+    expect(preStep[0]).not.toBe(postStep[0])
+  })
+
+  it('re-reads the camera every frame, so a viewport change reaches the next draw', () => {
+    // `buildFrame` taking a camera is not enough: the DRIVER must ask for it
+    // again. Reading `builder.frame.camera` instead returns the camera the last
+    // frame was built with and freezes the view at boot.
+    const r = rig(true)
+    const fb = builderFor(r)
+    const narrow = fitCamera(
+      { cssW: 390, cssH: 844, topInset: 46, bottomInset: 34, rawDpr: 3, performanceClass: null },
+      { x0: REVEALED_X0, y0: REVEALED_Y0, cols: REVEALED_W, rows: REVEALED_H },
+    )
+    expect(narrow.tileSize).not.toBe(r.camera.tileSize)
+    let current: Camera = r.camera
+    const drawn: Camera[] = []
+    const loop = createLoop(
+      createFrameDriver({
+        state: r.state,
+        world: r.world,
+        fields: r.fields,
+        scratch: r.scratch,
+        builder: fb,
+        camera: () => current,
+        draw: (f): void => {
+          drawn.push(f.camera)
+        },
+      }),
+      createInputQueue(),
+    )
+    loop.frame(0)
+    current = narrow
+    loop.frame(50)
+    expect(drawn[0]).toBe(r.camera)
+    expect(drawn[1]).toBe(narrow)
+  })
+
+  it('draws exactly once per frame and steps the sim exactly once per tick', () => {
+    const r = rig(true)
+    const fb = builderFor(r)
+    let draws = 0
+    const queue = createInputQueue()
+    const loop = createLoop(
+      driverFor(r, fb, () => {
+        draws++
+      }),
+      queue,
+    )
+    loop.frame(0)
+    loop.frame(50) // 1 tick, accumulator 16.67
+    loop.frame(60) // 0 ticks, accumulator 26.67
+    expect(draws).toBe(3)
+    expect(loop.ticksLastFrame).toBe(0)
+    expect(r.state.header[H_TICK] as number).toBe(1)
+  })
+
+  it('passes the loop’s paused flag into the frame', () => {
+    const r = rig(true)
+    const fb = builderFor(r)
+    const drawn: RenderFrame[] = []
+    const loop = createLoop(
+      driverFor(r, fb, (f) => {
+        drawn.push({ ...f })
+      }),
+      createInputQueue(),
+    )
+    loop.frame(0)
+    loop.setPaused(true)
+    loop.frame(50)
+    expect((drawn[0] as RenderFrame).paused).toBe(false)
+    expect((drawn[1] as RenderFrame).paused).toBe(true)
+  })
+
+  it('applies queued actions through step', () => {
+    const r = rig()
+    const fb = builderFor(r)
+    const queue = createInputQueue()
+    const loop = createLoop(driverFor(r, fb), queue)
+    loop.frame(0)
+    queue.enqueue('place', cellOf(8, 20), cellOf(9, 20))
+    loop.frame(40)
+    expect(r.state.roads[cellOf(8, 20)] as number).not.toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 10. Vacuity guards on the fixtures themselves
+// ---------------------------------------------------------------------------
+
+describe('fixture preconditions', () => {
+  it('has a non-square board and a revealed rect whose origin is not on the diagonal', () => {
+    const r = rig()
+    expect(r.world.w).not.toBe(r.world.h)
+    expect(REVEALED_X0).not.toBe(REVEALED_Y0)
+    expect(REVEALED_W).not.toBe(REVEALED_H)
+  })
+
+  it('places every seeded building well inside the revealed rect', () => {
+    const r = rig(true)
+    for (let h = 0; h < 3; h++) {
+      const cell = r.state.houseCell[h] as number
+      const x = cell % GRID_W
+      const y = (cell / GRID_W) | 0
+      expect(x).toBeGreaterThan(REVEALED_X0)
+      expect(x).toBeLessThan(REVEALED_X0 + REVEALED_W - 1)
+      expect(y).toBeGreaterThan(REVEALED_Y0)
+      expect(y).toBeLessThan(REVEALED_Y0 + REVEALED_H - 1)
+    }
+  })
+
+  it('has a step action type the queue and step agree on', () => {
+    const a: TickAction = { kind: 'place', a: 1, b: 2 }
+    expect(a.kind).toBe('place')
+  })
+})
