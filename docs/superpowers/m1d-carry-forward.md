@@ -46,7 +46,7 @@ M1d is where the multipliers get a caller. The unit test is already there; wire 
 
 - **`y < 0` in `stepCell` is a genuine equivalent mutant**, verified exhaustively over ~1600 geometries and Int32 extremes: 56 raw differences, 0 observable. The retained `x` guards force `y*w + x ≤ -1` for any `y ≤ -1`. It survives mutation and that is correct.
 - **Deleting all three route-walk bounds together still hangs.** Each is caught individually; the compound is irreducible, and all three sites carry a comment saying so. A guard cannot guard its own deletion.
-- **The "0 allocations per tick" claim has no test that can fail** — there is no allocation profiler in this repo. It is enforced by construction and by review, and has held across all six tasks.
+- ~~**The "0 allocations per tick" claim has no test that can fail** — there is no allocation profiler in this repo.~~ **False, and corrected during M2.** `node:inspector`'s `HeapProfiler.startSampling` is a Node builtin — no dependency, nothing to install. A reviewer reinstated an allocation inside a hot-path function and measured it appearing by name at ~112 B/frame over three 30,000-frame runs, against a baseline where it never appears. The claim was repeated in every brief across five milestones and capped what anyone attempted. **M1d inherits a real harness (M2 Task 6) — use it for the tick as well as the frame.**
 - **No golden covers demand-produced pins.** The loop golden's fixture pre-pins to keep `destPins` stable under assertion; the pin timer is frozen. Worth closing when M1e's authored spawn schedule lands.
 - **The rollback proof is empirical over a handful of fixtures**, not topology-general.
 
