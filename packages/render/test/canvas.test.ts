@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+import * as cameraModule from '../src/camera'
 import { buildAtlas, type Atlas, type AtlasContext, type AtlasSurface } from '../src/atlas'
 import {
   CAR_SIZE_FRACTION,
@@ -15,7 +16,7 @@ import {
 import { createHudRects, fitCamera, hudRects } from '../src/camera'
 import { PALETTE } from '../src/palette'
 import { TerrainClass } from '../src/types'
-import type { Camera, Palette, RenderFrame } from '../src/types'
+import type { Camera, Palette, Rect, RenderFrame } from '../src/types'
 
 /**
  * Task 5's test vocabulary is **recorded drawing state, not pixels** — the same
@@ -79,6 +80,14 @@ interface FillTextCommand {
   readonly text: string
   readonly x: number
   readonly y: number
+  /**
+   * The recorded fourth argument, and the reason "does the label fit its rect"
+   * is answerable here at all. The canvas spec condenses a run to at most
+   * `maxWidth`, so with `textAlign = 'center'` the text occupies exactly
+   * `[x - maxWidth/2, x + maxWidth/2]` — containment by construction, over a
+   * recorded number, with no font engine anywhere near it.
+   */
+  readonly maxWidth: number
 }
 
 interface ClearRectCommand {
@@ -146,7 +155,7 @@ class RecordingContext implements DrawContext {
     this.log.push({ op: 'fillRect', fillStyle: String(this.#fillStyle), x, y, w, h })
   }
 
-  fillText(text: string, x: number, y: number): void {
+  fillText(text: string, x: number, y: number, maxWidth: number): void {
     this.log.push({
       op: 'fillText',
       fillStyle: String(this.#fillStyle),
@@ -156,6 +165,7 @@ class RecordingContext implements DrawContext {
       text,
       x,
       y,
+      maxWidth,
     })
   }
 
@@ -291,6 +301,25 @@ function frameA(paused = false): RenderFrame {
   }
 }
 
+/**
+ * An otherwise-empty frame on an arbitrary camera — for the tests that are about
+ * the three band fills and nothing else, where board content would only add
+ * noise to the classifier.
+ */
+function frameOn(camera: Camera, boardW: number, boardH: number): RenderFrame {
+  const cells = boardW * boardH
+  return {
+    ...frameA(),
+    camera,
+    gridW: boardW,
+    roads: new Uint8Array(cells),
+    terrainClass: new Uint8Array(cells),
+    carCount: 0,
+    carXY: new Float32Array(2),
+    carColour: new Uint8Array(1),
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Fixture B: a small board whose revealed rect is a STRICT sub-rect
 // ---------------------------------------------------------------------------
@@ -352,9 +381,9 @@ function by(y: number): number {
  *  y\x   0        1         2       3        4       5       6       7
  *   0   WATER*    .         .       .        .       .       .       .
  *   1    .      (dead)     WATER    carpark  DEST    DEST    DEST     .
- *   2    .       TREE       .       road     DEST    DEST    DEST     .
- *   3   road*    MOUNTAIN   .       .        .       .       .        .
- *   4    .       house      .       car      .       car     house    .
+ *   2    .       TREE       .       road17   DEST    DEST    DEST     .
+ *   3   road*    road1      .       .        .       .      MOUNTAIN  .
+ *   4    .       house      WATER   road+car  .      car     house    .
  *   5    .        .         .       .        .       .       .      TREE*
  * ```
  *
@@ -363,6 +392,25 @@ function by(y: number): number {
  * empty mask" is the other thing that could prevent a blit and the fixture must
  * not let it be what makes the culling assertion pass.
  *
+ * **Both board loops have drawable content on all four of their bounds, and that
+ * is review finding I1 rather than decoration.** The original layout clustered
+ * every terrain cell and every road in the rect's top-left corner, so `xEnd` and
+ * `yEnd` could each be *shrunk* with the whole suite green: every bounds
+ * assertion in the file asked "is anything drawn OUTSIDE the rect" and none
+ * asked "is everything INSIDE it drawn". On the real camera that mutant drops
+ * board rows 23-30 and wraps columns 24-26 into the following row. So:
+ *
+ * | bound | terrain detector | road detector |
+ * |---|---|---|
+ * | `x = x0` (1)          | TREE (1, 2)      | mask 1 at (1, 3)  |
+ * | `y = y0` (1)          | WATER (2, 1)     | mask 16 at (3, 1) |
+ * | `x = x0 + cols - 1` (6) | MOUNTAIN (6, 3) | mask 2 at (6, 4)  |
+ * | `y = y0 + rows - 1` (4) | WATER (2, 4)    | mask 4 at (3, 4)  |
+ *
+ * Two of those road cells are deliberately on cells a road is legal on and that
+ * something else also occupies — the carpark at (3, 1) is the driveway case, and
+ * (6, 4) is a house cell, which is the whole reason houses draw above roads.
+ *
  * The dead house / destination / car slots all sit at cell `(1, 1)` — **inside**
  * the rect and non-zero — because the sim's real dead value is cell 0, which is
  * outside every M2 camera, so a fixture parking dead slots there is proved
@@ -370,13 +418,18 @@ function by(y: number): number {
  */
 function frameB(paused = false): RenderFrame {
   const roads = new Uint8Array(B_CELLS)
-  roads[2 * B_W + 3] = 17 // (3, 2), N|S — inside, non-zero
-  roads[3 * B_W + 0] = 5 // (0, 3), N|E — OUTSIDE, and non-zero on purpose
+  roads[1 * B_W + 3] = 16 // (3, 1), S    — the rect's first ROW, on the carpark
+  roads[2 * B_W + 3] = 17 // (3, 2), N|S
+  roads[3 * B_W + 1] = 1 //  (1, 3), N    — the rect's first COLUMN
+  roads[4 * B_W + 3] = 4 //  (3, 4), E    — the rect's last ROW, under a car
+  roads[4 * B_W + 6] = 2 //  (6, 4), NE   — the rect's last COLUMN, on a house
+  roads[3 * B_W + 0] = 5 //  (0, 3), N|E  — OUTSIDE, and non-zero on purpose
 
   const terrainClass = new Uint8Array(B_CELLS)
-  terrainClass[1 * B_W + 2] = TerrainClass.WATER // (2, 1)
-  terrainClass[2 * B_W + 1] = TerrainClass.TREE // (1, 2)
-  terrainClass[3 * B_W + 1] = TerrainClass.MOUNTAIN // (1, 3)
+  terrainClass[1 * B_W + 2] = TerrainClass.WATER // (2, 1) — the rect's first row
+  terrainClass[2 * B_W + 1] = TerrainClass.TREE // (1, 2) — its first column
+  terrainClass[3 * B_W + 6] = TerrainClass.MOUNTAIN // (6, 3) — its last column
+  terrainClass[4 * B_W + 2] = TerrainClass.WATER // (2, 4) — its last row
   terrainClass[0] = TerrainClass.WATER // (0, 0) — OUTSIDE
   terrainClass[5 * B_W + 7] = TerrainClass.TREE // (7, 5) — OUTSIDE
 
@@ -570,6 +623,23 @@ function set(prop: string, value: string): SetCommand {
 function fill(fillStyle: string, x: number, y: number, w: number, h: number): FillRectCommand {
   return { op: 'fillRect', fillStyle, x, y, w, h }
 }
+function blit(atlas: Atlas, sx: number, sy: number, dx: number, dy: number): DrawImageCommand {
+  const source = atlas.tileDevicePx
+  return { op: 'drawImage', image: atlas.surface, sx, sy, sw: source, sh: source, dx, dy, dw: B_TILE, dh: B_TILE }
+}
+function text(value: string, x: number, y: number, maxWidth: number): FillTextCommand {
+  return {
+    op: 'fillText',
+    fillStyle: UI_TEXT,
+    font: HUD_FONT,
+    textAlign: 'center',
+    textBaseline: 'middle',
+    text: value,
+    x,
+    y,
+    maxWidth,
+  }
+}
 
 const BACKGROUND = PALETTE.background
 const LAND = PALETTE.land
@@ -600,26 +670,22 @@ describe('drawFrame: the entire recorded frame, hand-written', () => {
       // 2. the grid land band: down to the HUD band's top edge
       set('fillStyle', LAND),
       fill(LAND, 0, 192, 400, 416),
-      // 3. non-land terrain, row-major over the revealed rect only
+      // 3. non-land terrain, row-major over the revealed rect only, and with a
+      //    cell on each of the four bounds (review I1)
       set('fillStyle', WATER),
-      fill(WATER, 68, 192, 66, 66), // (2, 1) — a whole cell
+      fill(WATER, 68, 192, 66, 66), // (2, 1) — a whole cell, the first row
       set('fillStyle', TREE),
       fill(TREE, 18.5, 274.5, 33, 33), // (1, 2) — inset, land shows around it
       set('fillStyle', MOUNTAIN),
-      fill(MOUNTAIN, 2, 324, 66, 66), // (1, 3)
-      // 4. roads: one blit, from mask 17's tile at (1, 1) of the 16x16 atlas
-      {
-        op: 'drawImage',
-        image: atlas.surface,
-        sx: 132,
-        sy: 132,
-        sw: 132,
-        sh: 132,
-        dx: 134,
-        dy: 258,
-        dw: 66,
-        dh: 66,
-      },
+      fill(MOUNTAIN, 332, 324, 66, 66), // (6, 3) — the last column
+      set('fillStyle', WATER),
+      fill(WATER, 68, 390, 66, 66), // (2, 4) — the last row
+      // 4. roads, row-major, one blit each from that mask's own atlas tile
+      blit(atlas, 0, 132, 134, 192), //   (3, 1) mask 16 -> tile (0, 1)
+      blit(atlas, 132, 132, 134, 258), // (3, 2) mask 17 -> tile (1, 1)
+      blit(atlas, 132, 0, 2, 324), //     (1, 3) mask 1  -> tile (1, 0)
+      blit(atlas, 528, 0, 134, 390), //   (3, 4) mask 4  -> tile (4, 0)
+      blit(atlas, 264, 0, 332, 390), //   (6, 4) mask 2  -> tile (2, 0)
       // 5. the destination: a 3x2 footprint, its carpark, then its waiting pins
       set('fillStyle', GROUP[4] as string),
       fill(GROUP[4] as string, 200, 192, 198, 132),
@@ -647,36 +713,11 @@ describe('drawFrame: the entire recorded frame, hand-written', () => {
       set('textAlign', 'center'),
       set('textBaseline', 'middle'),
       set('fillStyle', UI_TEXT),
-      {
-        op: 'fillText',
-        fillStyle: UI_TEXT,
-        font: HUD_FONT,
-        textAlign: 'center',
-        textBaseline: 'middle',
-        text: 'W3 D5',
-        x: 69,
-        y: 644,
-      },
-      {
-        op: 'fillText',
-        fillStyle: UI_TEXT,
-        font: HUD_FONT,
-        textAlign: 'center',
-        textBaseline: 'middle',
-        text: '12 TRIPS',
-        x: 199,
-        y: 644,
-      },
-      {
-        op: 'fillText',
-        fillStyle: UI_TEXT,
-        font: HUD_FONT,
-        textAlign: 'center',
-        textBaseline: 'middle',
-        text: '17 TILES',
-        x: 329,
-        y: 644,
-      },
+      // Every label carries `maxWidth = rect.w`, which is what makes "it fits"
+      // a construction guarantee rather than a device-dependent hope.
+      text('W3 D5', 69, 644, 122),
+      text('12 TRIPS', 199, 644, 122),
+      text('17 TILES', 329, 644, 122),
     ])
   })
 
@@ -694,6 +735,67 @@ describe('drawFrame: the entire recorded frame, hand-written', () => {
     expect(classes.size).toBeGreaterThanOrEqual(2)
     expect(classes).toContain(TerrainClass.LAND)
     expect(classes).toContain(TerrainClass.TREE)
+  })
+})
+
+describe('the OTHER direction: is everything inside the rect drawn? (review I1)', () => {
+  /**
+   * Every bounds assertion in the first version of this file asked one
+   * question — *does the renderer draw cells it should not?* — and the liveness
+   * work asked the same question again, because suppressing draws is what it is
+   * about. Nobody asked whether the renderer draws **enough**, so `drawTerrain`'s
+   * `xEnd` and `yEnd` and `drawRoads`' `yEnd` could each be shrunk with all 178
+   * tests green. On the real camera that drops board rows 23-30 and wraps
+   * columns 24-26 into the next row.
+   *
+   * The fix is a fixture with drawable content on each of the four bounds
+   * (see `frameB`) and **exact counts** here — a count is the assertion that
+   * looks in both directions at once.
+   */
+
+  it('draws every non-LAND cell in the rect, including one on each of its four bounds', () => {
+    const log = draw(frameB(), atlasAt(B_TILE_DEVICE))
+    // Four in the rect, two more outside it that must NOT appear.
+    expect(fillsStyled(log, WATER)).toEqual([
+      fill(WATER, bx(2), by(1), 66, 66), // y = y0, the first row
+      fill(WATER, bx(2), by(4), 66, 66), // y = y0 + rows - 1, the last row
+    ])
+    expect(fillsStyled(log, TREE)).toEqual([fill(TREE, bx(1) + 16.5, by(2) + 16.5, 33, 33)]) // x = x0
+    expect(fillsStyled(log, MOUNTAIN)).toEqual([fill(MOUNTAIN, bx(6), by(3), 66, 66)]) // x = x0 + cols - 1
+  })
+
+  it('blits every road cell in the rect, including one on each of its four bounds', () => {
+    const atlas = atlasAt(B_TILE_DEVICE)
+    const all = blits(draw(frameB(), atlas))
+    expect(all.length).toBe(5)
+    expect(all.map((b) => [b.dx, b.dy])).toEqual([
+      [bx(3), by(1)], // y = y0
+      [bx(3), by(2)],
+      [bx(1), by(3)], // x = x0
+      [bx(3), by(4)], // y = y0 + rows - 1
+      [bx(6), by(4)], // x = x0 + cols - 1
+    ])
+  })
+
+  it('is not vacuous: the fixture really does put content on all four bounds of both loops', () => {
+    // Without this the two tests above are satisfied by a fixture whose content
+    // is anywhere at all — which is exactly the fixture that shipped.
+    const frame = frameB()
+    const c = frame.camera
+    const xs = { first: c.x0, last: c.x0 + c.cols - 1 }
+    const ys = { first: c.y0, last: c.y0 + c.rows - 1 }
+    expect([xs.first, xs.last, ys.first, ys.last]).toEqual([1, 6, 1, 4])
+
+    const terrainAt = (x: number, y: number): number => frame.terrainClass[y * frame.gridW + x] as number
+    const roadAt = (x: number, y: number): number => frame.roads[y * frame.gridW + x] as number
+    expect(terrainAt(1, 2), 'no terrain on the first column').not.toBe(TerrainClass.LAND)
+    expect(terrainAt(6, 3), 'no terrain on the last column').not.toBe(TerrainClass.LAND)
+    expect(terrainAt(2, 1), 'no terrain on the first row').not.toBe(TerrainClass.LAND)
+    expect(terrainAt(2, 4), 'no terrain on the last row').not.toBe(TerrainClass.LAND)
+    expect(roadAt(1, 3), 'no road on the first column').toBeGreaterThan(0)
+    expect(roadAt(6, 4), 'no road on the last column').toBeGreaterThan(0)
+    expect(roadAt(3, 1), 'no road on the first row').toBeGreaterThan(0)
+    expect(roadAt(3, 4), 'no road on the last row').toBeGreaterThan(0)
   })
 })
 
@@ -826,6 +928,118 @@ describe('no clearRect, and three opaque fills that tile the canvas exactly', ()
     const styles = strip.map((b) => (b.command.op === 'fillRect' ? b.command.fillStyle : ''))
     expect(styles).toEqual([BACKGROUND, LAND, BACKGROUND])
     for (const style of styles) expect(style).toMatch(/^#[0-9a-f]{6}$/)
+  })
+})
+
+describe('the bands tile the DEVICE grid too, which the DPR-1.5 cap breaks (review I2)', () => {
+  /**
+   * `fitCamera` works in integer CSS px and `DPR_CAP_LOW` is 1.5, so an odd CSS
+   * edge lands on a half device pixel. Two fills sharing a half-pixel edge give
+   * that device row two source-over passes at alpha 0.5 instead of one opaque
+   * pass — it keeps 25% of the previous frame, which is precisely the ghosting
+   * plan Decision 4's "every pixel of the canvas must be covered" forbids, on
+   * exactly the class of device the DPR cap exists for.
+   *
+   * CSS-space tiling cannot see this: the review's 18-viewport sweep found gap
+   * 0.0000 and overlap 0.0000 everywhere while this seam was live. The device
+   * grid is the frame the invariant is actually about.
+   */
+
+  const cameraC = (): Camera =>
+    fitCamera(
+      { cssW: 412, cssH: 915, topInset: 24, bottomInset: 24, rawDpr: 2.625, performanceClass: 'LOW' },
+      { x0: 5, y0: 9, cols: 14, rows: 22 },
+    )
+
+  it('is the viewport that proves it: a Pixel at LOW puts hudTop on a half device pixel', () => {
+    // Integer CSS in, fractional device out — no fixture trickery.
+    const camera = cameraC()
+    expect(camera.dpr).toBe(1.5)
+    expect([camera.originY, camera.hudTop, camera.cssH]).toEqual([102, 819, 915])
+    expect(819 * 1.5).toBe(1228.5) // the seam, before the fix
+    expect(915 * 1.5).toBe(1372.5)
+  })
+
+  it('lands every band edge on a whole device pixel there', () => {
+    const camera = cameraC()
+    const strip = bands(draw(frameOn(camera, 24, 40), atlasAt(43)), camera)
+    expect(strip.length).toBe(3)
+    for (const band of strip) {
+      for (const edge of [band.x, band.y, band.x + band.w, band.y + band.h]) {
+        const device = edge * camera.dpr
+        expect(
+          Math.abs(device - Math.round(device)),
+          `CSS ${edge} is device ${device}, a half pixel`,
+        ).toBeLessThan(1e-9)
+      }
+    }
+  })
+
+  it('tiles the backing store exactly in DEVICE pixels: 618 x 1373, no gap, no overlap', () => {
+    const camera = cameraC()
+    const strip = bands(draw(frameOn(camera, 24, 40), atlasAt(43)), camera)
+    const dev = (v: number): number => Math.round(v * camera.dpr)
+
+    // The backing store Task 8 must allocate, hand-computed:
+    //   round(412 x 1.5) = 618,  round(915 x 1.5) = 1373
+    const width = dev(camera.cssW)
+    const height = dev(camera.cssH)
+    expect([width, height]).toEqual([618, 1373])
+
+    let cursor = 0
+    let area = 0
+    for (const band of strip) {
+      expect(dev(band.x)).toBe(0)
+      expect(dev(band.x + band.w)).toBe(width)
+      expect(dev(band.y), 'a gap or an overlap in DEVICE space').toBe(cursor)
+      cursor = dev(band.y + band.h)
+      area += width * (cursor - dev(band.y))
+    }
+    expect(cursor).toBe(height)
+    expect(area).toBe(width * height)
+    // The device rows the seam used to split: 153 (clean either way) and 1229.
+    expect(strip.map((b) => dev(b.y))).toEqual([0, 153, 1229])
+  })
+
+  it('still tiles exactly in CSS space at DPR 2, where the snapping is the identity', () => {
+    // The fix must not perturb the integral case: at the universal cap of 2 with
+    // an integer CSS camera, round(v * 2) / 2 === v, so every literal in this
+    // file is unchanged by it.
+    expect(bands(draw(frameA(), atlasAt(58)), cameraA()).map((b) => [b.y, b.h])).toEqual([
+      [0, 86],
+      [86, 678],
+      [764, 106],
+    ])
+    expect(bands(draw(frameB(), atlasAt(B_TILE_DEVICE)), cameraB()).map((b) => [b.y, b.h])).toEqual([
+      [0, 192],
+      [192, 416],
+      [608, 92],
+    ])
+  })
+
+  it('keeps the three bands on-canvas and contiguous on a degenerate viewport (review M2)', () => {
+    // `fitCamera` clamps `tileSize` to 1 on a transiently zero-sized viewport —
+    // a hidden webview, a measurement mid-rotation — and the plain band formula
+    // then gives `originY = -41` and a negative-height fill. The canvas
+    // normalises it, so this was never a coverage hole, but the shipped tiling
+    // walk PASSED on it with `cursor` running negative, which means the test
+    // was one assertion away from accepting a geometry it never saw.
+    const camera = fitCamera(
+      { cssW: 40, cssH: 0, topInset: 0, bottomInset: 0, rawDpr: 2, performanceClass: null },
+      { x0: 1, y0: 1, cols: 6, rows: 4 },
+    )
+    expect(camera.tileSize).toBe(1)
+    expect(camera.originY).toBeLessThan(0)
+
+    const strip = bands(draw(frameOn(camera, B_W, B_H), atlasAt(2)), camera)
+    expect(strip.length).toBe(3)
+    let cursor = 0
+    for (const band of strip) {
+      expect(band.y).toBe(cursor)
+      expect(band.h, 'a negative-height fill').toBeGreaterThanOrEqual(0)
+      cursor = band.y + band.h
+    }
+    expect(cursor).toBe(Math.max(0, camera.cssH))
   })
 })
 
@@ -974,8 +1188,11 @@ describe('terrain: the drawing half of the fold', () => {
 
   it('fills the whole cell for water and for mountain', () => {
     const log = draw(frameB(), atlasAt(B_TILE_DEVICE))
-    expect(fillsStyled(log, WATER)).toEqual([fill(WATER, 68, 192, 66, 66)])
-    expect(fillsStyled(log, MOUNTAIN)).toEqual([fill(MOUNTAIN, 2, 324, 66, 66)])
+    expect(fillsStyled(log, WATER)).toEqual([
+      fill(WATER, 68, 192, 66, 66),
+      fill(WATER, 68, 390, 66, 66),
+    ])
+    expect(fillsStyled(log, MOUNTAIN)).toEqual([fill(MOUNTAIN, 332, 324, 66, 66)])
   })
 
   it('draws nothing for a terrain class it does not recognise', () => {
@@ -999,32 +1216,20 @@ describe('terrain: the drawing half of the fold', () => {
     expect(frame.camera.cols).toBe(6)
     const log = draw(frame, atlasAt(B_TILE_DEVICE))
     expect(fillsStyled(log, WATER)[0]).toEqual(fill(WATER, bx(2), by(1), 66, 66))
-    expect(fillsStyled(log, MOUNTAIN)[0]).toEqual(fill(MOUNTAIN, bx(1), by(3), 66, 66))
+    expect(fillsStyled(log, MOUNTAIN)[0]).toEqual(fill(MOUNTAIN, bx(6), by(3), 66, 66))
   })
 })
 
 describe('roads: one blit per road cell, from that mask’s own atlas tile', () => {
   it('blits mask 17 from tile (1, 1), source in device px and destination in CSS px', () => {
     const atlas = atlasAt(B_TILE_DEVICE)
-    const all = blits(draw(frameB(), atlas))
-    expect(all.length).toBe(1)
-    expect(all[0]).toEqual({
-      op: 'drawImage',
-      image: atlas.surface,
-      sx: 132,
-      sy: 132,
-      sw: 132,
-      sh: 132,
-      dx: 134,
-      dy: 258,
-      dw: 66,
-      dh: 66,
-    })
+    const seventeen = blits(draw(frameB(), atlas)).find((b) => b.dx === 134 && b.dy === 258)
+    expect(seventeen).toEqual(blit(atlas, 132, 132, 134, 258))
     // The source rect is the atlas's tile size and the destination rect the
     // camera's — at the DPR-2 cap they differ by exactly the ratio, and
     // swapping them is a road drawn at half or double size.
-    expect(all[0]?.sw).toBe(atlas.tileDevicePx)
-    expect(all[0]?.dw).toBe(B_TILE)
+    expect(seventeen?.sw).toBe(atlas.tileDevicePx)
+    expect(seventeen?.dw).toBe(B_TILE)
     expect(atlas.tileDevicePx).not.toBe(B_TILE)
   })
 
@@ -1034,14 +1239,20 @@ describe('roads: one blit per road cell, from that mask’s own atlas tile', () 
     expect(blits(draw(frame, atlasAt(B_TILE_DEVICE)))).toEqual([])
   })
 
-  it('blits a second road cell from a DIFFERENT tile, so the lookup is not a constant', () => {
-    const frame = frameB()
-    frame.roads[3 * B_W + 5] = 1 // (5, 3), mask 1 = N -> tile (1, 0)
+  it('reads a DIFFERENT source tile for each of the five masks, so the lookup is not a constant', () => {
+    // With one road cell the tile is (1, 1) and `sx === sy`, so a transposed
+    // lookup is invisible — which is why the fixture's five masks are 16, 17, 1,
+    // 4 and 2: five distinct tiles, three of them off the diagonal.
     const atlas = atlasAt(B_TILE_DEVICE)
-    const all = blits(draw(frame, atlas))
-    expect(all.length).toBe(2)
-    expect([all[0]?.sx, all[0]?.sy]).toEqual([132, 132]) // mask 17 -> (1, 1)
-    expect([all[1]?.sx, all[1]?.sy]).toEqual([132, 0]) // mask 1  -> (1, 0)
+    const all = blits(draw(frameB(), atlas))
+    expect(all.map((b) => [b.sx, b.sy])).toEqual([
+      [0, 132], // mask 16 -> tile (0, 1)
+      [132, 132], // mask 17 -> tile (1, 1)
+      [132, 0], // mask 1  -> tile (1, 0)
+      [528, 0], // mask 4  -> tile (4, 0)
+      [264, 0], // mask 2  -> tile (2, 0)
+    ])
+    expect(new Set(all.map((b) => `${b.sx},${b.sy}`)).size).toBe(5)
   })
 })
 
@@ -1053,7 +1264,7 @@ describe('culling: only cells inside the revealed rect are drawn', () => {
     const frame = frameB()
     expect(frame.roads[3 * B_W + 0] as number).toBe(5)
     expect(frame.roads[2 * B_W + 3] as number).toBe(17)
-    expect(blits(draw(frame, atlasAt(B_TILE_DEVICE))).length).toBe(1)
+    expect(blits(draw(frame, atlasAt(B_TILE_DEVICE))).length).toBe(5)
   })
 
   it('fills no terrain outside the rect, though two non-LAND cells sit there', () => {
@@ -1061,8 +1272,40 @@ describe('culling: only cells inside the revealed rect are drawn', () => {
     expect(frame.terrainClass[0] as number).toBe(TerrainClass.WATER)
     expect(frame.terrainClass[5 * B_W + 7] as number).toBe(TerrainClass.TREE)
     const log = draw(frame, atlasAt(B_TILE_DEVICE))
-    expect(fillsStyled(log, WATER).length).toBe(1) // the in-rect one only
+    expect(fillsStyled(log, WATER).length).toBe(2) // the two in-rect ones only
     expect(fillsStyled(log, TREE).length).toBe(1)
+  })
+
+  it('lets a car on the rect’s last row spill into the letterbox, and the HUD band covers it', () => {
+    // Review M6, and it corrects an attribution the first report got wrong. A
+    // car is centred on its resolved position, so one at the rect's last row
+    // paints `tileSize / 4` CSS px BELOW the grid rect — into the letterbox,
+    // which is part of band 2 and was drawn earlier, so the spill persists.
+    // That is correct: the sim genuinely put the car there. What stops it
+    // reaching the HUD is the DRAW ORDER — the band is phase 8 and cars are
+    // phase 7 — and not the anchor culling, which is the buildings' protection
+    // and does not apply to cars at all.
+    const frame = frameB()
+    // 4.75 is inside the rect (`gy < y0 + rows` = 5) and dyadic, so exact in a
+    // Float32Array. Centre y = 390 + 0.75 × 66 + 33 = 472.5; the sprite spans
+    // [456, 489] and the grid rect ends at 456.
+    frame.carXY[1] = 4.75
+    const camera = frame.camera
+    const gridBottom = by(camera.y0 + camera.rows - 1) + B_TILE
+    expect(gridBottom).toBe(456)
+
+    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)), camera)
+    const car = paints.find((p) => p.w === 33 && p.h === 33 && p.y === 456)
+    expect(car, 'the car at the rect’s last row').toBeDefined()
+    expect((car?.y ?? 0) + (car?.h ?? 0), 'the car spills past the grid rect').toBe(489)
+    expect(489).toBeGreaterThan(gridBottom)
+
+    // It is NOT culled — `insideRevealed` is half-open and 4.75 < 5 — and what
+    // keeps the spill out of the HUD is the draw order, asserted as an index.
+    const log = draw(frame, atlasAt(B_TILE_DEVICE))
+    const hudBand = bands(log, camera)[2]
+    expect(hudBand?.y).toBe(camera.hudTop)
+    expect(hudBand?.index ?? -1).toBeGreaterThan(car?.index ?? 0)
   })
 
   it('draws no house, destination or car whose cell is outside the rect', () => {
@@ -1209,6 +1452,53 @@ describe('the HUD', () => {
     }
   })
 
+  it('constrains every label with maxWidth, so "it fits its rect" is a construction guarantee', () => {
+    // Review I4, and a claim this task's first report got wrong. The rendered
+    // advance width of '12 TRIPS' at 600 20px system-ui is genuinely not
+    // observable here — no font engine, and `system-ui` resolves to a different
+    // face on iOS than on Android. But the FIT does not need to be measured:
+    // the canvas spec condenses a run to at most `maxWidth`, so with
+    // `textAlign = 'center'` the text occupies exactly
+    // `[x - maxWidth/2, x + maxWidth/2]`. Passing `maxWidth = rect.w` makes
+    // overflow impossible, and the argument is recorded.
+    const rects = hudRects(cameraB(), createHudRects())
+    const drawn = texts(draw(frameB(), atlasAt(B_TILE_DEVICE)))
+    const expected = [rects.clock, rects.score, rects.tiles]
+
+    for (const [i, t] of drawn.entries()) {
+      const rect = expected[i] as Rect
+      expect(t.maxWidth, `label ${i} is unconstrained`).toBe(rect.w)
+      expect(t.x - t.maxWidth / 2).toBeGreaterThanOrEqual(rect.x)
+      expect(t.x + t.maxWidth / 2).toBeLessThanOrEqual(rect.x + rect.w)
+    }
+    expect(drawn.map((t) => t.maxWidth)).toEqual([122, 122, 122])
+  })
+
+  it('still fits at the NARROWEST viewport fitCamera accepts — 96 CSS px, not 122', () => {
+    // The first report wrote its overflow risk against 122 CSS px, which is
+    // fixture B's rect and not the worst case. `hudRects` gives
+    // `floor((cssW - 32) / 3)`: 124 on the M0 device, 119 at 390, 114 at 375 and
+    // **96 at 320** — a viewport `fitCamera` fits without complaint. And the
+    // labels are unbounded: `score` and `week` have no ceiling in the sim, so
+    // overflow is a certainty at some value rather than a device risk. The
+    // `maxWidth` guarantee is what makes that a legible condense instead of a
+    // collision with the neighbouring element.
+    const camera = fitCamera(
+      { cssW: 320, cssH: 568, topInset: 20, bottomInset: 0, rawDpr: 2, performanceClass: null },
+      { x0: 5, y0: 9, cols: 14, rows: 22 },
+    )
+    const rects = hudRects(camera, createHudRects())
+    expect(rects.clock.w).toBe(96)
+    expect(Math.floor((320 - 32) / 3)).toBe(96) // the arithmetic, independently
+
+    const frame: RenderFrame = { ...frameOn(camera, 24, 40), score: 999_999, week: 1234, day: 6 }
+    const drawn = texts(draw(frame, atlasAt(camera.tileSize * camera.dpr)))
+    expect(drawn.map((t) => t.text)).toEqual(['W1234 D6', '999999 TRIPS', '40 TILES'])
+    for (const t of drawn) expect(t.maxWidth).toBe(96)
+    // Containment holds for a label of any length, which is the point.
+    expect(drawn[1]?.x ?? 0).toBe(rects.score.x + 48)
+  })
+
   it('re-formats the text when a value changes, so the per-frame cache cannot go stale', () => {
     // The HUD's four numbers are formatted into strings, and a string built per
     // frame is an allocation in the frame loop. They are therefore memoised on
@@ -1254,6 +1544,80 @@ describe('the HUD', () => {
       expect(bar.x + bar.w).toBeLessThanOrEqual(clock.x + clock.w)
       expect(bar.y).toBeGreaterThanOrEqual(clock.y)
       expect(bar.y + bar.h).toBeLessThanOrEqual(clock.y + clock.h)
+    }
+  })
+
+  it('reserves the pause bars’ gutter, so the clock text cannot be drawn through them', () => {
+    // Review M4: the bars occupy CSS [15, 22] and [29, 36] while `fillCentred`
+    // was centring the clock text on the WHOLE rect at x = 69 with maxWidth 122
+    // — so a clock string wider than 66 CSS px runs straight through the second
+    // bar. That is layout arithmetic, true whatever the glyph widths are, and it
+    // is why this assertion is over coordinates and not over metrics.
+    const atlas = atlasAt(B_TILE_DEVICE)
+    const clock = hudRects(cameraB(), createHudRects()).clock
+    const barW = clock.h / 8 // 7
+    const gutter = 5 * barW // 35: four bar-widths of indicator, one of gap
+
+    const runningClock = texts(draw(frameB(false), atlas))[0]
+    const pausedClock = texts(draw(frameB(true), atlas))[0]
+
+    // Unpaused: the full rect, centred. Paused: the rect minus the gutter.
+    expect([runningClock?.x, runningClock?.maxWidth]).toEqual([69, 122])
+    expect([pausedClock?.x, pausedClock?.maxWidth]).toEqual([clock.x + gutter + (122 - gutter) / 2, 87])
+    expect([pausedClock?.x, pausedClock?.maxWidth]).toEqual([86.5, 87])
+
+    // The guarantee: the text's own span cannot reach the second bar's right edge.
+    const left = (pausedClock?.x ?? 0) - (pausedClock?.maxWidth ?? 0) / 2
+    expect(left).toBeGreaterThanOrEqual(clock.x + 4 * barW)
+    expect(left).toBe(43)
+  })
+})
+
+describe('allocation inside the frame loop, as far as this toolchain can see it', () => {
+  /**
+   * Review I3. The first report filed three allocation mutations as having "no
+   * possible observer", and two of the three were observable — the third time on
+   * this milestone that a "cannot observe" claim was half wrong. The honest
+   * split is below, and the part that *can* be automated now is.
+   *
+   * `render`'s four allocating factories are named exports that the draw path
+   * imports, and vitest can spy on ESM named exports. That turns "review is the
+   * only check" from a fact into a choice for every allocation with an
+   * importable identity — which is exactly the class Task 3 built the
+   * caller-owned-`out` protocol to prevent.
+   */
+
+  it('calls none of render’s allocating factories during a frame', () => {
+    // The frame and the atlas are built BEFORE the spies go up: `frameB` calls
+    // `fitCamera` itself, and boot-time allocation is exactly what these
+    // factories are for. The spies watch the frame loop and nothing else.
+    const frame = frameB()
+    const atlas = atlasAt(B_TILE_DEVICE)
+    const spies = [
+      vi.spyOn(cameraModule, 'createHudRects'),
+      vi.spyOn(cameraModule, 'createPoint'),
+      vi.spyOn(cameraModule, 'createGridHit'),
+      vi.spyOn(cameraModule, 'fitCamera'),
+    ]
+    try {
+      for (let i = 0; i < 3; i++) drawFrame(new RecordingContext(), frame, atlas, PALETTE)
+      for (const spy of spies) expect(spy, `${spy.getMockName()} was called`).not.toHaveBeenCalled()
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+    }
+  })
+
+  it('is not vacuous: the same spies DO fire when those factories are called', () => {
+    // A negative assertion over a spy is worthless if the spy cannot see the
+    // call at all — and ESM namespace objects are not always spy-able, so this
+    // is a property of the toolchain that has to be demonstrated rather than
+    // assumed.
+    const spy = vi.spyOn(cameraModule, 'createHudRects')
+    try {
+      cameraModule.createHudRects()
+      expect(spy).toHaveBeenCalledTimes(1)
+    } finally {
+      spy.mockRestore()
     }
   })
 })

@@ -154,6 +154,13 @@ export function fitCamera(view: ViewportMetrics, reveal: RevealedRect): Camera {
     // check, grid rows would classify as HUD. Making the invariant hold by
     // construction is one expression; relying on "a hidden webview receives no
     // taps" is a platform assumption.
+    //
+    // **It is load-bearing for a second consumer that did not exist when this
+    // was written: Task 5's band tiling.** `drawFrame` fills `[originY, hudTop)`
+    // as one opaque band, so `hudTop < originY` on a clamped viewport is a
+    // negative-height fill and the three bands stop partitioning the canvas.
+    // `canvas.ts` clamps its own edges too, but this `max` is what keeps the
+    // ordering true at the source. Two callers, one expression.
     hudTop: Math.max(originY + gridHeight, view.cssH - view.bottomInset - HUD_BAND_CSS),
     hudHeight: HUD_BAND_CSS,
   }

@@ -88,7 +88,14 @@ export interface DrawContext {
   textAlign: CanvasTextAlign
   textBaseline: CanvasTextBaseline
   fillRect(x: number, y: number, w: number, h: number): void
-  fillText(text: string, x: number, y: number): void
+  /**
+   * `maxWidth` is **required here though the DOM makes it optional**, so that a
+   * caller cannot draw an unconstrained label by omission. See `fillCentred`:
+   * it is what turns "the text fits its HUD rect" from a device-dependent risk
+   * into a construction guarantee. A real `CanvasRenderingContext2D` satisfies
+   * both forms — pinned below.
+   */
+  fillText(text: string, x: number, y: number, maxWidth: number): void
   drawImage(
     image: DrawImageSource,
     sx: number,
@@ -130,6 +137,16 @@ export const PIN_STRIDE_FRACTION = 1 / 3
  */
 export const MAX_DRAWN_PINS = 6
 
+/** A pause bar's width, as a fraction of the clock rect's height. */
+export const PAUSE_BAR_FRACTION = 1 / 8
+
+/**
+ * How many bar-widths of the clock rect the pause indicator reserves before the
+ * clock text starts. Four is the bars themselves (`[1·barW, 4·barW]`); the fifth
+ * is the gap between the indicator and the text.
+ */
+export const PAUSE_GUTTER_BARS = 5
+
 /**
  * A preallocated font string. Fixed at 20 CSS px rather than derived from the
  * tile size, because a computed font string (`\`${size}px …\``) is an allocation
@@ -145,9 +162,12 @@ export const HUD_FONT = '600 20px system-ui, -apple-system, sans-serif'
  * **A deliberate second copy**, for the same reason `ROAD_DIR_DX` is one: spec
  * §4 forbids `render` importing `sim`, and `test/boundary.test.ts` enforces it.
  * Unlike a copied constant with no reader, this one has a watcher in the one
- * package allowed to see both sides: `packages/game/test/renderDirections.test.ts`
+ * package allowed to see both sides: **`packages/game/test/renderFootprint.test.ts`**
  * compares `destFootprintW`/`destFootprintH` against `sim`'s own exported
  * `isFootprintCell`, cell by cell, for all four orientations.
+ * (`renderDirections.test.ts` is the *direction table*'s watcher and says
+ * nothing about footprints — a reader sent there concludes this copy is
+ * unwatched.)
  */
 export const DEST_ORIENTATION_N = 0
 export const DEST_ORIENTATION_S = 2
@@ -248,6 +268,22 @@ function tilesText(tilesLeft: number): string {
  * the fill; making it literally true costs either five fills or an overlap, and
  * an overlap is the thing Decision 4 struck out.
  *
+ * **The band edges are snapped to whole device pixels, and that is a fix for a
+ * real ghosting seam rather than tidiness.** `fitCamera` works in integer CSS
+ * px, but `DPR_CAP_LOW` is **1.5**, so an odd CSS edge lands on a *half* device
+ * pixel. `Pixel 412x915, insets 24/24, LOW` — integer inputs, a real device
+ * shape — gives `hudTop = 819` and `819 x 1.5 = 1228.5`. The device row at
+ * 1228 is then covered by two source-over passes at alpha 0.5 rather than one
+ * opaque pass, so it keeps **25% of the previous frame**: exactly the ghosting
+ * Decision 4's "every pixel of the canvas must be covered" exists to prevent,
+ * on the class of device the DPR cap was written for. `deviceEdge` below rounds
+ * each cut to a whole device pixel before dividing back into CSS.
+ *
+ * Only the three OPAQUE BAND EDGES are snapped. Cell boundaries are not: at a
+ * 29 px tile and DPR 1.5 a cell is 43.5 device px, and that resample is Task
+ * 3's stated, accepted trade. It is a softness, not a coverage hole — the bands
+ * underneath are opaque and complete.
+ *
  * Everything on the board is culled to the revealed rect: terrain and roads by
  * iterating it, buildings and cars by testing their anchor cell against it. A
  * building whose anchor is outside is not drawn at all, even if its footprint
@@ -255,6 +291,14 @@ function tilesText(tilesLeft: number): string {
  * seed places every building well within it, and the thing M1d must revisit when
  * the rect becomes dynamic (the fix then is a `clip` around phases 3-7, which
  * would also stop a partially-visible building painting into the HUD band).
+ *
+ * **Cars are culled by their own position and not by anything the buildings do,
+ * and a car in the rect's last column or row paints up to `tileSize / 4` CSS px
+ * into the letterbox.** That is correct — the letterbox is part of band 2, and
+ * the sprite is centred on a position the sim genuinely put at the edge — and
+ * the reason it never reaches the HUD is the **draw order**: the HUD band is
+ * phase 8 and cars are phase 7, so the band paints over anything that spilled.
+ * Not anchor culling, which is the buildings' protection and not the cars'.
  */
 export function drawFrame(
   ctx: DrawContext,
@@ -265,14 +309,27 @@ export function drawFrame(
   assertAtlasPalette(atlas, palette)
 
   const camera = frame.camera
+  const dpr = camera.dpr
+  // The canvas's own extent in CSS px, as the backing store will actually be
+  // sized: `round(css * dpr)` device px. Task 8 MUST size the canvas with the
+  // same rounding, or the last device row/column is outside every band.
+  const right = deviceEdge(camera.cssW, dpr)
+  const bottom = deviceEdge(camera.cssH, dpr)
+  // Clamped into `[0, bottom]` and kept monotone, so the three bands tile the
+  // ON-CANVAS area for every viewport including the degenerate ones `fitCamera`
+  // clamps for: at `cssH = 0` the plain formula gives `originY = -41` and a
+  // negative-height fill, which the canvas normalises but which is a wasted
+  // call and a geometry no test should have to reason about.
+  const gridTop = clamp(deviceEdge(camera.originY, dpr), 0, bottom)
+  const bandTop = clamp(deviceEdge(camera.hudTop, dpr), gridTop, bottom)
 
   // 1. The top band: the canvas top down to the grid rect's top edge.
   ctx.fillStyle = palette.background
-  ctx.fillRect(0, 0, camera.cssW, camera.originY)
+  ctx.fillRect(0, 0, right, gridTop)
 
   // 2. The grid land band: down to the HUD band's top edge.
   ctx.fillStyle = palette.land
-  ctx.fillRect(0, camera.originY, camera.cssW, camera.hudTop - camera.originY)
+  ctx.fillRect(0, gridTop, right, bandTop - gridTop)
 
   drawTerrain(ctx, frame, palette)
   drawRoads(ctx, frame, atlas)
@@ -285,9 +342,23 @@ export function drawFrame(
   // stops at `hudTop + hudHeight` leaves it holding the previous frame forever
   // — there is no clearRect coming to fix it.
   ctx.fillStyle = palette.background
-  ctx.fillRect(0, camera.hudTop, camera.cssW, camera.cssH - camera.hudTop)
+  ctx.fillRect(0, bandTop, right, bottom - bandTop)
 
   drawHud(ctx, frame, palette)
+}
+
+/**
+ * A CSS coordinate moved to the nearest whole **device** pixel and expressed
+ * back in CSS px. The identity on any edge that is already integral in device
+ * space, which is every edge at the universal DPR-2 cap with an integer CSS
+ * camera — so this changes nothing on the M0 device and everything at 1.5.
+ */
+function deviceEdge(cssValue: number, dpr: number): number {
+  return Math.round(cssValue * dpr) / dpr
+}
+
+function clamp(value: number, low: number, high: number): number {
+  return value < low ? low : value > high ? high : value
 }
 
 /**
@@ -407,12 +478,14 @@ function drawDestinations(ctx: DrawContext, frame: RenderFrame, palette: Palette
     // comment is why neither may be deleted on the strength of its own
     // survival.** `carparkCell` returns -1 when the bay would fall off the grid;
     // `-1 % w` is `-1` and `floor(-1 / w)` is `-1` in JavaScript, so a -1
-    // carpark decomposes to (-1, -1), which is outside every revealed rect
-    // (`x0`, `y0` are board coordinates and never negative). Mutating `>= 0` to
-    // `>= -1` therefore passes all 178 tests — it is an *equivalent mutant*,
-    // not a coverage hole. It stays because the two guards mean different
-    // things: one rejects a sentinel, the other clips to the camera, and the
-    // compound edit that removes both IS caught.
+    // carpark decomposes to (-1, -1), which `insideRevealed` rejects for **any
+    // `x0 >= 0`** — not merely for M2's frozen `x0 = 5`, so the equivalence
+    // survives M1d making the rect dynamic all the way down to column 0.
+    // Deleting this line **outright** (`if (true)`) therefore passes the whole
+    // suite, which is stronger evidence of equivalence than widening it to
+    // `>= -1` and is the form to reach for when re-checking. It stays because
+    // the two guards mean different things — one rejects a sentinel, the other
+    // clips to the camera — and the compound edit that removes both IS caught.
     const carpark = frame.destCarpark[d] as number
     if (carpark >= 0) {
       const cx = carpark % frame.gridW
@@ -518,13 +591,20 @@ function drawCars(ctx: DrawContext, frame: RenderFrame, palette: Palette): void 
  * The pause indicator is two bars at the left of the clock rect, drawn only when
  * the frame is paused — the clock doubles as the pause control (§7.2), so its
  * own rect is where its state belongs.
+ *
+ * **When the bars are up, the clock text is centred in what is LEFT of the rect,
+ * not in the whole rect.** The bars occupy `[x + barW, x + 4·barW]`; centring
+ * the text on the full rect puts a long clock string straight through them.
+ * That is a layout fact, true whatever the glyph widths are, and it is cheaper
+ * to reserve the gutter than to discover the collision on a device.
  */
 function drawHud(ctx: DrawContext, frame: RenderFrame, palette: Palette): void {
   const rects = hudRects(frame.camera, HUD_SCRATCH)
+  const clock = rects.clock
+  const barW = clock.h * PAUSE_BAR_FRACTION
+  const gutter = frame.paused ? PAUSE_GUTTER_BARS * barW : 0
 
   if (frame.paused) {
-    const clock = rects.clock
-    const barW = clock.h / 8
     const barH = clock.h / 2
     const barY = clock.y + clock.h / 4
     ctx.fillStyle = palette.uiText
@@ -536,13 +616,36 @@ function drawHud(ctx: DrawContext, frame: RenderFrame, palette: Palette): void {
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   ctx.fillStyle = palette.uiText
-  fillCentred(ctx, clockText(frame.week, frame.day), rects.clock)
-  fillCentred(ctx, scoreText(frame.score), rects.score)
-  fillCentred(ctx, tilesText(frame.tilesLeft), rects.tiles)
+  fillCentred(ctx, clockText(frame.week, frame.day), clock, gutter)
+  fillCentred(ctx, scoreText(frame.score), rects.score, 0)
+  fillCentred(ctx, tilesText(frame.tilesLeft), rects.tiles, 0)
 }
 
-function fillCentred(ctx: DrawContext, text: string, rect: Rect): void {
-  ctx.fillText(text, rect.x + rect.w / 2, rect.y + rect.h / 2)
+/**
+ * Draws `text` centred in `rect` minus a left `gutter`, **constrained by
+ * `maxWidth` so that it cannot leave the rect**.
+ *
+ * `fillText`'s fourth argument is the whole point of this function, and it
+ * closes a claim the first version of this task got wrong. The rendered advance
+ * width of a string at `600 20px system-ui` genuinely is not observable here —
+ * there is no font engine in this workspace and `system-ui` resolves to
+ * different faces on iOS and Android. But **"the label fits its rect" does not
+ * need to be measured, it can be made true by construction**: the canvas 2D spec
+ * condenses the run to at most `maxWidth`, and with `textAlign = 'center'` the
+ * text then occupies exactly `[cx - maxWidth/2, cx + maxWidth/2]`, which is the
+ * rect. The argument is recorded, so the guarantee is asserted rather than
+ * hoped for, at zero runtime cost and zero allocation.
+ *
+ * This matters more than it looks. `hudRects` gives `floor((cssW - 32) / 3)`:
+ * 124 CSS px on the M0 device, 119 at 390, and **96 at a 320 px viewport**,
+ * which `fitCamera` accepts. And the labels are unbounded — `score` and `week`
+ * have no ceiling in the sim, so `'N TRIPS'` grows without limit and overflow is
+ * a certainty at some value rather than a device-dependent risk. Condensing is a
+ * legible failure; overlapping the neighbouring element is not.
+ */
+function fillCentred(ctx: DrawContext, text: string, rect: Rect, gutter: number): void {
+  const width = rect.w - gutter
+  ctx.fillText(text, rect.x + gutter + width / 2, rect.y + rect.h / 2, width)
 }
 
 /**
@@ -605,7 +708,10 @@ function assertAtlasPalette(atlas: Atlas, palette: Palette): void {
       'drawFrame: the atlas was baked with a different palette than this frame is being drawn ' +
         'in. The atlas rasterises its road colour at build time and a blit cannot re-tint its ' +
         'source, so the roads would keep the old theme while everything else changed — rebuild ' +
-        'the atlas with the new palette instead of passing it here',
+        'the atlas with the new palette instead of passing it here. If both palettes LOOK ' +
+        'identical, the cause is two resolved copies of @laneways/render (a duplicated ' +
+        'dependency, a stale build output on the import path), each with its own frozen PALETTE ' +
+        'object — rebuilding the atlas will not help and the module graph is what to fix',
     )
   }
 }
