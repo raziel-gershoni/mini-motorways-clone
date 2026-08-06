@@ -10,9 +10,17 @@ For how tests fail on this project, read [`testing-defect-catalogue.md`](testing
 
 ## Structural work M1d owns, and should do early
 
+### 0. `canPlaceRoad` allocates ~40 B per call, in the frame loop
+
+Measured during M2 by the allocation harness, once it was widened to cover `packages/sim/src` — which it did not, for the whole of M2, because two tasks each scoped it to their own package and the gap between them went unnoticed.
+
+The allowance in `allocation.test.ts` asserts the allocation is **still present**, not merely under a ceiling. **So fixing it will turn that test red** — that is deliberate, and the red is your signal to delete the allowance rather than leave a dead exemption behind.
+
+Note the invariant is **per call, not per frame**: a per-frame figure encodes the test driver's input density and moves ~2× between rigs.
+
 ### 1. Consolidate `stepCell` into `roads.ts` — this one already cost us
 
-There are **three** copies of the cell-stepping bounds logic: `dispatch.ts`, `cars.ts`, and inlined in `graph.ts`. During M1c I ruled to keep the duplication rather than refactor mid-milestone, which was defensible and had a price: the whole-milestone review found `cars.ts`'s copy had four dedicated tests and **`dispatch.ts`'s copy had zero — all four bounds survived.** The copy that got tested was not the copy dispatch used.
+There are **two** copies of the cell-stepping bounds logic — private at `cars.ts:155` and exported at `dispatch.ts:324`. (M1c's note said three; M2's final review checked and it is two.) `roads.ts` is the right home because it already owns `OPPOSITE`, `dirBetween` and `inBounds`. During M1c I ruled to keep the duplication rather than refactor mid-milestone, which was defensible and had a price: the whole-milestone review found `cars.ts`'s copy had four dedicated tests and **`dispatch.ts`'s copy had zero — all four bounds survived.** The copy that got tested was not the copy dispatch used.
 
 Fold all three into `roads.ts` before adding a fourth caller. M1d's blocking logic will want one.
 
