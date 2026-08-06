@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      viewport-fit=cover is what makes the safe-area insets exist at all: without
+      it the webview letterboxes itself away from the notch and Telegram's
+      safeAreaInset is reported as 0, so fitCamera subtracts nothing and the
+      board is silently 46 CSS px shorter than the screen it is on.
+      user-scalable=no removes pinch-zoom, which on a drag-to-draw surface is a
+      mis-fire rather than a feature; touch-action: none below is the supported
+      half of the same job.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <title>Laneways</title>
+    <!--
+      THE ONE LINE WHOSE ABSENCE IS COMPLETELY SILENT.
+
+      Without it globalThis.Telegram is undefined, atLeast() returns false,
+      call() early-returns, and the ENTIRE boot sequence no-ops with no error:
+      no ready(), no expand(), no disableVerticalSwipes(), no fullscreen. The
+      game still renders, so it looks like it works — and every test in
+      test/telegram.test.ts stubs the very object that would be missing. That is
+      why the shipped file is asserted as text there.
+
+      Plain <script>, so it is fetched and executed before the deferred module
+      below. Unversioned deliberately: every call site is gated by atLeast(), so
+      a newer SDK can only add surfaces we already refuse to use, whereas a
+      pinned ?NN is a cache key somebody has to remember to bump.
+
+      It is also the ONLY cross-origin asset in the build (spec §8.5: iOS fails
+      silently on asset load errors, so everything else is self-hosted and
+      content-hashed by Vite).
+    -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+      /*
+        The palette is light (render/src/palette.ts), so the webview is told so
+        explicitly — a client in dark mode otherwise renders form controls and
+        the fallback button in a scheme the board is not in.
+      */
+      :root {
+        color-scheme: light;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        /*
+          --tg-viewport-stable-height is published by the SDK and excludes the
+          transient height Telegram reports mid-transition. Plain 100vh is
+          unreliable in the webview: it is frozen at the pre-fullscreen size on
+          some clients and includes the browser chrome on others. The fallback
+          is what makes the page usable with no SDK, in development.
+        */
+        height: var(--tg-viewport-stable-height, 100vh);
+        width: 100%;
+        overflow: hidden;
+        /* Spec §8.3. Without it a drag that runs past the top of the page
+           rubber-bands the whole webview and, below Bot API 7.7 where
+           disableVerticalSwipes() is a no-op, dismisses the Mini App. */
+        overscroll-behavior: contain;
+        /* PALETTE.background. The three opaque fills cover the canvas, but the
+           canvas is centred inside the page and this is what the strip around
+           it is painted in — white there against a warm board reads as a
+           rendering fault. */
+        background: #d9d3c7;
+        color: #2e2b28;
+        font: 13px/1.45 -apple-system, system-ui, Roboto, sans-serif;
+        font-variant-numeric: tabular-nums;
+        /* A drag over a canvas otherwise raises iOS's selection callout and its
+           grey tap highlight, both of which flash on every road laid. */
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-touch-callout: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      canvas {
+        display: block;
+        /*
+          The supported swipe mitigation, and BELOW BOT API 7.7 THE WHOLE OF IT:
+          disableVerticalSwipes() is a silent no-op there, so a downward
+          road-drawing drag would otherwise dismiss the Mini App mid-stroke.
+          Spec §8.3 forbids the legacy workarounds (a fixed body, a blanket
+          preventDefault on touchmove) — they are the approach reported broken
+          and they break legitimate scrolling. Scoped to the canvas for exactly
+          that reason.
+        */
+        touch-action: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="board"></canvas>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
