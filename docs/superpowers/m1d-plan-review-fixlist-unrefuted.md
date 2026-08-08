@@ -1,4 +1,8 @@
-# M1d plan review — **DO NOT EXECUTE. THE CORE PRIMITIVE IS WRONG.**
+# M1d plan review — the UNREFUTED snapshot
+
+> **Superseded by `m1d-plan-review-fixlist.md`**, written after the failed refuters were re-run. Kept because it is a useful comparison: this is what the review looked like with **49 of 124 findings never attacked**, and the difference between the two documents is a measure of how much refutation changes a review's conclusions.
+
+# DO NOT EXECUTE. THE CORE PRIMITIVE IS WRONG.
 
 Four lenses, **124 findings: 48 Critical, 56 Important, 20 Minor.** 75 reached a refuter (45 refuted, 30 survived) before the session limit killed the remaining 49 and the synthesis agent. This list was written by hand from the run's journal; the raw findings are in [`m1d-plan-review-raw-findings.md`](m1d-plan-review-raw-findings.md).
 
