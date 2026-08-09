@@ -203,9 +203,19 @@ export type PlaceResult =
  * shared instance cannot be scribbled on by one caller and observed by the
  * next — a returned singleton is only safe when the value is genuinely
  * immutable, and both halves are asserted rather than assumed
- * (`roads.test.ts`). Freezing every literal individually is also what the
- * `no-module-mutable-state` lint rule requires: `Object.freeze` does not
- * recurse.
+ * (`roads.test.ts`).
+ *
+ * **Two legs, and each covers what the other cannot — measured, not asserted.**
+ * The tests pin the ROWS: unfreezing any one of the eight is caught by
+ * `roads.test.ts`'s frozen and no-scribble tests. They cannot pin the OUTER
+ * `Object.freeze` on `ACCEPT_BY_COST` — with the rows still frozen, every
+ * returned value is still frozen and every one of the 545 sim tests passes.
+ * That leg belongs to the `determinism/no-module-mutable-state` lint rule,
+ * which reports the unfrozen outer array by name and line. Both were run under
+ * their own mutations rather than being claimed: rows → 1-2 test detectors
+ * each, outer → 0 test detectors and exactly 1 lint error. `Object.freeze` does
+ * not recurse, which is why the rule demands every level and why neither leg
+ * alone is enough.
  */
 const REFUSE_OUT_OF_BOUNDS = Object.freeze({ ok: false, reason: 'out-of-bounds' } as const)
 const REFUSE_NOT_ADJACENT = Object.freeze({ ok: false, reason: 'not-adjacent' } as const)

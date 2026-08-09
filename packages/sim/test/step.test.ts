@@ -226,18 +226,34 @@ describe('step', () => {
         'the TickAction set changed — re-derive tick phases 1..3 before widening it; see step.ts',
       ).toMatch(/^export type TickActionKind = 'place' \| 'erase'$/m)
 
-      // Half 2: phase 2 still cannot observe the clock. `roads.ts` is the only
-      // module it calls, and it must not import either header field.
+      /**
+       * Half 2: phase 2 still cannot observe the clock. `roads.ts` is the only
+       * module it calls, and it must not import either header field.
+       *
+       * **One `RegExp` per field, shared by the guard and its own self-check —
+       * and the first version of this had two copies of each pattern, which is
+       * the catalogue's "a scan self-test re-typing its own regex" exactly.**
+       * With separate copies the self-check validates only the copy it holds:
+       * typoing the *guard's* `H_TICK` pattern scored **0** detectors and
+       * typoing the guard's `H_WEEK` pattern scored **0**, so the clock half of
+       * this mechanism was disabled and its own comment claimed otherwise.
+       * Hoisted, a typo in either is a typo in both places at once and the
+       * self-check below catches it.
+       */
+      const H_TICK_RE = /\bH_TICK\b/
+      const H_WEEK_RE = /\bH_WEEK\b/
+
       expect(
         roadsSrc,
         'roads.ts now reads the clock — phase 2 can observe H_TICK, so the tick order needs re-deriving',
-      ).not.toMatch(/\bH_TICK\b/)
-      expect(roadsSrc, 'roads.ts now reads H_WEEK — same re-derivation as above').not.toMatch(/\bH_WEEK\b/)
+      ).not.toMatch(H_TICK_RE)
+      expect(roadsSrc, 'roads.ts now reads H_WEEK — same re-derivation as above').not.toMatch(H_WEEK_RE)
 
-      // Self-check on the scan: both patterns must be able to match something,
-      // or a typo in either regex is an assertion that cannot fail.
-      expect(stepSrc).toMatch(/\bH_TICK\b/)
-      expect(stepSrc).toMatch(/\bH_WEEK\b/)
+      // Self-check on the scan: THE SAME two patterns must be able to match
+      // something, or a typo in either is an assertion that cannot fail.
+      // `step.ts` reads both fields, so it is the positive control for both.
+      expect(stepSrc, 'the H_TICK pattern matches nothing — the guard above cannot fail').toMatch(H_TICK_RE)
+      expect(stepSrc, 'the H_WEEK pattern matches nothing — the guard above cannot fail').toMatch(H_WEEK_RE)
     })
   })
 
