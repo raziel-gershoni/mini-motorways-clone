@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { createState, hashState, snapshot, restore, H_TICK, H_WEEK, H_EPOCH } from '../src/state'
 import { createWorld } from '../src/world'
 import { step, type TickInputs, type TickAction } from '../src/step'
@@ -175,6 +176,68 @@ describe('step', () => {
       const scratch = freshScratch()
       const badAction = { kind: 'teleport', a: 0, b: 1 } as unknown as TickAction
       expect(() => step(s, WORLD, fields, scratch, { actions: [badAction] })).toThrow(/unknown action kind/i)
+    })
+
+    /**
+     * **A tripwire on the condition that keeps `1 <-> 2` and `2 <-> 3`
+     * 0-detector — not a detector for the transpositions themselves** (M1d Task
+     * 1c).
+     *
+     * `step.ts`'s comment records that both adjacent swaps are 0-detector
+     * no-ops for exactly one reason: **no `TickAction` reads `H_TICK`.** That is
+     * a property of today's action set, and the change that ends it is already
+     * scheduled — `placeDestination` stamps `destSpawnTick[d]` from `H_TICK`,
+     * and M1e makes building placement a `TickAction`. On that day both swaps
+     * become real off-by-ones at once and nothing in the suite catches either.
+     *
+     * Until then **no test that could fail exists to be written for the swaps**,
+     * and manufacturing one would be manufacturing a test that cannot exist. So
+     * this pins the *condition* instead. It is the difference between a handoff
+     * whose only carrier is a paragraph and one with a mechanism: whoever widens
+     * the action set, or makes `roads.ts` read the clock, gets a red test whose
+     * message points at the derivation they now own.
+     *
+     * A source read rather than a behavioural assertion, deliberately, on the
+     * precedent of `loop.test.ts`'s cross-file golden scan and
+     * `allocation.test.ts`'s `Float64Array` shape check: `TickActionKind` is a
+     * type and is erased at run time, so there is nothing to observe otherwise.
+     * And nothing else catches either half — the sibling test above still passes
+     * with a third kind added, and `tsc` has no opinion about which header
+     * fields a module imports.
+     */
+    it('pins the trigger that keeps the two tick-order transpositions inert', () => {
+      const stepSrc = readFileSync(new URL('../src/step.ts', import.meta.url), 'utf8')
+      const roadsSrc = readFileSync(new URL('../src/roads.ts', import.meta.url), 'utf8')
+      // Vacuity: an empty or misresolved read satisfies both scans below.
+      expect(stepSrc.length, 'step.ts read back empty').toBeGreaterThan(4000)
+      expect(roadsSrc.length, 'roads.ts read back empty').toBeGreaterThan(4000)
+
+      /**
+       * Half 1: the action set is still exactly the two road edits.
+       *
+       * **Anchored to the whole line, and the first version of this assertion
+       * was not — it used `toContain` and scored 0 detectors** against the
+       * mutation it was written for. `'place' | 'erase' | 'build'` *contains*
+       * `'place' | 'erase'`, so a widened union passed. Substring containment
+       * cannot express "exactly these"; a line-anchored match can.
+       */
+      expect(
+        stepSrc,
+        'the TickAction set changed — re-derive tick phases 1..3 before widening it; see step.ts',
+      ).toMatch(/^export type TickActionKind = 'place' \| 'erase'$/m)
+
+      // Half 2: phase 2 still cannot observe the clock. `roads.ts` is the only
+      // module it calls, and it must not import either header field.
+      expect(
+        roadsSrc,
+        'roads.ts now reads the clock — phase 2 can observe H_TICK, so the tick order needs re-deriving',
+      ).not.toMatch(/\bH_TICK\b/)
+      expect(roadsSrc, 'roads.ts now reads H_WEEK — same re-derivation as above').not.toMatch(/\bH_WEEK\b/)
+
+      // Self-check on the scan: both patterns must be able to match something,
+      // or a typo in either regex is an assertion that cannot fail.
+      expect(stepSrc).toMatch(/\bH_TICK\b/)
+      expect(stepSrc).toMatch(/\bH_WEEK\b/)
     })
   })
 

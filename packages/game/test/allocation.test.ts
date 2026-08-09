@@ -271,31 +271,6 @@ function dirtyFiles(all: readonly Allocator[], frames: number): string[] {
 }
 
 /**
- * **A KNOWN VIOLATION, carried to M1d — not an approval, and not a budget in the
- * sense every other entry in `BUDGETS` is one.**
- *
- * `sim/roads.ts`'s `canPlaceRoad` allocates inside the tick. Task 6's review
- * measured it at **40.3-41.4 B/frame**; the M2 milestone review reproduced it
- * independently at **37.96 / 38.15 / 39.39**; this harness, once widened to
- * `packages/sim/src`, measures it in the same band. It is **absent from the idle
- * profile entirely** — no input, no `placeRoad`, no allocation — which is why
- * three consecutive harnesses were green about it and why the *drag* profile is
- * the one that had to be widened.
- *
- * **`canPlaceRoad` is deliberately NOT fixed here.** It is `sim` code, this
- * milestone's Global Constraints say `sim` stays untouched, and every one of the
- * four goldens is a hash over a buffer `roads.ts` writes. **M1d owns the fix.**
- *
- * The allowance is deliberately tight — 64, against a measured 38-41 and a
- * single escaping object at 37-77 — so it covers the one violation that is known
- * and a **second** one would still fail. And `it('carries sim/roads.ts as a
- * KNOWN violation…')` below asserts the violation is **still there**, so when
- * M1d fixes it this entry becomes a failing test rather than a line nobody
- * deletes.
- */
-const ROADS_TS_CARRIED_VIOLATION = 128
-
-/**
  * See the module comment. **Every other file gets `NOISE_FLOOR_BYTES_PER_FRAME`,
  * and that is the assertion doing the work** — over 12 consecutive runs no
  * `game/src` file other than `loop.ts` appeared above the sampling floor even
@@ -310,8 +285,25 @@ const ROADS_TS_CARRIED_VIOLATION = 128
  * above the worst seen during review (23.6), and still below the 37-43 B/frame
  * one escaping object costs — so an object added inside `frame()` busts it in
  * **both** modes.
+ *
+ * ---------------------------------------------------------------------------
+ * THERE USED TO BE A SECOND ENTRY, AND IT IS GONE BECAUSE THE VIOLATION IS
+ * ---------------------------------------------------------------------------
+ *
+ * M2 carried `'roads.ts': 128` here as a **known violation**, not an approval:
+ * `canPlaceRoad` built a fresh `{ ok, ... }` on every call, measured at 40.6 /
+ * 41.7 / 44.3 B per call by this rig and at 38.0-39.4 B/frame by the M2
+ * milestone review's less dense one. The entry came with a test asserting the
+ * allocation was **still present**, precisely so that fixing it would turn this
+ * file red instead of leaving a dead exemption for the next reader to mistake
+ * for a real constraint.
+ *
+ * **M1d Task 1b fixed it and that test went red, so both are deleted.**
+ * `canPlaceRoad` now returns module-scope frozen singletons and measures 0.000
+ * B/call. `roads.ts` is held to `NOISE_FLOOR_BYTES_PER_FRAME` like every other
+ * file, by `allOffenders` — and the test below states the property positively.
  */
-const BUDGETS: Readonly<Record<string, number>> = { 'loop.ts': 32, 'roads.ts': ROADS_TS_CARRIED_VIOLATION }
+const BUDGETS: Readonly<Record<string, number>> = { 'loop.ts': 32 }
 
 const GAME_SRC = 'packages/game/src/'
 const GAME_PKG = 'packages/game/'
@@ -735,12 +727,13 @@ describe('the frame loop allocates nothing, measured', () => {
     // against guard-deletion regresses infinitely. It detects the unconsidered
     // one: raising a budget to make a failing change pass now turns two tests
     // red, and the second names the rule.
-    // Exactly two entries, and they are two DIFFERENT kinds of thing: `loop.ts`
-    // is a measured residual of code that allocates nothing, and `roads.ts` is a
-    // known violation being carried. A third entry appearing here is the edit
-    // this test exists to make visible.
-    expect(BUDGETS).toEqual({ 'loop.ts': 32, 'roads.ts': ROADS_TS_CARRIED_VIOLATION })
-    expect(ROADS_TS_CARRIED_VIOLATION).toBe(128)
+    // **Exactly ONE entry**, and it is a measured residual of code that
+    // allocates nothing — not an allowance for code that does. M1d Task 1b
+    // deleted the second (`'roads.ts': 128`, M2's carried `canPlaceRoad`
+    // violation) by fixing the violation; see `BUDGETS`. A second entry
+    // appearing here is the edit this test exists to make visible, and the
+    // question to ask of it is "is this a residual or an allowance?".
+    expect(BUDGETS).toEqual({ 'loop.ts': 32 })
     expect(NOISE_FLOOR_BYTES_PER_FRAME).toBe(4)
     expect(PROFILED_FRAMES).toBeGreaterThanOrEqual(3000)
     // The floor is only a floor if it stays far below one object per frame:
@@ -892,34 +885,52 @@ describe('the frame loop allocates nothing, measured', () => {
   })
 
   /**
-   * **`packages/sim/src/roads.ts` is a KNOWN VIOLATION, carried to M1d, and this
-   * is what stops the allowance rotting into an approval.**
+   * **`packages/sim/src/roads.ts` used to be a KNOWN VIOLATION carried by this
+   * file, and M1d Task 1b fixed it. This is the test that replaced the
+   * allowance, stating the property positively.**
    *
-   * `canPlaceRoad` allocates inside the tick. Three consecutive harnesses were
-   * green about it — Task 6's scoped it out and handed it to an owner that does
-   * not exist, Task 7's scoped to `packages/game/src`, Task 9's draw harness to
-   * `packages/render/src` — so the package doing the most work in the frame loop
-   * was covered by none of them.
+   * `canPlaceRoad` runs inside the tick — one call per `place` action in the
+   * input log — and built a fresh `{ ok, ... }` on every one of them. Three
+   * consecutive harnesses were green about it: Task 6's scoped it out and
+   * handed it to an owner that did not exist, Task 7's scoped to
+   * `packages/game/src`, Task 9's draw harness to `packages/render/src` — so
+   * the package doing the most work in the frame loop was covered by none of
+   * them. It measured 40.6 / 41.7 / 44.3 B per call in this rig before the fix
+   * and **0.000 after**; it now returns module-scope frozen singletons.
+   *
+   * **The allowance did its job on the way out**, and that is worth recording
+   * because it is the reason the entry was deleted rather than loosened: the
+   * previous version of this test asserted the allocation was *still present*,
+   * so the fix turned it red with its own message. `BUDGETS` lost `'roads.ts'`
+   * in the same commit, which is what puts the file back under
+   * `NOISE_FLOOR_BYTES_PER_FRAME` in `allOffenders` alongside every other file.
    *
    * Three assertions, and each one exists for a different reason:
    *
-   * 1. **It is still there.** When M1d fixes `canPlaceRoad`, this test fails and
-   *    whoever fixed it deletes `ROADS_TS_CARRIED_VIOLATION`. An allowance with
-   *    no expiry is how a carried violation becomes a budget nobody questions.
-   * 2. **Pinned per ACTION, not per frame**, and that is the correction this
-   *    test exists to make. The milestone review measured 37.96 / 38.15 / 39.39
-   *    B/frame and this harness measures 78-82 — the two do not disagree, they
-   *    are different drag densities. This rig enqueues `ACTIONS_PER_STROKE / STROKE_FRAMES`
-   *    = 2 actions a frame, so both reduce to the same **~40 bytes per
-   *    `canPlaceRoad` call**, which is the rig-independent quantity. A per-frame
-   *    band would be a fact about the driver; this is a fact about the code, and
-   *    it is what makes a SECOND allocation in the same file fail while the
-   *    known one passes.
-   * 3. **It is absent when idle.** That is the whole reason it hid: the frame
-   *    path does not touch it, only the input path does, and every harness
-   *    before Task 7's profiled an idle queue.
+   * 1. **Absent under a live drag**, where it used to appear. This is the half
+   *    that would have caught the original defect.
+   * 2. **Pinned per CALL, not per frame.** A per-frame figure is a fact about
+   *    the driver: this rig enqueues `ACTIONS_PER_STROKE / STROKE_FRAMES` = 2
+   *    actions a frame and measured 81-89 B/frame before the fix, while the M2
+   *    milestone review's one-action-a-frame rig measured 38.0-39.4 — the same
+   *    ~40 B/call seen through two drag densities. The per-call form is the
+   *    rig-independent quantity and it is what a future rig can be compared
+   *    against.
+   * 3. **Absent when idle**, which is how it hid for three harnesses: the frame
+   *    path never touches `roads.ts`, only the input path does. Kept as a
+   *    control on the *other* direction — a zero here is not evidence of
+   *    anything, so the drag arm above is the one carrying the weight, and
+   *    `counters.actions` is asserted so the drag arm cannot be a zero for the
+   *    same uninteresting reason.
+   *
+   * **The floor cannot be 0** — see `NOISE_FLOOR_BYTES_PER_FRAME`. A sampling
+   * profiler's smallest reportable non-zero figure over 3,000 frames is 0.17
+   * B/frame, so both bounds below are the floor scaled into per-call terms
+   * rather than a literal zero: at 6,000 calls the floor is
+   * `4 * 3000 / 6000` = 2 B/call, against the 40+ the fix removed and the 69.9
+   * B/call an injected escaping object measures. The gap between them is empty.
    */
-  it('carries sim/roads.ts as a KNOWN violation — still present, ~40 B per canPlaceRoad call', () => {
+  it('charges nothing to sim/roads.ts — canPlaceRoad allocates 0 B per call, drag and idle', () => {
     const rig = buildRig(() => undefined)
     const counters = newCounters()
     driveWithDrag(rig, WARMUP_FRAMES, 0, newCounters())
@@ -927,30 +938,29 @@ describe('the frame loop allocates nothing, measured', () => {
       driveWithDrag(rig, PROFILED_FRAMES, 1e6, counters)
     })
     assertScopeResolves(all, SIM_SRC)
+    // Vacuity: without actions `canPlaceRoad` never runs and a zero below means
+    // nothing at all. This is the assertion that separates "clean" from
+    // "measured nothing".
     expect(counters.actions, 'no actions, so canPlaceRoad never ran').toBeGreaterThan(5000)
 
     const bytes = all
       .filter((a) => a.file === 'packages/sim/src/roads.ts')
       .reduce((sum, a) => sum + a.bytes, 0)
     const perFrame = bytes / PROFILED_FRAMES
-    const perAction = bytes / counters.actions
+    const perCall = bytes / counters.actions
+    /** The sampling floor expressed per call, for this rig's call density. */
+    const floorPerCall = (NOISE_FLOOR_BYTES_PER_FRAME * PROFILED_FRAMES) / counters.actions
 
-    // 1. Still there. If this fails because the figure went to zero, M1d fixed
-    //    it — delete `ROADS_TS_CARRIED_VIOLATION` and this whole test.
-    expect(
-      perFrame,
-      'sim/roads.ts no longer allocates — if M1d fixed canPlaceRoad, delete ROADS_TS_CARRIED_VIOLATION',
-    ).toBeGreaterThan(NOISE_FLOOR_BYTES_PER_FRAME * 4)
+    // 1 and 2. Absent under a live drag, per call.
+    expect(perFrame, `sim/roads.ts allocates ${perFrame.toFixed(2)} B/frame under a live drag`).toBeLessThan(
+      NOISE_FLOOR_BYTES_PER_FRAME,
+    )
+    expect(perCall, `canPlaceRoad allocates ${perCall.toFixed(3)} B/call`).toBeLessThan(floorPerCall)
+    // The floor must stay far below the thing it is watching for, or "under the
+    // floor" stops meaning anything: one escaping object per call is 40-70.
+    expect(floorPerCall * 8).toBeLessThan(25)
 
-    // 2. The magnitude, per CALL. Measured 39.4 / 40.8 / 39.6 over three runs of
-    //    this rig, and 37.96-39.39 B/frame in the milestone review's rig at one
-    //    action a frame. A band, not a point: it is a sampling estimate. A
-    //    second escaping object in this file lands at 77-117 and fails.
-    expect(perAction, `canPlaceRoad is now ${perAction.toFixed(2)} B/call`).toBeGreaterThan(25)
-    expect(perAction, `canPlaceRoad is now ${perAction.toFixed(2)} B/call`).toBeLessThan(55)
-
-    // 3. Absent when idle — the reason three harnesses missed it. Same rig, same
-    //    frame count, no input at all.
+    // 3. Still absent when idle. Same rig, same frame count, no input at all.
     const idle = buildLoop(() => undefined)
     drive(idle, WARMUP_FRAMES, 0)
     const idleProfile = profileAllocations(() => {
@@ -960,10 +970,9 @@ describe('the frame loop allocates nothing, measured', () => {
     const idleBytes = idleProfile
       .filter((a) => a.file === 'packages/sim/src/roads.ts')
       .reduce((sum, a) => sum + a.bytes, 0)
-    expect(
-      idleBytes / PROFILED_FRAMES,
-      'roads.ts allocates with an EMPTY queue — the input-driven story is wrong',
-    ).toBeLessThan(NOISE_FLOOR_BYTES_PER_FRAME)
+    expect(idleBytes / PROFILED_FRAMES, 'roads.ts allocates with an EMPTY queue').toBeLessThan(
+      NOISE_FLOOR_BYTES_PER_FRAME,
+    )
   })
 
   /**

@@ -110,9 +110,32 @@ export interface TickInputs {
  * make building placement a `TickAction`. **The day it does, both swaps become
  * real off-by-ones in every destination's first-pin delay at once, and nothing
  * in the suite catches either.** Anyone adding an action that reads the clock
- * owns re-deriving these two positions and pinning them; until then this
- * paragraph is the only record that they were checked rather than merely
- * assumed.
+ * owns re-deriving these two positions and pinning them.
+ *
+ * **M1d checked the trigger and it did not fire** (Task 1c). Re-confirmed by
+ * reading, at the start of the milestone: `TickActionKind` is still exactly
+ * `'place' | 'erase'`, phase 2 still calls nothing but `placeRoad`/`eraseRoad`,
+ * and `roads.ts` still reads neither `H_TICK` nor `H_WEEK` (it imports
+ * `H_TILES` and `H_DEST_COUNT` from `state.ts` and nothing else from it; the
+ * only other module it calls into, `buildings.ts`, is reached through
+ * `isFootprintCell`/`destMetaOrientation`, both of which take plain numbers and
+ * no `GameState`). So the two transpositions are still 0-detector for the same
+ * single reason, and **no test that could fail exists to be written for them
+ * yet** — demanding one here would be demanding a test that cannot exist.
+ *
+ * Two things follow, and they are deliberately different in kind:
+ *
+ *   - **The trigger now has a tripwire rather than only this paragraph.**
+ *     `step.test.ts` reads this file and `roads.ts` off disk and pins both
+ *     halves of the condition above. It is NOT a detector for the two
+ *     transpositions — nothing can be, while the condition holds — it is a
+ *     mechanism that makes the person who ends the condition read this comment.
+ *     A handoff whose only carrier is a comment is a handoff with no recipient.
+ *   - **The 0-detector claim itself is NOT re-measured here, and must not be
+ *     read as re-measured.** Task 1 runs before any of M1d's branches exist, and
+ *     measuring 0-detector-ness before the new code lands says nothing about
+ *     after. **Task 9 re-runs all 13 reorderings against the finished
+ *     milestone.**
  *
  * Pure in the sense that matters: the result depends only on the contents of
  * `s.buffer`, `world`, `fields`/`scratch` (both re-derivable from `s.buffer`

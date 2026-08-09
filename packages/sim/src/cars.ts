@@ -1,7 +1,7 @@
 import { CAR_SPEED_UNITS_PER_TICK, COST_UNIT_SCALE, DENOM, LANE_SPEED_DEFAULT, ORTHO_COST } from '@laneways/shared'
 import type { GameState } from './state'
 import type { WorldData } from './world'
-import { DX, DY, OPPOSITE } from './roads'
+import { OPPOSITE, stepCell } from './roads'
 import { edgeCost } from './graph'
 import { routeStep } from './dispatch'
 import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
@@ -31,6 +31,14 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
  * (`eraseRoad`) and the car drives the erased segment to the end of its
  * committed route. That is decision 6's stated, tested deviation from spec
  * §5.11's delayed "ghost lane" refund, deferred to M1d.
+ *
+ * **It does import from `roads.ts`, and that is not the same claim.** `OPPOSITE`
+ * and `stepCell` (M1d Task 1a) are pure grid geometry over `DX`/`DY` — neither
+ * takes a `GameState` and neither can observe a road bit. The sentence above is
+ * about `state.roads`, the buffer region, and it stays exactly as strong as it
+ * was. Anything that makes movement depend on the *contents* of `roads`
+ * (M1d Task 7's intersection multiplier is the first) must amend that sentence
+ * in the same commit rather than leaning on this one.
  *
  * **Progress is accumulated in the pathfinder's own cost units:**
  *
@@ -134,29 +142,6 @@ export function assertSingleCrossing(residual: number, minThreshold: number): vo
         'an invariant at these constants, and movement is silently discarding the excess',
     )
   }
-}
-
-/**
- * The cell one step in direction `dir` from `cell`, or -1 if that leaves the
- * grid.
- *
- * The x/y round-trip is not decoration: `cell + DY * w + DX` alone wraps the
- * grid's right edge onto the next row's left edge — the same row-seam false
- * neighbour `graph.ts`'s `neighbours` guards against, and a wrong-but-plausible
- * cell rather than an out-of-range one.
- *
- * A five-line duplicate of `dispatch.ts`'s private helper of the same name.
- * Both read the SHARED `DX`/`DY` tables, so they cannot disagree about what a
- * direction means; only the bounds test is written twice. Sharing it would
- * mean widening Task 4's module surface for a helper neither module's public
- * contract mentions — recorded in this task's report rather than done
- * silently.
- */
-function stepCell(cell: number, dir: number, w: number, h: number): number {
-  const x = (cell % w) + (DX[dir] as number)
-  const y = ((cell / w) | 0) + (DY[dir] as number)
-  if (x < 0 || x >= w || y < 0 || y >= h) return -1
-  return y * w + x
 }
 
 /**

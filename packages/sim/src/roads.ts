@@ -119,10 +119,146 @@ export function dirBetween(from: number, to: number, w: number, h: number): numb
   return -1
 }
 
+/**
+ * The cell one step in direction `dir` from `cell` on a `w` x `h` grid, or -1
+ * if that step leaves the grid. The inverse of `dirBetween`, and it lives here
+ * beside it, `DX`/`DY`/`OPPOSITE` and `inBounds` for that reason.
+ *
+ * **The x/y round-trip is not decoration.** `cell + DY[dir] * w + DX[dir]`
+ * alone wraps the grid's right edge onto the next row's left edge — the same
+ * row-seam false neighbour `dirBetween`, `carparkCell` and `graph.ts`'s
+ * `neighbours` each carry a paragraph about. The failure is a *wrong-but-
+ * plausible* cell rather than an out-of-range one, which is why every caller
+ * needs the bound rather than relying on a typed-array read to fail: an
+ * out-of-range typed-array read is `undefined` and an out-of-range write is a
+ * silent no-op, neither of which is a signal.
+ *
+ * ---------------------------------------------------------------------------
+ * ONE COPY, AND WHY THERE USED TO BE TWO
+ * ---------------------------------------------------------------------------
+ *
+ * M1c shipped this function twice: private in `cars.ts`, exported from
+ * `dispatch.ts`. Both read the shared `DX`/`DY`, so they could never disagree
+ * about what a direction *means* — only the bounds test was written twice, and
+ * only one of the two was ever tested. `cars.test.ts` gave its copy one `it()`
+ * per bound; `dispatch.ts`'s copy had none, and all four of its bounds survived
+ * the whole suite. **The copy that got tested was not the copy dispatch used**
+ * — the catalogue's "production code with no covering test, masked by a
+ * redundant sibling" in its most literal form. M1c ruled to keep the
+ * duplication mid-milestone and recorded consolidating it here as the plan;
+ * M1d Task 1a is that consolidation, done before a third caller is added.
+ *
+ * ---------------------------------------------------------------------------
+ * `y < 0` IS A VERIFIED EQUIVALENT MUTANT THROUGH EITHER CALLER
+ * ---------------------------------------------------------------------------
+ *
+ * Deleting `y < 0` from the guard below is **not observable through any
+ * caller**, and that is a derivation rather than an intuition:
+ *
+ *   - the retained `x` guards fence `x` into `[0, w - 1]`;
+ *   - so for any `y <= -1`, `y * w + x <= -w + (w - 1) = -1`;
+ *   - so the function still returns a negative number, just not the literal -1;
+ *   - and every caller reduces every negative to one observable — `cars.ts`
+ *     throws on `next < 0` *without interpolating `next` into the message*, and
+ *     `dispatch.ts`'s walk does `if (next < 0) break`.
+ *
+ * Re-verified exhaustively at M1d: 1,600 geometries x every in-range cell x
+ * Int32 extremes x all 8 directions gave 97,040 raw return-value differences
+ * and **0** differences in the sign. **Do not manufacture a detector for it**,
+ * and in particular **do not tighten either caller's `next < 0` to
+ * `next === -1`** — that satisfies the letter of "every bound has a detector"
+ * by strictly weakening two guards, in a milestone that is about to hand this
+ * function a third caller. The bound is kept because the behaviour is
+ * required; the direct tests in `roads.test.ts` observe it because they call
+ * this function without a caller in the way, which is the whole reason it is
+ * exported rather than private.
+ */
+export function stepCell(cell: number, dir: number, w: number, h: number): number {
+  const x = (cell % w) + (DX[dir] as number)
+  const y = ((cell / w) | 0) + (DY[dir] as number)
+  if (x < 0 || x >= w || y < 0 || y >= h) return -1
+  return y * w + x
+}
+
 export type PlaceFailure = 'out-of-bounds' | 'not-adjacent' | 'terrain' | 'building' | 'budget'
 export type PlaceResult =
   | { readonly ok: true; readonly cost: number } // 0, 1 or 2 tiles
   | { readonly ok: false; readonly reason: PlaceFailure }
+
+/**
+ * **Every value `canPlaceRoad` can return, allocated once at module load.**
+ *
+ * `canPlaceRoad` runs inside the tick — `step`'s phase 2 calls `placeRoad` for
+ * every `place` action in the input log, and a drag enqueues one per sampled
+ * cell — and it used to build a fresh `{ ok, ... }` literal on every call.
+ * Measured by `packages/game/test/allocation.test.ts` at **40.6 / 41.7 / 44.3
+ * bytes per call** (81-89 B/frame at that rig's two actions a frame), and
+ * independently by the M2 milestone review at 38.0-39.4 B/frame at one action a
+ * frame. Both figures are the same code: **the invariant is per CALL**, because
+ * a per-frame number encodes the driver's input density and moves about 2x
+ * between rigs. It is now 0.
+ *
+ * The return type is unchanged, so no caller changes. It is sound because
+ * `PlaceResult` is `readonly` in the type system *and* frozen at run time, so a
+ * shared instance cannot be scribbled on by one caller and observed by the
+ * next — a returned singleton is only safe when the value is genuinely
+ * immutable, and both halves are asserted rather than assumed
+ * (`roads.test.ts`). Freezing every literal individually is also what the
+ * `no-module-mutable-state` lint rule requires: `Object.freeze` does not
+ * recurse.
+ */
+const REFUSE_OUT_OF_BOUNDS = Object.freeze({ ok: false, reason: 'out-of-bounds' } as const)
+const REFUSE_NOT_ADJACENT = Object.freeze({ ok: false, reason: 'not-adjacent' } as const)
+const REFUSE_TERRAIN = Object.freeze({ ok: false, reason: 'terrain' } as const)
+const REFUSE_BUILDING = Object.freeze({ ok: false, reason: 'building' } as const)
+const REFUSE_BUDGET = Object.freeze({ ok: false, reason: 'budget' } as const)
+
+/**
+ * Indexed by cost, which `canPlaceRoad` computes as the number of the two
+ * endpoint cells whose mask is currently 0 — so it is 0, 1 or 2 and nothing
+ * else, and this table is total over that range. `assertPlaceCost` below is the
+ * fail-closed guard that says so out loud rather than letting an out-of-range
+ * index return `undefined` and crash at the caller's `.ok`.
+ */
+const ACCEPT_BY_COST = Object.freeze([
+  Object.freeze({ ok: true, cost: 0 } as const),
+  Object.freeze({ ok: true, cost: 1 } as const),
+  Object.freeze({ ok: true, cost: 2 } as const),
+] as const)
+
+/**
+ * Throws unless `cost` is one of the three the accept table covers.
+ *
+ * Unreachable through `canPlaceRoad` as written — `cost` is a sum of two
+ * ternaries over `{0, 1}` — and exported so it is exercised directly rather
+ * than being the one line nothing executes, on the precedent of
+ * `assertSingleCrossing` (cars.ts) and `assertDispatchProgress` (dispatch.ts).
+ * It exists because the alternative to a named throw is `undefined` returned as
+ * a `PlaceResult`, which fails at whichever caller reads `.ok` next.
+ *
+ * **Disclosed, in `cars.ts`'s idiom for exactly this shape: deleting the CALL
+ * to this function from `canPlaceRoad` is a 0-detector no-op today**, and
+ * measured as one rather than assumed (M1d Task 1). The function's own bounds
+ * are killed from both directions by direct calls in `roads.test.ts`; the call
+ * site is not, and cannot be, while `cost` provably lies in `[0, 2]`. Unlike
+ * `assertSingleCrossing` there is no parameter to drive it through — the cost
+ * is computed two lines above, from the state — so making the call site
+ * reachable would mean adding a seam that exists only for the test. It is kept
+ * because the guard's value is entirely prospective: the day the cost model
+ * changes (an endpoint count other than two, or a cell that can be half-paid
+ * for), the difference is a named error here versus `undefined.ok` at a caller.
+ * Do not delete it on the strength of its own survival.
+ *
+ * @internal
+ */
+export function assertPlaceCost(cost: number): void {
+  if (!Number.isInteger(cost) || cost < 0 || cost >= ACCEPT_BY_COST.length) {
+    throw new Error(
+      `roads: a placement cost of ${cost} is outside [0, ${ACCEPT_BY_COST.length}) — the cost is the ` +
+        'number of the two endpoint cells whose road mask is 0, so it cannot be anything else',
+    )
+  }
+}
 
 /**
  * True iff `cell` is one of the 6 non-carpark footprint cells of any
@@ -149,26 +285,26 @@ function cellIsDestinationFootprintOnly(state: GameState, world: WorldData, cell
  */
 export function canPlaceRoad(state: GameState, world: WorldData, a: number, b: number): PlaceResult {
   if (!inBounds(a, world.cells) || !inBounds(b, world.cells)) {
-    return { ok: false, reason: 'out-of-bounds' }
+    return REFUSE_OUT_OF_BOUNDS
   }
 
   const dir = dirBetween(a, b, world.w, world.h)
   if (dir === -1) {
-    return { ok: false, reason: 'not-adjacent' }
+    return REFUSE_NOT_ADJACENT
   }
 
   // Whitelist on BOTH endpoints, matching `world.passable` (LAND or TREE).
   // Bounds are already checked above, so `world.passable[a]`/`[b]` are real
   // terrain reads here, never `undefined`.
   if (world.passable[a] !== 1 || world.passable[b] !== 1) {
-    return { ok: false, reason: 'terrain' }
+    return REFUSE_TERRAIN
   }
 
   // The driveway rule (M1c decision 5): both endpoints are checked, and a
   // destination's 6 non-carpark footprint cells are the only cells this
   // rejects — the house cell and the carpark cell stay placeable.
   if (cellIsDestinationFootprintOnly(state, world, a) || cellIsDestinationFootprintOnly(state, world, b)) {
-    return { ok: false, reason: 'building' }
+    return REFUSE_BUILDING
   }
 
   const maskA = state.roads[a] as number
@@ -179,10 +315,14 @@ export function canPlaceRoad(state: GameState, world: WorldData, a: number, b: n
   // (both masks are already non-zero, since the bit toward the other
   // endpoint is set), so this comparison passes even at zero tiles left.
   if (cost > tilesLeft(state)) {
-    return { ok: false, reason: 'budget' }
+    return REFUSE_BUDGET
   }
 
-  return { ok: true, cost }
+  // A table read, not a literal — see `ACCEPT_BY_COST`. Every return above is a
+  // module-scope frozen singleton for the same reason: this function runs
+  // inside the tick, once per `place` action.
+  assertPlaceCost(cost)
+  return ACCEPT_BY_COST[cost] as PlaceResult
 }
 
 /**

@@ -4,7 +4,7 @@ import { H_DEST_COUNT, H_HOUSE_COUNT, H_ROUTES_REFUSED } from './state'
 import type { WorldData } from './world'
 import { INF, type FlowField, type Scratch } from './scratch'
 import { fieldFor } from './flowfield'
-import { DIR_COUNT, DX, DY, roadMask } from './roads'
+import { DIR_COUNT, roadMask, stepCell } from './roads'
 import { carparkCell, destMetaColour, destMetaOrientation, PHASE_IDLE, PHASE_OUTBOUND } from './buildings'
 
 /**
@@ -292,41 +292,20 @@ export function assertFreeCarFound(k: number, h: number, colour: number): void {
 }
 
 /**
- * The cell one step in direction `k` from `cell`, or -1 if that leaves the grid.
+ * **`stepCell` used to live here, in duplicate. M1d Task 1a consolidated it
+ * into `roads.ts`** — beside `DX`/`DY`/`OPPOSITE`/`dirBetween`/`inBounds`,
+ * which is where every other piece of grid geometry already lives, and before
+ * M1d's blocking added a third caller to a helper that existed twice.
  *
- * **The x/y round-trip is not decoration, and this is the copy that decides
- * where every committed route actually goes.** `cell + DY[k] * w + DX[k]` alone
- * wraps the grid's right edge onto the next row's left column — the same
- * row-seam false neighbour `carparkCell`, `dirBetween`, `neighbours` and
- * `cars.ts`'s own `stepCell` each carry a paragraph about. The failure is a
- * route committed onto a cell the walk never named: wrong-but-plausible, not a
- * crash.
- *
- * **`@internal` Exported for testing only; `dispatchColour`'s walk is the real
- * call site — and the export exists because of a specific, measured gap.**
- * `cars.ts` holds a five-line duplicate of this function and `cars.test.ts`
- * gives THAT copy one `it()` per bound, by name. This copy had none: all four
- * bounds and the whole x/y decomposition survived the entire suite. The
- * milestone review named it "the catalogue's *production code with no covering
- * test, masked by a redundant sibling* in its most literal form — the sibling
- * has four tests and the original has zero", and per-task review could not see
- * it because it never looked at both copies at once.
- *
- * Testing it only through `dispatchColour` is not enough: with `x` fenced into
- * `[0, w - 1]`, any `y <= -1` makes `y * w + x <= -1`, so the caller's own
- * `if (next < 0) break` masks the `y < 0` bound completely. Direct calls
- * observe all four. The caller's refusal branch gets its own witness in
- * `dispatch.test.ts` — the bounds and the refusal are two different
- * obligations. Consolidating the three copies into `roads.ts` beside
- * `DX`/`DY`/`dirBetween` remains the recorded plan (M1d); this closes the
- * coverage half of it now, because coverage is what was actually missing.
+ * The duplication was not free and this comment is the receipt. `cars.ts`'s
+ * copy had one `it()` per bound; **this one had none, and all four of its
+ * bounds survived the whole suite** — the copy that got tested was not the copy
+ * dispatch used. That gap was closed in M1c by exporting this copy and giving
+ * it four direct tests; those tests now live in `roads.test.ts` against the one
+ * remaining copy, and the walk's own `if (next < 0) break` refusal keeps its
+ * separate witnesses in this file — the bounds and the refusal are two
+ * different obligations and neither subsumes the other.
  */
-export function stepCell(cell: number, k: number, w: number, h: number): number {
-  const x = (cell % w) + (DX[k] as number)
-  const y = ((cell / w) | 0) + (DY[k] as number)
-  if (x < 0 || x >= w || y < 0 || y >= h) return -1
-  return y * w + x
-}
 
 /** The colour-`colour` destination whose carpark is `cell`, or -1. */
 function destAtCarpark(state: GameState, world: WorldData, cell: number, colour: number): number {

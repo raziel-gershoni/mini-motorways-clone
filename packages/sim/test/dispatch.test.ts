@@ -37,7 +37,6 @@ import {
   ROUTE_BYTES,
   assertDispatchProgress,
   assertFreeCarFound,
-  stepCell,
 } from '../src/dispatch'
 
 /**
@@ -1517,77 +1516,32 @@ describe('4b: reservation survives a snapshot/restore', () => {
 })
 
 // ---------------------------------------------------------------------------
-// stepCell — the walk's bounds check
+// The walk's off-grid refusal — stepCell's three caller-observable bounds
 // ---------------------------------------------------------------------------
 
-describe('stepCell: the route walk cannot step off the grid', () => {
-  /**
-   * **ONE `it()` PER BOUND, mirroring `cars.test.ts:715-763` for the duplicate
-   * copy of this function — because until the milestone review, this copy had
-   * none at all.** All four bounds and the whole x/y decomposition survived the
-   * 627-test suite. `cars.ts`'s duplicate had four dedicated tests and a comment
-   * pointing AT this copy while describing the guard as shared reasoning, which
-   * is exactly what made the asymmetry invisible: the copy that got tested was
-   * not the copy dispatch uses.
-   *
-   * Four `it()`s rather than one, for the reason `cars.test.ts` already states:
-   * a merged test reports only the first bound to break, so a regression in two
-   * of them reads as a regression in one.
-   *
-   * Called DIRECTLY here, and through `runDispatch` in the seam test below.
-   * Both are needed and neither subsumes the other. Direct calls observe all
-   * four bounds; through the caller, `y < 0` is masked entirely — with `x`
-   * fenced into `[0, w - 1]`, any `y <= -1` gives `y * w + x <= -1`, which
-   * `dispatchColour`'s own `if (next < 0) break` rejects regardless of which
-   * line delivered the -1. The caller's refusal branch is a separate
-   * obligation, and it gets the separate test.
-   */
-  const EAST = 2
-  const SOUTH = 4
-  const WEST = 6
-  const NORTH = 0
+/**
+ * **`stepCell` itself now lives in `roads.ts` and its four bounds are tested
+ * DIRECTLY in `roads.test.ts`** (M1d Task 1a folded `cars.ts`'s private copy
+ * and this file's exported one into a single shared function). The four direct
+ * `it()`s that used to sit here moved with it.
+ *
+ * What stays here is the other obligation, and it is a different one: that
+ * **`dispatchColour`'s own `if (next < 0) break` observes the bound** rather
+ * than committing a route through the cell the missing bound would produce.
+ * Direct tests and caller tests do not subsume each other in either direction —
+ * the direct ones cannot see whether the caller consumes the -1, and the caller
+ * ones cannot see `y < 0` at all (with `x` fenced into `[0, w - 1]`, any
+ * `y <= -1` gives `y * w + x <= -1`, so both the shipped code and the mutant
+ * deliver a negative and this branch cannot tell them apart — the equivalent
+ * mutant `roads.ts` derives in full).
+ *
+ * So there are exactly **three** tests below, one per caller-observable bound,
+ * and each is built the hard way for the reason 4b's comment gives: the obvious
+ * version passes under its own mutation, because `dispatchColour` funnels three
+ * refusal reasons into one branch.
+ */
 
-  it('refuses a step E off the last column, rather than wrapping onto the next row (x >= w)', () => {
-    // Without this bound the walk lands on cell 100 = (0, 5) — the next row's
-    // first column, a real cell the walk never named.
-    expect(cellFor(19, 4) + 1).toBe(cellFor(0, 5))
-    expect(stepCell(cellFor(19, 4), EAST, W, H)).toBe(-1)
-    // Vacuity: the same step one column left is a real move, so this is the
-    // bound answering and not the function refusing everything.
-    expect(stepCell(cellFor(18, 4), EAST, W, H)).toBe(cellFor(19, 4))
-  })
-
-  it('refuses a step W off the first column, rather than wrapping onto the previous row (x < 0)', () => {
-    // The same row-seam hazard in the other direction, and the one an
-    // eastern-only fixture leaves untested.
-    expect(cellFor(0, 5) - 1).toBe(cellFor(19, 4))
-    expect(stepCell(cellFor(0, 5), WEST, W, H)).toBe(-1)
-    expect(stepCell(cellFor(1, 5), WEST, W, H)).toBe(cellFor(0, 5))
-  })
-
-  it('refuses a step S off the last row, rather than indexing past the grid (y >= h)', () => {
-    // Distinct from the x bounds in its failure mode: this one produces an
-    // index >= cells, which reads `dirs[cell]` as `undefined` in the walk —
-    // neither `< 0` nor `>= DIR_COUNT`, so the walk would carry `undefined`
-    // into `packRouteStep` and throw rather than refuse.
-    expect(stepCell(cellFor(5, H - 1), SOUTH, W, H)).toBe(-1)
-    expect(stepCell(cellFor(5, H - 2), SOUTH, W, H)).toBe(cellFor(5, H - 1))
-  })
-
-  it('refuses a step N off the first row (y < 0)', () => {
-    expect(stepCell(cellFor(5, 0), NORTH, W, H)).toBe(-1)
-    expect(stepCell(cellFor(5, 1), NORTH, W, H)).toBe(cellFor(5, 0))
-    // Disclosed, in `cars.test.ts`'s idiom: through `dispatchColour` this bound
-    // is an EQUIVALENT MUTANT — the retained `x` bounds fence `x` into
-    // `[0, w - 1]`, so any `y <= -1` gives `y * w + x <= -1` and the caller's
-    // `next < 0` arm rejects it regardless. It is observable here only because
-    // this test calls the function directly, which is the reason the function
-    // is exported at all.
-    expect(cellFor(5, 0) - W).toBeLessThan(0)
-  })
-})
-
-describe('4b: a walk that would leave the grid is refused, not committed', () => {
+describe('4b: a walk that would leave the grid is refused, not committed — one test per caller-observable bound', () => {
   /**
    * The caller's `if (next < 0) break` — `dispatchColour`'s documented "walked
    * off the grid" refusal — had no test either.
@@ -1636,6 +1590,115 @@ describe('4b: a walk that would leave the grid is refused, not committed', () =>
     runDispatch(r.state, r.world, r.fields, r.scratch)
 
     // Every one of these flips under the mutation: it commits a 1-step route.
+    expect(r.state.carPhase[0]).toBe(PHASE_IDLE)
+    expect(r.state.carRouteLen[0]).toBe(0)
+    expect(r.state.carRouteCursor[0]).toBe(0)
+    expect(r.state.destReserved[0]).toBe(0)
+    expect(r.state.header[H_ROUTES_REFUSED]).toBe(before + 1)
+    expect(routeBytesOf(r, 0)).toEqual(new Array(ROUTE_BYTES).fill(0))
+    assertReservationInvariants(r)
+  })
+
+  /**
+   * **The mirror of the test above, and the one an eastern-only fixture leaves
+   * untested** (M1d Task 1a). Same construction, other direction: the cell the
+   * missing `x < 0` bound wraps onto must itself be a live, pinned,
+   * colour-matching carpark, or `destAtCarpark` returns -1 and the walk refuses
+   * for a reason that has nothing to do with the bound.
+   *
+   * Destination origin (16,5) orientation E: footprint x16..18 y5..6, carpark
+   * (19,5) = 119. House at (0,6) = 120, whose WEST step is index 119 — the
+   * previous row's last column, and exactly that carpark.
+   */
+  it('does not commit a route whose step wraps the left edge onto a carpark', () => {
+    const r = rig('row-seam-west')
+    expect(placeDestination(r.state, r.world, cellFor(16, 5), ORIENTATION_E, 0, DEST_KIND_SQUARE)).toBe(true)
+    expect(placeHouse(r.state, r.world, cellFor(0, 6), 0)).toBe(true)
+    // The wrap identity, asserted rather than assumed.
+    expect(cellFor(0, 6) - 1).toBe(cellFor(19, 5))
+    expect(carparkCell(cellFor(16, 5), ORIENTATION_E, W, H)).toBe(cellFor(19, 5))
+
+    // A legitimate road house -> carpark down column 0, along row 8 (below the
+    // footprint's y5..6) and up column 19. 2 + 19 + 3 = 24 orthogonal steps.
+    const chain: number[] = [cellFor(0, 6), cellFor(0, 7)]
+    for (let x = 0; x <= 19; x++) chain.push(cellFor(x, 8))
+    chain.push(cellFor(19, 7), cellFor(19, 6), cellFor(19, 5))
+    placeChain(r, chain)
+
+    r.state.destPins[0] = 1
+    assembleAndSync(r)
+    // Vacuity: the house genuinely reaches the carpark by the legal route.
+    expect(r.fields[0]!.dist[cellFor(0, 6)]).toBe(24 * ORTHO_COST)
+    expect(sourcesOf(r, 0)).toEqual([cellFor(19, 5)])
+
+    // Corrupt `dir` to point WEST, off the grid.
+    r.fields[0]!.dir[cellFor(0, 6)] = 6
+    const before = r.state.header[H_ROUTES_REFUSED] as number
+
+    runDispatch(r.state, r.world, r.fields, r.scratch)
+
+    // Every one of these flips under the mutation: it commits a 1-step route to
+    // a carpark on the row above, which the car cannot reach in one step.
+    expect(r.state.carPhase[0]).toBe(PHASE_IDLE)
+    expect(r.state.carRouteLen[0]).toBe(0)
+    expect(r.state.carRouteCursor[0]).toBe(0)
+    expect(r.state.destReserved[0]).toBe(0)
+    expect(r.state.header[H_ROUTES_REFUSED]).toBe(before + 1)
+    expect(routeBytesOf(r, 0)).toEqual(new Array(ROUTE_BYTES).fill(0))
+    assertReservationInvariants(r)
+  })
+
+  /**
+   * **The third caller-observable bound, and its observable is a different kind
+   * of thing — which is stated here rather than dressed up as the other two**
+   * (M1d Task 1a).
+   *
+   * `y >= h` cannot wrap onto a real cell through this caller: `y = h` gives
+   * `y * w + x >= w * h` for every in-range `x`, so the missing bound always
+   * produces an index past the end of the grid, never a wrong-but-plausible
+   * one. `dirs[thatIndex]` then reads back `undefined` (`dir` is an
+   * `Int8Array(cells)`), which is neither `< 0` nor `>= DIR_COUNT`, so the walk
+   * does not terminate and carries `undefined` straight into `packRouteStep`,
+   * which throws by name.
+   *
+   * So the discriminator is **"refuses cleanly" versus "throws"**, and it is
+   * written as `expect(...).not.toThrow()` deliberately: that makes the mutant's
+   * detection an ASSERTION FAILURE rather than an uncaught error, which is the
+   * difference between a kill and a crash the catalogue says to keep straight.
+   */
+  it('refuses, rather than throwing, when the walk would step off the last row', () => {
+    const r = rig('row-seam-south')
+    // Destination origin (0,0) orientation S: footprint x0..1 y0..2, carpark
+    // (0,3) = 60. House at (5,11) = 235, on the last row.
+    expect(placeDestination(r.state, r.world, cellFor(0, 0), ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+    expect(placeHouse(r.state, r.world, cellFor(5, 11), 0)).toBe(true)
+    expect(carparkCell(cellFor(0, 0), ORIENTATION_S, W, H)).toBe(cellFor(0, 3))
+    // The index the missing bound would produce is off the END of the grid, not
+    // a real cell — which is why this test's observable is a throw.
+    expect(cellFor(5, 11) + W).toBeGreaterThanOrEqual(W * H)
+
+    // Up column 5 to row 3, then west along row 3 to the carpark: 8 + 5 = 13.
+    const chain: number[] = []
+    for (let y = 11; y >= 3; y--) chain.push(cellFor(5, y))
+    for (let x = 4; x >= 0; x--) chain.push(cellFor(x, 3))
+    placeChain(r, chain)
+
+    r.state.destPins[0] = 1
+    assembleAndSync(r)
+    expect(r.fields[0]!.dist[cellFor(5, 11)]).toBe(13 * ORTHO_COST)
+    expect(sourcesOf(r, 0)).toEqual([cellFor(0, 3)])
+
+    // Corrupt `dir` to point SOUTH, off the last row.
+    r.fields[0]!.dir[cellFor(5, 11)] = 4
+    const before = r.state.header[H_ROUTES_REFUSED] as number
+
+    expect(
+      () => {
+        runDispatch(r.state, r.world, r.fields, r.scratch)
+      },
+      'the walk read past the end of `dir` and carried undefined into packRouteStep',
+    ).not.toThrow()
+
     expect(r.state.carPhase[0]).toBe(PHASE_IDLE)
     expect(r.state.carRouteLen[0]).toBe(0)
     expect(r.state.carRouteCursor[0]).toBe(0)

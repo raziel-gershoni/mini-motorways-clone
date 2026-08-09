@@ -73,6 +73,33 @@ import { ROUTE_BYTES } from './dispatch'
  * other `Uint8Array` boundary, and it gets its own test rather than shipping
  * as an unobserved guard.
  *
+ * ---------------------------------------------------------------------------
+ * THE CLASS, NAMED, WITH ITS NEXT RECIPIENT — M1d Task 1d
+ * ---------------------------------------------------------------------------
+ *
+ * The class is: **an unguarded `--` at 0 on a `Uint8Array` slot wraps to 255,
+ * and where that slot gates eligibility it excludes something forever, because
+ * the counter can never climb back above 255.** It is silent, it survives
+ * snapshot/restore, and it replays identically in the Worker — so it is not
+ * even a divergence, just a game that quietly stops working.
+ *
+ * M1d re-swept the class rather than assuming it (Task 1d). The **complete**
+ * set of `Uint8Array` decrement paths in `packages/sim/src` at the start of the
+ * milestone is the two lines below, `destPins` and `destReserved`, both guarded
+ * here and both directly unit-tested in `trips.test.ts` — each arm separately
+ * and the compound as well, so neither hides inside the other. The other six
+ * `Uint8` regions take no decrement at all: `roads` clears bits with `& ~bit`,
+ * `cleared` is only ever set to 1, `houseColour`/`destMeta` are written once at
+ * placement, `carPhase` is assigned named constants, and `carRoute` is written
+ * by nibble or zero-filled wholesale.
+ *
+ * **M1d's queueing adds no decrement to either slot here.** The one genuine new
+ * `Uint8Array` decrement path in the milestone is **Task 5's `ghostCommitted`**
+ * — the count of cars committed to a ghosted cell, decremented as each crosses
+ * off it — and it carries this guard by name. That is a named recipient, not a
+ * "whoever owns this"; Task 9 verifies at the end of the milestone that no
+ * other new decrement path appeared.
+ *
  * Parameterised rather than closing over `state`, on the precedent of
  * `assertBucketCountExceedsEveryEdgeCost` (scratch.ts), `assertDispatchProgress`
  * (dispatch.ts) and `assertSingleCrossing` (cars.ts): the failure path is then

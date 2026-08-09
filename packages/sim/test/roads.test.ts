@@ -10,7 +10,10 @@ import {
   DY,
   OPPOSITE,
   dirBetween,
+  stepCell,
   canPlaceRoad,
+  assertPlaceCost,
+  type PlaceResult,
   placeRoad,
   eraseRoad,
   roadMask,
@@ -130,6 +133,109 @@ describe('dirBetween', () => {
     // row's first column.
     const eastEdge = 1 * W + (W - 1)
     expect(dirBetween(eastEdge, eastEdge + 1, W, H)).toBe(-1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// stepCell — the four bounds, called DIRECTLY (M1d Task 1a)
+// ---------------------------------------------------------------------------
+
+describe('stepCell: the one shared grid step, and each of its four bounds', () => {
+  /**
+   * **ONE `it()` PER BOUND, and they are direct calls.** A single merged test
+   * reports only the first bound to break, so a regression in two of them reads
+   * as a regression in one — and three of the four fail in genuinely different
+   * ways, which is exactly the information a merged test throws away.
+   *
+   * These four moved here from `dispatch.test.ts` when M1d Task 1a folded
+   * `cars.ts`'s private copy and `dispatch.ts`'s exported copy into the single
+   * one in `roads.ts`. The history is the reason they exist at all: M1c shipped
+   * the function twice, `cars.test.ts` gave one copy four tests, and the other
+   * copy — **the one dispatch actually called** — had zero, with all four bounds
+   * surviving the whole suite.
+   *
+   * Direct calls and caller-level tests are two different obligations and
+   * neither subsumes the other. Direct calls observe all four bounds. Through a
+   * caller only three are observable, because `y < 0` is a verified equivalent
+   * mutant there — see `roads.ts`'s own comment for the derivation, and
+   * `cars.test.ts` / `dispatch.test.ts` for the caller-side halves.
+   *
+   * **Every marker below is past exactly ONE bound and exactly one cell past
+   * it.** A cell in a diagonal corner is past two bounds at once, which makes
+   * extending either one reach nothing — the catalogue records seven 0-detector
+   * mutants from exactly that placement. Each `it()` asserts its marker's
+   * in-range companion too, so the -1 is the bound answering rather than the
+   * function refusing everything.
+   */
+  const NORTH = 0
+  const EAST = 2
+  const SOUTH = 4
+  const WEST = 6
+
+  /** `y * W + x` on the fixture's 6 x 4 board — non-square, so w and h cannot be swapped silently. */
+  function at(x: number, y: number): number {
+    return y * W + x
+  }
+
+  it('agrees with the DIRS table it is named against, so the four literals above are the right ones', () => {
+    // Vacuity for the whole block: if these indices did not mean N/E/S/W, every
+    // bound below would be exercised by the wrong step and could pass for the
+    // wrong reason. Derived from the shared tables rather than re-typed.
+    expect([DX[NORTH], DY[NORTH]]).toEqual([0, -1])
+    expect([DX[EAST], DY[EAST]]).toEqual([1, 0])
+    expect([DX[SOUTH], DY[SOUTH]]).toEqual([0, 1])
+    expect([DX[WEST], DY[WEST]]).toEqual([-1, 0])
+    // Non-square, or a w/h swap inside `stepCell` would be invisible.
+    expect(W).not.toBe(H)
+  })
+
+  it('refuses a step E off the last column, rather than wrapping onto the next row (x >= w)', () => {
+    // The marker is on row 1, one column past the east bound and nowhere near
+    // either y bound. Without this half of the guard the step lands on cell 12
+    // = (0, 2) — a real cell no caller ever named.
+    expect(at(W - 1, 1) + 1).toBe(at(0, 2))
+    expect(stepCell(at(W - 1, 1), EAST, W, H)).toBe(-1)
+    // Vacuity: the same step one column left is a real move.
+    expect(stepCell(at(W - 2, 1), EAST, W, H)).toBe(at(W - 1, 1))
+  })
+
+  it('refuses a step W off the first column, rather than wrapping onto the previous row (x < 0)', () => {
+    // The same row-seam hazard in the other direction, and the one an
+    // eastern-only fixture leaves untested. Row 2, so the y bounds are slack.
+    expect(at(0, 2) - 1).toBe(at(W - 1, 1))
+    expect(stepCell(at(0, 2), WEST, W, H)).toBe(-1)
+    expect(stepCell(at(1, 2), WEST, W, H)).toBe(at(0, 2))
+  })
+
+  it('refuses a step S off the last row, rather than indexing past the grid (y >= h)', () => {
+    // Distinct from the x bounds in its failure mode: this one produces an
+    // index >= cells, which every caller reads back as `undefined` rather than
+    // as a wrong-but-plausible cell.
+    expect(at(2, H - 1) + W).toBe(W * H + 2)
+    expect(stepCell(at(2, H - 1), SOUTH, W, H)).toBe(-1)
+    expect(stepCell(at(2, H - 2), SOUTH, W, H)).toBe(at(2, H - 1))
+  })
+
+  it('refuses a step N off the first row (y < 0) — observable HERE and, by derivation, only here', () => {
+    expect(at(2, 0) - W).toBe(-4)
+    expect(stepCell(at(2, 0), NORTH, W, H)).toBe(-1)
+    expect(stepCell(at(2, 1), NORTH, W, H)).toBe(at(2, 0))
+    // The bound returns the sentinel -1, not merely "some negative number" —
+    // which is the whole reason this bound is observable from a direct call and
+    // from nowhere else. Dropping it returns -4 here; every caller collapses
+    // both to one observable. See `roads.ts` for the derivation, and DO NOT
+    // tighten a caller's `next < 0` to `next === -1` to manufacture one.
+    expect(stepCell(at(2, 0), NORTH, W, H)).not.toBe(at(2, 0) - W)
+  })
+
+  it('returns the real neighbour in all eight directions from an interior cell', () => {
+    // The bounds tests above are all negative. This is the positive half: a
+    // guard that returned -1 for everything would satisfy four of five `it()`s
+    // in this block and this is what refuses it.
+    const c = at(2, 1)
+    for (let k = 0; k < DIR_COUNT; k++) {
+      expect(stepCell(c, k, W, H)).toBe(at(2 + (DX[k] as number), 1 + (DY[k] as number)))
+    }
   })
 })
 
@@ -291,6 +397,177 @@ describe('canPlaceRoad cost accounting', () => {
     expect(canPlaceRoad(state, world, 3, 4)).toEqual({ ok: true, cost: 1 })
     placeRoad(state, world, 3, 4)
     expect(canPlaceRoad(state, world, 2, 3)).toEqual({ ok: true, cost: 0 })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// canPlaceRoad's returns are frozen module-scope singletons (M1d Task 1b)
+// ---------------------------------------------------------------------------
+
+describe('canPlaceRoad allocates nothing per call', () => {
+  /**
+   * **`canPlaceRoad` runs inside the tick and used to allocate a fresh
+   * `{ ok, ... }` on every call**: 40.6 / 41.7 / 44.3 B per call, measured by
+   * `packages/game/test/allocation.test.ts`, and 38.0-39.4 B/frame in the M2
+   * milestone review's differently-dense rig. It now returns one of eight
+   * module-scope frozen singletons.
+   *
+   * **This block exists because the profiler is in the wrong package and is a
+   * sampling instrument.** The allocation harness lives in `packages/game`, it
+   * estimates rather than counts, and it can only see the paths its driver
+   * happens to walk — the drag driver spends its budget in the first few
+   * strokes, so almost every call it makes returns `budget`. Identity is the
+   * property that actually forbids the allocation, it is deterministic, and it
+   * is checkable here, in the package that owns the code, for every outcome
+   * rather than for the one the driver reaches. Reverting any single `return`
+   * to a literal turns exactly one of these red.
+   *
+   * Frozen-ness is the other half and it is not decoration: a shared instance
+   * that a caller can scribble on is a worse defect than the allocation was,
+   * because the next caller sees the scribble. `PlaceResult` is `readonly` in
+   * the type system, which stops nothing at run time.
+   */
+  const DW = 8
+  const DH = 6
+
+  interface Outcomes {
+    readonly state: GameState
+    readonly world: WorldData
+    /** Every outcome `canPlaceRoad` can produce, as a zero-argument call. */
+    readonly cases: ReadonlyArray<readonly [string, () => PlaceResult]>
+  }
+
+  /**
+   * An 8x6 all-LAND board carrying a destination (footprint (2,1)..(3,3),
+   * carpark (2,0)) and a two-segment road, so that **all eight outcomes are
+   * reachable from one fixture** — five refusals and all three costs. Building
+   * them from one board is what lets the "distinct outcomes are distinct
+   * instances" assertion below compare them against each other.
+   */
+  function outcomes(id: string, startingTiles: number): Outcomes {
+    const map = parseMap(id, ['........', '........', '........', '........', '........', '........'], startingTiles, 40, 16, 5)
+    const world = createWorld(map)
+    const state = createState(id, map)
+    expect(placeDestination(state, world, 1 * DW + 2, ORIENTATION_N, 0, DEST_KIND_SQUARE)).toBe(true)
+    // Row 5 is clear of the footprint and of its carpark, so these are plain
+    // land-to-land placements.
+    const r0 = 5 * DW
+    return {
+      state,
+      world,
+      cases: [
+        ['out-of-bounds', () => canPlaceRoad(state, world, -1, 0)],
+        ['not-adjacent', () => canPlaceRoad(state, world, r0, r0 + 3)],
+        // (2,1) is a footprint cell; (1,1) is off-footprint and 8-adjacent.
+        ['building', () => canPlaceRoad(state, world, 1 * DW + 2, 1 * DW + 1)],
+        ['cost 2', () => canPlaceRoad(state, world, r0, r0 + 1)],
+        ['cost 1', () => canPlaceRoad(state, world, r0 + 1, r0 + 2)],
+        ['cost 0', () => canPlaceRoad(state, world, r0, r0 + 1)],
+      ],
+    }
+  }
+
+  it('the fixture really does reach all eight outcomes, or every assertion below is about six of them', () => {
+    // Vacuity first: a `cases` list whose entries silently produced the same
+    // refusal would satisfy "frozen" and "stable" while proving nothing.
+    const o = outcomes('outcome-cover', 50)
+    const r0 = 5 * DW
+    expect(o.cases[0]![1]()).toEqual({ ok: false, reason: 'out-of-bounds' })
+    expect(o.cases[1]![1]()).toEqual({ ok: false, reason: 'not-adjacent' })
+    expect(o.cases[2]![1]()).toEqual({ ok: false, reason: 'building' })
+    expect(o.cases[3]![1]()).toEqual({ ok: true, cost: 2 })
+    expect(placeRoad(o.state, o.world, r0, r0 + 1)).toBe(true)
+    expect(o.cases[4]![1]()).toEqual({ ok: true, cost: 1 })
+    expect(o.cases[5]![1]()).toEqual({ ok: true, cost: 0 })
+
+    // The two outcomes the shared board cannot host at once, on their own
+    // boards: `terrain` needs a non-LAND cell and `budget` needs an empty purse.
+    const t = fixture(50, 'outcome-terrain')
+    expect(canPlaceRoad(createState('s', t.map), t.world, 0, 1)).toEqual({ ok: false, reason: 'terrain' })
+    const b = fixture(0, 'outcome-budget')
+    expect(canPlaceRoad(createState('s', b.map), b.world, 2, 3)).toEqual({ ok: false, reason: 'budget' })
+  })
+
+  it('returns a FROZEN value for every outcome, so one caller cannot scribble on the next caller’s answer', () => {
+    const o = outcomes('outcome-frozen', 50)
+    for (const [name, call] of o.cases) {
+      expect(Object.isFrozen(call()), `${name} is not frozen`).toBe(true)
+    }
+    const t = fixture(50, 'frozen-terrain')
+    expect(Object.isFrozen(canPlaceRoad(createState('s', t.map), t.world, 0, 1))).toBe(true)
+    const b = fixture(0, 'frozen-budget')
+    expect(Object.isFrozen(canPlaceRoad(createState('s', b.map), b.world, 2, 3))).toBe(true)
+  })
+
+  it('returns the SAME instance for a repeated outcome — the deterministic form of "allocates nothing"', () => {
+    const o = outcomes('outcome-identity', 50)
+    for (const [name, call] of o.cases) {
+      expect(call(), `${name} allocated a fresh object`).toBe(call())
+    }
+    // Across two independent states as well, which is the property a
+    // per-`GameState` cache would NOT have.
+    const t1 = fixture(50, 'identity-terrain-1')
+    const t2 = fixture(50, 'identity-terrain-2')
+    expect(canPlaceRoad(createState('s', t1.map), t1.world, 0, 1)).toBe(
+      canPlaceRoad(createState('s', t2.map), t2.world, 0, 1),
+    )
+  })
+
+  it('gives DIFFERENT outcomes different instances, so the singletons are not one collapsed object', () => {
+    const o = outcomes('outcome-distinct', 50)
+    const seen = new Set<PlaceResult>()
+    for (const [, call] of o.cases.slice(0, 4)) seen.add(call())
+    // 4 distinct outcomes reachable before any road is placed: out-of-bounds,
+    // not-adjacent, building, cost 2. `cost 1`/`cost 0` need a placed road.
+    expect(seen.size).toBe(4)
+  })
+
+  it('a caller cannot corrupt the shared instance, and a later independent call is unaffected', () => {
+    const { map, world } = fixture(50, 'no-scribble')
+    const state = createState('s', map)
+    const first = canPlaceRoad(state, world, 2, 3)
+    expect(first).toEqual({ ok: true, cost: 2 })
+
+    /**
+     * **This test repairs its own damage, and that is not tidiness.** The thing
+     * it attempts is a write to a MODULE-SCOPE singleton. Under the mutation it
+     * exists to catch — a missing `Object.freeze` — the write succeeds, and a
+     * corrupted `{ ok: true, cost: 99 }` then leaks into every later test in
+     * this file. Measured: without the restore below, dropping one
+     * `Object.freeze` scored **9** failures, of which 2 were detectors and 7
+     * were unrelated tests failing on poisoned state. An inflated detector count
+     * is exactly as misleading as a fake one.
+     */
+    const before = (first as { cost: number }).cost
+    let threw: unknown = null
+    try {
+      ;(first as { cost: number }).cost = 99
+    } catch (e) {
+      threw = e
+    }
+    if ((first as { cost: number }).cost !== before) (first as { cost: number }).cost = before
+
+    // ESM is strict mode, so a write to a frozen property throws rather than
+    // failing silently. Both halves matter: the throw, and the value after it.
+    expect(threw, 'the shared result accepted a write — canPlaceRoad’s singleton is not frozen').toBeInstanceOf(
+      TypeError,
+    )
+    expect(canPlaceRoad(state, world, 2, 3)).toEqual({ ok: true, cost: 2 })
+  })
+
+  it('names an impossible cost rather than returning undefined as a PlaceResult', () => {
+    // Unreachable through `canPlaceRoad` — the cost is a sum of two ternaries
+    // over {0, 1} — so it is exercised directly, on the precedent of
+    // `assertSingleCrossing` and `assertDispatchProgress`. Without it, an
+    // out-of-range index returns `undefined` and fails at whichever caller
+    // reads `.ok` next, with no mention of `roads.ts`.
+    expect(() => assertPlaceCost(-1)).toThrow(/placement cost of -1 is outside/)
+    expect(() => assertPlaceCost(3)).toThrow(/placement cost of 3 is outside/)
+    expect(() => assertPlaceCost(1.5)).toThrow(/placement cost of 1.5 is outside/)
+    // Both directions of the bound: 0 and 2 are the two ends of the real range.
+    expect(() => assertPlaceCost(0)).not.toThrow()
+    expect(() => assertPlaceCost(1)).not.toThrow()
+    expect(() => assertPlaceCost(2)).not.toThrow()
   })
 })
 
