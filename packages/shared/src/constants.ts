@@ -35,6 +35,50 @@ export const RIGHT_ANGLE_SPEED_MUL = 667
 export const INTERSECTION_SPEED_MUL = 500
 export const SHARP_TURN_SPEED_MUL = 333
 
+// --- Blocking and the anti-deadlock valve (spec §5.5, M1d decision 6) ---
+/**
+ * How long a car may be refused entry to the next cell before it proceeds
+ * anyway — spec §5.5's *"max wait at an intersection before proceeding anyway
+ * is 45 s"*, at `TICKS_PER_SECOND` (30): 45 * 30 = 1,350 ticks.
+ *
+ * **Derived, never written as the literal 1,350.** The conversion from the
+ * spec's seconds belongs in this file and nowhere else, and writing the product
+ * out would let the clock change under it silently — the same rule
+ * `FIRST_PIN_DELAY_TICKS` above already follows.
+ *
+ * **This is a game mechanic, not a safety hack.** A gridlocked city GRINDS
+ * rather than stops, which is what makes the failure legible and recoverable.
+ * It also guarantees no car is ever stuck forever, which matters because a
+ * permanently frozen car holds an occupancy claim and a destination
+ * reservation, and would starve that destination for the rest of the run.
+ *
+ * **Under M1d's two lanes the valve's job is narrower than it looks.** Head-on
+ * is structurally impossible (`LANE_OF_DIR[d] !== LANE_OF_DIR[OPPOSITE[d]]`,
+ * `packages/sim/src/roads.ts`), so no 2-cycle can deadlock and the valve is not
+ * the answer to opposing traffic. It is the answer to a **cycle of length >= 3**
+ * in which every car is same-lane-blocked by the next. 1,350 ticks is 30 % of a
+ * 4,500-tick week — an acceptable price for a genuine circular wait, and an
+ * absurd one for the commonest event in the game, which is why the lane rule
+ * has to come first.
+ *
+ * **Two width facts this number carries, both load-bearing:**
+ *
+ *   1. **1,350 > 255**, so the `carBlockedTicks` counter cannot be a `Uint8`:
+ *      the threshold would be unreachable and the valve would simply never
+ *      fire. It is `Int16` (`packages/sim/src/regions.ts`).
+ *   2. **The counter SATURATES at exactly this value** rather than growing
+ *      without bound (`noteEntryRefused`, `packages/sim/src/blocking.ts`), so
+ *      no overflow question can arise at any run length. The saturation ceiling
+ *      and the firing threshold are deliberately the SAME constant: a ceiling
+ *      below the threshold makes the valve unreachable, and a ceiling above it
+ *      is bytes nothing reads.
+ *
+ * Whether 45 s is the right wait is unvalidated in play — it is the spec's
+ * number, and under two lanes it fires far less often than it would have under
+ * one undirected slot per cell. M1e's tuning is the first real evidence.
+ */
+export const MAX_BLOCKED_TICKS = 45 * TICKS_PER_SECOND
+
 // --- Failure (spec §5.8) ---
 /**
  * The spec states this as a bare "90" — a threshold on the integrated

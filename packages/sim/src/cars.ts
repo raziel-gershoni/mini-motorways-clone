@@ -2,7 +2,7 @@ import { CAR_SPEED_UNITS_PER_TICK, COST_UNIT_SCALE, DENOM, LANE_SPEED_DEFAULT, O
 import type { GameState } from './state'
 import type { WorldData } from './world'
 import { OPPOSITE, stepCell } from './roads'
-import { canEnter, claimCell, releaseCell, EnterOutcome } from './blocking'
+import { canEnter, claimCell, releaseCell, noteEntryGranted, noteEntryRefused, EnterOutcome } from './blocking'
 import { edgeCost } from './graph'
 import { routeStep } from './dispatch'
 import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
@@ -170,7 +170,7 @@ export function assertSingleCrossing(residual: number, minThreshold: number): vo
  * An exhausted car is one arrivals has not collected yet; letting it bank
  * progress would credit the next leg with time it did not spend driving.
  *
- * **From M1d Task 3 there is a FOURTH way this function writes nothing: the
+ * **From M1d Task 3 there is a FOURTH way this function moves no car: the
  * entry refusal**, and the three above are exactly why the refusal's reason has
  * to be in `canEnter`'s return value rather than inferred from "the car did not
  * move". Distinguishing them from outside takes all three of: the phase is
@@ -179,6 +179,11 @@ export function assertSingleCrossing(residual: number, minThreshold: number): vo
  * raises `carProgress` by `speed`, and the other two arms need a non-driving
  * phase or an exhausted cursor. `blocking.test.ts` states that derivation where
  * it uses it.
+ *
+ * **From Task 4 the refusal is also the only one of the four that writes
+ * anything**: it raises `carBlockedTicks[i]` by one. The other three still
+ * write literally nothing, so that region doubles as a fifth discriminator —
+ * an idle or route-exhausted car's counter is 0 at every tick of every run.
  *
  * The return leg is the same route read backwards, stepping
  * `OPPOSITE[route[cursor - 1]]` and decrementing. `edgeCost(OPPOSITE[d]) ===
@@ -260,9 +265,14 @@ export function advanceCar(state: GameState, world: WorldData, i: number, speed:
   // `canEnter` first would need `canEnter` to re-derive `next` itself, and a
   // refusal there would silently convert the corruption into a car that stops.
   //
-  // **On a refusal this writes NOTHING AT ALL.** Not `carProgress`, not
-  // `carCell`, not `carRouteCursor`, not occupancy, not `carBlockedTicks`
-  // (Task 4 owns that region's semantics). Two consequences, both load-bearing:
+  // **On a refusal this writes exactly ONE byte pair and no others.** Not
+  // `carProgress`, not `carCell`, not `carRouteCursor`, not occupancy — only
+  // `carBlockedTicks[i]`, which Task 4 added and which is the whole difference
+  // from Task 3's "writes nothing at all". `cars.test.ts`'s buffer-identity
+  // assertion was narrowed to exactly that one region in the same commit, and
+  // it is the STRONGER form of the original: it pins both the write that must
+  // happen and the absence of every write that must not. Two consequences of
+  // holding the progress, both load-bearing:
   //
   //   - **The progress is HELD, not clamped.** `carProgress` keeps the value it
   //     had before this tick's `speed` was notionally added, which is in
@@ -291,23 +301,55 @@ export function advanceCar(state: GameState, world: WorldData, i: number, speed:
   // early breaks `sum(destReserved) === count(PHASE_OUTBOUND)` and the next
   // car's `assertArrivalHonoured` throws by name.
   //
-  // Task 4 inserts the counter increment/reset around this branch; Task 5 adds
-  // the second refusal code.
+  // ------------------------------------------------------------------------
+  // THE ANTI-DEADLOCK VALVE'S COUNTER — M1d Task 4, Decision 6
+  // ------------------------------------------------------------------------
   //
-  // **The condition is "refuse unless explicitly granted", and today that is a
-  // labelled-inert choice rather than an observable one.** Writing it the other
-  // way round — `if (outcome === EnterOutcome.REFUSED_OCCUPIED) return` — is a
-  // measured **0-detector** mutant across the whole suite, because
-  // `REFUSED_OCCUPIED` is currently the only refusal `canEnter` can return, so
-  // the two forms are the same function. **It stops being inert at Task 5**,
-  // which adds `REFUSED_GHOST`: under the fail-open form that code falls through
-  // and the car drives onto a road that has been erased — the one thing the
-  // ghost feature must never do, and the reason the valve is forbidden from
-  // releasing a `REFUSED_GHOST` either. Task 5 is the named recipient of this
-  // mutant's detector; do not "simplify" the condition on the strength of its
-  // survival before then.
+  // `carBlockedTicks[i]` is the number of CONSECUTIVE ticks car `i` has been
+  // refused this entry, and this is its only writer. It goes up by one on a
+  // refusal (saturating) and back to 0 on any grant, `ENTER_VALVE` included;
+  // `blocking.ts` owns all three rules and both writes are one call each, so no
+  // caller can implement half the protocol.
+  //
+  // **The two calls sit on opposite sides of the same branch, and the reset is
+  // the half that is easy to lose.** Dropping `noteEntryGranted` leaves a car
+  // that valved once with a saturated counter forever: every later crossing is
+  // answered `ENTER_VALVE` and it drives through every car in front of it for
+  // the rest of its trip. The counter is a WAIT, not a permit.
+  //
+  // **`ENTER_VALVE` is grouped with `ENTER_FREE` here, not special-cased.**
+  // Everything below this line — release, claim, cursor, carry — is identical
+  // for the two, and that is the point: a valved crossing is an ordinary
+  // crossing that happened to be granted for a different reason. The only place
+  // the two differ at all is that the valve's claim can DISPLACE the slot's
+  // current holder, which `claimCell`'s unconditional write and `releaseCell`'s
+  // identity guard between them make sound (blocking.ts's Decision 6 trace).
+  //
+  // **The condition is "refuse unless explicitly granted", and today that is
+  // still a labelled-inert choice rather than an observable one.** Writing it
+  // the other way round — `if (outcome === EnterOutcome.REFUSED_OCCUPIED) {
+  // noteEntryRefused(state, i); return }` — remains a measured **0-detector**
+  // mutant across the whole suite, because `REFUSED_OCCUPIED` is still the only
+  // refusal `canEnter` can return, so the two forms are the same function.
+  // **It stops being inert at Task 5**, which adds `REFUSED_GHOST`: under the
+  // fail-open form that code falls through and the car drives onto a road that
+  // has been erased — the one thing the ghost feature must never do, and the
+  // reason the valve is forbidden from releasing a `REFUSED_GHOST` either.
+  // Task 5 is the named recipient of this mutant's detector; do not "simplify"
+  // the condition on the strength of its survival before then. Task 4 widened
+  // the grant set from one code to two and left the shape alone for the same
+  // reason.
+  //
+  // Task 5 must also decide whether a `REFUSED_GHOST` should feed
+  // `noteEntryRefused` at all. It does today, by falling into this arm, and it
+  // is inert while the code is unreachable; the saturating ceiling is what keeps
+  // it harmless if it ever becomes reachable (blocking.ts says why).
   const outcome = canEnter(state, world, i, next, dir)
-  if (outcome !== EnterOutcome.ENTER_FREE) return
+  if (outcome !== EnterOutcome.ENTER_FREE && outcome !== EnterOutcome.ENTER_VALVE) {
+    noteEntryRefused(state, i)
+    return
+  }
+  noteEntryGranted(state, i)
 
   // Occupancy, lifecycle events 3 then 2 (blocking.ts). This is the ONE
   // crossing site in the codebase, so it is the one place both events fire.
@@ -323,11 +365,14 @@ export function advanceCar(state: GameState, world: WorldData, i: number, speed:
   // wrong at every turn, which is decision 6's corruption case. `claimCell`
   // overwrites unconditionally with the lane of THIS crossing's direction.
   //
-  // Reached only on a GRANT. `canEnter` above has already established that
-  // `(next, LANE_OF_DIR[dir])` is free, so the claim below cannot displace a
-  // car through this path — from Task 3 the only thing that can is Task 4's
-  // valve, which is why `assertOccupancyComplete`'s exception set names it and
-  // nothing else.
+  // Reached only on a GRANT, and from Task 4 that is two codes rather than one.
+  // On `ENTER_FREE` the slot is known free and the claim displaces nobody. On
+  // `ENTER_VALVE` the slot is known TAKEN and the claim deliberately displaces
+  // its holder — the one displacement path in the codebase, which is why
+  // `assertOccupancyComplete`'s exception set names the valve and nothing else.
+  // The two lines below are the same for both, and Decision 6's self-healing
+  // rests on that: the displaced car's own later `releaseCell` finds a slot
+  // naming somebody else and correctly does nothing.
   releaseCell(state, i, state.carCell[i] as number)
   state.carCell[i] = next
   claimCell(state, i, next, dir)

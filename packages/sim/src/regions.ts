@@ -57,8 +57,12 @@ export function regionsFor(map: MapData): readonly Region[] {
     // `cell * 2 + lane` — the SECOND index arithmetic this codebase carries,
     // beside `index = y * w + x`, and the two must not be confused.
     { name: 'occupancy', ctor: Int16Array, len: cells * LANE_COUNT },
-    // Declared here with the rest of the blocking buffer shape; given its
-    // semantics (increment on refusal, saturate, reset on entry) by M1d Task 4.
+    // Declared here with the rest of the blocking buffer shape in M1d Task 2;
+    // **Task 4 gave it its semantics and is its only writer** — increment on a
+    // refused entry, saturate at `MAX_BLOCKED_TICKS`, reset to 0 on any grant
+    // including the valve's own (`noteEntryRefused`/`noteEntryGranted`,
+    // blocking.ts). The region's LENGTH and TYPE were fixed in Task 2, so
+    // Task 4 added no region and moved no golden.
     // It is Int16 and NOT Uint8 deliberately: `MAX_BLOCKED_TICKS` is 1,350 and
     // 1,350 > 255, so a Uint8 counter could never reach the threshold and the
     // valve would simply never fire. It is buffer state and NOT `Scratch`

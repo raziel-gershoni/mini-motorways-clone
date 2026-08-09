@@ -606,23 +606,42 @@ describe('the entry refusal is the FOURTH way advanceCar writes nothing (M1d Tas
     return { state, world }
   }
 
-  it('writes NOTHING AT ALL on a refused tick — the whole state buffer is byte-identical', () => {
-    // The strongest form the claim can take, and the reason it is available at
-    // all is that a refusal has no bookkeeping: no progress, no cursor, no
-    // occupancy, and no `carBlockedTicks` (Task 4 owns that region). Every
-    // named mutation on the refusal branch — accumulate, clamp to the
-    // threshold, advance the cursor, increment a counter — moves at least one
-    // byte and this assertion sees all of them at once.
+  it('writes ONE region on a refused tick and nothing else — the rest of the buffer is byte-identical', () => {
+    // **Task 3 wrote this as "the whole state buffer is byte-identical", and
+    // Task 4 necessarily contradicts it.** The valve's counter has to be
+    // incremented somewhere, and the refusal branch is the only place it can
+    // be, so a refused tick now moves exactly two bytes: `carBlockedTicks[i]`.
+    // Neither the M1d plan nor Task 4's brief names this contradiction (Task 5
+    // carries an explicitly named one of the same shape, at `:586-628` below),
+    // so it is called out here rather than silently re-blessed.
+    //
+    // The repair is the STRONGER form of the original claim, not a weakened
+    // one: the counter's exact new value is pinned, then restored, and the rest
+    // of the buffer is asserted byte-identical exactly as before. Every named
+    // mutation on the refusal branch — accumulate, clamp to the threshold,
+    // advance the cursor, claim occupancy, increment by two, increment the
+    // wrong car — moves a byte this pair of assertions sees.
     const { state, world } = blockedRig('refusal-writes-nothing', 2200)
     // Vacuity: the car must genuinely reach its threshold this tick, or
     // "nothing changed" is satisfied by a car that was never going to cross.
     expect((state.carProgress[1] as number) + SPEED).toBeGreaterThanOrEqual(ORTHO_T)
     expect(state.carPhase[1]).toBe(PHASE_OUTBOUND)
     expect(canEnter(state, world, 1, START + 1, E)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+    expect(state.carBlockedTicks[1]).toBe(0)
 
     const before = new Uint8Array(state.buffer).slice()
     const digest = hashState(state)
     runMovement(state, world)
+
+    // The one write, by exact value and for the right car only.
+    expect(state.carBlockedTicks[1]).toBe(1)
+    expect(state.carBlockedTicks[0]).toBe(0)
+    // And the digest MOVED, which is what says the counter is inside it and
+    // therefore survives snapshot/restore into a Worker replay.
+    expect(hashState(state)).not.toBe(digest)
+
+    // Put it back, and every other byte of the buffer is where it was.
+    state.carBlockedTicks[1] = 0
     expect(new Uint8Array(state.buffer)).toEqual(before)
     expect(hashState(state)).toBe(digest)
   })
@@ -662,7 +681,13 @@ describe('the entry refusal is the FOURTH way advanceCar writes nothing (M1d Tas
     // alone cannot tell the two apart — which is the point.
     expect(cells.every((c) => c === START)).toBe(true)
     expect(progresses).toEqual([330, 660, 990, 1320, 1650, 1980, 2310, 2310, 2310, 2310])
-    expect(state.carBlockedTicks[1]).toBe(0)
+    // The third discriminator, and it separates the two arms in the opposite
+    // direction from `carProgress`: the sub-threshold ticks are the ones that
+    // move progress and NOT the counter, and the refused ticks are the ones
+    // that move the counter and NOT progress. Ticks 8, 9 and 10 are refusals,
+    // so the counter is 3 — not 10, which is what "count every tick the car
+    // failed to move" would give.
+    expect(state.carBlockedTicks[1]).toBe(3)
   })
 
   it('advanceCar consults the refusal directly too, not only through runMovement', () => {

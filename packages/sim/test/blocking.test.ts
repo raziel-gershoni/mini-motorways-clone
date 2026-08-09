@@ -4,6 +4,7 @@ import {
   CARS_PER_HOUSE,
   COST_UNIT_SCALE,
   LANE_SPEED_DEFAULT,
+  MAX_BLOCKED_TICKS,
   ORTHO_COST,
   type MapData,
 } from '@laneways/shared'
@@ -43,6 +44,8 @@ import {
   claimCell,
   releaseCell,
   hasCrossedThisLeg,
+  noteEntryGranted,
+  noteEntryRefused,
   assertEnterCellOnBoard,
   assertEnterDirValid,
   assertMaxCarsFitsOccupancy,
@@ -312,6 +315,21 @@ function runFixture(r: Rig, ticks: number, pins: number): Trace {
       trace.maxCompletenessChecked,
       assertOccupancyConsistent(r.state, r.world),
     )
+
+    // **M1d Task 4's standing invariant, asserted on every tick of every
+    // fixture that drives the real `step`: a car that is not in flight has a
+    // zero blocked counter.** It holds by construction — the counter is raised
+    // only at a crossing attempt, and the only ways out of flight (arrival,
+    // trip end) are cursor-driven and therefore follow a crossing, which resets
+    // it. It is worth a per-tick check anyway because it is what keeps this
+    // task off the goldens: `determinism`, `rollback` and `startingCity` all
+    // hash boards whose cars are idle, so a counter that leaked past trip end
+    // would move three whole-buffer digests with no other symptom.
+    for (let i = 0; i < r.state.carPhase.length; i++) {
+      const p = r.state.carPhase[i] as number
+      if (p === PHASE_OUTBOUND || p === PHASE_RETURNING) continue
+      expect(r.state.carBlockedTicks[i], `car ${i} is not in flight on tick ${tick}`).toBe(0)
+    }
 
     const cell = r.state.carCell[0] as number
     trace.cellAfterTick[tick] = cell
@@ -870,8 +888,12 @@ describe('two cars dispatched from one house in one tick queue at the FIRST cros
     // by none of them.
     expect(canEnter(r.state, r.world, 1, 143, DIR_E)).toBe(EnterOutcome.REFUSED_OCCUPIED)
     expect(occupantOf(r.state, 143, LANE_OF_DIR[DIR_E] as number)).toBe(0)
-    // Task 3 writes nothing to `carBlockedTicks`; Task 4 owns its semantics.
-    expect(r.state.carBlockedTicks[1]).toBe(0)
+    // **The one byte a refusal DOES write, as of Task 4**: car 1 has been
+    // refused exactly once, so its consecutive-blocked-tick count is 1 — and
+    // car 0, which crossed, is at 0. Asserted as the pair, because "the counter
+    // moved" is also satisfied by a counter that moves for everybody.
+    expect(r.state.carBlockedTicks[1]).toBe(1)
+    expect(r.state.carBlockedTicks[0]).toBe(0)
     // The array is now sound AND complete — the Task-2-only displacement arm
     // this block replaces cannot arise any more.
     expect(assertOccupancyConsistent(r.state, r.world)).toBe(1)
@@ -1309,30 +1331,55 @@ interface HandTrace {
    * destinations, with nothing in the diff to notice.
    */
   readonly reservations: [number, number, number][]
+  /**
+   * `carBlockedTicks` for each watched car at the END of each tick — M1d Task 4.
+   *
+   * Recorded per tick rather than read off `r.state` after the run for the same
+   * reason `slots` is: the counter is reset by the crossing that ends the jam,
+   * so a post-run read of a fixture whose valve has fired is all zeroes and
+   * would silently assert nothing.
+   */
+  readonly blocked: number[][]
   maxCompletenessChecked: number
 }
 
 /**
  * Drives `runMovement` (plus `runArrivals` when asked) for `ticks` ticks,
- * asserting BOTH halves of `assertOccupancyConsistent` after every one.
+ * asserting `assertOccupancyConsistent` after every one — both halves by
+ * default.
  *
  * Tick numbering starts at 1 and is the loop index, not `H_TICK`: nothing here
  * runs `step`, so the clock never advances. Said out loud because every number
  * in this half of the file is a tick count rather than an absolute tick.
+ *
+ * **`complete: false` is Task 4's addition and it is opt-OUT, not opt-in**, so a
+ * fixture has to say out loud that it is dropping the weaker half. The only
+ * legitimate reason is the valve's stated residual: once the valve has
+ * displaced a car, that car stands on a cell neither of whose slots names it,
+ * and `assertOccupancyComplete` throws by design. The valve section drives its
+ * fixtures in TWO calls for exactly this reason — the whole 1,350-tick jam with
+ * completeness ON, and only the ticks from the firing onward with it off — so
+ * the exemption covers the ticks that need it and not one tick more.
  */
 function driveHand(
   r: Rig,
   watch: readonly Watch[],
   ticks: number,
-  options: { readonly arrivals?: boolean; readonly cells?: readonly number[] } = {},
+  options: {
+    readonly arrivals?: boolean
+    readonly cells?: readonly number[]
+    readonly complete?: boolean
+  } = {},
 ): HandTrace {
   const cells = options.cells ?? []
+  const checkComplete = options.complete ?? true
   const trace: HandTrace = {
     cell: [],
     progress: [],
     probe: [],
     slots: [],
     reservations: [],
+    blocked: [],
     maxCompletenessChecked: 0,
   }
   for (let tick = 1; tick <= ticks; tick++) {
@@ -1348,10 +1395,11 @@ function driveHand(
 
     trace.maxCompletenessChecked = Math.max(
       trace.maxCompletenessChecked,
-      assertOccupancyConsistent(r.state, r.world),
+      assertOccupancyConsistent(r.state, r.world, checkComplete),
     )
     trace.cell[tick] = watch.map((w) => r.state.carCell[w.i] as number)
     trace.progress[tick] = watch.map((w) => r.state.carProgress[w.i] as number)
+    trace.blocked[tick] = watch.map((w) => r.state.carBlockedTicks[w.i] as number)
     const snap = new Map<number, [number, number]>()
     for (const c of cells) snap.set(c, slotsOf(r.state, c))
     trace.slots[tick] = snap
@@ -1537,7 +1585,10 @@ describe('a refused car holds its progress and writes nothing at all (Decision 5
     // the render test in `resolve.test.ts` then falsifies.
     expect(2200 + 12 * SPEED).toBe(6160)
     expect(r.state.carRouteCursor[1]).toBe(1) // the cursor never moved either
-    expect(r.state.carBlockedTicks[1]).toBe(0) // Task 4 owns this region
+    // The counter, and it is the ONE thing a refusal writes (Task 4): twelve
+    // blocked ticks, twelve increments, still 1,338 short of the valve.
+    expect(r.state.carBlockedTicks[1]).toBe(12)
+    expect(r.state.carBlockedTicks[1]).toBeLessThan(MAX_BLOCKED_TICKS)
   })
 
   it('reaches the threshold on the block tick and not before — the sub-threshold arm is NOT a refusal', () => {
@@ -1835,13 +1886,40 @@ describe('three cars behind a blocked leader form a queue, and it clears in orde
     expect(trace.progress[25]).toEqual([310, 320, 0, 10, 750])
   })
 
-  it('nothing in the buffer records a queue — the emergence claim, asserted', () => {
-    // `carBlockedTicks` is the only region that could hold a queue position and
-    // Task 3 never writes it. If a future change starts maintaining follower
-    // state anywhere, this is the assertion that says so.
+  it('nothing in the buffer records a queue POSITION — the emergence claim, asserted', () => {
+    // `carBlockedTicks` is the only region that could hold follower state, and
+    // as of Task 4 it is written — so the emergence claim has to be made against
+    // what it holds rather than against it being empty.
+    //
+    // **It holds a per-car DURATION, not a position in a line.** On tick 7 all
+    // four are queued, having joined on ticks 1, 3, 5 and 7, so the counters
+    // read 7, 5, 3, 1 — each car's own wait, descending with its place in the
+    // queue purely because the car in front started waiting sooner. A queue
+    // position would read 0, 1, 2, 3 and would be the same on every tick; these
+    // numbers are different on every tick and are hand-derived from the join
+    // ladder above, not read back.
     const r = queueRig('queue-emergent')
-    driveHand(r, Q_WATCH, 25)
+    const trace = driveHand(r, Q_WATCH, 25)
+    for (let k = 0; k < 4; k++) {
+      const joins = Q_JOINS_AT[k] as number
+      expect(trace.blocked[Q_ALL_QUEUED_AT]![k], `car ${k}`).toBe(Q_ALL_QUEUED_AT - joins + 1)
+    }
+    expect(trace.blocked[Q_ALL_QUEUED_AT]!.slice(0, 4)).toEqual([7, 5, 3, 1])
+    // The blocker never waited for anything, so its counter never left 0 —
+    // which is what says the region is not simply "ticks alive".
+    expect(trace.blocked[Q_ALL_QUEUED_AT]![4]).toBe(0)
+    // And the cascade clears every one of them: a crossing resets the counter,
+    // so after tick 9 the whole region is back to zero and stays there apart
+    // from the platoon's single refused tick at 24 — which the platoon test
+    // above attributes to cars 2 AND 3, both of which reach their thresholds a
+    // tick before the cars in front of them move.
+    expect(trace.blocked[Q_CLEARS_AT]!).toEqual([0, 0, 0, 0, 0])
+    expect(trace.blocked[24]!).toEqual([0, 0, 1, 1, 0])
+    expect(trace.blocked[25]!).toEqual([0, 0, 0, 0, 0])
     expect(Array.from(r.state.carBlockedTicks).every((v) => v === 0)).toBe(true)
+    // Nobody came anywhere near the valve, which is what makes this a queue
+    // rather than a jam.
+    expect(Q_ALL_QUEUED_AT).toBeLessThan(MAX_BLOCKED_TICKS)
   })
 })
 
@@ -2238,4 +2316,844 @@ describe('two cars contending for one slot resolve in ascending index, and the l
       expect(r.state.carCell[winner]).not.toBe(JUNCTION)
     })
   }
+})
+
+// ---------------------------------------------------------------------------
+// 16. The anti-deadlock valve — M1d Task 4, Decision 6
+// ---------------------------------------------------------------------------
+
+/**
+ * **The valve is a game mechanic, not a safety hack.** A car refused entry for
+ * `MAX_BLOCKED_TICKS` = 45 s x 30 Hz = **1,350 consecutive ticks** moves anyway,
+ * regardless of the occupant. That is what makes a gridlocked city GRIND rather
+ * than freeze — legible and recoverable — and it is what guarantees no car is
+ * ever stuck forever, which matters because a frozen car holds an occupancy
+ * claim and a destination reservation and would starve that destination for the
+ * rest of the run.
+ *
+ * ---------------------------------------------------------------------------
+ * THE TICK ARITHMETIC, ONCE, AND EVERY NUMBER BELOW COMES FROM IT
+ * ---------------------------------------------------------------------------
+ *
+ * `carBlockedTicks[i]` is the number of consecutive ticks car `i` HAS ALREADY
+ * been refused. `canEnter` reads it BEFORE this tick's refusal is recorded, so
+ * on the k-th refused tick it reads `k - 1`. Therefore:
+ *
+ *   tick 1 .. 1,350   counter reads 0 .. 1,349   -> REFUSED_OCCUPIED
+ *   tick 1,351        counter reads 1,350        -> ENTER_VALVE
+ *
+ * for a car that reaches its threshold on tick 1. **The car waits exactly 1,350
+ * ticks — exactly 45 s — and crosses on the next one.** "Blocked tick 1,350" in
+ * the brief is the counter VALUE the valve fires at; the tick it fires on is
+ * `MAX_BLOCKED_TICKS + 1` relative to the first refusal, and the two are written
+ * as separate constants below so neither can be mistaken for the other.
+ *
+ * A car at `AT_THRESHOLD` = 2,500 - 330 = **2,170** progress units reaches its
+ * threshold on tick 1 (2,170 + 330 = 2,500) and so has its first refusal there.
+ * A car at 0 reaches it on tick 8 (330 x 8 = 2,640), seven ticks later — which
+ * is how every staggered fixture here is built, because the stagger is a
+ * property of the carry and nothing else.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE RING NEEDS NO TEST-ONLY DISABLE SEAM — AND WHY THERE IS ONE ANYWAY
+ * ---------------------------------------------------------------------------
+ *
+ * **Ticks 1 to 1,350 of every fixture here ARE the no-valve world**, byte for
+ * byte: the valve's only effect is at the comparison `counter >= 1,350`, which
+ * is false throughout. So "the ring genuinely deadlocks without the valve" is
+ * asserted by running it to the last refused tick and observing that not one
+ * car, not one progress unit and not one occupancy slot has moved — no
+ * production seam, no test-only flag, nothing that could rot.
+ *
+ * That argument is sound for 1,350 ticks and silent about 1,351 onward, so
+ * there is a second arm that answers the stronger question — *is this deadlock
+ * permanent, or merely long?* — by zeroing `carBlockedTicks` after every tick,
+ * which is precisely the world a counter that did not persist would produce. It
+ * runs 3,000 ticks and nothing moves. Both arms are test-side only; neither
+ * adds a branch to `sim`.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT A RING CANNOT SHOW, AND WHY THERE IS A SECOND JAM FIXTURE
+ * ---------------------------------------------------------------------------
+ *
+ * Decision 6's stated residual is *"the valve fires for car i into a slot held
+ * by car j, and j does not move that tick"*. **A four-car ring cannot hold that
+ * state open**: the first valve to fire vacates a cell, which breaks the cycle,
+ * and every remaining car is granted within a tick or two. In the synchronised
+ * ring the residual does not arise at all — the array is complete at the end of
+ * the valve tick, with zero holes, exactly as Decision 6's trace predicts.
+ *
+ * So the persistent shared cell has its own fixture, and it needs a head car
+ * that genuinely cannot move. There are only two immovable heads in this model:
+ * a cycle (which self-heals) and a car whose route cursor is exhausted (which
+ * `advanceCar` returns from before touching anything). The second is what
+ * `sharedCellRig` uses, on the same precedent `parkedLeaderRig` above already
+ * sets — it is a real in-flight car, standing on the cell its slot names, that
+ * `runArrivals` has not been called to collect.
+ */
+
+/** The counter value the valve fires at — the spec's 45 s, from the constant. */
+const VALVE_AT = MAX_BLOCKED_TICKS // 1,350
+/** The tick it fires ON, for a car whose first refusal is tick 1. */
+const VALVE_TICK = MAX_BLOCKED_TICKS + 1 // 1,351
+/** The progress that puts a car exactly one tick short of an orthogonal crossing. */
+const AT_THRESHOLD = ORTHO_THRESHOLD - SPEED // 2,170
+/** Long enough that a valve-less world would have fired twice over. */
+const NO_VALVE_TICKS = 3000
+
+describe('MAX_BLOCKED_TICKS is the spec 45 s, and canEnter fires at exactly that value', () => {
+  it('is derived from the clock and lands between the Uint8 trap and the Int16 ceiling', () => {
+    expect(MAX_BLOCKED_TICKS).toBe(1350)
+    // The two facts the region's width rests on, asserted rather than recited:
+    // a Uint8 counter could never reach it, and an Int16 one has room to spare
+    // even before the saturation makes overflow impossible.
+    expect(MAX_BLOCKED_TICKS).toBeGreaterThan(255)
+    expect(MAX_BLOCKED_TICKS).toBeLessThan(OCCUPANCY_MAX_CAR_INDEX)
+    expect(VALVE_TICK).toBe(1351)
+  })
+
+  it('returns REFUSED_OCCUPIED at 1,349 and ENTER_VALVE at 1,350 — both sides of the exact edge', () => {
+    // The whole exact-1,350 claim, asked of `canEnter` directly so nothing about
+    // a drive can be what separates the two answers: one cell, one direction,
+    // one occupant, and the counter as the only variable.
+    //
+    // This is the assertion that kills "valve at 1,349" (1,349 would answer
+    // ENTER_VALVE) and "valve at 1,351" (1,350 would answer REFUSED_OCCUPIED).
+    const r = makeRig('valve-edge', 'valve-edge')
+    claimCell(r.state, 7, 150, DIR_E)
+    for (const v of [0, 1, VALVE_AT - 2, VALVE_AT - 1]) {
+      r.state.carBlockedTicks[3] = v
+      expect(canEnter(r.state, r.world, 3, 150, DIR_E), `counter ${v}`).toBe(EnterOutcome.REFUSED_OCCUPIED)
+    }
+    for (const v of [VALVE_AT, VALVE_AT + 1, OCCUPANCY_MAX_CAR_INDEX]) {
+      r.state.carBlockedTicks[3] = v
+      expect(canEnter(r.state, r.world, 3, 150, DIR_E), `counter ${v}`).toBe(EnterOutcome.ENTER_VALVE)
+    }
+    // `>=`, not `===`: a counter above the threshold still fires. Unreachable
+    // through `advanceCar` because the counter saturates, and pinned anyway so
+    // that a future ceiling change cannot turn the valve off silently.
+    expect(VALVE_AT + 1).toBeGreaterThan(VALVE_AT)
+  })
+
+  it('says ENTER_FREE, not ENTER_VALVE, when the slot is free — the valve is not a car state', () => {
+    // The negative control the whole outcome enum exists for. A saturated
+    // counter is not a licence to move; it is an answer about ONE slot. Under
+    // "return ENTER_VALVE whenever the counter is saturated" this line flips,
+    // and every ordinary crossing a jammed car makes afterwards would be
+    // reported as a valve firing.
+    const r = makeRig('valve-free-slot', 'valve-free-slot')
+    r.state.carBlockedTicks[3] = VALVE_AT
+    expect(canEnter(r.state, r.world, 3, 150, DIR_E)).toBe(EnterOutcome.ENTER_FREE)
+    claimCell(r.state, 7, 150, DIR_E)
+    expect(canEnter(r.state, r.world, 3, 150, DIR_E)).toBe(EnterOutcome.ENTER_VALVE)
+  })
+
+  it('reads the ASKING car counter, not the occupant one — the valve is per car', () => {
+    // Two cars asking the same question about the same slot, differing only in
+    // whose counter is saturated. Kills "read carBlockedTicks[occupant]" and
+    // every form of a single shared counter.
+    const r = makeRig('valve-per-car', 'valve-per-car')
+    claimCell(r.state, 7, 150, DIR_E)
+    r.state.carBlockedTicks[3] = VALVE_AT
+    r.state.carBlockedTicks[5] = 0
+    r.state.carBlockedTicks[7] = 0
+    expect(canEnter(r.state, r.world, 3, 150, DIR_E)).toBe(EnterOutcome.ENTER_VALVE)
+    expect(canEnter(r.state, r.world, 5, 150, DIR_E)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+    // And saturating the OCCUPANT does nothing for the asker.
+    r.state.carBlockedTicks[7] = VALVE_AT
+    expect(canEnter(r.state, r.world, 5, 150, DIR_E)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+  })
+
+  it('is a pure query: asking does not advance the counter it reads', () => {
+    // `driveHand`'s probe calls `canEnter` once per watched car per tick, so an
+    // implementation that counted inside the query would double every figure in
+    // this file — and the probe would change the answer it is there to record.
+    const r = makeRig('valve-pure', 'valve-pure')
+    claimCell(r.state, 7, 150, DIR_E)
+    r.state.carBlockedTicks[3] = 41
+    for (let k = 0; k < 5; k++) canEnter(r.state, r.world, 3, 150, DIR_E)
+    expect(r.state.carBlockedTicks[3]).toBe(41)
+  })
+})
+
+describe('the counter itself: one per refusal, saturating, cleared by any grant', () => {
+  it('increments by exactly one and saturates AT the firing threshold, never above it', () => {
+    // Called directly, on the precedent of `assertSingleCrossing` (cars.ts) and
+    // the guards above: the ceiling is NOT production-reachable through
+    // `runMovement` today, because a counter that reaches 1,350 is answered
+    // ENTER_VALVE on the very next tick and reset by the crossing. It is
+    // reachable the moment Task 5's `REFUSED_GHOST` exists — the valve is
+    // forbidden to release that one, so a ghost-refused car would be refused
+    // while saturated, every tick, and an unclamped Int16 counter would wrap
+    // negative after 32,767 of them and disarm the valve for that car forever.
+    const r = makeRig('valve-counter', 'valve-counter')
+    for (let k = 1; k <= 5; k++) {
+      noteEntryRefused(r.state, 2)
+      expect(r.state.carBlockedTicks[2]).toBe(k)
+    }
+    // Nobody else moved: the write is indexed by the car.
+    expect(r.state.carBlockedTicks[1]).toBe(0)
+    expect(r.state.carBlockedTicks[3]).toBe(0)
+
+    r.state.carBlockedTicks[2] = VALVE_AT - 1
+    noteEntryRefused(r.state, 2)
+    expect(r.state.carBlockedTicks[2]).toBe(VALVE_AT)
+    for (let k = 0; k < 10; k++) noteEntryRefused(r.state, 2)
+    expect(r.state.carBlockedTicks[2]).toBe(VALVE_AT)
+    // The ceiling and the firing threshold are the SAME constant, and that is
+    // the property "lower the ceiling to 255" breaks: a ceiling below the
+    // threshold makes the threshold unreachable and the valve never fires.
+    expect(r.state.carBlockedTicks[2]).toBe(MAX_BLOCKED_TICKS)
+  })
+
+  it('is cleared by a grant, from any value, including a saturated one', () => {
+    const r = makeRig('valve-reset', 'valve-reset')
+    for (const v of [1, 7, VALVE_AT - 1, VALVE_AT]) {
+      r.state.carBlockedTicks[4] = v
+      noteEntryGranted(r.state, 4)
+      expect(r.state.carBlockedTicks[4], `from ${v}`).toBe(0)
+    }
+    expect(r.state.carBlockedTicks[3]).toBe(0)
+  })
+})
+
+// --- The exact firing tick, through a real drive -----------------------------
+
+/** Row 5 cells the two jam fixtures below stand on. */
+const V_HEAD = ROW5_X0 + 8 // 108 — the immovable head
+const V_MID = ROW5_X0 + 7 // 107
+const V_TAIL = ROW5_X0 + 6 // 106
+
+/**
+ * Two cars: a head with an EXHAUSTED cursor (which `advanceCar` returns from
+ * before it touches anything, so it holds `V_HEAD` indefinitely) and a follower
+ * one tick short of its threshold. The follower's first refusal is tick 1, so
+ * its valve fires on tick `VALVE_TICK`.
+ */
+function valvePairRig(seed: string): Rig {
+  const r = makeRig('valve-pair', seed)
+  handCar(r, { i: 0, cell: V_HEAD, progress: 0, step: DIR_E, enteredBy: DIR_E, cursor: HAND_ROUTE_LEN })
+  handCar(r, { i: 1, cell: V_MID, progress: AT_THRESHOLD, step: DIR_E, enteredBy: DIR_E })
+  // Vacuity, before a single tick runs: the block is real, same-lane, and the
+  // head is held by its CURSOR rather than by geometry — the cell in front of
+  // it is free the whole time.
+  expect(canEnter(r.state, r.world, 1, V_HEAD, DIR_E)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+  expect(occupantOf(r.state, V_HEAD, LANE_OF_DIR[DIR_E] as number)).toBe(0)
+  expect(canEnter(r.state, r.world, 0, V_HEAD + 1, DIR_E)).toBe(EnterOutcome.ENTER_FREE)
+  expect(r.state.carRouteCursor[0]).toBe(HAND_ROUTE_LEN)
+  expect(assertOccupancyConsistent(r.state, r.world)).toBe(2)
+  return r
+}
+
+const V_WATCH: readonly Watch[] = [
+  { i: 0, dir: DIR_E },
+  { i: 1, dir: DIR_E },
+]
+
+describe('the valve fires on the tick the counter reaches 1,350, and not one tick earlier', () => {
+  it('is refused on all 1,350 ticks, with the counter equal to the tick number on every one', () => {
+    const r = valvePairRig('valve-exact-jam')
+    const jam = driveHand(r, V_WATCH, VALVE_AT, { cells: [V_MID, V_HEAD] })
+    for (let tick = 1; tick <= VALVE_AT; tick++) {
+      expect(jam.probe[tick]![1], `tick ${tick}`).toBe(EnterOutcome.REFUSED_OCCUPIED)
+      expect(jam.cell[tick]![1], `tick ${tick}`).toBe(V_MID)
+      expect(jam.progress[tick]![1], `tick ${tick}`).toBe(AT_THRESHOLD)
+      expect(jam.blocked[tick]![1], `tick ${tick}`).toBe(tick)
+      // The head never moves and never waits for anything.
+      expect(jam.cell[tick]![0], `tick ${tick}`).toBe(V_HEAD)
+      expect(jam.blocked[tick]![0], `tick ${tick}`).toBe(0)
+    }
+    // The last refused tick, stated as the two numbers that must differ: the
+    // counter has REACHED the threshold and the car has still not moved,
+    // because the counter is read before the refusal is recorded.
+    expect(jam.blocked[VALVE_AT]![1]).toBe(VALVE_AT)
+    expect(jam.cell[VALVE_AT]![1]).toBe(V_MID)
+    // Occupancy is fully consistent for the whole jam — both cars, every tick.
+    // The completeness half only lapses when the valve DISPLACES somebody.
+    expect(jam.maxCompletenessChecked).toBe(2)
+  })
+
+  it('crosses on tick 1,351 with the outcome code ENTER_VALVE, not ENTER_FREE', () => {
+    const r = valvePairRig('valve-exact-fire')
+    driveHand(r, V_WATCH, VALVE_AT, { cells: [V_MID, V_HEAD] })
+    // One more tick, and the completeness half comes off for it and it alone —
+    // the valve is about to put two cars on one cell.
+    const fire = driveHand(r, V_WATCH, 1, { cells: [V_MID, V_HEAD], complete: false })
+
+    // **The outcome code, and it is the whole point of the enum.** The probe is
+    // taken immediately before the tick and is exactly what `advanceCar` saw:
+    // the head is immovable, so nothing can have changed between the two.
+    expect(fire.probe[1]![1]).toBe(EnterOutcome.ENTER_VALVE)
+    expect(fire.probe[1]![1]).not.toBe(EnterOutcome.ENTER_FREE)
+    // ...and the slot really was still taken when it fired, so this is a
+    // release-in-spite-of-an-occupant rather than a cell that quietly freed up.
+    expect(fire.probe[1]![0]).toBe(EnterOutcome.ENTER_FREE) // the head, unrelated
+    expect(r.state.carCell[0]).toBe(V_HEAD)
+
+    // The crossing itself is an ORDINARY crossing: one cell, the hand-computed
+    // carry, the cursor advanced by one, and the counter cleared.
+    expect(fire.cell[1]![1]).toBe(V_HEAD)
+    expect(fire.progress[1]![1]).toBe(AT_THRESHOLD + SPEED - ORTHO_THRESHOLD)
+    expect(fire.progress[1]![1]).toBe(0)
+    expect(r.state.carRouteCursor[1]).toBe(2)
+    expect(fire.blocked[1]![1]).toBe(0)
+  })
+
+  it('is not vacuous: one tick short of the threshold the same car is still refused', () => {
+    // The other side of the edge, driven rather than asked. Identical fixture,
+    // one tick less: the counter reads 1,349 when `canEnter` is asked, and the
+    // car is exactly where it started. Under "valve at 1,349" this fails.
+    const r = valvePairRig('valve-one-short')
+    const jam = driveHand(r, V_WATCH, VALVE_AT - 1, { cells: [V_MID] })
+    expect(jam.blocked[VALVE_AT - 1]![1]).toBe(VALVE_AT - 1)
+    expect(canEnter(r.state, r.world, 1, V_HEAD, DIR_E)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+    const one = driveHand(r, V_WATCH, 1, { cells: [V_MID] })
+    expect(one.probe[1]![1]).toBe(EnterOutcome.REFUSED_OCCUPIED)
+    expect(one.cell[1]![1]).toBe(V_MID)
+    expect(one.blocked[1]![1]).toBe(VALVE_AT)
+  })
+
+  it('resets the wait: a car that valved is refused again at its very next crossing', () => {
+    // The `noteEntryGranted` observer, and it is behavioural rather than a
+    // counter read. Without the reset the car keeps its saturated counter and
+    // the valve releases every subsequent crossing, so it would drive straight
+    // through the head car eight ticks later instead of queueing behind it.
+    const r = valvePairRig('valve-resets')
+    driveHand(r, V_WATCH, VALVE_TICK, { complete: false })
+    expect(r.state.carCell[1]).toBe(V_HEAD) // it valved onto the head cell
+    // Eight more ticks: it reaches its next threshold and asks about V_HEAD + 1,
+    // which is free — so park a car there to make the question a refusal.
+    handCar(r, { i: 2, cell: V_HEAD + 1, progress: 0, step: DIR_E, enteredBy: DIR_E, cursor: HAND_ROUTE_LEN })
+    const after = driveHand(r, V_WATCH, 8, { complete: false })
+    expect(after.probe[8]![1]).toBe(EnterOutcome.REFUSED_OCCUPIED)
+    expect(after.cell[8]![1]).toBe(V_HEAD)
+    expect(after.blocked[8]![1]).toBe(1)
+  })
+})
+
+// --- The shared cell: Decision 6's residual, asserted as reachable -----------
+
+/**
+ * Three cars in a line, all eastbound, all same-lane:
+ *
+ *   car 0 @ 106, carry 2,170  -> first refusal tick 1,     valve tick 1,351
+ *   car 1 @ 107, carry 0      -> first refusal tick 8,     valve tick 1,358
+ *   car 2 @ 108, cursor spent -> never moves at all
+ *
+ * The seven-tick stagger is the carry and nothing else, and it is what makes
+ * the residual observable: car 0's valve fires while car 1 is still standing on
+ * the cell it enters, and car 1 is still blocked for another seven ticks after
+ * that.
+ */
+function sharedCellRig(seed: string): Rig {
+  const r = makeRig('valve-shared', seed)
+  handCar(r, { i: 0, cell: V_TAIL, progress: AT_THRESHOLD, step: DIR_E, enteredBy: DIR_E })
+  handCar(r, { i: 1, cell: V_MID, progress: 0, step: DIR_E, enteredBy: DIR_E })
+  handCar(r, { i: 2, cell: V_HEAD, progress: 0, step: DIR_E, enteredBy: DIR_E, cursor: HAND_ROUTE_LEN })
+  // Both blocks are SAME-LANE, which is the only kind the valve exists for: a
+  // head-on pair resolves by Decision 1 and would prove nothing.
+  expect(LANE_OF_DIR[DIR_E]).toBe(0)
+  expect(occupantOf(r.state, V_MID, LANE_OF_DIR[DIR_E] as number)).toBe(1)
+  expect(occupantOf(r.state, V_HEAD, LANE_OF_DIR[DIR_E] as number)).toBe(2)
+  expect(assertOccupancyConsistent(r.state, r.world)).toBe(3)
+  return r
+}
+
+const SC_WATCH: readonly Watch[] = [
+  { i: 0, dir: DIR_E },
+  { i: 1, dir: DIR_E },
+  { i: 2, dir: DIR_E },
+]
+const SC_CELLS = [V_TAIL, V_MID, V_HEAD, V_HEAD + 1] as const
+/** Car 1's carry is 0, so its threshold is tick 8 and its valve is seven later. */
+const SC_SECOND_VALVE = 8
+/** Car 1 crosses off the shared head cell eight ticks after valving onto it. */
+const SC_GAP_AT = SC_SECOND_VALVE + 8 // 16, i.e. absolute 1,366
+/** Car 0 takes the vacated head cell on the next tick. */
+const SC_REFILL_AT = SC_GAP_AT + 1 // 17, i.e. absolute 1,367
+
+describe('two cars share a cell after the valve, and the array stays SOUND throughout', () => {
+  it('puts the valve car and the car it displaced on one cell, with the slot naming the ENTRANT', () => {
+    const r = sharedCellRig('shared-valve-tick')
+    const jam = driveHand(r, SC_WATCH, VALVE_AT, { cells: SC_CELLS })
+    // Nothing has shared anything yet: completeness held on all 1,350 ticks.
+    expect(jam.maxCompletenessChecked).toBe(3)
+    expect(jam.blocked[VALVE_AT]).toEqual([VALVE_AT, VALVE_AT - 7, 0])
+
+    const fire = driveHand(r, SC_WATCH, 1, { cells: SC_CELLS, complete: false })
+
+    // **Two cars on one cell — REACHABLE, and this is the assertion that says
+    // so.** Not "they have equal carCell and something is odd": the exact
+    // contents of all three cells are pinned.
+    expect(r.state.carCell[0]).toBe(V_MID)
+    expect(r.state.carCell[1]).toBe(V_MID)
+    expect(fire.slots[1]!.get(V_MID)).toEqual([0, FREE])
+    expect(fire.slots[1]!.get(V_TAIL)).toEqual([FREE, FREE])
+    expect(fire.slots[1]!.get(V_HEAD)).toEqual([2, FREE])
+    // The slot names the MOST RECENT entrant, because `claimCell` overwrites
+    // unconditionally. That is the whole of what the array can say: it holds one
+    // car per (cell, lane) and there are now two cars in one (cell, lane).
+    expect(occupantOf(r.state, V_MID, 0)).toBe(0)
+    expect(occupantOf(r.state, V_MID, 1)).toBe(FREE)
+
+    // SOUNDNESS holds — the slot names a car that IS standing there.
+    assertOccupancySound(r.state, r.world)
+    // COMPLETENESS does not, for the displaced car and only for it. Asserted by
+    // the throw and by its message, so "something threw" cannot pass for "the
+    // documented residual happened to the documented car".
+    expect(() => assertOccupancyComplete(r.state, r.world)).toThrow(
+      /car 1 has crossed on its current leg and stands on cell 107/,
+    )
+    expect(hasCrossedThisLeg(r.state, 1)).toBe(true)
+    // And car 1 is not merely unnamed, it is still genuinely BLOCKED: its own
+    // valve is seven ticks away.
+    expect(fire.probe[1]![1]).toBe(EnterOutcome.REFUSED_OCCUPIED)
+    expect(fire.blocked[1]![1]).toBe(VALVE_AT - 6)
+  })
+
+  it('leaves the array correct when the DISPLACED car departs — the guarded release does nothing', () => {
+    // The first of the two departures from a shared cell, and it is the
+    // self-healing one Decision 6 traces. Car 1's valve fires on relative tick
+    // 8; it releases `V_MID`, whose lane 0 names car 0 — so the guard fails,
+    // correctly, and car 0 keeps the slot it is standing on.
+    //
+    // Under UNCONDITIONAL release this is where the array corrupts: `V_MID`
+    // would read FREE with car 0 standing on it, and the cell would stop
+    // blocking for the rest of the run.
+    const r = sharedCellRig('shared-displaced-departs')
+    driveHand(r, SC_WATCH, VALVE_AT, { cells: SC_CELLS })
+    const after = driveHand(r, SC_WATCH, SC_SECOND_VALVE, { cells: SC_CELLS, complete: false })
+
+    expect(after.probe[SC_SECOND_VALVE]![1]).toBe(EnterOutcome.ENTER_VALVE)
+    expect(r.state.carCell[0]).toBe(V_MID)
+    expect(r.state.carCell[1]).toBe(V_HEAD)
+    // `V_MID` still names car 0, which is still standing on it: no hole.
+    expect(after.slots[SC_SECOND_VALVE]!.get(V_MID)).toEqual([0, FREE])
+    // And the residual has simply MOVED one cell along: cars 1 and 2 now share
+    // the head cell, with the slot naming the entrant again.
+    expect(r.state.carCell[2]).toBe(V_HEAD)
+    expect(after.slots[SC_SECOND_VALVE]!.get(V_HEAD)).toEqual([1, FREE])
+    assertOccupancySound(r.state, r.world)
+    expect(() => assertOccupancyComplete(r.state, r.world)).toThrow(
+      /car 2 has crossed on its current leg and stands on cell 108/,
+    )
+  })
+
+  it('opens a transient hole when the DISPLACING car departs, and the next entrant closes it', () => {
+    // The second departure, and the one that costs something. Car 1 crosses off
+    // the head cell on relative tick 16; its guarded release SUCCEEDS this time
+    // (the slot names it), so cell 108 reads FREE with car 2 standing on it.
+    //
+    // **That is the documented price of one car per (cell, lane), and it is a
+    // completeness gap, never a soundness violation.** Stated in both
+    // directions: nothing false is recorded, and one true thing is missing.
+    const r = sharedCellRig('shared-displacer-departs')
+    driveHand(r, SC_WATCH, VALVE_AT, { cells: SC_CELLS })
+    const after = driveHand(r, SC_WATCH, SC_REFILL_AT, { cells: SC_CELLS, complete: false })
+
+    // Car 0 was refused on every tick between its own valve and this one — the
+    // reset really did put it back at the end of the queue.
+    expect(after.blocked[SC_GAP_AT]![0]).toBe(8)
+    expect(after.cell[SC_GAP_AT]![1]).toBe(V_HEAD + 1)
+    expect(after.cell[SC_GAP_AT]![2]).toBe(V_HEAD)
+    // THE HOLE: both slots free, a car standing on the cell.
+    expect(after.slots[SC_GAP_AT]!.get(V_HEAD)).toEqual([FREE, FREE])
+    // ...which is observable as the cell answering ENTER_FREE with car 2 on it.
+    // This is the honest statement of the cost: for these ticks that cell does
+    // not block. It is bounded by the next entry, which is the very next tick.
+    expect(after.probe[SC_REFILL_AT]![0]).toBe(EnterOutcome.ENTER_FREE)
+
+    // THE CLOSE: car 0 enters and the slot names a car that is there again.
+    expect(after.cell[SC_REFILL_AT]![0]).toBe(V_HEAD)
+    expect(after.slots[SC_REFILL_AT]!.get(V_HEAD)).toEqual([0, FREE])
+    assertOccupancySound(r.state, r.world)
+    // Car 2 is still unnamed, and that is the part Decision 6's "the next
+    // entrant overwrites it back into a correct state" does not cover: the SLOT
+    // recovers, the displaced car's namedness does not, until it crosses again.
+    // It never will here — its cursor is spent — so the throw is permanent for
+    // this fixture and is asserted as such rather than waited out.
+    expect(() => assertOccupancyComplete(r.state, r.world)).toThrow(
+      /car 2 has crossed on its current leg and stands on cell 108/,
+    )
+  })
+})
+
+// --- The four-car gridlock ring ---------------------------------------------
+
+/**
+ * **The cycle of length 4 the valve actually exists for.** Four cells in a 2x2
+ * square, four cars, each one blocked by the next, all four blocks SAME-LANE:
+ *
+ *      110 --E--> 111          car 0 on 110 heading E, entered by N (lane 1)
+ *       ^          |           car 1 on 111 heading S, entered by E (lane 0)
+ *       N          S           car 2 on 131 heading W, entered by S (lane 0)
+ *       |          v           car 3 on 130 heading N, entered by W (lane 1)
+ *      130 <--W-- 131
+ *
+ * Each car entered its cell by the step of the car BEHIND it, which is what a
+ * convoy that has closed a loop looks like — so the geometry is a real one, not
+ * four cars posed in a square.
+ *
+ * **Same-lane, and no pair of it is head-on.** `LANE_OF_DIR` is 0 for E and S
+ * and 1 for W and N, so each car wants exactly the lane the car in front is
+ * holding: E into a cell held by an E-entrant, S into an S-entrant, W into a
+ * W-entrant, N into an N-entrant. And no car's direction of travel is the
+ * OPPOSITE of its blocker's — the two opposed directions in the ring, E and W,
+ * belong to cars 0 and 2, which are diagonally across the square and never ask
+ * each other anything. A ring with a head-on pair in it resolves by Decision 1
+ * in one tick and would prove nothing; both facts are asserted below rather
+ * than read off this diagram.
+ *
+ * **The routes are only three steps long.** Each car has two crossings left,
+ * which is enough to leave the ring and prove it was not starved, and stops it
+ * walking to the board edge later in the run where `stepCell` would throw.
+ *
+ * **Two destinations, and that is deliberate.** The invariant
+ * `sum(destReserved) === count(PHASE_OUTBOUND)` must hold throughout the jam,
+ * and with one destination the sum and `destReserved[0]` coincide so a
+ * single-slot read would look identical. Here they differ — 2 against 4 — which
+ * is asserted, so the helper's sum is doing work a slot read could not.
+ */
+const RING_CELL = [110, 111, 131, 130] as const
+const RING_DIR = [DIR_E, DIR_S, DIR_W, DIR_N] as const
+const RING_ENTERED = [DIR_N, DIR_E, DIR_S, DIR_W] as const
+const RING_ROUTE_LEN = 3
+/** The second destination's origin: (2,0), orientation S, carpark (2,3). */
+const RING_DEST2_ORIGIN = 2
+const RING_WATCH: readonly Watch[] = [
+  { i: 0, dir: DIR_E },
+  { i: 1, dir: DIR_S },
+  { i: 2, dir: DIR_W },
+  { i: 3, dir: DIR_N },
+]
+/** Where each car stands after its first crossing, and after its second. */
+const RING_AFTER_1 = [111, 131, 130, 110] as const
+const RING_AFTER_2 = [112, 151, 129, 90] as const
+/** Eight ticks after a crossing with carry 0, the next threshold is reached. */
+const RING_SECOND_CROSSING = 8
+
+function ringRig(seed: string, progresses: readonly number[]): Rig {
+  const r = makeRig('valve-ring', seed)
+  expect(placeDestination(r.state, r.world, DEST_ORIGIN, ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+  expect(placeDestination(r.state, r.world, RING_DEST2_ORIGIN, ORIENTATION_S, 1, DEST_KIND_SQUARE)).toBe(true)
+  expect(r.state.header[H_DEST_COUNT]).toBe(2)
+  for (let k = 0; k < 4; k++) {
+    handCar(r, {
+      i: k,
+      cell: RING_CELL[k] as number,
+      progress: progresses[k] as number,
+      step: RING_DIR[k] as number,
+      enteredBy: RING_ENTERED[k] as number,
+      routeLen: RING_ROUTE_LEN,
+    })
+    r.state.carTargetDest[k] = k < 2 ? 0 : 1
+  }
+  // Two cars reserved against each destination, so the SUM is 4 and neither
+  // slot alone is.
+  r.state.destReserved[0] = 2
+  r.state.destReserved[1] = 2
+  return r
+}
+
+/** `[sum(destReserved), count(PHASE_OUTBOUND)]`, the invariant's two sides. */
+const RING_BALANCE: readonly [number, number, number] = [0, 4, 4]
+
+describe('a gridlocked ring of four cars: same-lane, no head-on pair, genuinely circular', () => {
+  it('is a real 4-cycle in which every car wants exactly the lane the next one holds', () => {
+    // The brief's vacuity self-check, and the fixture rests entirely on it.
+    const r = ringRig('ring-shape', [AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD])
+    for (let k = 0; k < 4; k++) {
+      const next = (k + 1) % 4
+      // The step really lands on the next car's cell.
+      expect(stepCell(RING_CELL[k] as number, RING_DIR[k] as number, r.world.w, r.world.h), `car ${k}`).toBe(
+        RING_CELL[next] as number,
+      )
+      // ...and the lane it wants there is the lane that car is holding. This is
+      // the SAME-LANE assertion: it is what makes the block real rather than
+      // two cars that merely happen to be adjacent.
+      const wantedLane = LANE_OF_DIR[RING_DIR[k] as number] as number
+      expect(occupantOf(r.state, RING_CELL[next] as number, wantedLane), `car ${k}`).toBe(next)
+      expect(LANE_OF_DIR[RING_ENTERED[next] as number]).toBe(wantedLane)
+      // No block in this ring is a head-on: a head-on pair resolves in one tick
+      // by Decision 1 and the ring would never deadlock at all.
+      expect(RING_DIR[k], `car ${k} is head-on with its blocker`).not.toBe(
+        OPPOSITE[RING_DIR[next] as number] as number,
+      )
+      // ...and it is refused, right now, with a cold counter.
+      expect(r.state.carBlockedTicks[k]).toBe(0)
+      expect(canEnter(r.state, r.world, k, RING_CELL[next] as number, RING_DIR[k] as number)).toBe(
+        EnterOutcome.REFUSED_OCCUPIED,
+      )
+    }
+    // Both lanes are represented, so the ring is not accidentally a
+    // single-lane corridor bent into a square.
+    expect(RING_DIR.map((d) => LANE_OF_DIR[d] as number)).toEqual([0, 0, 1, 1])
+    expect(new Set(RING_CELL).size).toBe(4)
+    expect(assertOccupancyConsistent(r.state, r.world)).toBe(4)
+    // The reservation invariant, and the proof that the SUM is load-bearing
+    // here: `destReserved[0]` alone is 2 against 4 outbound cars.
+    expect(reservationBalance(r)).toEqual([4, 4])
+    expect(r.state.destReserved[0]).toBe(2)
+    expect(r.state.destReserved[0]).not.toBe(4)
+  })
+
+  it('deadlocks for all 1,350 ticks — no car, no progress unit, no slot moves', () => {
+    // **This IS the no-valve world**, byte for byte: the valve's only effect is
+    // the comparison `counter >= 1,350`, which is false on every one of these
+    // ticks. No test-only disable seam is needed to establish it.
+    const r = ringRig('ring-deadlock', [AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD])
+    const before = new Uint8Array(r.state.buffer).slice()
+    const jam = driveHand(r, RING_WATCH, VALVE_AT, { cells: RING_CELL })
+
+    for (let tick = 1; tick <= VALVE_AT; tick++) {
+      expect(jam.cell[tick], `tick ${tick}`).toEqual([...RING_CELL])
+      expect(jam.progress[tick], `tick ${tick}`).toEqual([AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD])
+      expect(jam.probe[tick], `tick ${tick}`).toEqual([
+        EnterOutcome.REFUSED_OCCUPIED,
+        EnterOutcome.REFUSED_OCCUPIED,
+        EnterOutcome.REFUSED_OCCUPIED,
+        EnterOutcome.REFUSED_OCCUPIED,
+      ])
+      expect(jam.blocked[tick], `tick ${tick}`).toEqual([tick, tick, tick, tick])
+      // Nothing anywhere consumed a pin or a reservation while the jam ran.
+      expect(jam.reservations[tick], `tick ${tick}`).toEqual([...RING_BALANCE])
+    }
+    // Occupancy is fully consistent throughout — the jam itself never displaces
+    // anybody, so both halves hold on all 1,350 ticks.
+    expect(jam.maxCompletenessChecked).toBe(4)
+
+    // **And the whole buffer is byte-identical apart from the four counters.**
+    // 1,350 ticks of a four-car gridlock cost exactly eight bytes of state.
+    r.state.carBlockedTicks.fill(0)
+    expect(new Uint8Array(r.state.buffer)).toEqual(before)
+  })
+
+  it('and the deadlock is PERMANENT without the valve, not merely long: 3,000 ticks, nothing', () => {
+    // The stronger arm, and the only one that needs a disable. Zeroing the
+    // counter after every tick is exactly the world a counter that did not
+    // persist would produce — which is also why this doubles as the behavioural
+    // form of "put the counter on Scratch". Test-side only: no branch is added
+    // to `sim` and there is nothing here that can rot into production.
+    const r = ringRig('ring-no-valve', [AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD])
+    const before = new Uint8Array(r.state.buffer).slice()
+    for (let tick = 1; tick <= NO_VALVE_TICKS; tick++) {
+      runMovement(r.state, r.world)
+      r.state.carBlockedTicks.fill(0)
+      assertOccupancySound(r.state, r.world)
+    }
+    expect(Array.from(r.state.carCell.subarray(0, 4))).toEqual([...RING_CELL])
+    expect(new Uint8Array(r.state.buffer)).toEqual(before)
+    // Two full valve periods and then some, so "it would have fired by now" is
+    // not a matter of opinion.
+    expect(NO_VALVE_TICKS).toBeGreaterThan(2 * VALVE_TICK)
+  })
+
+  it('releases all four on tick 1,351, and the array self-heals with ZERO holes', () => {
+    // Decision 6's traced end state, executed. Processed ascending: car 0
+    // clears its own slot on 110 and overwrites 111's; car 1's guarded clear on
+    // 111 now correctly FAILS and it overwrites 131's; and so on. The last car
+    // finds 110 already free, because car 0 vacated it earlier in this same
+    // tick — so it crosses on ENTER_FREE, not on the valve.
+    //
+    // **Completeness is asserted straight through the firing**, which is the
+    // sharpest statement available that this ring never produces the residual:
+    // no `complete: false` anywhere in this test.
+    const r = ringRig('ring-fires', [AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD])
+    const jam = driveHand(r, RING_WATCH, VALVE_AT, { cells: RING_CELL })
+    expect(jam.blocked[VALVE_AT]).toEqual([VALVE_AT, VALVE_AT, VALVE_AT, VALVE_AT])
+    const fire = driveHand(r, RING_WATCH, 1, { cells: RING_CELL })
+
+    // All four were saturated when the tick began, so all four were entitled.
+    expect(fire.probe[1]).toEqual([
+      EnterOutcome.ENTER_VALVE,
+      EnterOutcome.ENTER_VALVE,
+      EnterOutcome.ENTER_VALVE,
+      EnterOutcome.ENTER_VALVE,
+    ])
+    // **None starves**: every one of the four moved, on the same tick.
+    expect(fire.cell[1]).toEqual([...RING_AFTER_1])
+    expect(fire.progress[1]).toEqual([0, 0, 0, 0])
+    expect(fire.blocked[1]).toEqual([0, 0, 0, 0])
+    for (let k = 0; k < 4; k++) expect(r.state.carRouteCursor[k], `car ${k}`).toBe(2)
+
+    // **Every cell named by exactly the car standing on it, zero holes.** The
+    // lane each car now holds is the lane of the direction it TRAVELLED, which
+    // is why 110 and 130 name their cars in lane 1 and 111 and 131 in lane 0.
+    expect(fire.slots[1]!.get(110)).toEqual([FREE, 3])
+    expect(fire.slots[1]!.get(111)).toEqual([0, FREE])
+    expect(fire.slots[1]!.get(131)).toEqual([1, FREE])
+    expect(fire.slots[1]!.get(130)).toEqual([FREE, 2])
+    expect(fire.maxCompletenessChecked).toBe(4)
+    // Under UNCONDITIONAL release this is the test that fires: three of the
+    // four cells would read FREE with a car standing on each, and the
+    // completeness half would throw on the same tick.
+    expect(fire.reservations[1]).toEqual([...RING_BALANCE])
+
+    // The ring dissolves rather than re-forming: eight ticks later all four
+    // cross again, onto four cells none of them shares.
+    const on = driveHand(r, RING_WATCH, RING_SECOND_CROSSING, { cells: RING_CELL })
+    expect(on.cell[RING_SECOND_CROSSING]).toEqual([...RING_AFTER_2])
+    expect(on.maxCompletenessChecked).toBe(4)
+    for (let k = 0; k < 4; k++) expect(r.state.carBlockedTicks[k], `car ${k}`).toBe(0)
+  })
+
+  it('needs only ONE valve to unwind: the car behind the vacated cell crosses on ENTER_FREE', () => {
+    // The same ring with the other three cars one tick behind car 0, so on the
+    // firing tick their counters read 1,349 — one short. Car 3 crosses anyway,
+    // because car 0 vacated cell 110 earlier in the same tick.
+    //
+    // **This is the direct observation that `ENTER_VALVE` and `ENTER_FREE` are
+    // different answers rather than one answer with two names**: car 3 moved
+    // with an UNSATURATED counter, which the valve cannot explain.
+    const r = ringRig('ring-one-valve', [AT_THRESHOLD, 1840, 1840, 1840])
+    // The stagger, derived: 1,840 + 330 x 2 = 2,500, so their first refusal is
+    // tick 2 and their counters run one behind car 0's for the whole jam.
+    expect(1840 + 2 * SPEED).toBe(ORTHO_THRESHOLD)
+    const jam = driveHand(r, RING_WATCH, VALVE_AT, { cells: RING_CELL })
+    expect(jam.blocked[VALVE_AT]).toEqual([VALVE_AT, VALVE_AT - 1, VALVE_AT - 1, VALVE_AT - 1])
+    expect(jam.cell[VALVE_AT]).toEqual([...RING_CELL])
+
+    // Tick 1,351. Car 0 valves; car 3 follows it through the cell it vacated.
+    // Cars 1 and 2 are still blocked, so car 0 lands on top of car 1 and the
+    // residual appears for one tick.
+    const fire = driveHand(r, RING_WATCH, 1, { cells: RING_CELL, complete: false })
+    expect(fire.cell[1]).toEqual([111, 111, 131, 110])
+    expect(jam.blocked[VALVE_AT]![3]).toBeLessThan(MAX_BLOCKED_TICKS)
+    expect(fire.blocked[1]![3]).toBe(0) // it crossed, so its wait was cleared
+    expect(fire.slots[1]!.get(110)).toEqual([FREE, 3])
+    expect(fire.slots[1]!.get(111)).toEqual([0, FREE])
+    // Cars 1 and 2 did not move and their counters ticked on to saturation.
+    expect(fire.blocked[1]![1]).toBe(VALVE_AT)
+    expect(fire.blocked[1]![2]).toBe(VALVE_AT)
+    assertOccupancySound(r.state, r.world)
+    expect(() => assertOccupancyComplete(r.state, r.world)).toThrow(
+      /car 1 has crossed on its current leg and stands on cell 111/,
+    )
+
+    // Tick 1,352: car 1 valves out of the shared cell and car 2 follows into
+    // the cell car 3 vacated. The residual closes on the very next tick and
+    // completeness is asserted ON to say so.
+    const rest = driveHand(r, RING_WATCH, 1, { cells: RING_CELL })
+    expect(rest.cell[1]).toEqual([...RING_AFTER_1])
+    expect(rest.maxCompletenessChecked).toBe(4)
+    expect(rest.slots[1]!.get(111)).toEqual([0, FREE])
+    // **None starves**: all four have moved within two ticks of the first valve.
+    for (let k = 0; k < 4; k++) expect(r.state.carRouteCursor[k], `car ${k}`).toBe(2)
+  })
+})
+
+// --- The counter is hashed state: a mid-jam snapshot replays identically -----
+
+/** The tick the mid-jam snapshot is taken on — deep inside the jam, well before the valve. */
+const SNAP_TICK = 700
+/** Ticks driven after the snapshot, in both the original and the replay. */
+const REPLAY_TICKS = 660
+/** The valve's tick, counted from the snapshot rather than from tick 1. */
+const REPLAY_VALVE_AT = VALVE_TICK - SNAP_TICK // 651
+
+describe('carBlockedTicks is buffer state, so a Worker cold-starting a replay valves identically', () => {
+  it('reproduces the run byte for byte, and fires the valve on the same ABSOLUTE tick', () => {
+    // The divergence this product exists to prevent, in its exact shape: a
+    // counter that did not survive the snapshot would fire in the browser and
+    // not in the Worker, and nothing else in the suite would see it.
+    //
+    // Built with `fields` and `scratch` COLD-REBUILT on the restore, as
+    // `loop.test.ts` does, because that is what a Worker cold-starting a replay
+    // actually holds.
+    const r = ringRig('ring-snapshot', [AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD])
+    driveHand(r, RING_WATCH, SNAP_TICK, { cells: RING_CELL })
+
+    // Vacuity BEFORE: the snapshot is genuinely mid-jam, with a counter that is
+    // neither cold nor saturated. Snapshotting a fixture at rest would prove
+    // nothing about the counter at all.
+    expect(Array.from(r.state.carBlockedTicks.subarray(0, 4))).toEqual([
+      SNAP_TICK,
+      SNAP_TICK,
+      SNAP_TICK,
+      SNAP_TICK,
+    ])
+    expect(SNAP_TICK).toBeGreaterThan(0)
+    expect(SNAP_TICK).toBeLessThan(VALVE_AT)
+    const hashAtSnapshot = hashState(r.state)
+    const snap = snapshot(r.state)
+
+    // The uninterrupted run, through the valve and out the other side.
+    const original = driveHand(r, RING_WATCH, REPLAY_TICKS, { cells: RING_CELL })
+    const finalHash = hashState(r.state)
+    const finalCells = Array.from(r.state.carCell.subarray(0, 4))
+    expect(original.cell[REPLAY_VALVE_AT - 1]).toEqual([...RING_CELL]) // still jammed
+    expect(original.cell[REPLAY_VALVE_AT]).toEqual([...RING_AFTER_1]) // fired here
+    expect(SNAP_TICK + REPLAY_VALVE_AT).toBe(VALVE_TICK)
+    // Vacuity AFTER: the timeline genuinely moved on from the snapshot.
+    expect(finalHash).not.toBe(hashAtSnapshot)
+
+    // The cold start: a fresh state over the snapshotted bytes, and derived
+    // state rebuilt from nothing.
+    const cold: Rig = {
+      state: restore(snap, r.world),
+      world: r.world,
+      map: r.map,
+      scratch: createScratch(
+        r.world.cells,
+        r.map.groupCount,
+        r.map.maxDestinations,
+        createFieldInputRanges(r.map),
+      ),
+      fields: createFlowFields(r.map.groupCount, r.world.cells),
+    }
+    expect(cold.scratch).not.toBe(r.scratch) // the rebuild really is a rebuild
+    expect(cold.fields).not.toBe(r.fields)
+    expect(hashState(cold.state)).toBe(hashAtSnapshot)
+
+    const replay = driveHand(cold, RING_WATCH, REPLAY_TICKS, { cells: RING_CELL })
+    expect(hashState(cold.state)).toBe(finalHash)
+    expect(Array.from(cold.state.carCell.subarray(0, 4))).toEqual(finalCells)
+    // **The same ABSOLUTE tick, not merely the same final bytes.** The valve
+    // fires 651 ticks after the restore, which is tick 1,351 of the run.
+    expect(replay.cell[REPLAY_VALVE_AT - 1]).toEqual([...RING_CELL])
+    expect(replay.cell[REPLAY_VALVE_AT]).toEqual([...RING_AFTER_1])
+    expect(replay.blocked[REPLAY_VALVE_AT - 1]).toEqual([VALVE_AT, VALVE_AT, VALVE_AT, VALVE_AT])
+  })
+
+  it('is not vacuous: a replay that LOSES the counter stays jammed past the valve tick', () => {
+    // The counterfactual, and it is the arm that makes the test above evidence
+    // rather than an observation about a run that would have matched anyway.
+    // Zeroing `carBlockedTicks` immediately after the restore is exactly what a
+    // Scratch-resident or otherwise off-buffer counter hands a cold-starting
+    // Worker — `runMovement` takes no `scratch` argument and module-scope
+    // mutable state is banned by lint, so this is the only constructible form
+    // of that mutation, and it is test-side.
+    const r = ringRig('ring-snapshot-lost', [AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD])
+    driveHand(r, RING_WATCH, SNAP_TICK, { cells: RING_CELL })
+    const snap = snapshot(r.state)
+    driveHand(r, RING_WATCH, REPLAY_TICKS, { cells: RING_CELL })
+    const finalHash = hashState(r.state)
+
+    const lost: Rig = {
+      state: restore(snap, r.world),
+      world: r.world,
+      map: r.map,
+      scratch: createScratch(
+        r.world.cells,
+        r.map.groupCount,
+        r.map.maxDestinations,
+        createFieldInputRanges(r.map),
+      ),
+      fields: createFlowFields(r.map.groupCount, r.world.cells),
+    }
+    lost.state.carBlockedTicks.fill(0)
+
+    const replay = driveHand(lost, RING_WATCH, REPLAY_TICKS, { cells: RING_CELL })
+    // Still jammed on the tick the real run valved on, and still jammed at the
+    // end of the window: its counters restarted from zero and are 660 short.
+    expect(replay.cell[REPLAY_VALVE_AT]).toEqual([...RING_CELL])
+    expect(replay.cell[REPLAY_TICKS]).toEqual([...RING_CELL])
+    expect(Array.from(lost.state.carBlockedTicks.subarray(0, 4))).toEqual([
+      REPLAY_TICKS,
+      REPLAY_TICKS,
+      REPLAY_TICKS,
+      REPLAY_TICKS,
+    ])
+    expect(hashState(lost.state)).not.toBe(finalHash)
+  })
 })

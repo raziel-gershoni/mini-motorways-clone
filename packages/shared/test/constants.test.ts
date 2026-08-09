@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
 import {
   DENOM, TICKS_PER_SECOND, SECONDS_PER_WEEK, DAYS_PER_WEEK,
@@ -5,6 +6,7 @@ import {
   ORTHO_COST, DIAG_COST,
   LANE_SPEED_DEFAULT, MOTORWAY_SPEED_MAX, ROUNDABOUT_SPEED_MUL,
   RIGHT_ANGLE_SPEED_MUL, INTERSECTION_SPEED_MUL, SHARP_TURN_SPEED_MUL,
+  MAX_BLOCKED_TICKS,
   MAX_OVERCROWD_TIME_MS, OVERCROWD_RAMP, OVERCROWD_RETURN_MUL,
   ARRIVAL_KNOCKBACK_PCT, ARRIVAL_KNOCKBACK_MAX_MS, OVERCROWD_GRACE_MS,
   PIN_CAP_SQUARE_TIMER, PIN_CAP_SQUARE_HARD, PIN_CAP_CIRCLE_TIMER, PIN_CAP_CIRCLE_HARD,
@@ -167,6 +169,41 @@ describe('rule constants', () => {
     expect((DIAG_COST * COST_UNIT_SCALE) % CAR_SPEED_UNITS_PER_TICK).toBe(200)
     expect(CAR_SPEED_UNITS_PER_TICK - 200).toBe(130)
     expect(CAR_SPEED_UNITS_PER_TICK).toBeLessThan(ORTHO_COST * COST_UNIT_SCALE) // at most one crossing per tick
+  })
+
+  it('sets the anti-deadlock valve at the spec 45 s, derived through the clock', () => {
+    // Spec §5.5: "max wait at an intersection before proceeding anyway is 45 s",
+    // at TICKS_PER_SECOND. M1d Task 4.
+    expect(MAX_BLOCKED_TICKS).toBe(45 * TICKS_PER_SECOND)
+    expect(MAX_BLOCKED_TICKS).toBe(1350)
+    // Read back as seconds, exactly — a valve that is not a whole number of
+    // seconds means the clock changed under it and nobody re-derived it.
+    expect(MAX_BLOCKED_TICKS % TICKS_PER_SECOND).toBe(0)
+    expect(MAX_BLOCKED_TICKS / TICKS_PER_SECOND).toBe(45)
+    // **The two width facts the `carBlockedTicks` region rests on**, asserted
+    // here because this is where the number lives and `regions.ts` only recites
+    // them. Above 255, so a Uint8 counter could never reach the threshold and
+    // the valve would silently never fire; below the Int16 ceiling with room to
+    // spare, so the region's element type is not marginal.
+    expect(MAX_BLOCKED_TICKS).toBeGreaterThan(255)
+    expect(MAX_BLOCKED_TICKS).toBeLessThan(32767)
+    // 45 s is 30 % of a week, which is the price of a genuine circular wait and
+    // would be an absurd one for a common event — the reason Decision 1's lane
+    // rule has to make head-on structurally impossible BEFORE this exists.
+    expect(MAX_BLOCKED_TICKS * 10).toBeLessThan(TICKS_PER_WEEK * 4)
+  })
+
+  it('derives the valve from the clock rather than storing the product', () => {
+    // The plan asks for MAX_BLOCKED_TICKS "derived rather than written as a
+    // literal", and `toBe(45 * TICKS_PER_SECOND)` above is satisfied by a bare
+    // 1350 just as happily. This is the assertion that is not: the declaration
+    // itself must name the clock constant. Same idiom as `loop.test.ts`'s
+    // cross-file golden scan — read the source, assert the text.
+    const src = readFileSync(new URL('../src/constants.ts', import.meta.url), 'utf8')
+    expect(src).toMatch(/export const MAX_BLOCKED_TICKS = 45 \* TICKS_PER_SECOND/)
+    expect(src).not.toMatch(/export const MAX_BLOCKED_TICKS = 1350/)
+    // Vacuity: the scan is reading the real file, not an empty string.
+    expect(src).toMatch(/export const TICKS_PER_SECOND = 30/)
   })
 
   it('encodes the failure constants at the right scale', () => {

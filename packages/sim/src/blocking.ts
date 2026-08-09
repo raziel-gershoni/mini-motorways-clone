@@ -1,3 +1,4 @@
+import { MAX_BLOCKED_TICKS } from '@laneways/shared'
 import type { GameState } from './state'
 import type { WorldData } from './world'
 import { DIR_COUNT, LANE_COUNT, LANE_OF_DIR } from './roads'
@@ -149,13 +150,44 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
  * to stop a car. That is what made Task 2's golden re-bless provably
  * layout-only: no car's motion could have changed, so the only difference in
  * the four whole-buffer digests was buffer SHAPE. **Task 3 adds `canEnter` and
- * refusal**; Task 4 the valve and `carBlockedTicks`'s semantics; Task 5 the
+ * refusal**; **Task 4 the valve and `carBlockedTicks`'s semantics**; Task 5 the
  * ghost regions.
  *
- * **Task 3 writes nothing to `carBlockedTicks`.** The region is declared and
- * zero-filled; giving it semantics is Task 4's whole job, and a Task 3 that
- * incremented it "ready for the valve" would be an untested second value in a
- * region whose only consumer does not exist yet.
+ * ---------------------------------------------------------------------------
+ * THE ANTI-DEADLOCK VALVE — TASK 4, DECISION 6
+ * ---------------------------------------------------------------------------
+ *
+ * **`carBlockedTicks` is this module's second region and Task 4 is its first
+ * writer.** Its whole semantics are three rules and they live in two one-line
+ * functions below, so that nothing outside this module ever touches the region:
+ *
+ *   1. `noteEntryRefused` — **increment on a refused entry**, and SATURATE at
+ *      `MAX_BLOCKED_TICKS`. The ceiling and the firing threshold are the same
+ *      constant on purpose; see that function.
+ *   2. `noteEntryGranted` — **reset to 0 on any successful entry, INCLUDING the
+ *      valve's own**. Without the reset a car that valved once would valve at
+ *      every subsequent crossing for the rest of its trip, driving straight
+ *      through every car in front of it — blocking would silently stop working
+ *      for that car, which is this milestone's named worst outcome.
+ *   3. `canEnter` — **`ENTER_VALVE` when a `REFUSED_OCCUPIED` meets a saturated
+ *      counter**, and only then. The valve releases a `REFUSED_OCCUPIED` and
+ *      NOTHING ELSE: Task 5's `REFUSED_GHOST` must never be released, because a
+ *      car must not drive onto a road that no longer exists merely because it
+ *      waited. That is why the valve test lives INSIDE the occupied branch
+ *      rather than in front of the whole function.
+ *
+ * **The counter is read here and written by `advanceCar`, and that split is
+ * deliberate.** `canEnter` stays a pure query — it is called by tests and
+ * probes as an oracle, and an oracle that advanced a counter every time
+ * somebody asked it a question would make the probe change the answer.
+ *
+ * **A derived invariant worth knowing, because the goldens depend on it:** a
+ * car that is not OUTBOUND or RETURNING always has `carBlockedTicks === 0`. The
+ * counter can only be raised at a crossing attempt, and a car can only stop
+ * being in flight by way of a crossing (arrival and trip end are both
+ * cursor-driven), which resets it first. So no idle car ever carries a non-zero
+ * counter into the digest, and a fixture that never refuses an entry has an
+ * all-zero region — which is why this task moves no golden.
  *
  * **Nothing here allocates.** No object literal, no array, no closure, no
  * `.map`/`.filter`/`.slice`; every value is a bare number and the only buffer
@@ -254,22 +286,78 @@ export function occupantOf(state: GameState, cell: number, lane: number): number
 }
 
 /**
+ * Task 4: car `i` was refused an entry on this tick. One more consecutive
+ * blocked tick, **saturating** at `MAX_BLOCKED_TICKS`.
+ *
+ * **The saturation ceiling and the valve's firing threshold are the SAME
+ * constant, and that identity is the whole design.** A ceiling BELOW the
+ * threshold makes the threshold unreachable and the valve never fires at all —
+ * which is exactly what "make the counter a `Uint8`" would do (255 < 1,350),
+ * expressed behaviourally rather than as a layout change. A ceiling ABOVE the
+ * threshold is bytes nothing reads, since a saturated counter is released on
+ * the very next tick.
+ *
+ * **Not production-reachable in Task 4, and that is stated rather than left to
+ * be discovered.** A counter at `MAX_BLOCKED_TICKS` is answered `ENTER_VALVE`
+ * on the next tick and reset by the crossing, so today the counter never gets
+ * the chance to exceed the ceiling and `v + 1` unclamped would behave
+ * identically through `runMovement`. The clamp is here for the case that ends
+ * that: **Task 5's `REFUSED_GHOST`, which the valve is forbidden to release.** A
+ * car refused by a ghost is refused while saturated, every tick, indefinitely —
+ * an unclamped `Int16` counter overflows after 32,767 of them (about 18 minutes
+ * of play), wraps to -32,768, and the valve is then permanently disarmed for
+ * that car with no error anywhere. Saturating means no width question can ever
+ * arise, at any run length, for any refusal code. Exercised by direct call in
+ * `blocking.test.ts`, on the precedent of `assertSingleCrossing` (cars.ts).
+ *
+ * @internal `advanceCar` is the production call site.
+ */
+export function noteEntryRefused(state: GameState, i: number): void {
+  const v = state.carBlockedTicks[i] as number
+  if (v < MAX_BLOCKED_TICKS) state.carBlockedTicks[i] = v + 1
+}
+
+/**
+ * Task 4: car `i` entered a cell on this tick. The consecutive-blocked-tick run
+ * is over, so the counter goes back to 0.
+ *
+ * **Called on the valve's own crossing too**, which is the rule that keeps the
+ * valve a 45-second wait rather than a permanent licence. A car that valved and
+ * kept its saturated counter would be granted every subsequent entry for the
+ * rest of its trip.
+ *
+ * Unconditional rather than `if (v !== 0)`: writing 0 over 0 moves no byte, and
+ * the branch would only buy a comparison in the common case while adding a
+ * second way for the reset to be wrong.
+ *
+ * @internal `advanceCar` is the production call site.
+ */
+export function noteEntryGranted(state: GameState, i: number): void {
+  state.carBlockedTicks[i] = 0
+}
+
+/**
  * What `canEnter` decided, and why. Every code is **non-zero**, in
  * `PointerOutcome`'s idiom, so a caller writing `if (outcome)` cannot
  * accidentally treat one outcome as false.
  *
- * **All four are declared here in Task 3, and only two of them are reachable
- * until Task 5.** That is deliberate: the alternative is a later task widening
- * a return type that `advanceCar` is already switching on, and a switch that
- * was exhaustive when it was written silently stops being exhaustive. The two
- * that are not yet reachable each have a named owner —
+ * **All four were declared in Task 3; three are reachable as of Task 4 and the
+ * fourth is Task 5's.** Declaring them all at once was deliberate: the
+ * alternative is a later task widening a return type that `advanceCar` is
+ * already switching on, and a switch that was exhaustive when it was written
+ * silently stops being exhaustive.
  *
- *   - `ENTER_VALVE` — **Task 4.** Returned when a `REFUSED_OCCUPIED` meets a
- *     `carBlockedTicks[i]` saturated at `MAX_BLOCKED_TICKS`.
- *   - `REFUSED_GHOST` — **Task 5.** Returned when the cell is a ghost (its last
- *     road bit was erased with cars still committed to it) and this car is not
- *     one of the committed ones. Production-unreachable by construction even
- *     then, and exercised directly.
+ *   - `ENTER_VALVE` — **wired in Task 4.** Returned when a `REFUSED_OCCUPIED`
+ *     meets a `carBlockedTicks[i]` saturated at `MAX_BLOCKED_TICKS`. It is a
+ *     GRANT, not a refusal: `advanceCar` crosses on it, and it is grouped with
+ *     `ENTER_FREE` at that call site rather than being treated as a special
+ *     case of the refusal.
+ *   - `REFUSED_GHOST` — **Task 5**, and still unreachable. Returned when the
+ *     cell is a ghost (its last road bit was erased with cars still committed to
+ *     it) and this car is not one of the committed ones. Production-unreachable
+ *     by construction even then, and exercised directly. **The valve must not
+ *     release it**, which is why the valve test lives inside `canEnter`'s
+ *     occupied branch rather than in front of the function.
  *
  * **There is deliberately no `NO_ROAD` code and no `OUT_OF_BOUNDS` code**, and
  * the omissions are load-bearing rather than an oversight — see `canEnter`.
@@ -401,9 +489,36 @@ export function assertEnterDirValid(i: number, cell: number, dir: number): void 
  * an off-board cell and a direction outside the eight. **Both**, and the second
  * exists only because the first was written alone — see its comment.
  *
- * @param i    the car asking. Read only by `assertEnterCellOnBoard`'s message in
- *             Task 3; Task 4 reads `carBlockedTicks[i]` and Task 5 the ghost
- *             commitment, which is why the parameter is here now.
+ * ---------------------------------------------------------------------------
+ * THE VALVE, AND WHY IT IS INSIDE THE OCCUPIED BRANCH — TASK 4
+ * ---------------------------------------------------------------------------
+ *
+ * A car whose `carBlockedTicks` has reached `MAX_BLOCKED_TICKS` (45 s, spec
+ * §5.5) is granted `ENTER_VALVE` instead of `REFUSED_OCCUPIED`, and moves
+ * regardless of the occupant. Three things about where that test sits:
+ *
+ *   - **Inside the `occupant !== FREE` branch, not in front of the function.**
+ *     The valve releases a `REFUSED_OCCUPIED` and nothing else. Task 5 adds
+ *     `REFUSED_GHOST` and the rule that the valve must NOT release it — a car
+ *     must never drive onto a road that no longer exists merely because it
+ *     waited — and a valve test hoisted to the top of the function would
+ *     release both. Adding the ghost check as a separate early return in front
+ *     of this one is therefore the shape Task 5 needs.
+ *   - **A free slot is `ENTER_FREE` even for a saturated car.** The valve is not
+ *     a state a car enters, it is an answer to a question about one slot; a
+ *     saturated car that finds its way clear crosses ordinarily and its counter
+ *     is reset by the same `noteEntryGranted` as any other crossing. This is
+ *     visible in the four-car ring: the first valve to fire vacates a cell, and
+ *     the car behind that cell is then granted `ENTER_FREE` on the same tick
+ *     with an UNSATURATED counter.
+ *   - **`>=`, not `===`.** The counter saturates at exactly the threshold so the
+ *     two cannot differ today, but `===` would turn any future ceiling change
+ *     into a valve that silently never fires rather than one that fires early.
+ *
+ * @param i    the car asking. Read by `assertEnterCellOnBoard`'s message, and —
+ *             from Task 4 — by the valve, which is per car: `carBlockedTicks[i]`
+ *             is the ASKING car's wait, never the occupant's. Task 5 reads the
+ *             ghost commitment through it too.
  * @param cell the cell being ENTERED, not the one being left.
  * @param dir  the direction of THIS crossing.
  */
@@ -418,6 +533,7 @@ export function canEnter(
   assertEnterDirValid(i, cell, dir)
   const occupant = state.occupancy[occupancySlot(cell, LANE_OF_DIR[dir] as number)] as number
   if (occupant === FREE) return EnterOutcome.ENTER_FREE
+  if ((state.carBlockedTicks[i] as number) >= MAX_BLOCKED_TICKS) return EnterOutcome.ENTER_VALVE
   return EnterOutcome.REFUSED_OCCUPIED
 }
 
@@ -504,14 +620,25 @@ export function assertOccupancySound(state: GameState, world: WorldData): void {
  *     ruling: an idle car holds nothing, and a just-dispatched car holds
  *     nothing until its first crossing) — excluded by `hasCrossedThisLeg`, and
  *     that exclusion is the rule, not an exception;
- *   - a car displaced by the anti-deadlock valve (Decision 6's stated residual,
- *     from Task 4 onward). When the valve fires for car *i* into a slot held by
- *     car *j* and *j* does not move that tick, both are on the cell and the
- *     slot names *i*; if *i* leaves first, its guarded clear frees a slot *j*
- *     is still standing on. That is a **transient completeness gap, never a
- *     soundness violation**, and the next entrant overwrites it back into a
- *     correct state. So this half is asserted only on fixtures where the valve
- *     has not fired;
+ *   - **a car displaced by the anti-deadlock valve — live as of Task 4, and the
+ *     only source of displacement there is.** When the valve fires for car *i*
+ *     into a slot held by car *j* and *j* does not move that tick, both are on
+ *     the cell and the slot names *i* (claim overwrites); if *i* then leaves
+ *     first, its guarded clear frees a slot *j* is still standing on. So this
+ *     half is asserted only on fixtures where the valve has not fired, and
+ *     `blocking.test.ts`'s valve section asserts BOTH shapes of the residual
+ *     directly rather than merely skipping the check.
+ *
+ *     Two things Decision 6's wording compresses, separated here because a
+ *     reader checking the claim needs both. **The SLOT recovers**: the next car
+ *     to enter overwrites it, and from that moment the cell blocks again. **The
+ *     DISPLACED CAR does not** — nothing renames *j* until *j* itself crosses,
+ *     so completeness stays false for *j* for as long as it stands there, and
+ *     in the meantime that cell answers `ENTER_FREE` to a third car with *j*
+ *     standing on it. Both are consequences of the same one-car-per-slot array
+ *     and neither is a soundness violation: every slot that names a car still
+ *     names a car that is there. This is the density cost Decision 1 already
+ *     records, surfacing for one cell at a time;
  *   - **a car displaced by an ordinary same-lane crossing, which is reachable
  *     in TASK 2 ONLY and is not in the plan's stated exception set.** Task 2
  *     declares the primitive and adds no refusal, so two cars may cross into
