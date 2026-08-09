@@ -1,6 +1,6 @@
 import type { GameState } from './state'
 import type { WorldData } from './world'
-import { LANE_COUNT, LANE_OF_DIR } from './roads'
+import { DIR_COUNT, LANE_COUNT, LANE_OF_DIR } from './roads'
 import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
 
 /**
@@ -322,6 +322,39 @@ export function assertEnterCellOnBoard(i: number, cell: number, cells: number): 
 }
 
 /**
+ * Throws if `canEnter` is asked about a direction that is not one of the eight.
+ *
+ * **The sibling of `assertEnterCellOnBoard`, and it exists because the guard
+ * next to it did not cover its own stated failure mode.** That comment says an
+ * out-of-range question must not be "answered `REFUSED_OCCUPIED` by a slot that
+ * does not exist" — and until this function was added, `canEnter(state, world,
+ * 0, aFreeCell, 8)` did exactly that through the OTHER parameter:
+ * `LANE_OF_DIR[8]` is `undefined`, `cell * 2 + undefined` is `NaN`,
+ * `occupancy[NaN]` is `undefined`, `undefined === FREE` is false, and the answer
+ * is a refusal indistinguishable from a real one. The cell was guarded and the
+ * direction was not; the reasoning that justified the first applies verbatim to
+ * the second, which is the catalogue's "a lesson applied where it was learned
+ * and not carried to its sibling case".
+ *
+ * Unreachable through `advanceCar` today — `edgeCost(dir)` throws on a bad
+ * nibble several lines earlier — which is exactly the unreachability the cell
+ * guard already accepts as a reason to guard anyway. It stops being an argument
+ * at all as more callers arrive: Tasks 4, 5 and 7 each add code that reads these
+ * parameters.
+ *
+ * @internal `canEnter` is the production call site.
+ */
+export function assertEnterDirValid(i: number, cell: number, dir: number): void {
+  if (!Number.isInteger(dir) || dir < 0 || dir >= DIR_COUNT) {
+    throw new Error(
+      `blocking: car ${i} was asked whether it can enter cell ${cell} in direction ${dir}, which is ` +
+        `not one of the eight (0..${DIR_COUNT - 1}) — LANE_OF_DIR would be undefined, the slot index ` +
+        'NaN, and the answer a refusal from a slot that does not exist',
+    )
+  }
+}
+
+/**
  * **The single blocking question**, spec §5.5: does an inbound vehicle collide
  * with a traversing vehicle on this chunk? Answered as per-(cell, lane)
  * occupancy — car `i` may enter `cell` travelling in direction `dir` iff the
@@ -363,8 +396,10 @@ export function assertEnterCellOnBoard(i: number, cell: number, cells: number): 
  * and `advanceCar` already throws on it by name. Turning that into a refusal
  * would convert a corrupted route — a loud, named, unresumable failure — into a
  * car that quietly stops moving, which is the one outcome that looks like
- * ordinary traffic. `assertEnterCellOnBoard` above keeps the loud form for the
- * only path that could reach this function with a bad cell.
+ * ordinary traffic. `assertEnterCellOnBoard` and `assertEnterDirValid` above
+ * keep the loud form for both of the ways this function can be handed nonsense:
+ * an off-board cell and a direction outside the eight. **Both**, and the second
+ * exists only because the first was written alone — see its comment.
  *
  * @param i    the car asking. Read only by `assertEnterCellOnBoard`'s message in
  *             Task 3; Task 4 reads `carBlockedTicks[i]` and Task 5 the ghost
@@ -380,6 +415,7 @@ export function canEnter(
   dir: number,
 ): EnterOutcomeCode {
   assertEnterCellOnBoard(i, cell, world.cells)
+  assertEnterDirValid(i, cell, dir)
   const occupant = state.occupancy[occupancySlot(cell, LANE_OF_DIR[dir] as number)] as number
   if (occupant === FREE) return EnterOutcome.ENTER_FREE
   return EnterOutcome.REFUSED_OCCUPIED

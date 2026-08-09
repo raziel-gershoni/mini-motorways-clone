@@ -292,8 +292,20 @@ export function advanceCar(state: GameState, world: WorldData, i: number, speed:
   // car's `assertArrivalHonoured` throws by name.
   //
   // Task 4 inserts the counter increment/reset around this branch; Task 5 adds
-  // the second refusal code. The condition is written as "refuse unless
-  // explicitly granted" so that an unrecognised future code fails closed.
+  // the second refusal code.
+  //
+  // **The condition is "refuse unless explicitly granted", and today that is a
+  // labelled-inert choice rather than an observable one.** Writing it the other
+  // way round — `if (outcome === EnterOutcome.REFUSED_OCCUPIED) return` — is a
+  // measured **0-detector** mutant across the whole suite, because
+  // `REFUSED_OCCUPIED` is currently the only refusal `canEnter` can return, so
+  // the two forms are the same function. **It stops being inert at Task 5**,
+  // which adds `REFUSED_GHOST`: under the fail-open form that code falls through
+  // and the car drives onto a road that has been erased — the one thing the
+  // ghost feature must never do, and the reason the valve is forbidden from
+  // releasing a `REFUSED_GHOST` either. Task 5 is the named recipient of this
+  // mutant's detector; do not "simplify" the condition on the strength of its
+  // survival before then.
   const outcome = canEnter(state, world, i, next, dir)
   if (outcome !== EnterOutcome.ENTER_FREE) return
 
@@ -348,11 +360,20 @@ export function advanceCar(state: GameState, world: WorldData, i: number, speed:
  *
  *   - at Task 2, killed by exactly **one** test (the same-lane displacement
  *     fixture, which could only exist while nothing refused anything);
- *   - at Task 3, killed by **8** — that fixture rewritten as a refusal test
- *     (ascending grants car 0 and refuses car 1, descending the reverse), the
- *     junction contention fixture, and the four-car queue, whose cascade clears
- *     in ONE tick ascending and takes FOUR descending, so every arrival tick in
- *     its hand-computed ladder moves.
+ *   - at Task 3, killed by **11**, and the breakdown is transcribed from the
+ *     failure list rather than estimated — an earlier version of this paragraph
+ *     said 8 and mis-attributed two of them, which is the same "a figure a
+ *     reader is meant to check" defect the test file's own derivation carries a
+ *     note about:
+ *       - **4** in `two cars dispatched from one house … at the FIRST crossing`
+ *         (ascending grants car 0 and refuses car 1; descending the reverse, and
+ *         the sibling's whole 161-tick trip moves with it);
+ *       - **3** in `three cars behind a blocked leader …`, whose cascade clears
+ *         in ONE tick ascending and takes FOUR descending, so every arrival tick
+ *         in its hand-computed ladder moves;
+ *       - **2** in `a dead-end carpark …`, where ascending vacates the carpark
+ *         before the follower is asked and descending does not;
+ *       - **2** in `two cars contending for one slot …`, one per index order.
  *
  * Ascending is the specified order (Decision 2), chosen over spec §5.5's
  * "committed timestamp" because movement is discrete — a car either enters a

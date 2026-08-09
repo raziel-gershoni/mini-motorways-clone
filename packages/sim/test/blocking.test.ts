@@ -44,6 +44,7 @@ import {
   releaseCell,
   hasCrossedThisLeg,
   assertEnterCellOnBoard,
+  assertEnterDirValid,
   assertMaxCarsFitsOccupancy,
   assertOccupancySound,
   assertOccupancyComplete,
@@ -1294,7 +1295,19 @@ interface HandTrace {
    * state happens to match.
    */
   readonly slots: Map<number, [number, number]>[]
-  /** `[destPins[0], destReserved[0], count(PHASE_OUTBOUND)]` at the end of each tick. */
+  /**
+   * `[destPins[0], SUM(destReserved), count(PHASE_OUTBOUND)]` at the end of each
+   * tick.
+   *
+   * **The middle term is the sum over every destination, not `destReserved[0]`,
+   * and the difference is invisible here on purpose.** Every fixture in this
+   * file has exactly one destination, so the two coincide and no assertion
+   * below can tell them apart — which is precisely why the sum is what gets
+   * recorded. The invariant is `sum(destReserved) === count(PHASE_OUTBOUND)`,
+   * and Task 4's ring fixture reuses this helper; a single-slot read would
+   * silently stop checking the invariant the moment a fixture has two
+   * destinations, with nothing in the diff to notice.
+   */
   readonly reservations: [number, number, number][]
   maxCompletenessChecked: number
 }
@@ -1346,11 +1359,11 @@ function driveHand(
     for (let i = 0; i < r.state.carPhase.length; i++) {
       if (r.state.carPhase[i] === PHASE_OUTBOUND) outbound++
     }
-    trace.reservations[tick] = [
-      r.state.destPins[0] as number,
-      r.state.destReserved[0] as number,
-      outbound,
-    ]
+    let reserved = 0
+    for (let d = 0; d < (r.state.header[H_DEST_COUNT] as number); d++) {
+      reserved += r.state.destReserved[d] as number
+    }
+    trace.reservations[tick] = [r.state.destPins[0] as number, reserved, outbound]
   }
   return trace
 }
@@ -1437,6 +1450,28 @@ describe('canEnter, asked directly (Decision 8s outcome codes)', () => {
     // outcome as false. Asserted over the whole set rather than by inspection.
     for (const v of Object.values(EnterOutcome)) expect(v).not.toBe(0)
     expect(new Set(Object.values(EnterOutcome)).size).toBe(4)
+  })
+
+  it('throws by name for a DIRECTION that is not one of the eight, rather than answering "occupied"', () => {
+    // The sibling of the cell guard, and it was missing until review round 2.
+    // `LANE_OF_DIR[8]` is `undefined`, so `cell * 2 + undefined` is `NaN`,
+    // `occupancy[NaN]` is `undefined`, `undefined === FREE` is false — and the
+    // answer was `REFUSED_OCCUPIED` from a slot that does not exist, on a cell
+    // that is completely free. That is the exact failure the cell guard's own
+    // comment exists to prevent, reached through the other parameter.
+    const r = makeRig('can-enter-bad-dir', 'can-enter-bad-dir')
+    expect(slotsOf(r.state, 150)).toEqual([FREE, FREE]) // the cell really is free
+    expect(() => canEnter(r.state, r.world, 0, 150, 8)).toThrow(/direction 8, which is not one of the eight/)
+    expect(() => canEnter(r.state, r.world, 0, 150, -1)).toThrow(/not one of the eight/)
+    expect(() => canEnter(r.state, r.world, 0, 150, 1.5)).toThrow(/not one of the eight/)
+    // Both ends of the bound, so it is not off by one: 7 is a direction and 8
+    // is not. Every valid direction answers ENTER_FREE on a free cell.
+    for (let d = 0; d < 8; d++) {
+      expect(canEnter(r.state, r.world, 0, 150, d), `dir ${d}`).toBe(EnterOutcome.ENTER_FREE)
+    }
+    // And directly, on the precedent of the cell guard beside it.
+    expect(() => assertEnterDirValid(3, 150, 8)).toThrow(/car 3 .*cell 150 in direction 8/)
+    expect(() => assertEnterDirValid(3, 150, 7)).not.toThrow()
   })
 
   it('throws by name for a cell that is not on the board, rather than answering "occupied"', () => {
@@ -1582,9 +1617,9 @@ describe('a refused car holds its progress and writes nothing at all (Decision 5
  * Four cars behind a blocked leader, on one eastbound lane of row 5.
  *
  * ```
- *   x:        4     5     6     7     8        9 ...
- *   cell:   104   105   106   105   107   108   109
- *   car:      3     2     1     0   (blocker 4)
+ *   x:        4     5     6     7     8     9 ...
+ *   cell:   104   105   106   107   108   109
+ *   car:      3     2     1     0     4    (free — car 4 leaves into it)
  * ```
  *
  * **There is no queue in the source.** No follower list, no "who is behind me",
@@ -1711,7 +1746,7 @@ describe('three cars behind a blocked leader form a queue, and it clears in orde
     expect(canEnter(r.state, r.world, 4, Q_BLOCKER_CELL + 1, DIR_E)).toBe(EnterOutcome.ENTER_FREE)
   })
 
-  it('joins the queue on the hand-computed tick for each car — 1, 4, 7, 8 — and not before', () => {
+  it('joins the queue on the hand-computed tick for each car — 1, 3, 5, 7 — and not before', () => {
     // Each car is unblocked until its own threshold, which is what makes this a
     // queue that FORMS rather than four cars that were parked. Both sides of
     // each boundary are asserted: moving on the tick before, held on the tick
@@ -1762,9 +1797,11 @@ describe('three cars behind a blocked leader form a queue, and it clears in orde
 
   it('then runs as a platoon: all four cross again at 17 and 25, with car 3 refused once at 24', () => {
     // The queue does not dissolve when it clears — it becomes a platoon one
-    // cell apart, and the carries it inherited keep it interacting. Car 3's
-    // carry after tick 17 is 280 against 150-170 for the others, so it reaches
-    // its threshold a tick early and is refused exactly once more.
+    // cell apart, and the carries it inherited keep it interacting. After tick
+    // 17 the four carry 170 / 180 / 190 / 200: the first two need eight more
+    // ticks and the last two need only seven, so cars 2 and 3 reach their
+    // thresholds on tick 24, a tick before the cars in front of them move, and
+    // are refused exactly once each.
     const r = queueRig('queue-platoon')
     const trace = driveHand(r, Q_WATCH, 25)
     for (let k = 0; k < 4; k++) {
