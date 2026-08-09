@@ -552,8 +552,15 @@ describe('golden replay', () => {
     // regions M1d's blocking primitive needs — `occupancy` (2 x cells,
     // FREE-filled) and `carBlockedTicks` (maxCars) — per the plan's "Why
     // exactly two re-blesses are true". **Layout only, and derived rather
-    // than assumed**: splicing the 4,000 inserted bytes back out of this
-    // buffer reproduces 2413319809 exactly, so no pre-existing byte moved.
+    // than assumed**: splicing the inserted bytes back out of this buffer
+    // reproduces 2413319809 exactly, so no pre-existing byte moved. The splice
+    // is **96 bytes at offset 452** FOR THIS FIXTURE, not the 4,000 of
+    // `firstCity` — GOLDEN_MAP above is 4x4 with maxHouses 8, so occupancy is
+    // 16 cells x 2 lanes x 2 B = 64 and carBlockedTicks is 16 cars x 2 B = 32,
+    // against a whole buffer of 1,288 -> 1,384 bytes. Each of the four
+    // re-blessed goldens runs on a DIFFERENT map and each splice is a
+    // different size; quoting `firstCity`'s figure here would be impossible on
+    // its face and would read as a fabricated derivation.
     // This fixture places no building and therefore has no car, so it cannot
     // move for a behavioural reason in this milestone at all — after Task 2
     // it is a pure layout tripwire until Task 5's second (and last) change.

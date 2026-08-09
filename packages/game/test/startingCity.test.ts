@@ -617,7 +617,11 @@ describe('the seeded-state golden', () => {
     // Re-blessed in M1d Task 2 (was 2505371110): the state buffer grew from
     // 7,908 to 11,908 bytes with `occupancy` and `carBlockedTicks`. **Layout
     // only, derived**: splicing the 4,000 inserted bytes back out of this
-    // buffer reproduces 2505371110 exactly. This golden is taken immediately
+    // buffer reproduces 2505371110 exactly. 4,000 is `firstCity`'s figure
+    // specifically (960 cells x 2 lanes x 2 B = 3,840, plus 80 cars x 2 B =
+    // 160) and this is the only one of the four re-blessed goldens that runs
+    // on `firstCity`; the other three splice 96, 152 and 1,120 bytes on their
+    // own maps. This golden is taken immediately
     // after `seedStartingCity`, before any tick, so it cannot move for a
     // behavioural reason in this milestone.
     expect(hashState(state)).toBe(3576722662)

@@ -764,9 +764,13 @@ describe('golden replay: the whole trip loop', () => {
     // this is the fixture that PROVES it rather than merely asserting it** —
     // unlike the three static goldens, 130 real ticks of dispatch, movement,
     // arrivals and scoring have run here with a car mid-flight, so the
-    // occupancy region is genuinely populated. Splicing the 4,000 inserted
-    // bytes back out of this buffer reproduces 3896659943 bit-for-bit, so not
-    // one byte of any pre-existing region moved across a live trip loop. Every
+    // occupancy region is genuinely populated. Splicing the inserted bytes
+    // back out of this buffer reproduces 3896659943 bit-for-bit, so not one
+    // byte of any pre-existing region moved across a live trip loop. The
+    // splice is **1,120 bytes at offset 1,980** for THIS fixture (20x12 = 240
+    // cells x 2 lanes x 2 B = 960, plus 80 cars x 2 B = 160), against a whole
+    // buffer of 6,468 -> 7,588 bytes; `firstCity`'s 4,000 belongs to
+    // `startingCity.test.ts` and to no other golden here. Every
     // behavioural literal above is likewise unchanged, and the field golden did
     // not move. Task 5 is the second and last re-bless of this number.
     expect(hashState(r.state)).toBe(452702392)

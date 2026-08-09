@@ -307,6 +307,18 @@ describe('the real draw path allocates nothing, measured', () => {
     expect([frame.camera.x0, frame.camera.y0]).toEqual([REVEALED_X0, REVEALED_Y0])
   })
 
+  /**
+   * **This test carries an explicit `testTimeout` and that is not padding.**
+   * It profiles the rig TWICE — a delta between two 3,000-frame runs — so it is
+   * inherently ~2x the cost of every other test in this file, and it measured
+   * **5,134 ms** under parallel load against vitest's 5,000 ms default. A
+   * threshold set inside the noise band is a flaky test whichever dimension the
+   * noise is in, and here the dimension is time: it is 6/6 green at a clean
+   * head and fails as a timeout the moment the machine is busy, which reads as
+   * a real allocation regression rather than as a scheduling accident. 30,000 ms
+   * is ~6x the observed worst case, far outside the band, and still bounds a
+   * genuine hang.
+   */
   it('is not vacuous: the SAME predicate reports one escaping object per frame', () => {
     // The positive control, and it is a **delta between two profiles of the same
     // rig** rather than a search for a named allocator — `test/allocation.test.ts`
@@ -347,5 +359,5 @@ describe('the real draw path allocates nothing, measured', () => {
       here(after) - here(before),
       'the profiler cannot see one escaping object per frame — every budget above is vacuous',
     ).toBeGreaterThan(NOISE_FLOOR_BYTES_PER_FRAME * 4)
-  })
+  }, 30_000)
 })

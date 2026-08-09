@@ -716,8 +716,30 @@ describe('claim and release over the L fixture (lifecycle events 2, 3, 4)', () =
     // would be a no-op here and would strand a claim naming an idle car.
     expect(slotsOf(r.state, STRANDED)).toEqual([FREE, FREE])
     expect(slotsOf(r.state, HOUSE_CELL)).toEqual([FREE, FREE])
-    // Second, independent detector for the same edit: a slot naming a
-    // PHASE_IDLE car is a soundness violation by definition.
+  })
+
+  it('...and the same edit is caught a second, independent way: soundness', () => {
+    // **This is a separate `it()` on purpose, and the reason is arithmetic
+    // rather than style.** It used to sit at the bottom of the test above,
+    // below the slot assertion — where, under the mutation it claims to catch,
+    // the slot assertion throws first and this line never executes. It
+    // contributed 0 detectors while its comment called it a second independent
+    // detector: true of the mechanism, false of the count. Split out, it is
+    // genuinely independent and the mutation scores 2.
+    const r = buildFixture('complete-trip-off-manifold-soundness')
+    const STRANDED = 108
+    r.state.carPhase[0] = PHASE_RETURNING
+    r.state.carRouteLen[0] = 4
+    r.state.carRouteCursor[0] = 0
+    r.state.carCell[0] = STRANDED
+    claimCell(r.state, 0, STRANDED, DIR_N)
+    expect(STRANDED).not.toBe(HOUSE_CELL)
+
+    runArrivals(r.state)
+
+    // A slot naming a PHASE_IDLE car is a soundness violation by definition, so
+    // releasing the wrong cell here is caught without reading any slot value.
+    expect(r.state.carPhase[0]).toBe(PHASE_IDLE)
     expect(() => assertOccupancySound(r.state, r.world)).not.toThrow()
   })
 

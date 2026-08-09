@@ -138,15 +138,28 @@ describe('LANE_OF_DIR (M1d decision 1)', () => {
     let pairsChecked = 0
     for (let d = 0; d < DIR_COUNT; d++) {
       const opp = OPPOSITE[d] as number
+      const mine = LANE_OF_DIR[d]
+      const theirs = LANE_OF_DIR[opp]
+      // **Both sides must be REAL lanes before they are compared, and that is
+      // the line doing the work against a truncated table** — not the counter
+      // below. On a 4-entry table `LANE_OF_DIR[6]` is `undefined`, and
+      // `undefined !== 0` satisfies the property while proving nothing.
+      expect([0, 1], `LANE_OF_DIR[${d}] is ${String(mine)}, not a lane`).toContain(mine)
+      expect([0, 1], `LANE_OF_DIR[${opp}] is ${String(theirs)}, not a lane`).toContain(theirs)
       expect(
-        LANE_OF_DIR[d],
-        `direction ${d} and its opposite ${opp} share lane ${LANE_OF_DIR[d]} — head-on is no longer structural`,
-      ).not.toBe(LANE_OF_DIR[opp])
+        mine,
+        `direction ${d} and its opposite ${opp} share lane ${mine} — head-on is no longer structural`,
+      ).not.toBe(theirs)
       pairsChecked++
     }
-    // Vacuity: the loop above must genuinely have ranged over all eight
-    // directions, not over an empty or truncated table.
-    expect(pairsChecked).toBe(8)
+    // **Labelled honestly: this cannot fail independently.** It counts
+    // iterations of a loop bounded by `DIR_COUNT`, so it is equivalent to
+    // `DIR_COUNT === 8`, which the first test in this block already pins. It is
+    // a loop-ran-at-all check, not a vacuity guard against a short table — the
+    // two `toContain` assertions above are what covers that. Kept because a
+    // reader scanning for "did this range over everything" should find an
+    // answer, and removed decoration is worse than labelled decoration.
+    expect(pairsChecked).toBe(DIR_COUNT)
   })
 
   it('agrees with the rule decision 1 states it can be checked against: lane 0 iff DX > 0 || (DX === 0 && DY > 0)', () => {

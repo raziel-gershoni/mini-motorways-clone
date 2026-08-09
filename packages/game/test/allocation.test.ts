@@ -1,13 +1,23 @@
 import { describe, it, expect } from 'vitest'
 import { Session } from 'node:inspector'
 import { readFileSync } from 'node:fs'
-import { firstCity, REVEALED_X0, REVEALED_Y0, REVEALED_W, REVEALED_H } from '@laneways/shared'
+import { firstCity, parseMap, REVEALED_X0, REVEALED_Y0, REVEALED_W, REVEALED_H } from '@laneways/shared'
 import {
   createState,
   createWorld,
   createScratch,
   createFlowFields,
   createFieldInputRanges,
+  snapshot,
+  placeHouse,
+  placeDestination,
+  step,
+  DEST_KIND_SQUARE,
+  ORIENTATION_S,
+  PHASE_OUTBOUND,
+  PHASE_RETURNING,
+  H_SCORE,
+  type TickAction,
 } from '@laneways/sim'
 import { createHudRects, fitCamera, hudRects, type RenderFrame } from '@laneways/render'
 import { seedStartingCity } from '../src/startingCity'
@@ -1080,5 +1090,354 @@ describe('the frame loop allocates nothing, measured', () => {
     assertScopeResolves(all, GAME_PKG)
     const bad = offenders(all, PROFILED_FRAMES, GAME_PKG, BUDGETS)
     expect(bad.join('\n')).toMatch(/packages\/game\/test\/allocation\.test\.ts at \d/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The TICK side — M1d Task 2
+// ---------------------------------------------------------------------------
+
+/**
+ * **The frame-loop rig above cannot see the sim's movement code, and that is
+ * why this section exists.**
+ *
+ * `buildLoop`/`buildRig` paint the pointer in the revealed rect's top-left
+ * corner and never connect a house to a destination, so measured over 1,752
+ * ticks **all six live cars stay `PHASE_IDLE`**. `advanceCar` never crosses a
+ * cell, `completeTrip` never runs, and every branch M1d adds is profiled at
+ * zero executions — clean regardless of what it does. Injecting an allocation
+ * into `claimCell` leaves every test above **green**.
+ *
+ * That is the fourth time this harness has passed while not covering the new
+ * thing: silently inert in every worktree; never run with a live drag;
+ * `sim/src` unscoped entirely; and then live but blind to the tick. The pattern
+ * is that **the scope never follows the code**, so this section is written to
+ * be extended rather than duplicated — Task 9 widens the same rig to the jam
+ * fixture, `REFUSED_OCCUPIED`, `ENTER_VALVE` and the ghost pass.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE INVARIANT IS PER CROSSING, NOT PER TICK
+ * ---------------------------------------------------------------------------
+ *
+ * The catalogue's rule that a per-frame figure is a property of the driver
+ * applies here with teeth. `claimCell` runs once per **crossing**, and a car
+ * crosses a cell about every 7.6 ticks — so on a one-car rig an injected object
+ * per claim measures **1.88 B/tick**, *under* the 4 B floor, and the guard
+ * passes while the violation is real. The fix is the one `canPlaceRoad` already
+ * uses: count the calls and assert per call. This rig also runs **32 cars at
+ * once** so the crossing density is ~4.2/tick rather than 0.13.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE CLEAN WINDOW CONTAINS NO ARRIVAL
+ * ---------------------------------------------------------------------------
+ *
+ * A flow-field rebuild allocates, in `flowfield.ts` and `roads.ts` — pre-existing,
+ * unrelated to this task, and measured at 9.9 and 6.5 B/tick across a window
+ * with 15 pin changes in it. Left in the window it would swamp a 4 B floor and
+ * force a budget entry, which is the "raise the budget to make it pass" move
+ * this file forbids. So the corridor is an **88-step snake** and the houses sit
+ * at the far end of it: no car can arrive for ~550 ticks, `pinMoves === 0` is
+ * asserted over the window, and the whole of `packages/sim/src` then measures
+ * **absent from the profile entirely**. A second window is profiled *with*
+ * arrivals so `completeTrip`'s release is covered too; there the assertion is
+ * scoped to the three files this task changed rather than to `offenders`,
+ * because the rebuild charge is legitimate and not mine.
+ */
+
+const TICK_RIG_W = 40
+const TICK_RIG_H = 30
+const TICK_RIG_ROW = 28
+const TICK_RIG_COL = 38
+/** Ticks profiled in the clean (no-arrival, no-rebuild) window. */
+const PROFILED_TICKS = 400
+/** Ticks profiled in the window that contains trip completions. */
+const ARRIVAL_TICKS = 900
+/** Ticks the completion-dense rig needs before every car is in flight. */
+const DENSE_WARMUP = 120
+/**
+ * How many stray samples a file may be charged before it counts as allocating.
+ *
+ * The completion window cannot use a per-tick budget (see that test), so its
+ * bound is expressed in the instrument's own unit: one recorded stack per
+ * `SAMPLING_INTERVAL_BYTES`. Four samples is 2,048 B — comfortably above the
+ * one-or-two-sample strays this file's noise-floor derivation measured, and 12x
+ * below what one escaping object per completed trip costs at this rig's
+ * density.
+ */
+const ALLOWED_STRAY_SAMPLES = 4
+/** Enough ticks for every car to be dispatched and moving before the window opens. */
+const TICK_WARMUP = 80
+/** A throwaway rig driven this far first, so the clean window is not measuring first-call costs. */
+const JIT_WARMUP_TICKS = 3000
+
+const DENSE_W = 30
+const DENSE_H = 20
+const DENSE_ROW = 18
+const DENSE_CARPARK_X = 10
+
+interface DenseRig {
+  readonly state: ReturnType<typeof createState>
+  drive(n: number): { crossings: number; completions: number }
+  readonly houses: number
+}
+
+interface TickRig {
+  readonly state: ReturnType<typeof createState>
+  /** Advances `n` ticks and returns what actually happened in them. */
+  drive(n: number): { crossings: number; pinMoves: number; completions: number }
+  readonly houses: number
+}
+
+/**
+ * 32 cars on one 88-step snake corridor, all colour 0, all routed to one
+ * carpark. Houses stand ON the corridor (road-legal by design), at the far end,
+ * so every route is 73-88 steps.
+ */
+function buildTickRig(seed: string): TickRig {
+  const rows = Array.from({ length: TICK_RIG_H }, () => '.'.repeat(TICK_RIG_W))
+  const map = parseMap('tick-alloc-rig', rows, 9999, 16, 4, 5)
+  const world = createWorld(map)
+  const state = createState(seed, map)
+  const scratch = createScratch(world.cells, map.groupCount, map.maxDestinations, createFieldInputRanges(map))
+  const fields = createFlowFields(map.groupCount, world.cells)
+  if (!placeDestination(state, world, 1 * TICK_RIG_W + TICK_RIG_COL, ORIENTATION_S, 0, DEST_KIND_SQUARE)) {
+    throw new Error('tick rig: the destination did not place')
+  }
+  let houses = 0
+  for (let y = 1; y <= 16; y++) {
+    if (placeHouse(state, world, y * TICK_RIG_W + 1, 0)) houses++
+  }
+  const actions: TickAction[] = []
+  for (let y = 1; y < TICK_RIG_ROW; y++) {
+    actions.push({ kind: 'place', a: y * TICK_RIG_W + 1, b: (y + 1) * TICK_RIG_W + 1 })
+  }
+  for (let x = 1; x < TICK_RIG_COL; x++) {
+    actions.push({ kind: 'place', a: TICK_RIG_ROW * TICK_RIG_W + x, b: TICK_RIG_ROW * TICK_RIG_W + x + 1 })
+  }
+  for (let y = TICK_RIG_ROW; y > 4; y--) {
+    actions.push({ kind: 'place', a: y * TICK_RIG_W + TICK_RIG_COL, b: (y - 1) * TICK_RIG_W + TICK_RIG_COL })
+  }
+  step(state, world, fields, scratch, { actions })
+  // Written directly, exactly as a pin fire would: a big supply, so every car
+  // can reserve and the demand timer never has to be waited out.
+  state.destPins[0] = 200
+  const noActions: { actions: TickAction[] } = { actions: [] }
+  const prev = Array.from(state.carCell) as number[]
+  let lastPins = state.destPins[0] as number
+  let lastScore = state.header[H_SCORE] as number
+  return {
+    state,
+    houses,
+    drive(n: number) {
+      let crossings = 0
+      let pinMoves = 0
+      for (let i = 0; i < n; i++) {
+        step(state, world, fields, scratch, noActions)
+        for (let c = 0; c < state.carCell.length; c++) {
+          if (state.carCell[c] !== prev[c]) crossings++
+          prev[c] = state.carCell[c] as number
+        }
+        if (state.destPins[0] !== lastPins) {
+          pinMoves++
+          lastPins = state.destPins[0] as number
+        }
+      }
+      const score = state.header[H_SCORE] as number
+      const completions = score - lastScore
+      lastScore = score
+      return { crossings, pinMoves, completions }
+    },
+  }
+}
+
+/**
+ * 32 cars on a SHORT corridor with the carpark in the middle of it, so trips
+ * turn over fast: ~630 completed trips per 900 ticks, against 32 for the snake
+ * rig above. Built for `completeTrip` density and nothing else — it is
+ * rebuild-heavy by construction, because every arrival consumes a pin.
+ */
+function buildDenseTripRig(seed: string): DenseRig {
+  const rows = Array.from({ length: DENSE_H }, () => '.'.repeat(DENSE_W))
+  // groupCount 2, not 5: this rig triggers a rebuild on nearly every tick and
+  // the Dijkstra cost is per colour.
+  const map = parseMap('dense-trip-rig', rows, 9999, 16, 4, 2)
+  const world = createWorld(map)
+  const state = createState(seed, map)
+  const scratch = createScratch(world.cells, map.groupCount, map.maxDestinations, createFieldInputRanges(map))
+  const fields = createFlowFields(map.groupCount, world.cells)
+  // Origin (10,15) orientation S: footprint x 10-11 / y 15-17, carpark (10,18)
+  // — which sits ON the corridor, mid-way along it.
+  if (!placeDestination(state, world, 15 * DENSE_W + DENSE_CARPARK_X, ORIENTATION_S, 0, DEST_KIND_SQUARE)) {
+    throw new Error('dense rig: the destination did not place')
+  }
+  let houses = 0
+  for (let x = 1; x <= 20 && houses < 16; x++) {
+    if (x === DENSE_CARPARK_X) continue
+    if (placeHouse(state, world, DENSE_ROW * DENSE_W + x, 0)) houses++
+  }
+  const actions: TickAction[] = []
+  for (let x = 1; x < 20; x++) {
+    actions.push({ kind: 'place', a: DENSE_ROW * DENSE_W + x, b: DENSE_ROW * DENSE_W + x + 1 })
+  }
+  step(state, world, fields, scratch, { actions })
+  state.destPins[0] = 255
+  const noActions: { actions: TickAction[] } = { actions: [] }
+  const prev = Array.from(state.carCell) as number[]
+  let lastScore = state.header[H_SCORE] as number
+  return {
+    state,
+    houses,
+    drive(n: number) {
+      let crossings = 0
+      for (let i = 0; i < n; i++) {
+        // Topped up rather than waited out: `destPins` is a Uint8 and 630 trips
+        // would exhaust any single fill.
+        if ((state.destPins[0] as number) < 60) state.destPins[0] = 255
+        step(state, world, fields, scratch, noActions)
+        for (let c = 0; c < state.carCell.length; c++) {
+          if (state.carCell[c] !== prev[c]) crossings++
+          prev[c] = state.carCell[c] as number
+        }
+      }
+      const score = state.header[H_SCORE] as number
+      const completions = score - lastScore
+      lastScore = score
+      return { crossings, completions }
+    },
+  }
+}
+
+/** Bytes the profile charges to one `packages/sim/src` file. */
+function bytesIn(all: readonly Allocator[], file: string): number {
+  return all.filter((a) => a.file === `packages/sim/src/${file}`).reduce((sum, a) => sum + a.bytes, 0)
+}
+
+/** The three files M1d Task 2 changed on the tick path. */
+const TASK2_TICK_FILES = ['blocking.ts', 'cars.ts', 'trips.ts'] as const
+
+describe('the tick allocates nothing on the blocking path, measured', () => {
+  it('charges nothing to blocking.ts, cars.ts or trips.ts — claim and release are 0 B per crossing', () => {
+    // JIT warm-up on a THROWAWAY rig, driven far enough to include arrivals and
+    // rebuilds. Without it the profiled window measures first-call costs and
+    // charges 15.6 B/tick to `buildings.ts` and 11.7 to `clock.ts` — two files
+    // of pure integer arithmetic that cannot allocate per tick at all.
+    buildTickRig('tick-alloc-jit-warm').drive(JIT_WARMUP_TICKS)
+
+    const rig = buildTickRig('tick-alloc-clean')
+    rig.drive(TICK_WARMUP)
+    let window = { crossings: 0, pinMoves: 0, completions: 0 }
+    const all = profileAllocations(() => {
+      window = rig.drive(PROFILED_TICKS)
+    })
+
+    // ---- Vacuity, before any zero is read as evidence ----
+    // The rig must genuinely be moving cars, or "nothing allocates" is a
+    // statement about a board where nothing happens — which is exactly what the
+    // frame-loop rig above has always been for this code.
+    expect(rig.houses, 'the rig placed no houses').toBe(16)
+    let inFlight = 0
+    for (let c = 0; c < rig.state.carPhase.length; c++) {
+      const p = rig.state.carPhase[c] as number
+      if (p === PHASE_OUTBOUND || p === PHASE_RETURNING) inFlight++
+    }
+    expect(inFlight, 'no car is in flight, so advanceCar never crosses').toBe(32)
+    expect(window.crossings, 'no crossings, so claimCell/releaseCell never ran').toBeGreaterThan(1000)
+    // And the window must be rebuild-free, or the pre-existing flow-field
+    // charge lands in it and the floor below stops meaning anything.
+    expect(window.pinMoves, 'a pin moved inside the clean window').toBe(0)
+
+    /** The sampling floor expressed per crossing, at THIS rig's crossing density. */
+    const floorPerCrossing = (NOISE_FLOOR_BYTES_PER_FRAME * PROFILED_TICKS) / window.crossings
+
+    // ---- 1. Nothing in the whole sim scope is over its budget ----
+    expect(offenders(all, PROFILED_TICKS, SIM_SRC, BUDGETS).join('\n')).toBe('')
+
+    // ---- 2. And per CROSSING, for the three files this task changed ----
+    for (const file of TASK2_TICK_FILES) {
+      const perCrossing = bytesIn(all, file) / window.crossings
+      expect(perCrossing, `sim/src/${file} allocates ${perCrossing.toFixed(3)} B/crossing`).toBeLessThan(
+        floorPerCrossing,
+      )
+    }
+    // The floor must stay far below the thing it watches for, or "under the
+    // floor" stops meaning anything: one escaping object per claim is 40-70 B.
+    // Same guard, same reasoning, as the `canPlaceRoad` per-call test above.
+    expect(floorPerCrossing * 8).toBeLessThan(25)
+  })
+
+  it('covers completeTrip too: 600+ trips END inside the window and the three files still charge nothing', () => {
+    // The clean window above deliberately contains no arrival, so it never runs
+    // `completeTrip`'s release. This one is built for the opposite property.
+    //
+    // **The first version of this test could not fail and that is worth
+    // recording.** It reused the long-snake rig, which completes ~32 trips in
+    // 900 ticks, and derived its bound from the 4 B/tick frame floor — giving
+    // an allowance of 112 B per completion against a signal of ~40. Injecting
+    // an object into `completeTrip` left it **green**. Same defect as the
+    // per-tick-vs-per-crossing trap one level down: a RARE event needs a bound
+    // derived from the instrument, not from a per-tick budget.
+    //
+    // So: a short corridor with the carpark in the middle of it and 16 houses
+    // along it, which turns over **~630 completed trips in 900 ticks** (0.70 a
+    // tick, against 0.036 before), and a bound expressed in SAMPLES.
+    buildDenseTripRig('dense-jit-warm').drive(JIT_WARMUP_TICKS)
+    const rig = buildDenseTripRig('dense-trips')
+    rig.drive(DENSE_WARMUP)
+    let window = { crossings: 0, completions: 0 }
+    const all = profileAllocations(() => {
+      window = rig.drive(ARRIVAL_TICKS)
+    })
+
+    // Vacuity: trips must actually have ENDED inside the profiled window, in
+    // bulk. `completions` is read off `H_SCORE`, which only `completeTrip`
+    // writes, so this is a direct count of the calls under test.
+    expect(rig.houses).toBe(16)
+    expect(window.completions, 'completeTrip did not run enough to be measurable').toBeGreaterThan(400)
+    expect(window.crossings).toBeGreaterThan(2000)
+
+    // This window CANNOT use `offenders`: every arrival consumes a pin, which
+    // moves the FIELD_INPUT hash, so 630 completions mean 630 flow-field
+    // rebuild bursts and `flowfield.ts` is legitimately charged ~46 KB. That is
+    // pre-existing, is not this task's code, and Task 9's tick profile is where
+    // it gets its own look. The three files below are held to the instrument's
+    // own resolution instead.
+    const bound = SAMPLING_INTERVAL_BYTES * ALLOWED_STRAY_SAMPLES
+    for (const file of TASK2_TICK_FILES) {
+      const bytes = bytesIn(all, file)
+      const perCompletion = bytes / window.completions
+      expect(
+        bytes,
+        `sim/src/${file} allocated ${bytes} B (${perCompletion.toFixed(2)} B/trip) over ${window.completions} trips`,
+      ).toBeLessThanOrEqual(bound)
+    }
+    // The bound must stay far below the signal it watches for, or it is an
+    // allowance rather than a floor: one escaping object per completed trip is
+    // 40-70 B, so at this density the signal is 25,000-44,000 B against a bound
+    // of 2,048 — a 12x margin at the low end. Asserted, not asserted-about.
+    expect(bound * 12).toBeLessThan(40 * window.completions)
+  })
+
+  it('DOES report a sim/src allocation on the same rig, same scope, same predicate — the guard can fail', () => {
+    // The positive control, and it is the reason the two zeros above are
+    // evidence rather than an empty list. The clean profile resolves NOTHING at
+    // all under `packages/` — a genuinely allocation-free tick — so
+    // `assertScopeResolves` is the wrong liveness check here and would fire on
+    // success. This is the right one, and it is the delta-between-two-profiles
+    // idiom the draw control was rewritten into: the same rig, the same
+    // `offenders` predicate, the same `SIM_SRC` scope, plus one `snapshot()` per
+    // tick — a real `sim/src` allocator on a real production seam.
+    buildTickRig('tick-alloc-jit-warm-3').drive(JIT_WARMUP_TICKS)
+    const rig = buildTickRig('tick-alloc-control')
+    rig.drive(TICK_WARMUP)
+    let crossings = 0
+    const all = profileAllocations(() => {
+      for (let i = 0; i < PROFILED_TICKS; i++) {
+        crossings += rig.drive(1).crossings
+        snapshot(rig.state)
+      }
+    })
+    expect(crossings).toBeGreaterThan(1000)
+    const bad = offenders(all, PROFILED_TICKS, SIM_SRC, BUDGETS)
+    expect(bad.join('\n')).toMatch(/packages\/sim\/src\/state\.ts at \d/)
   })
 })

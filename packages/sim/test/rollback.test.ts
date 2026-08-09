@@ -697,8 +697,12 @@ describe('blessed goldens', () => {
     // M1b): the buffer grew from 7,908 to 11,908 bytes with `occupancy` and
     // `carBlockedTicks`. See "Why exactly two re-blesses are true" in the M1d
     // plan. **Layout only, derived**: splicing the inserted bytes back out
-    // reproduces 2790151213 exactly. This fixture never calls `step`, so it
-    // cannot move for a behavioural reason in this milestone.
+    // reproduces 2790151213 exactly. The splice is **152 bytes at offset 452**
+    // for THIS fixture (GOLDEN_MAP is 6x5 with maxHouses 8: 30 cells x 2 lanes
+    // x 2 B = 120, plus 16 cars x 2 B = 32), against a whole buffer of
+    // 1,316 -> 1,468 bytes — not `firstCity`'s 4,000, which is a different
+    // map. This fixture never calls `step`, so it cannot move for a
+    // behavioural reason in this milestone.
     expect(hashState(state)).toBe(3949962277)
   })
 
