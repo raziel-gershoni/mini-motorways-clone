@@ -1249,35 +1249,40 @@ const GHOST_WINDOWS = 3
  * another test can turn red", arriving from the direction of CPU load rather
  * than of inlining.
  */
-const GHOST_TICKS = 250
+const GHOST_TICKS = 150
 const GHOST_CHURN_EVERY = 3
 
 /**
  * Per-ghost-event allocation a file may be charged before it counts as
  * allocating, in **bytes per ghost event** — M1d Task 5.
  *
- * A rate, not a total, for the reason `COMPLETION_BUDGET_BYTES_PER_TRIP` is one.
- * **Both ends measured before the number was chosen, and re-measured at the
- * window size that actually ships** (3 x 250 ticks, churn every third tick,
- * 2,316 ghost events per window):
+ * A rate, not a total, for the reason `COMPLETION_BUDGET_BYTES_PER_TRIP` is one,
+ * and a **delta** (treatment minus matched control) rather than a raw figure —
+ * the test says why a minimum could not do the job here.
  *
- *   - **above the noise.** Five baseline draws: the floor was **0.000 on every
- *     file in four of them**, and 0.774 (`roads.ts`) in the fifth.
+ * **Both ends measured on the instrument and the window size that ship**
+ * (3 treatment/control pairs x 150 ticks, 1,336 ghost events per window):
+ *
+ *   - **above the noise.** Six baseline draws: the floor was **0.00 on every
+ *     file in five of them** and 1.29 (`roads.ts`) in the sixth. Negative floors
+ *     are normal and are the instrument working — they mean the per-process blob
+ *     landed on the control.
  *   - **below the signal.** Three escaping injections, one per new call site,
  *     each `(globalThis as any).__sink = {...}` so the object genuinely ESCAPES
  *     — a NON-escaping local is deleted by V8's scalar replacement and reads
  *     exactly like a blind harness, which is the trap the catalogue records.
- *     Floors, two draws each: `isCommittedTo` (dispatch.ts) **166.86 / 166.40**;
- *     `canEnter`'s ghost branch (blocking.ts) **22.97 / 22.06**;
- *     `noteGhostDeparture` (roads.ts) **13.10 / 15.54** — the quietest of the
- *     three, because it fires once per departure rather than once per
- *     commitment walk, and therefore the one the margin is measured against.
+ *     Floors, three draws each: `isCommittedTo` (dispatch.ts) **166.86 / 165.20
+ *     / 163.14**; `canEnter`'s ghost branch (blocking.ts) **24.35 / 24.35 /
+ *     24.82**; `noteGhostDeparture` (roads.ts) **13.44 / 15.12 / 15.02** — the
+ *     quietest of the three, because it fires once per departure rather than
+ *     once per commitment walk, and therefore the one the margin is measured
+ *     against. All three are treatment-only by construction: the control has no
+ *     ghost, so none of the three sites is entered in it.
  *
- * So 5 is **6.5x above the worst floor ever observed and 2.6x below the
- * quietest signal**. It is a margin over zero, not an allowance — the minimum
- * has to be hit in three windows running to reach it.
+ * So 4 is **3.1x above the worst baseline excursion and 3.4x below the quietest
+ * signal**, with the gap between them empty.
  */
-const GHOST_BUDGET_BYTES_PER_EVENT = 5
+const GHOST_BUDGET_BYTES_PER_EVENT = 4
 
 /** Enough ticks for every car to be dispatched and moving before the window opens. */
 const TICK_WARMUP = 80
@@ -1773,43 +1778,84 @@ describe('the tick allocates nothing on the blocking path, measured', () => {
     // `flowfield.ts` work.
     //
     // ---------------------------------------------------------------------
-    // WHY THIS WINDOW TAKES A MINIMUM AND THE CLEAN WINDOW ABOVE DOES NOT
+    // WHY THIS WINDOW IS A DELTA AND NOT A MINIMUM
     // ---------------------------------------------------------------------
     //
-    // The clean window keeps its single-draw `offenders` assertion because the
-    // whole of `packages/sim/src` is **absent from its profile entirely**. This
-    // window is not that quiet, and the difference was measured before it was
-    // designed around. A blob of **13-25 KB** appears in it on every draw and
-    // lands on a different frame each time — observed on `step @ step.ts`,
-    // `<top-level>` in `hash.ts`, `state.ts`, `constants.ts`, `roads.ts`,
-    // `buildings.ts` and `dispatch.ts`, and on this test file's own driver. It
-    // is the same artefact the completion window below documents, and it was
-    // ruled in or out before anything was tuned:
+    // **A minimum over windows was tried here first and it does not work, for a
+    // reason worth writing down because the obvious reading is that it should.**
+    // The completion window below floors a per-trip rate over three windows, on
+    // the grounds that a stray sample lands in about a fifth of them. That works
+    // when the artefact is INDEPENDENT per window. Here it is not: measured on
+    // this rig, the blob is ~58 B per TICK and it lands on the same file for
+    // every window of a given process, so it contributes a roughly CONSTANT
+    // ~6 B per ghost event no matter how long the windows are or how many there
+    // are. A minimum over three correlated draws is just the draw. Measured as
+    // shipped-with-a-minimum: **3 failures in 24 runs**, at floors of 5.4-6.1
+    // against a budget of 5, with all three windows charged 6-12.
     //
-    //   - **It is not Task 5's.** With the corridor left INTACT and the churn
-    //     pointed at a mid-corridor segment — so `settleErasedCell`,
-    //     `countCommittedCars`, `noteGhostDeparture` and the ghost branch never
-    //     run at all — the blob is unchanged. With the action list EMPTY on the
-    //     same rig and the same driver, it is still there.
-    //   - **It is not any file's.** Three draws of the two-`place` variant put
-    //     it on `step.ts`, `constants.ts` and `hash.ts` respectively, at the
-    //     same magnitude.
+    // Lengthening cannot fix it either, and that is the same arithmetic: the
+    // blob is per tick and so are the events, so the RATE is invariant. This is
+    // the noise-band entry with the band sitting on top of the bound.
     //
-    // So `offenders` over `SIM_SRC` would be a coin flip here, and the honest
-    // instrument is the one this file already adopted for it: **a rate, and the
-    // minimum over three independent windows.** A per-event allocation is
-    // present in every window; a stray lands in about a third of them.
+    // **So the instrument is the other one this file already owns: a delta
+    // between two profiles of the same rig**, which is what the draw control was
+    // rewritten into for exactly this reason — "summed over both files the
+    // residual can land in so the bimodality cancels rather than being
+    // inherited". Each window profiles a TREATMENT (corridor erased under 32
+    // committed cars, so every crossing is into a ghost) and a matched CONTROL
+    // (identical board, identical cars, identical car motion, the same erase +
+    // place actions on the same code path, and NO ghost anywhere because the
+    // corridor is intact). A per-process blob appears in both and subtracts out;
+    // an allocation in Task 5's code appears only in the treatment. The control
+    // is asserted to contain zero ghost cells, or it would be subtracting the
+    // signal rather than the noise.
     //
-    // **This does leave something real un-owned, and it is named rather than
-    // absorbed:** nobody has ever profiled `step` with a non-empty action list,
-    // and the blob's magnitude did scale cleanly 2x from 200 to 400 ticks across
-    // four draws each (11.6-14.7 KB against 22.9-25.0 KB), which a pure stray
-    // should not. That is ~40-60 B/tick of *something* on the tick path,
-    // pre-existing, invisible to every rig in this file, and outside Task 5's
-    // scope in both directions. **Task 9 owns it** — its brief is to profile
-    // `step` directly over the jam fixture with `SIM_SRC` scope, which is the
-    // first rig that will be pointed at it.
-    buildTickRig('ghost-alloc-jit-warm').drive(JIT_WARMUP_TICKS)
+    // ---------------------------------------------------------------------
+    // WHAT THIS DRIVES
+    // ---------------------------------------------------------------------
+    //
+    // No rig in this file had ever erased a road, let alone erased one under a
+    // committed car, so every branch Task 5 adds was at zero executions —
+    // inside `SIM_SRC`'s scope the whole time, and therefore "already covered"
+    // in exactly the sense this harness has been wrong about four times in two
+    // milestones. The treatment puts all four inside the window at a high rate:
+    //
+    //   - **`canEnter`'s ghost branch and `isCommittedTo`** — every crossing is
+    //     into a ghost cell, so the `ghostMask[cell] !== 0` test is taken and
+    //     the O(remaining route) commitment walk runs behind it. On 73-88 step
+    //     routes that is the most expensive new code in the milestone.
+    //   - **`noteGhostDeparture`** — every departure is from a ghost cell.
+    //   - **`eraseRoad`'s deferral and `countCommittedCars`** — the churn
+    //     segment is erased every third tick, ghosting both endpoints, and the
+    //     erase-time count walks all 32 cars' routes twice.
+    //   - **`placeRoad`'s refund payment** — the other half of that pair.
+    //
+    // **One thing this window was briefly, wrongly, reported to have found, and
+    // the retraction belongs here rather than only in a report.** While
+    // bisecting the flakiness above I drove `step` with a non-empty action list
+    // inside a profiled window — which no rig in this file had done before, the
+    // tick rigs all passing `{ actions: [] }` — saw `step @ step.ts` charged
+    // 11.6-14.7 KB at 200 ticks against 22.9-25.0 KB at 400, read the clean 2x
+    // as scaling with the action path, and wrote it up as a pre-existing
+    // ~40-60 B/tick allocation for Task 9. **It is not one.** The scaling is
+    // with TICKS, not with actions: re-measured at 0, 2 and 50 actions per tick,
+    // three draws each, `step.ts` is charged **0 in all nine** and 25x the
+    // action count produces no proportional rise. `canPlaceRoad` returns frozen
+    // singletons on every path and the action loop allocates nothing. The 2x was
+    // the same per-tick blob this window's delta now subtracts, landing on
+    // `step`'s frame — which my own bisect had already shown it doing with an
+    // EMPTY action list, on `hash.ts`, `state.ts` and `constants.ts`. The lesson
+    // is the catalogue's, in its own words: a wandering `<top-level>`-class
+    // attribution is a verdict about nothing, and scaling with the window is not
+    // scaling with the cause.
+
+    // **Erase-then-place of the same segment inside one action list is what
+    // keeps both windows rebuild-free**: actions are phase 2 and `syncFields` is
+    // phase 4, so `roads` is byte-identical by the time the field-input hash is
+    // taken. `destPins` unmoved is asserted per window, and each window gets a
+    // FRESH rig — the snake is arrival-free for only ~550 ticks, and three
+    // consecutive windows on one rig failed `pinMoves === 0` in 12 of 12.
+        buildTickRig('ghost-alloc-jit-warm').drive(JIT_WARMUP_TICKS)
 
     /**
      * A warmed rig with its corridor erased under 32 committed cars, all but
@@ -1823,7 +1869,7 @@ describe('the tick allocates nothing on the blocking path, measured', () => {
      * them inside the quiet stretch, and `destPins` is asserted unmoved for each
      * so the property is checked rather than assumed.
      */
-    const ghostRig = (seed: string): { rig: TickRig; churn: [number, number] } => {
+    const ghostRig = (seed: string, ghosted: boolean): { rig: TickRig; churn: [number, number] } => {
       const rig = buildTickRig(seed)
       rig.drive(TICK_WARMUP)
       const segments: [number, number][] = []
@@ -1836,6 +1882,16 @@ describe('the tick allocates nothing on the blocking path, measured', () => {
       for (let y = TICK_RIG_ROW; y > 4; y--) {
         segments.push([y * TICK_RIG_W + TICK_RIG_COL, (y - 1) * TICK_RIG_W + TICK_RIG_COL])
       }
+      if (!ghosted) {
+        // **The matched CONTROL.** Same board, same 32 cars, same warm-up, same
+        // number of tick actions on the same code path — and no ghost anywhere,
+        // because the corridor is left intact so the churned segment's endpoints
+        // keep a road bit and `settleErasedCell` is never reached. Car motion is
+        // IDENTICAL to the treatment's: movement never reads `roads`, no car
+        // completes inside an arrival-free window, so no car re-dispatches.
+        // The one thing that differs is Task 5's ghost code.
+        return { rig, churn: segments[(segments.length / 2) | 0] as [number, number] }
+      }
       for (let k = 0; k < segments.length - 1; k++) {
         const seg = segments[k] as [number, number]
         expect(eraseRoad(rig.state, rig.world, seg[0], seg[1]), `segment ${k} did not erase`).toBe(true)
@@ -1846,50 +1902,62 @@ describe('the tick allocates nothing on the blocking path, measured', () => {
       return { rig, churn: segments[segments.length - 1] as [number, number] }
     }
 
-    // Per-branch entry counters, in the `DragCounters` style: a driver that
-    // stops entering a branch must turn this RED, not quietly measure less.
-    const counts = { crossings: 0, departures: 0, created: 0, paid: 0 }
-    const perEvent: number[][] = []
-    const events: number[] = []
-    let ghostCellsAtOpen = 0
-    let ghostCellsAtClose = 0
-
-    for (let w = 0; w < GHOST_WINDOWS; w++) {
-      const { rig, churn } = ghostRig(`ghost-alloc-${w}`)
+    /** Drives one profiled window on `rig`, churning `churn` every third tick. */
+    const driveWindow = (
+      rig: TickRig,
+      churn: [number, number],
+      tally: { crossings: number; departures: number; created: number; paid: number } | null,
+    ): Allocator[] => {
       const churnActions: readonly TickAction[] = [
         { kind: 'erase', a: churn[0], b: churn[1] },
         { kind: 'place', a: churn[0], b: churn[1] },
       ]
       const prevCell = Array.from(rig.state.carCell) as number[]
       const wasGhost = new Uint8Array(rig.world.cells)
-      const before = { ...counts }
-      const pinsBefore = rig.state.destPins[0] as number
-      let open = 0
-      for (let c = 0; c < rig.world.cells; c++) if (rig.state.ghostMask[c] !== 0) open++
-      ghostCellsAtOpen = open
-
-      const all = profileAllocations(() => {
+      return profileAllocations(() => {
         for (let t = 0; t < GHOST_TICKS; t++) {
           for (let c = 0; c < rig.world.cells; c++) wasGhost[c] = rig.state.ghostMask[c] === 0 ? 0 : 1
           const churning = t % GHOST_CHURN_EVERY === 0
           rig.step(churning ? churnActions : NO_TICK_ACTIONS)
-          // The churn segment is ghosted and paid off INSIDE the tick, so it is
-          // counted from the action rather than from a before/after diff, which
-          // cannot see a ghost that did not outlive the tick.
-          if (churning) {
-            counts.created += 2
-            counts.paid += 2
+          if (tally !== null && churning) {
+            tally.created += 2
+            tally.paid += 2
           }
           for (let c = 0; c < rig.state.carCell.length; c++) {
             const now = rig.state.carCell[c] as number
             if (now !== prevCell[c]) {
-              if (wasGhost[now] === 1) counts.crossings++
-              if (wasGhost[prevCell[c] as number] === 1) counts.departures++
+              if (tally !== null) {
+                if (wasGhost[now] === 1) tally.crossings++
+                if (wasGhost[prevCell[c] as number] === 1) tally.departures++
+              }
               prevCell[c] = now
             }
           }
         }
       })
+    }
+
+    // Per-branch entry counters, in the `DragCounters` style: a driver that
+    // stops entering a branch must turn this RED, not quietly measure less.
+    const counts = { crossings: 0, departures: 0, created: 0, paid: 0 }
+    const perEventDelta: number[][] = []
+    const events: number[] = []
+    let ghostCellsAtOpen = 0
+    let ghostCellsAtClose = 0
+
+    for (let w = 0; w < GHOST_WINDOWS; w++) {
+      const treatment = ghostRig(`ghost-alloc-${w}`, true)
+      const control = ghostRig(`ghost-ctl-${w}`, false)
+      const before = { ...counts }
+      const pinsBefore = treatment.rig.state.destPins[0] as number
+      let open = 0
+      for (let c = 0; c < treatment.rig.world.cells; c++) {
+        if (treatment.rig.state.ghostMask[c] !== 0) open++
+      }
+      ghostCellsAtOpen = open
+
+      const tProfile = driveWindow(treatment.rig, treatment.churn, counts)
+      const cProfile = driveWindow(control.rig, control.churn, null)
 
       const n =
         counts.crossings - before.crossings +
@@ -1897,16 +1965,24 @@ describe('the tick allocates nothing on the blocking path, measured', () => {
         (counts.created - before.created) +
         (counts.paid - before.paid)
       events.push(n)
-      perEvent.push(TASK5_TICK_FILES.map((f) => bytesIn(all, f) / n))
+      perEventDelta.push(TASK5_TICK_FILES.map((f) => (bytesIn(tProfile, f) - bytesIn(cProfile, f)) / n))
 
       // Per window, not in aggregate: one window that stopped jamming, or
-      // started rebuilding, would otherwise be averaged away — and a window with
-      // no events in it is what makes a MINIMUM trivially zero.
-      expect(rig.state.destPins[0], `window ${w}: a pin moved, so it is not rebuild-free`).toBe(pinsBefore)
-      expect(rig.state.roads[churn[0]], `window ${w}: the churn segment was not restored`).not.toBe(0)
-      expect(rig.state.ghostMask[churn[0]], `window ${w}: its ghost outlived the tick`).toBe(0)
+      // started rebuilding, would otherwise be averaged away.
+      expect(treatment.rig.state.destPins[0], `window ${w}: a pin moved in the treatment`).toBe(pinsBefore)
+      expect(treatment.rig.state.roads[treatment.churn[0]], `window ${w}: churn not restored`).not.toBe(0)
+      expect(treatment.rig.state.ghostMask[treatment.churn[0]], `window ${w}: ghost outlived the tick`).toBe(0)
+      // The control must genuinely have no ghost, or the delta subtracts the
+      // very signal it is meant to isolate.
+      let ctlGhosts = 0
+      for (let c = 0; c < control.rig.world.cells; c++) {
+        if (control.rig.state.ghostMask[c] !== 0) ctlGhosts++
+      }
+      expect(ctlGhosts, `window ${w}: the CONTROL produced a ghost, so it is not a control`).toBe(0)
       let close = 0
-      for (let c = 0; c < rig.world.cells; c++) if (rig.state.ghostMask[c] !== 0) close++
+      for (let c = 0; c < treatment.rig.world.cells; c++) {
+        if (treatment.rig.state.ghostMask[c] !== 0) close++
+      }
       ghostCellsAtClose = close
       expect(open, `window ${w}: the erase produced no ghost`).toBeGreaterThan(50)
       expect(close, `window ${w}: every ghost was paid off before the window closed`).toBeGreaterThan(10)
@@ -1925,7 +2001,7 @@ describe('the tick allocates nothing on the blocking path, measured', () => {
 
     // ---- The bound: per ghost event, floored over three windows ----
     for (let f = 0; f < TASK5_TICK_FILES.length; f++) {
-      const draws = perEvent.map((w) => w[f] as number)
+      const draws = perEventDelta.map((w) => w[f] as number)
       const floor = Math.min(...draws)
       expect(
         floor,
@@ -1938,7 +2014,7 @@ describe('the tick allocates nothing on the blocking path, measured', () => {
     // QUIETEST of the three positive controls — one escaping object per ghost
     // departure — so that is the margin that matters, and it is asserted here
     // rather than asserted about.
-    expect(GHOST_BUDGET_BYTES_PER_EVENT * 2).toBeLessThan(13)
+    expect(GHOST_BUDGET_BYTES_PER_EVENT * 2).toBeLessThan(10)
   })
 
   it('DOES report a sim/src allocation on the same rig, same scope, same predicate — the guard can fail', () => {

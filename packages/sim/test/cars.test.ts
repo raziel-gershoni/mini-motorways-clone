@@ -989,6 +989,75 @@ describe('a road erased under an in-flight car — §5.11 delayed refunds (M1d T
     expect(state.ghostCommitted[GHOST]).toBe(0)
   })
 
+  it('the EARLY CLEAR: a car s return crossing spends the last count while another car is still inbound', () => {
+    // **The residual `dispatch.ts` derives, built rather than described.** The
+    // test above shows a re-crossing cannot underflow or double-refund with ONE
+    // committed car — but with one car the count reaches 0 on the outbound
+    // departure and the return crossing finds no ghost, so it cannot reach the
+    // case the derivation is actually about: **a decrement spent by a car that
+    // has already cleared, while a car that has not is still on its way.** That
+    // needs two cars, and it is the shape a reader would want to see before
+    // accepting "the budget is exact and only the timing moves".
+    //
+    // Car 0 starts on 46 with a two-step route (47, 48) and is turned round by
+    // hand at 48; car 1 starts on 42 with a six-step route and reaches 47 much
+    // later. Ticks, from this file's ORTHO ladder and the carry:
+    //
+    //   car 0  enters 47 @8, enters 48 @16          -> DEPARTS 47 @16 (2 -> 1)
+    //          flipped to RETURNING, carrying 280 units
+    //          48->47 needs (2500-280)/330 -> 7 ticks   @23
+    //          47->46 needs (2500-90)/330  -> 8 ticks   @31  -> DEPARTS 47 @31 (1 -> 0, REFUND)
+    //   car 1  enters 47 @38, enters 48 @46          -> DEPARTS 47 @46 (no ghost left)
+    //
+    // So the refund lands on tick 31, while car 1 is still four cells short of
+    // the ghost. Exactly one tile is returned, which is the half that matters.
+    const { state, world } = rig('erase-early-clear')
+    corridor(state, world)
+    commit(state, 0, 46, [E, E])
+    commit(state, 1, START, [E, E, E, E, E, E])
+    eraseGhostCell(state, world)
+    expect(state.ghostCommitted[GHOST], 'both cars are committed to the ghost').toBe(2)
+
+    const refundTicks: number[] = []
+    const departures: number[] = []
+    let prevTiles = tilesLeft(state)
+    let on0 = state.carCell[0] === GHOST
+    let on1 = state.carCell[1] === GHOST
+    let flipped = false
+    for (let t = 1; t <= 60; t++) {
+      runMovement(state, world)
+      // Hand-turn car 0 the tick after its route runs out; this rig has no
+      // destination, so this stands in for `arriveAtDestination`, which is
+      // deliberately not a ghost event either way.
+      if (!flipped && state.carRouteCursor[0] === 2) {
+        state.carPhase[0] = PHASE_RETURNING
+        flipped = true
+      }
+      const now0 = state.carCell[0] === GHOST
+      const now1 = state.carCell[1] === GHOST
+      if (on0 && !now0) departures.push(t)
+      if (on1 && !now1) departures.push(t)
+      on0 = now0
+      on1 = now1
+      const tiles = tilesLeft(state)
+      if (tiles !== prevTiles) refundTicks.push(t)
+      prevTiles = tiles
+    }
+
+    // Car 0 leaves the ghost twice (16 outbound, 31 returning) and car 1 once
+    // (46). Asserted so the fixture cannot silently stop re-crossing.
+    expect(departures).toEqual([16, 31, 46])
+    // The refund lands on car 0's SECOND departure — early, by the standard of
+    // "the last committed car clears", because car 1 has not reached it yet.
+    expect(refundTicks).toEqual([31])
+    // Which is the point: the timing moves, the BUDGET does not. One tile,
+    // once, and no throw when car 1 finally crosses off a cell that is no
+    // longer a ghost.
+    expect(tilesLeft(state)).toBe(AFTER_BUILD + 1)
+    expect(state.ghostMask[GHOST]).toBe(0)
+    expect(state.ghostCommitted[GHOST]).toBe(0)
+  })
+
   it('placing a road over the ghost pays the pending refund and charges the placement — net zero', () => {
     // §5.11's "refunds in full", and the budget property that matters for the
     // leaderboard: erase-then-replace nets EXACTLY zero, so nothing is printed
@@ -1077,5 +1146,231 @@ describe('a road erased under an in-flight car — §5.11 delayed refunds (M1d T
     expect(tickOf(restored)).toBe(46)
     expect(tickOf(state)).toBe(46)
     expect(hashState(restored)).toBe(hashState(state))
+  })
+})
+
+describe('movement cannot re-path, by signature', () => {
+  /**
+   * The re-pathing mutation ("read `dir[carCell]` instead of the committed
+   * route") is **not constructible against this module**, and that is the
+   * point of the two structural assertions here. The BEHAVIOURAL version
+   * needs a field whose CONTENT changes mid-flight — a nearer same-colour
+   * destination gaining a pin after dispatch — which needs `syncFields` and
+   * dispatch, and belongs to Task 6. Turning is NOT the discriminator:
+   * dispatch commits `route[i] = dir[cell_i]`, so `dir[carCell] ===
+   * route[carRouteCursor]` at every outbound tick by construction, on a
+   * turning path exactly as much as on a straight one.
+   */
+  it('takes no fields and no scratch parameter', () => {
+    expect(runMovement.length).toBe(2) // state, world — and nothing else
+  })
+
+  it('imports neither the flow field nor the scratch module, and never reads state.roads', () => {
+    // A source assertion, in the idiom `determinism.test.ts` already uses:
+    // the arity pin above can be defeated by reaching for a module-level
+    // import, and this cannot. Matching on the import specifier rather than a
+    // bare word keeps it immune to this file's own prose.
+    const source = readFileSync(fileURLToPath(new URL('../src/cars.ts', import.meta.url)), 'utf8')
+    expect(source).not.toMatch(/from '\.\/flowfield'/)
+    expect(source).not.toMatch(/from '\.\/scratch'/)
+    expect(source).not.toMatch(/state\s*\.\s*roads\s*\[/)
+    expect(source).not.toMatch(/\bfield\w*\s*\.\s*dir\b/)
+    // Vacuity: the scan is looking at the right file.
+    expect(source).toMatch(/export function runMovement/)
+
+    // And, in the same idiom and for a reason worth stating: the loop's speed
+    // comes from `speedUnits`, not from a copy of the number. That linkage has
+    // NO behavioural observer — `speedUnits(LANE_SPEED_DEFAULT)` and
+    // `CAR_SPEED_UNITS_PER_TICK` are equal by definition of the identity
+    // multiplier, so `const speed = 330` passes every test in this file
+    // (verified: it survives the suite). What it would cost is a change to
+    // `CAR_SPEED_UNITS_PER_TICK` that movement silently ignores while
+    // `speedUnits` reports the new value.
+    expect(source).toMatch(/const speed = speedUnits\(LANE_SPEED_DEFAULT\)/)
+  })
+
+  it('follows the committed route even when a live field disagrees with it at a cell it occupies', () => {
+    // The brief's in-task substitute. It is honest about what it can show:
+    // `runMovement` cannot be handed the field at all, so this documents the
+    // consequence of the signature rather than probing a branch. The
+    // fixture's `dir` genuinely contradicts the route — a car reading it would
+    // reverse on its fourth cell — and the trace is unchanged.
+    const { state, world, map } = rig('field-disagrees')
+    const fields = createFlowFields(map.groupCount, world.cells)
+    const dir = (fields[0] as { dir: Int8Array }).dir
+    for (const cell of [START, ...ORTHO_CELLS]) dir[cell] = E
+    dir[45] = W_DIR // on the car's path, and the exact reverse of the route
+
+    commit(state, 0, START, ORTHO_ROUTE)
+    // Vacuity: the field really does disagree, at a cell the car really does
+    // stand on.
+    expect(dir[45]).not.toBe(routeStep(state, 0, 3))
+    expect(ORTHO_CELLS).toContain(45)
+
+    const trace = runTicks(state, world, 0, 61)
+    expect(trace.crossingTicks).toEqual(ORTHO_TICKS)
+    expect(trace.cellPerTick).toEqual(perTickCells(START, ORTHO_CELLS, ORTHO_TICKS, 61))
+    expect(state.carCell[0]).toBe(50)
+  })
+})
+
+describe('movement is a pure function of the state buffer', () => {
+  it('resumes a mid-flight trip identically after a snapshot/restore', () => {
+    // The plan's specific warning: the cheapest thing to reach for in this
+    // module is a JS-side cache outside the state buffer, which survives no
+    // snapshot. Here the trip is cut in half by a round trip through bytes.
+    const { state, world } = rig('snapshot')
+    commit(state, 0, START, MIXED_ROUTE)
+    runTicks(state, world, 0, 40)
+    expect(state.carRouteCursor[0]).toBe(4) // mid-flight: crossings at 8,19,26,37
+    expect(state.carProgress[0]).toBe(SPEED * 40 - 12000) // 13_200 - 12_000 = 1200
+
+    const revived = restore(snapshot(state), world)
+    const rest = runTicks(revived, world, 0, 33)
+
+    expect(rest.crossingTicks).toEqual([4, 15, 23, 33]) // ticks 44, 55, 63, 73 overall
+    expect(revived.carCell[0]).toBe(130)
+    expect(revived.carProgress[0]).toBe(90)
+  })
+})
+
+describe('off-manifold guards', () => {
+  /**
+   * `stepCell`'s bounds check, ONE `it()` PER BOUND. All four in a single test
+   * reports only the first to break, so a regression in two of them looks like
+   * a regression in one — and three of the four fail in genuinely different
+   * ways, which is exactly the information a merged test throws away.
+   *
+   * Off-manifold throughout: `runDispatch`'s downhill walk breaks the moment a
+   * step would leave the grid and refuses the route rather than committing it,
+   * so only a hand-written or corrupted route reaches these. The alternative to
+   * the throw is not a crash — it is a silent wrap onto a wrong-but-plausible
+   * cell.
+   */
+  function expectOffGrid(id: string, cell: number, dir: number): void {
+    const { state, world } = rig(id)
+    commit(state, 0, cell, [dir])
+    expect(() => {
+      for (let t = 0; t < 8; t++) runMovement(state, world)
+    }).toThrow(/step off the grid/)
+    expect(state.carCell[0], 'the car moved despite the throw').toBe(cell)
+    expect(state.carRouteCursor[0]).toBe(0)
+  }
+
+  it('throws stepping E off the last column, rather than wrapping onto the next row (x >= w)', () => {
+    expect(39 % W).toBe(19) // (19, 1): the rightmost column
+    // Without this bound the car lands on cell 40 = (0, 2) — the next row's
+    // first column, a real cell the route never named.
+    expectOffGrid('off-grid-east', 39, E)
+  })
+
+  it('throws stepping W off the first column, rather than wrapping onto the previous row (x < 0)', () => {
+    expect(40 % W).toBe(0) // (0, 2): the leftmost column
+    // The same row-seam hazard in the other direction — cell 39 = (19, 1) — and
+    // the one an eastern-only fixture leaves untested. It survived until the
+    // review caught it.
+    expectOffGrid('off-grid-west', 40, W_DIR)
+  })
+
+  it('throws stepping S off the last row, rather than indexing past the grid (y >= h)', () => {
+    expect((225 / W) | 0).toBe(H - 1) // (5, 11): the last row
+    expectOffGrid('off-grid-south', 225, S)
+  })
+
+  it('throws stepping N off the first row (y < 0) — kept for symmetry, and disclosed as an equivalent mutant', () => {
+    expect((5 / W) | 0).toBe(0) // (5, 0): the first row
+    // Dropping this half of the guard is NOT detectable, and saying so is the
+    // point: the retained `x` bounds fence `x` into `[0, w - 1]`, so for any
+    // `y <= -1` the product `y * w + x` is at most `-1`. `advanceCar`'s own
+    // `next < 0` arm therefore rejects every northern overrun regardless. The
+    // case is exercised because the behaviour is required, not because this
+    // test can observe which line delivers it.
+    expectOffGrid('off-grid-north', 5, N)
+  })
+
+  it('throws on a corrupted route nibble rather than driving in a direction that does not exist', () => {
+    // `packRouteStep` refuses to write a direction outside [0, 8), so this
+    // writes the byte directly — the only way to produce a nibble of 8..15,
+    // which a corrupted or replayed-from-corrupt buffer can hold.
+    const { state, world } = rig('bad-nibble')
+    commit(state, 0, START, ORTHO_ROUTE)
+    state.carRoute[0 * ROUTE_BYTES] = 0x0d // step 0 = direction 13
+    expect(() => runMovement(state, world)).toThrow(/direction index out of range/)
+    // And the car stayed where it was, for the same reason its off-grid sibling
+    // asserts it: a throw that has already half-written the slot is a different
+    // and worse failure than a throw that has not.
+    expect(state.carCell[0]).toBe(START)
+    expect(state.carRouteCursor[0]).toBe(0)
+    expect(state.carProgress[0]).toBe(0)
+  })
+
+  it('names the one-crossing-per-tick invariant when the constants stop supporting it', () => {
+    // Reachable only through `constants.ts`: raise the speed above the
+    // smallest threshold and movement would silently cap every car at one cell
+    // per tick, discarding the excess — the invisible, uniform slowdown
+    // decision 3 exists to prevent. Called directly, on the precedent of
+    // `assertDispatchProgress`/`assertBucketCountExceedsEveryEdgeCost`.
+    expect(() => assertSingleCrossing(ORTHO_T, ORTHO_T)).toThrow(/one crossing per car per tick/)
+    expect(() => assertSingleCrossing(ORTHO_T - 1, ORTHO_T)).not.toThrow()
+
+    // And the CALL SITE, which is what a bare unit test of the function above
+    // cannot reach: with `speed` a parameter of `advanceCar`, a speed above
+    // the smallest threshold is drivable from here. Residuals grow 3000 - 2500
+    // = 500 per crossing — 500, 1000, 1500, 2000, then 2500, which is itself a
+    // whole crossing. Deleting the call inside `advanceCar` makes this pass
+    // silently with the car capped at one cell per tick, which is exactly the
+    // failure the guard exists to name.
+    const capped = rig('two-crossings')
+    commit(capped.state, 0, START, ORTHO_ROUTE)
+    expect(() => {
+      for (let t = 0; t < 4; t++) advanceCar(capped.state, capped.world, 0, 3000)
+    }).not.toThrow()
+    expect(capped.state.carProgress[0]).toBe(2000)
+    expect(() => advanceCar(capped.state, capped.world, 0, 3000)).toThrow(/one crossing per car per tick/)
+
+    // The bound is the SMALLEST threshold, not the threshold just crossed —
+    // and only a diagonal fixture can tell those apart. Crossing a diagonal
+    // (3500) at speed 6000 leaves a residual of 2500: enough to cross the
+    // orthogonal step that may come next, so it must throw, even though it is
+    // below the 3500 the car just paid.
+    const diagonal = rig('two-crossings-diag')
+    commit(diagonal.state, 0, START, DIAG_ROUTE)
+    expect(() => advanceCar(diagonal.state, diagonal.world, 0, 6000)).toThrow(/one crossing per car per tick/)
+    expect(6000 - DIAG_T).toBe(2500) // the residual in question
+    expect(6000 - DIAG_T).toBeLessThan(DIAG_T) // ...which the just-crossed threshold would wave through
+    expect(6000 - DIAG_T).toBeGreaterThanOrEqual(ORTHO_T) // ...and the smallest threshold catches
+    // And the real call site never trips it at M1c's constants: the residual
+    // after any crossing is below the speed, which is below every threshold.
+    const { state, world } = rig('invariant')
+    commit(state, 0, START, MIXED_ROUTE)
+    const trace = runTicks(state, world, 0, 73)
+    // Progress never reaches the threshold of the edge being traversed. The
+    // loose bound is DIAG_T, not ORTHO_T: on a diagonal edge progress
+    // legitimately climbs to just under 3500 (2780 is the observed peak here),
+    // and the sharp statement of the invariant is the per-crossing one below.
+    for (const p of trace.progressPerTick) expect(p).toBeLessThan(DIAG_T)
+    for (let k = 0; k < trace.crossingTicks.length; k++) {
+      const t = trace.crossingTicks[k] as number
+      expect(trace.progressPerTick[t - 1], `residual after crossing ${k + 1}`).toBeLessThan(SPEED)
+    }
+  })
+})
+
+describe('the direction tables movement leans on', () => {
+  it('pairs every direction with its exact negation, so a return leg costs what the outbound did', () => {
+    // `edgeCost(OPPOSITE[d]) === edgeCost(d)` for every d is what makes a
+    // round trip hand-computable. Checked over all eight, not just the two the
+    // fixtures use.
+    for (let d = 0; d < 8; d++) {
+      const o = OPPOSITE[d] as number
+      // Summed rather than negated: `-(0)` is `-0`, which `toBe` (Object.is)
+      // does not consider equal to the `0` the table holds.
+      expect((DX[o] as number) + (DX[d] as number), `DX[${o}] is not -DX[${d}]`).toBe(0)
+      expect((DY[o] as number) + (DY[d] as number), `DY[${o}] is not -DY[${d}]`).toBe(0)
+      // Vacuity: a table of all zeroes would satisfy the sums above.
+      expect(Math.abs(DX[d] as number) + Math.abs(DY[d] as number)).toBeGreaterThan(0)
+    }
+    expect(OPPOSITE[SE]).toBe(NW)
+    expect(OPPOSITE[N]).toBe(4)
   })
 })

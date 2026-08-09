@@ -23,7 +23,7 @@ import {
 import { createWorld, type WorldData } from '../src/world'
 import { createFieldInputRanges } from '../src/regions'
 import { createScratch, createFlowFields, CT_REBUILDS, INF, type FlowField, type Scratch } from '../src/scratch'
-import { LANE_COUNT, LANE_OF_DIR, DX, DY, OPPOSITE, eraseRoad, stepCell } from '../src/roads'
+import { DIR_COUNT, LANE_COUNT, LANE_OF_DIR, DX, DY, OPPOSITE, eraseRoad, stepCell } from '../src/roads'
 import {
   placeHouse,
   placeDestination,
@@ -3322,27 +3322,50 @@ describe('REFUSED_GHOST: a ghost is not traversable by a car that has not commit
     // same route from that same cell with that same step, so `next` is the first
     // cell it visits and the answer is always `true`.
     //
-    // Enumerated here rather than left as a reading of two functions: both
-    // phases x every cursor x seven start cells x 500 pseudo-random routes, and
-    // the count of exceptions must be **zero**. Any change that makes it
+    // Enumerated here rather than left as a reading of two functions. **The
+    // space, stated exactly so the count is reproducible from its own
+    // description:** 2 phases x 500 pseudo-random 6-step routes x every legal
+    // cursor for that phase (6 each) x 7 start cells = **42,000 shapes**, of
+    // which the ones whose next step leaves the board are excluded (`advanceCar`
+    // throws on those before it asks) and the rest are put through the real
+    // `isCommittedTo`. The count of exceptions must be **zero**. Any change that makes it
     // non-zero — a different commitment definition, a route the cursor does not
     // track — turns this red and hands the next reader the case that reopens the
     // branch.
     const r = makeRig('ghost-unreachable', 'ghost-unreachable')
     const routeLen = 6
+    const starts = [23, 45, 150, 151, 88, 106, 199]
+    const ROUTES = 500
     let checked = 0
     let notCommitted = 0
+    let offBoard = 0
+    const dirsSeen = new Set<number>()
+    const routesSeen = new Set<string>()
+    // A 32-bit LCG through `Math.imul`, and the width is the whole point.
+    // **The first version of this loop multiplied a 31-bit state by 1103515245
+    // in double arithmetic, which overflows 2^53 and silently loses the low
+    // bits** — 500 seeds produced 5 distinct routes and never emitted 5 of the 8
+    // directions, so an enumeration advertised as covering the space covered a
+    // twentieth of it and the count it produced could not be reproduced from its
+    // own description. `Math.imul` keeps the product exact in 32 bits, and the
+    // two `Set`s below turn "the space was actually covered" into an assertion
+    // instead of a hope.
+    let x = 0x2f6e2b1 >>> 0
     for (const phase of [PHASE_OUTBOUND, PHASE_RETURNING]) {
-      for (let seed = 1; seed <= 500; seed++) {
-        let x = (seed * 2654435761) % 4294967296
+      for (let seed = 0; seed < ROUTES; seed++) {
+        let key = ''
         for (let k = 0; k < routeLen; k++) {
-          x = (x * 1103515245 + 12345) % 2147483648
-          packRouteStep(r.state, 0, k, x % 8)
+          x = (Math.imul(x, 1664525) + 1013904223) >>> 0
+          const d = (x >>> 24) % DIR_COUNT
+          dirsSeen.add(d)
+          key += String(d)
+          packRouteStep(r.state, 0, k, d)
         }
+        routesSeen.add(key)
         r.state.carRouteLen[0] = routeLen
         r.state.carPhase[0] = phase
         for (let cursor = 0; cursor <= routeLen; cursor++) {
-          for (const cell of [23, 45, 150, 151, 88, 106, 199]) {
+          for (const cell of starts) {
             const outbound = phase === PHASE_OUTBOUND
             if (outbound ? cursor >= routeLen : cursor <= 0) continue
             r.state.carRouteCursor[0] = cursor
@@ -3351,13 +3374,26 @@ describe('REFUSED_GHOST: a ghost is not traversable by a car that has not commit
               ? routeStep(r.state, 0, cursor)
               : (OPPOSITE[routeStep(r.state, 0, cursor - 1)] as number)
             const next = stepCell(cell, dir, r.world.w, r.world.h)
-            if (next < 0) continue // `advanceCar` throws on this before it asks
+            if (next < 0) {
+              // `advanceCar` throws on this before it ever asks `canEnter`, so
+              // it is outside the claim rather than a case that passes.
+              offBoard++
+              continue
+            }
             checked++
             if (!isCommittedTo(r.state, r.world, 0, next)) notCommitted++
           }
         }
       }
     }
+    // **Vacuity, and it is what the broken PRNG defeated.** All eight directions
+    // must appear, and the routes must be genuinely distinct — otherwise this is
+    // a handful of shapes wearing a five-digit count.
+    expect(dirsSeen.size, 'the enumeration never emitted some directions').toBe(DIR_COUNT)
+    expect(routesSeen.size, 'the routes are not distinct').toBeGreaterThan(900)
+    expect(checked + offBoard, 'the enumeration did not range over the whole space').toBe(
+      2 * ROUTES * routeLen * starts.length,
+    )
     expect(checked, 'vacuity: the enumeration must actually range over something').toBeGreaterThan(10000)
     expect(notCommitted, 'a car can be refused at a ghost it is committed to').toBe(0)
   })
