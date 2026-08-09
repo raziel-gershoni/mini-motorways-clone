@@ -4,8 +4,15 @@ import { H_DEST_COUNT, H_HOUSE_COUNT, H_ROUTES_REFUSED } from './state'
 import type { WorldData } from './world'
 import { INF, type FlowField, type Scratch } from './scratch'
 import { fieldFor } from './flowfield'
-import { DIR_COUNT, roadMask, stepCell } from './roads'
-import { carparkCell, destMetaColour, destMetaOrientation, PHASE_IDLE, PHASE_OUTBOUND } from './buildings'
+import { DIR_COUNT, OPPOSITE, roadMask, stepCell } from './roads'
+import {
+  carparkCell,
+  destMetaColour,
+  destMetaOrientation,
+  PHASE_IDLE,
+  PHASE_OUTBOUND,
+  PHASE_RETURNING,
+} from './buildings'
 
 /**
  * Dispatch: source assembly (phase 4 of the tick order), house selection,
@@ -99,6 +106,121 @@ export function routeStep(s: GameState, carIndex: number, i: number): number {
   assertStepIndex(i)
   const byteIndex = carIndex * ROUTE_BYTES + (i >> 1)
   return ((s.carRoute[byteIndex] as number) >> ((i & 1) * 4)) & 0xf
+}
+
+/**
+ * **Is car `i` committed to `cell`?** — the definition M1d Decision 8 leaves to
+ * this task, written down once, here, because `roads.ts` (the erase-time count)
+ * and `blocking.ts` (`REFUSED_GHOST`) must not be able to disagree about it.
+ *
+ * **"Committed" means: `cell` is on the part of this car's committed route it
+ * has yet to traverse, INCLUDING the cell it is standing on right now.**
+ *
+ *   - `PHASE_OUTBOUND` at cursor `j` on route `c_0..c_L`: `{c_j, ..., c_L}`.
+ *   - `PHASE_RETURNING` at cursor `j`: `{c_j, ..., c_0}` — the retrace is the
+ *     same route read backwards, so the remaining cells are the PREFIX.
+ *   - anything else: the empty set. An idle car has no route to be committed to.
+ *
+ * **Occupancy cannot express this and that is the whole point of the walk.**
+ * Occupancy records who is standing on a cell NOW; a committed car may be five
+ * cells short of it. `dispatchColour` above commits the whole route at dispatch,
+ * unreached cells included, and movement never re-paths — so keying §5.11's
+ * delayed refund on occupancy would fire it immediately and the ghost would
+ * vanish under an inbound committed car, which is the exact case §5.11 exists
+ * for.
+ *
+ * **Why the cell the car is STANDING on counts, and it is not a rounding
+ * choice.** `ghostCommitted` is decremented when a car DEPARTS a ghost cell.
+ * A car standing on the cell at erase time will depart it, so if it were not
+ * counted the departures would outnumber the count and the refund would land
+ * before the last committed car cleared. Count and decrement are two halves of
+ * one ledger; this is the half that keeps them balanced.
+ *
+ * ---------------------------------------------------------------------------
+ * THE RESIDUAL, DERIVED RATHER THAN DISCOVERED — READ THIS BEFORE "FIXING" IT
+ * ---------------------------------------------------------------------------
+ *
+ * An OUTBOUND car's committed set is the SUFFIX `{c_j..c_L}`, but its remaining
+ * journey also retraces `{c_{j-1}..c_0}` afterwards. So a car can depart a cell
+ * it was not counted for (a cell behind it, on the return leg), and can depart a
+ * cell it WAS counted for twice (once outbound, once returning). Three
+ * consequences, and only the third is a real cost:
+ *
+ *   1. **No underflow is possible.** `noteGhostDeparture` (roads.ts) decrements
+ *      only while `ghostMask[cell] !== 0`, and reaching 0 clears the mask in the
+ *      same statement — so every extra departure after the count is exhausted is
+ *      a no-op on a cell that is no longer a ghost.
+ *   2. **The tile budget is exact.** Exactly one refund is paid per ghosted
+ *      cell, by whichever event takes the count to 0, and `placeRoad` pays the
+ *      same one tile if a road lands there first. Never twice, never lost.
+ *   3. **The refund can land EARLY**, in one shape: a car re-crossing the cell
+ *      on its return leg spends a decrement that "belongs" to a car still
+ *      inbound, so the ghost can clear while a committed car has yet to reach
+ *      it. That car still drives the cell — movement never reads `roads` — and
+ *      the budget is still exact; what is lost is the visual, for that one cell.
+ *
+ * Closing (3) needs the count to be a count of remaining DEPARTURE EVENTS
+ * rather than of cars, which makes it up to `2 x maxCars` and moves the refund
+ * of a single committed car from its outbound crossing to its return crossing —
+ * contradicting this task's own required behaviour ("refunds on the tick that
+ * car crosses off the cell, not before and not later") and the plan's stated
+ * `maxCars` bound. It is written down here, with the derivation, rather than
+ * silently chosen: M1e owns the question if ghost lifetime ever becomes
+ * something a player can see going wrong.
+ *
+ * Walks with `stepCell` and `routeStep`, allocating nothing: two scalar locals
+ * and an indexed loop. Called once per in-flight car per erase, and once per
+ * crossing into a ghost cell — both rare, and neither inside an inner loop.
+ */
+export function isCommittedTo(state: GameState, world: WorldData, i: number, cell: number): boolean {
+  const phase = state.carPhase[i] as number
+  if (phase !== PHASE_OUTBOUND && phase !== PHASE_RETURNING) return false
+
+  let c = state.carCell[i] as number
+  if (c === cell) return true
+
+  const cursor = state.carRouteCursor[i] as number
+  if (phase === PHASE_OUTBOUND) {
+    const len = state.carRouteLen[i] as number
+    for (let k = cursor; k < len; k++) {
+      c = stepCell(c, routeStep(state, i, k), world.w, world.h)
+      // A corrupted route that leaves the board: stop rather than wrap the row
+      // seam onto a cell the route never named. `advanceCar` is the site that
+      // turns this into a named throw; a membership question must not.
+      if (c < 0) return false
+      if (c === cell) return true
+    }
+  } else {
+    for (let k = cursor - 1; k >= 0; k--) {
+      c = stepCell(c, OPPOSITE[routeStep(state, i, k)] as number, world.w, world.h)
+      if (c < 0) return false
+      if (c === cell) return true
+    }
+  }
+  return false
+}
+
+/**
+ * How many in-flight cars are committed to `cell` — the number `eraseRoad`
+ * stores in `ghostCommitted` when it defers a refund.
+ *
+ * Every car slot is visited, including `PHASE_NONE` ones past the live prefix:
+ * `isCommittedTo` returns false for every phase that is not OUTBOUND or
+ * RETURNING, so the phase byte is the liveness marker here exactly as it is in
+ * `runArrivals` and `runMovement`.
+ *
+ * **This is where "count every in-flight car rather than the committed ones"
+ * would live**, and the difference is only observable on a board that HAS an
+ * in-flight car that is not committed to the erased cell — which is why the
+ * fixture that pins this one carries a second, unrelated car by construction.
+ */
+export function countCommittedCars(state: GameState, world: WorldData, cell: number): number {
+  const carCount = state.carPhase.length
+  let n = 0
+  for (let i = 0; i < carCount; i++) {
+    if (isCommittedTo(state, world, i, cell)) n++
+  }
+  return n
 }
 
 /** Zeroes car `k`'s WHOLE route slice — never just the prefix a walk happened to reach. */

@@ -2,6 +2,7 @@ import type { GameState } from './state'
 import { H_SCORE } from './state'
 import { PHASE_IDLE, PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
 import { releaseCell } from './blocking'
+import { noteGhostDeparture } from './roads'
 import { ROUTE_BYTES } from './dispatch'
 
 /**
@@ -97,9 +98,14 @@ import { ROUTE_BYTES } from './dispatch'
  * **M1d's queueing adds no decrement to either slot here.** The one genuine new
  * `Uint8Array` decrement path in the milestone is **Task 5's `ghostCommitted`**
  * — the count of cars committed to a ghosted cell, decremented as each crosses
- * off it — and it carries this guard by name. That is a named recipient, not a
- * "whoever owns this"; Task 9 verifies at the end of the milestone that no
- * other new decrement path appeared.
+ * off it — and it carries this guard by name. **It has now landed, and the
+ * recipient honoured it**: `roads.ts`'s `assertGhostCommittedPositive` is the
+ * same shape as the `reserved <= 0` arm below, exercised directly, with the
+ * same "wrapping to 255 excludes something forever, silently" reasoning at its
+ * site. So the complete set of `Uint8Array` decrement paths in
+ * `packages/sim/src` is now THREE: `destPins` and `destReserved` here, and
+ * `ghostCommitted` in `roads.ts`. Task 9 verifies at the end of the milestone
+ * that no fourth appeared.
  *
  * Parameterised rather than closing over `state`, on the precedent of
  * `assertBucketCountExceedsEveryEdgeCost` (scratch.ts), `assertDispatchProgress`
@@ -165,8 +171,8 @@ function arriveAtDestination(state: GameState, i: number): void {
  * 1g's compression measurement — and through it M3's 4,096-character
  * CloudStorage budget — depends on it exactly: `carRoute` is 3,840 B of the
  * state buffer (of 7,908 B at M1c; of 11,908 B after M1d Task 2 added
- * `occupancy` and `carBlockedTicks`, and 13,828 B after Task 5's two ghost
- * regions — M3 must re-measure, not extrapolate), and the prediction that a
+ * `occupancy` and `carBlockedTicks`, and 13,828 B as of Task 5's two ghost
+ * regions, which is the final M1d figure — M3 must re-measure, not extrapolate), and the prediction that a
  * snapshot compresses is the prediction that an idle car's route slice is a run
  * of zeros. After this runs, the car's own slot in every CAR region is
  * byte-identical to a freshly created car's slot, which is what
@@ -218,6 +224,17 @@ function completeTrip(state: GameState, i: number): void {
   // argument; the manifold argument is what the `carCell` write below already
   // declines to trust.
   releaseCell(state, i, state.carCell[i] as number)
+  // M1d Task 5: trip end is a ghost DEPARTURE as well as an occupancy release —
+  // the two events coincide because both are "this car has stopped standing on
+  // this cell". Without it, a ghost whose last committed car's route ENDS on it
+  // would never reach 0 and its tile would be confiscated for the rest of the
+  // run, which is the mirror of the double-refund and just as silent. The house
+  // cell is a road cell like any other (roads.ts keeps house cells placeable),
+  // so this is not an exotic case: it is every trip whose house cell is erased.
+  //
+  // Read from `carCell[i]` before the write below, on exactly the reasoning the
+  // release above already carries.
+  noteGhostDeparture(state, state.carCell[i] as number)
   state.carCell[i] = state.houseCell[state.carHome[i] as number] as number
   state.carTargetDest[i] = -1
   state.carProgress[i] = 0

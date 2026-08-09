@@ -614,17 +614,21 @@ describe('the seeded-state golden', () => {
     // is the point: this is the only assertion that sees a change nobody
     // wrote a named test for.
     //
-    // Re-blessed in M1d Task 2 (was 2505371110): the state buffer grew from
-    // 7,908 to 11,908 bytes with `occupancy` and `carBlockedTicks`. **Layout
-    // only, derived**: splicing the 4,000 inserted bytes back out of this
-    // buffer reproduces 2505371110 exactly. 4,000 is `firstCity`'s figure
-    // specifically (960 cells x 2 lanes x 2 B = 3,840, plus 80 cars x 2 B =
-    // 160) and this is the only one of the four re-blessed goldens that runs
-    // on `firstCity`; the other three splice 96, 152 and 1,120 bytes on their
-    // own maps. This golden is taken immediately
-    // after `seedStartingCity`, before any tick, so it cannot move for a
-    // behavioural reason in this milestone.
-    expect(hashState(state)).toBe(3576722662)
+    // **Re-blessed in M1d Task 5 (was 3576722662 at Task 2; 2505371110 at M2)
+    // — the second and last re-bless of this number in M1d.** The state buffer
+    // grew from 11,908 to 13,828 bytes with `ghostMask` and `ghostCommitted`,
+    // one `Uint8` per cell each. **Layout only, derived**: splicing the 1,920
+    // inserted bytes back out of this buffer reproduces 3576722662 exactly.
+    // 1,920 is `firstCity`'s figure specifically (960 cells x 2 regions x 1 B)
+    // and this is the only one of the four re-blessed goldens that runs on
+    // `firstCity`; the other three splice 32, 60 and 480 bytes on their own
+    // maps. This golden is taken immediately after `seedStartingCity`, before
+    // any tick, so it cannot move for a behavioural reason in this milestone —
+    // and with no tick there is no car in flight and nothing erased, so both
+    // ghost regions are all-zero.
+    expect(state.ghostMask.every((b) => b === 0), 'the seed erases nothing').toBe(true)
+    expect(state.ghostCommitted.every((b) => b === 0)).toBe(true)
+    expect(hashState(state)).toBe(1178110182)
   })
 
   it('differs from the unseeded state — otherwise the golden pins nothing', () => {

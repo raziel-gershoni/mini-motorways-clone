@@ -276,6 +276,8 @@ describe('view layout wiring', () => {
     { name: 'destReserved', ctor: Uint8Array, len: MAP.maxDestinations },
     { name: 'carPhase', ctor: Uint8Array, len: maxCars },
     { name: 'carRoute', ctor: Uint8Array, len: maxCars * routeBytes },
+    { name: 'ghostMask', ctor: Uint8Array, len: cells },
+    { name: 'ghostCommitted', ctor: Uint8Array, len: cells },
   ] as const
 
   it('wires every view to its own layout entry, with no gap or overlap beyond declared padding', () => {
@@ -306,6 +308,8 @@ describe('view layout wiring', () => {
       destReserved: s.destReserved,
       carPhase: s.carPhase,
       carRoute: s.carRoute,
+      ghostMask: s.ghostMask,
+      ghostCommitted: s.ghostCommitted,
     }
 
     let sumOfViewBytes = 0
@@ -334,8 +338,9 @@ describe('view layout wiring', () => {
   // correctly appends a 2-byte TAIL pad for it (layout.ts's own documented
   // "rounds the total up to 4 even when no region is that wide" behaviour —
   // this is expected, not a defect). The plan's zero-padding claim is
-  // specifically about `firstCity`'s sizes (960 cells, total exactly 11,908 B
-  // after M1d Task 2's two Int16 regions; 7,908 B at M1c), and is asserted
+  // specifically about `firstCity`'s sizes (960 cells, total exactly 13,828 B
+  // after M1d Task 5's two Uint8 regions; 11,908 B after Task 2, 7,908 B at
+  // M1c), and is asserted
   // against the real, exported `regionsFor(firstCity())` in `regions.test.ts`,
   // not re-derived here against an unrelated fixture.
 })

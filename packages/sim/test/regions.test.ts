@@ -44,15 +44,36 @@ describe('regionsFor', () => {
     expect(totalBytes).toBe(declaredBytes)
   })
 
-  it('totals exactly 11,908 bytes for firstCity, per the plan\'s region table', () => {
-    // M1c: 7,908 B over 22 regions. M1d Task 2 appends two `Int16` regions to
+  it('totals exactly 13,828 bytes for firstCity, per the plan\'s region table', () => {
+    // M1c: 7,908 B over 22 regions. M1d Task 2 appended two `Int16` regions to
     // the end of the `Int16` tier — `occupancy` (2 x 960 cells = 1,920
     // elements, 3,840 B) and `carBlockedTicks` (maxCars = 80, 160 B) — for
-    // 7,908 + 4,000 = 11,908, exactly the figure the plan's "Why exactly two
-    // re-blesses are true" table predicts. Task 5 takes it to 13,828 and no
-    // task after that changes it.
+    // 7,908 + 4,000 = 11,908. **M1d Task 5 appends the last two**, both `Uint8`
+    // and both one per cell, to the end of the `Uint8` tier: `ghostMask` (960
+    // B) and `ghostCommitted` (960 B), for 11,908 + 1,920 = **13,828** —
+    // exactly the figure the plan's "Why exactly two re-blesses are true" table
+    // predicts, and the milestone's final buffer size. No task after this one
+    // changes it: Tasks 6 and 7 bless NEW goldens, which they could not do if
+    // the shape were still moving.
     const { totalBytes } = computeLayout(regionsFor(MAP))
-    expect(totalBytes).toBe(11908)
+    expect(totalBytes).toBe(13828)
+  })
+
+  it('the two M1d Task 5 ghost regions have the exact element counts and byte sizes the plan predicts', () => {
+    // Spelled out separately from the total for the same reason the Task 2 pair
+    // is: a total is satisfied by any two regions summing to 1,920 B, including
+    // one region of 1,920 cells (a per-LANE ghost, which the renderer could not
+    // use) or a `Uint16` count (which would double the cost of a counter whose
+    // whole point is that it fits in a byte).
+    const byName = new Map(regionsFor(MAP).map((r) => [r.name, r]))
+    const mask = byName.get('ghostMask')!
+    const committed = byName.get('ghostCommitted')!
+    expect(mask.ctor).toBe(Uint8Array)
+    expect(mask.len).toBe(MAP.w * MAP.h)
+    expect(mask.len * mask.ctor.BYTES_PER_ELEMENT).toBe(960)
+    expect(committed.ctor).toBe(Uint8Array)
+    expect(committed.len).toBe(MAP.w * MAP.h)
+    expect(committed.len * committed.ctor.BYTES_PER_ELEMENT).toBe(960)
   })
 
   it('the two M1d Task 2 regions have the exact element counts and byte sizes the plan predicts', () => {
@@ -71,7 +92,7 @@ describe('regionsFor', () => {
     expect(blocked.len * blocked.ctor.BYTES_PER_ELEMENT).toBe(160)
   })
 
-  it('declares exactly the 24 named regions the plan lists, no more and no fewer', () => {
+  it('declares exactly the 26 named regions the plan lists, no more and no fewer', () => {
     const names = regionsFor(MAP).map((r) => r.name)
     expect(names).toEqual([
       'rng',
@@ -98,6 +119,8 @@ describe('regionsFor', () => {
       'destReserved',
       'carPhase',
       'carRoute',
+      'ghostMask',
+      'ghostCommitted',
     ])
   })
 })
@@ -146,6 +169,21 @@ describe('FIELD_INPUT / FIELD_IRRELEVANT partition', () => {
     expect(new Set<string>(FIELD_INPUT_REGIONS)).toEqual(
       new Set(['mapIdentity', 'destCell', 'roads', 'destMeta', 'destPins']),
     )
+  })
+
+  it('both M1d Task 5 ghost regions are FIELD_IRRELEVANT, by name', () => {
+    // The exact-set pin above fires if either is misclassified, but with a
+    // message about a set. This one names the region and the reason, so a
+    // failure points at Decision 4: the ghost's whole effect on routing is
+    // already carried by `roads`, which is already FIELD_INPUT — `eraseRoad`
+    // MOVES the bit rather than duplicating it, so `dist[ghostCell]` is INF
+    // from the erase tick and hashing `ghostMask` would rebuild every colour a
+    // second time for a change the `roads` hash has already seen.
+    // `ghostCommitted` is worse again: it moves on car CROSSINGS.
+    expect(isFieldIrrelevantRegion('ghostMask')).toBe(true)
+    expect(isFieldInputRegion('ghostMask')).toBe(false)
+    expect(isFieldIrrelevantRegion('ghostCommitted')).toBe(true)
+    expect(isFieldInputRegion('ghostCommitted')).toBe(false)
   })
 
   it('both M1d Task 2 regions are FIELD_IRRELEVANT, by name', () => {

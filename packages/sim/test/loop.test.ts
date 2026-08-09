@@ -759,21 +759,29 @@ describe('golden replay: the whole trip loop', () => {
     // buffer layout. When a rule change makes it fail intentionally, re-bless
     // it in the same commit as the change, never separately.
     //
-    // Re-blessed in M1d Task 2 (was 3896659943): the buffer grew from 7,908 to
-    // 11,908 bytes with `occupancy` and `carBlockedTicks`. **Layout only, and
-    // this is the fixture that PROVES it rather than merely asserting it** —
-    // unlike the three static goldens, 130 real ticks of dispatch, movement,
-    // arrivals and scoring have run here with a car mid-flight, so the
-    // occupancy region is genuinely populated. Splicing the inserted bytes
-    // back out of this buffer reproduces 3896659943 bit-for-bit, so not one
-    // byte of any pre-existing region moved across a live trip loop. The
-    // splice is **1,120 bytes at offset 1,980** for THIS fixture (20x12 = 240
-    // cells x 2 lanes x 2 B = 960, plus 80 cars x 2 B = 160), against a whole
-    // buffer of 6,468 -> 7,588 bytes; `firstCity`'s 4,000 belongs to
-    // `startingCity.test.ts` and to no other golden here. Every
-    // behavioural literal above is likewise unchanged, and the field golden did
-    // not move. Task 5 is the second and last re-bless of this number.
-    expect(hashState(r.state)).toBe(452702392)
+    // **Re-blessed in M1d Task 5 (was 452702392 at Task 2; 3896659943 at M1c).
+    // This is the second and last re-bless of this number: both of M1d's
+    // buffer changes are now behind us, and Tasks 6-9 must leave it alone.**
+    // Task 5 appended `ghostMask` and `ghostCommitted`, one `Uint8` per cell
+    // each. **Layout only, and this is the fixture that PROVES it rather than
+    // merely asserting it** — unlike the three static goldens, 130 real ticks
+    // of dispatch, movement, arrivals and scoring have run here with a car
+    // mid-flight. Splicing the inserted bytes back out of this buffer
+    // reproduces 452702392 bit-for-bit, so not one byte of any pre-existing
+    // region moved across a live trip loop, occupancy included. The splice is
+    // **480 bytes at offset 7,588** for THIS fixture (20x12 = 240 cells x 2
+    // regions x 1 B), against a whole buffer of 7,588 -> 8,068 bytes;
+    // `firstCity`'s 1,920 belongs to `startingCity.test.ts` and to no other
+    // golden here. Every behavioural literal above is likewise unchanged, and
+    // the field golden did not move.
+    //
+    // The fixture never erases a road, so **both ghost regions are all-zero**
+    // — asserted rather than assumed, because a golden that moved partly for
+    // layout and partly for a stray ghost write would be indistinguishable
+    // from one that moved purely for layout.
+    expect(r.state.ghostMask.every((b) => b === 0), 'the loop fixture erases nothing').toBe(true)
+    expect(r.state.ghostCommitted.every((b) => b === 0)).toBe(true)
+    expect(hashState(r.state)).toBe(2942219448)
   })
 
   it('leaves the three existing goldens alone — this task adds a golden, it does not move one', () => {
@@ -793,8 +801,8 @@ describe('golden replay: the whole trip loop', () => {
     const determinism = readFileSync(`${here}determinism.test.ts`, 'utf8')
     const rollback = readFileSync(`${here}rollback.test.ts`, 'utf8')
 
-    expect(determinism, 'the state golden moved').toContain('toBe(1729791425)')
-    expect(rollback, 'the road-network golden moved').toContain('toBe(3949962277)')
+    expect(determinism, 'the state golden moved').toContain('toBe(340556353)')
+    expect(rollback, 'the road-network golden moved').toContain('toBe(2076760277)')
     expect(rollback, 'the field golden moved — that one is a tripwire, not a re-bless').toContain(
       'toBe(252514232)',
     )
@@ -802,7 +810,7 @@ describe('golden replay: the whole trip loop', () => {
     // empty strings that trivially fail to contain anything else either.
     expect(determinism.length).toBeGreaterThan(1000)
     expect(rollback.length).toBeGreaterThan(1000)
-    expect(determinism).not.toContain('toBe(3949962277)') // the two files own different numbers
+    expect(determinism).not.toContain('toBe(2076760277)') // the two files own different numbers
   })
 })
 

@@ -189,6 +189,20 @@ export interface GameState {
   readonly destReserved: Uint8Array
   readonly carPhase: Uint8Array
   readonly carRoute: Uint8Array
+  /**
+   * The road bit an erase removed from a cell whose live mask thereby reached
+   * 0 while at least one car was still committed to it — spec §5.11's ghost
+   * road, M1d Task 5. A BIT, not a boolean: the renderer blits one atlas tile
+   * per 8-bit mask and never blits mask 0. `roads.ts` owns every write.
+   */
+  readonly ghostMask: Uint8Array
+  /**
+   * How many in-flight cars were committed to that ghost cell at erase time.
+   * Only ever falls; reaching 0 clears both regions and pays the deferred
+   * refund. The milestone's one new `Uint8Array` decrement path, guarded by
+   * name (`assertGhostCommittedPositive`, roads.ts).
+   */
+  readonly ghostCommitted: Uint8Array
 }
 
 /** Every field of `GameState` besides `buffer`, in the exact order `regionsFor` declares them. */
@@ -217,6 +231,8 @@ const REGION_FIELD_NAMES = Object.freeze([
   'destReserved',
   'carPhase',
   'carRoute',
+  'ghostMask',
+  'ghostCommitted',
 ] as const)
 
 function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
@@ -259,6 +275,8 @@ function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
   const destReserved = views.get('destReserved')
   const carPhase = views.get('carPhase')
   const carRoute = views.get('carRoute')
+  const ghostMask = views.get('ghostMask')
+  const ghostCommitted = views.get('ghostCommitted')
   if (
     !(rng instanceof Uint32Array) ||
     !(mapIdentity instanceof Int32Array) ||
@@ -283,7 +301,9 @@ function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
     !(destPins instanceof Uint8Array) ||
     !(destReserved instanceof Uint8Array) ||
     !(carPhase instanceof Uint8Array) ||
-    !(carRoute instanceof Uint8Array)
+    !(carRoute instanceof Uint8Array) ||
+    !(ghostMask instanceof Uint8Array) ||
+    !(ghostCommitted instanceof Uint8Array)
   ) {
     throw new Error('state layout: view construction did not produce the expected region types')
   }
@@ -314,6 +334,8 @@ function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
     destReserved,
     carPhase,
     carRoute,
+    ghostMask,
+    ghostCommitted,
   }
 }
 

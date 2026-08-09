@@ -693,17 +693,20 @@ describe('blessed goldens', () => {
     )
     expect(tilesLeft(state), 'and must not have overspent the budget').toBeGreaterThanOrEqual(0)
 
-    // Re-blessed in M1d Task 2 (was 2790151213, M1c's value; 3183850973 at
-    // M1b): the buffer grew from 7,908 to 11,908 bytes with `occupancy` and
-    // `carBlockedTicks`. See "Why exactly two re-blesses are true" in the M1d
-    // plan. **Layout only, derived**: splicing the inserted bytes back out
-    // reproduces 2790151213 exactly. The splice is **152 bytes at offset 452**
-    // for THIS fixture (GOLDEN_MAP is 6x5 with maxHouses 8: 30 cells x 2 lanes
-    // x 2 B = 120, plus 16 cars x 2 B = 32), against a whole buffer of
-    // 1,316 -> 1,468 bytes — not `firstCity`'s 4,000, which is a different
-    // map. This fixture never calls `step`, so it cannot move for a
-    // behavioural reason in this milestone.
-    expect(hashState(state)).toBe(3949962277)
+    // **Re-blessed in M1d Task 5 (was 3949962277 at Task 2; 2790151213 at M1c;
+    // 3183850973 at M1b) — the second and last re-bless of this number in
+    // M1d.** Task 5 appended `ghostMask` and `ghostCommitted`, one `Uint8` per
+    // cell each. See "Why exactly two re-blesses are true" in the M1d plan.
+    // **Layout only, derived**: splicing the inserted bytes back out
+    // reproduces 3949962277 exactly. The splice is **60 bytes at offset 1,468**
+    // for THIS fixture (GOLDEN_MAP is 6x5: 30 cells x 2 regions x 1 B),
+    // against a whole buffer of 1,468 -> 1,528 bytes — not `firstCity`'s
+    // 1,920, which is a different map. This fixture never calls `step`, so it
+    // cannot move for a behavioural reason in this milestone, and it has no
+    // car to be committed to anything: both ghost regions are all-zero.
+    expect(state.ghostMask.every((b) => b === 0), 'no fixture cell is a ghost').toBe(true)
+    expect(state.ghostCommitted.every((b) => b === 0)).toBe(true)
+    expect(hashState(state)).toBe(2076760277)
   })
 
   it("field golden: pins hashBytes over each colour's dist/dir bytes, folded together, computed over the SAME fixed network above", () => {

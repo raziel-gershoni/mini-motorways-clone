@@ -547,23 +547,28 @@ describe('golden replay', () => {
       step(s, GOLDEN_WORLD, fields, scratch, NO_INPUT)
       if (i % 1000 === 0) nextRandom(s.rng, 0)
     }
-    // Re-blessed in M1d Task 2 (was 2413319809, M1c's value; 1073292924 at
-    // M1b): the buffer grew from 7,908 to 11,908 bytes with the two Int16
-    // regions M1d's blocking primitive needs — `occupancy` (2 x cells,
-    // FREE-filled) and `carBlockedTicks` (maxCars) — per the plan's "Why
-    // exactly two re-blesses are true". **Layout only, and derived rather
+    // **Re-blessed in M1d Task 5 (was 1729791425 at Task 2; 2413319809 at M1c;
+    // 1073292924 at M1b). This is the SECOND AND LAST re-bless of this number
+    // in M1d** — the plan's "Why exactly two re-blesses are true" fixes the
+    // buffer shape here at 26 regions, and Tasks 6-9 must leave it alone.
+    //
+    // Task 5 appended `ghostMask` and `ghostCommitted`, one `Uint8` per cell
+    // each, to the end of the `Uint8` tier. **Layout only, and derived rather
     // than assumed**: splicing the inserted bytes back out of this buffer
-    // reproduces 2413319809 exactly, so no pre-existing byte moved. The splice
-    // is **96 bytes at offset 452** FOR THIS FIXTURE, not the 4,000 of
-    // `firstCity` — GOLDEN_MAP above is 4x4 with maxHouses 8, so occupancy is
-    // 16 cells x 2 lanes x 2 B = 64 and carBlockedTicks is 16 cars x 2 B = 32,
-    // against a whole buffer of 1,288 -> 1,384 bytes. Each of the four
+    // reproduces 1729791425 exactly, so no pre-existing byte moved. The splice
+    // is **32 bytes at offset 1,384** FOR THIS FIXTURE, not the 1,920 of
+    // `firstCity` — GOLDEN_MAP above is 4x4, so 16 cells x 2 regions x 1 B =
+    // 32, against a whole buffer of 1,384 -> 1,416 bytes. Each of the four
     // re-blessed goldens runs on a DIFFERENT map and each splice is a
-    // different size; quoting `firstCity`'s figure here would be impossible on
-    // its face and would read as a fabricated derivation.
+    // different size (32, 60, 480, 1,920); quoting `firstCity`'s figure here
+    // would be impossible on its face and would read as a fabricated
+    // derivation.
     // This fixture places no building and therefore has no car, so it cannot
-    // move for a behavioural reason in this milestone at all — after Task 2
-    // it is a pure layout tripwire until Task 5's second (and last) change.
-    expect(hashState(s)).toBe(1729791425)
+    // move for a behavioural reason in this milestone at all — and both ghost
+    // regions are all-zero in it, asserted below, which is what makes "the
+    // digest moved for layout" checkable rather than merely stated.
+    expect(s.ghostMask.every((b) => b === 0), 'no fixture cell is a ghost').toBe(true)
+    expect(s.ghostCommitted.every((b) => b === 0), 'no fixture cell has a committed count').toBe(true)
+    expect(hashState(s)).toBe(340556353)
   })
 })

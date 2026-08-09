@@ -22,8 +22,8 @@ import {
 } from '../src/state'
 import { createWorld, type WorldData } from '../src/world'
 import { createFieldInputRanges } from '../src/regions'
-import { createScratch, createFlowFields, CT_REBUILDS, type FlowField, type Scratch } from '../src/scratch'
-import { LANE_COUNT, LANE_OF_DIR, DX, DY, OPPOSITE, stepCell } from '../src/roads'
+import { createScratch, createFlowFields, CT_REBUILDS, INF, type FlowField, type Scratch } from '../src/scratch'
+import { LANE_COUNT, LANE_OF_DIR, DX, DY, OPPOSITE, eraseRoad, stepCell } from '../src/roads'
 import {
   placeHouse,
   placeDestination,
@@ -46,7 +46,9 @@ import {
   hasCrossedThisLeg,
   noteEntryGranted,
   noteEntryRefused,
+  assertEnterCarValid,
   assertEnterCellOnBoard,
+  isEntryGranted,
   assertEnterDirValid,
   assertMaxCarsFitsOccupancy,
   assertOccupancySound,
@@ -55,9 +57,10 @@ import {
   type EnterOutcomeCode,
 } from '../src/blocking'
 import { runMovement, speedUnits } from '../src/cars'
-import { packRouteStep } from '../src/dispatch'
+import { isCommittedTo, packRouteStep, routeStep } from '../src/dispatch'
 import { runArrivals } from '../src/trips'
 import { step, type TickAction, type TickInputs } from '../src/step'
+import { fieldFor } from '../src/flowfield'
 
 /**
  * M1d Task 2: the occupancy region and its claim/release lifecycle.
@@ -1485,8 +1488,9 @@ describe('canEnter, asked directly (Decision 8s outcome codes)', () => {
 
   it('the outcome codes are a frozen, all-non-zero enum with all four members declared now', () => {
     // Declared in full in Task 3 so that no later task WIDENS a return type a
-    // caller is already switching on: `ENTER_VALVE` is Task 4's and
-    // `REFUSED_GHOST` is Task 5's, and neither is reachable yet.
+    // caller is already switching on. **All four are now returned by `canEnter`:**
+    // `ENTER_VALVE` was wired in Task 4 and `REFUSED_GHOST` in Task 5, which is
+    // what the ghost section at the foot of this file exercises.
     expect(Object.isFrozen(EnterOutcome)).toBe(true)
     expect(EnterOutcome).toEqual({
       ENTER_FREE: 1,
@@ -2480,12 +2484,23 @@ describe('the counter itself: one per refusal, saturating, cleared by any grant'
   it('increments by exactly one and saturates AT the firing threshold, never above it', () => {
     // Called directly, on the precedent of `assertSingleCrossing` (cars.ts) and
     // the guards above: the ceiling is NOT production-reachable through
-    // `runMovement` today, because a counter that reaches 1,350 is answered
-    // ENTER_VALVE on the very next tick and reset by the crossing. It is
-    // reachable the moment Task 5's `REFUSED_GHOST` exists — the valve is
-    // forbidden to release that one, so a ghost-refused car would be refused
-    // while saturated, every tick, and an unclamped Int16 counter would wrap
-    // negative after 32,767 of them and disarm the valve for that car forever.
+    // `runMovement`, because a counter that reaches 1,350 is answered
+    // ENTER_VALVE on the very next tick and reset by the crossing.
+    //
+    // **Task 4 predicted that Task 5's `REFUSED_GHOST` would make it reachable
+    // — a car refused by a ghost being refused while saturated, forever. Task 5
+    // has landed and the prediction was wrong**, so it is corrected here rather
+    // than left standing. `advanceCar` only ever asks `canEnter` about the next
+    // cell of its own committed route, and `isCommittedTo` answers `true` for
+    // that cell by construction (enumerated: 131,930 in-flight shapes, zero
+    // exceptions — see the ghost section at the foot of this file), so
+    // `runMovement` cannot produce a `REFUSED_GHOST` at all and no car can be
+    // refused while saturated. The clamp stays a fail-closed guard whose only
+    // observer is this direct call, and it stays for the reason it was written:
+    // an unclamped Int16 counter would wrap negative after 32,767 consecutive
+    // refusals and disarm the valve for that car forever, and nothing about the
+    // present unreachability is guaranteed by anything a future task cannot
+    // change.
     const r = makeRig('valve-counter', 'valve-counter')
     for (let k = 1; k <= 5; k++) {
       noteEntryRefused(r.state, 2)
@@ -3185,5 +3200,255 @@ describe('carBlockedTicks is buffer state, so a Worker cold-starting a replay va
       REPLAY_TICKS,
     ])
     expect(hashState(lost.state)).not.toBe(finalHash)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M1d TASK 5 — REFUSED_GHOST
+// ---------------------------------------------------------------------------
+
+/**
+ * **`REFUSED_GHOST` is not reachable through `runDispatch` + `runMovement`, and
+ * that is a property of the design rather than a gap in these fixtures.**
+ *
+ * The two halves of its condition cannot both hold on the reachable manifold.
+ * `eraseRoad` clears the live road bits before it ghosts the cell, so
+ * `dist[cell]` is INF and **no route committed after the erase can contain it**
+ * (asserted below, directly, against a real flow field); and every car
+ * committed BEFORE the erase is by definition committed, so `canEnter` grants
+ * it. A car that is on a ghost cell's doorstep and NOT committed to it therefore
+ * has to be built by hand.
+ *
+ * That is the same idiom as `assertSingleCrossing` (cars.ts),
+ * `assertDispatchProgress` (dispatch.ts) and `assertPlaceCost` (roads.ts): the
+ * branch is exercised directly and labelled unreachable **so nobody deletes it
+ * on the strength of its own survival.** What it buys is stated rather than
+ * implied — without it, erasing a road under traffic would be free capacity,
+ * because any car could then drive the erased cell, and §5.11's ghost would be
+ * a road that still works.
+ */
+describe('REFUSED_GHOST: a ghost is not traversable by a car that has not committed to it (Task 5)', () => {
+  const GHOST_CELL = 150
+  const GHOST_BIT = 1 << DIR_E
+
+  /** Marks `cell` a ghost by hand, exactly as `eraseRoad` would. */
+  function ghost(r: Rig, cell: number, committed: number): void {
+    r.state.ghostMask[cell] = GHOST_BIT
+    r.state.ghostCommitted[cell] = committed
+  }
+
+  it('refuses a car whose committed route does not contain the cell', () => {
+    const r = makeRig('ghost-refused', 'ghost-refused')
+    // Car 0 stands on 149 with a route running WEST, away from 150 — so 150 is
+    // on neither its remaining route nor its current cell.
+    handCar(r, { i: 0, cell: 149, progress: 0, step: DIR_W, enteredBy: DIR_W })
+    ghost(r, GHOST_CELL, 1)
+    expect(isCommittedTo(r.state, r.world, 0, GHOST_CELL), 'fixture: car 0 must NOT be committed').toBe(
+      false,
+    )
+    // The slot is FREE, so without the ghost branch this is ENTER_FREE — which
+    // is the whole discriminator, and it is asserted as the control below.
+    expect(slotsOf(r.state, GHOST_CELL)).toEqual([FREE, FREE])
+    expect(canEnter(r.state, r.world, 0, GHOST_CELL, DIR_E)).toBe(EnterOutcome.REFUSED_GHOST)
+  })
+
+  it('grants ENTER_FREE to a car that IS committed to the same ghost cell — the discriminator', () => {
+    // Identical board, one thing different: the car's route runs EAST, through
+    // 150. If this said REFUSED_GHOST the feature would be inverted and a
+    // committed car could never clear the ghost, so the refund could never be
+    // paid at all.
+    const r = makeRig('ghost-committed', 'ghost-committed')
+    handCar(r, { i: 0, cell: 149, progress: 0, step: DIR_E, enteredBy: DIR_E })
+    ghost(r, GHOST_CELL, 1)
+    expect(isCommittedTo(r.state, r.world, 0, GHOST_CELL)).toBe(true)
+    expect(canEnter(r.state, r.world, 0, GHOST_CELL, DIR_E)).toBe(EnterOutcome.ENTER_FREE)
+  })
+
+  it('the control: with the ghost cleared, the very same non-committed car is granted', () => {
+    // The catalogue's most-repeated family, closed for this branch: "the car was
+    // refused" must be satisfied only by the ghost. Same rig, same car, same
+    // direction, `ghostMask` back to 0.
+    const r = makeRig('ghost-control', 'ghost-control')
+    handCar(r, { i: 0, cell: 149, progress: 0, step: DIR_W, enteredBy: DIR_W })
+    ghost(r, GHOST_CELL, 1)
+    expect(canEnter(r.state, r.world, 0, GHOST_CELL, DIR_E)).toBe(EnterOutcome.REFUSED_GHOST)
+    r.state.ghostMask[GHOST_CELL] = 0
+    expect(canEnter(r.state, r.world, 0, GHOST_CELL, DIR_E)).toBe(EnterOutcome.ENTER_FREE)
+  })
+
+  it('the ghost test sits IN FRONT of the occupancy test: an occupied ghost still says GHOST', () => {
+    // Ordering, asserted rather than read off the source. A cell that is both a
+    // ghost and occupied has two possible refusals, and the ghost must win —
+    // otherwise the valve, which lives inside the occupied branch, gets to see
+    // it. This is the assertion that fails if the ghost check is moved below
+    // the occupancy read.
+    const r = makeRig('ghost-before-occupied', 'ghost-before-occupied')
+    handCar(r, { i: 0, cell: 149, progress: 0, step: DIR_W, enteredBy: DIR_W })
+    claimCell(r.state, 1, GHOST_CELL, DIR_E)
+    ghost(r, GHOST_CELL, 1)
+    expect(occupantOf(r.state, GHOST_CELL, LANE_OF_DIR[DIR_E] as number)).toBe(1)
+    expect(canEnter(r.state, r.world, 0, GHOST_CELL, DIR_E)).toBe(EnterOutcome.REFUSED_GHOST)
+  })
+
+  it('THE VALVE DOES NOT RELEASE IT: a saturated counter on a ghost is still REFUSED_GHOST', () => {
+    // Decision 8's rule, and the milestone's named worst outcome if it were
+    // wrong: *a car must never drive onto a road that no longer exists merely
+    // because it waited.* The same saturated counter on an OCCUPIED cell is
+    // released — asserted here as the control, on the same rig — so this is a
+    // statement about the ghost and not about a counter that failed to saturate.
+    const r = makeRig('ghost-vs-valve', 'ghost-vs-valve')
+    handCar(r, { i: 0, cell: 149, progress: 0, step: DIR_W, enteredBy: DIR_W })
+    r.state.carBlockedTicks[0] = MAX_BLOCKED_TICKS
+    ghost(r, GHOST_CELL, 1)
+    expect(canEnter(r.state, r.world, 0, GHOST_CELL, DIR_E)).toBe(EnterOutcome.REFUSED_GHOST)
+    // Well past the ceiling, too: the answer is not a threshold artefact.
+    r.state.carBlockedTicks[0] = 32767
+    expect(canEnter(r.state, r.world, 0, GHOST_CELL, DIR_E)).toBe(EnterOutcome.REFUSED_GHOST)
+    // Control: the identical saturated counter DOES release an occupied cell.
+    r.state.ghostMask[GHOST_CELL] = 0
+    claimCell(r.state, 1, GHOST_CELL, DIR_E)
+    expect(canEnter(r.state, r.world, 0, GHOST_CELL, DIR_E)).toBe(EnterOutcome.ENTER_VALVE)
+  })
+
+  it('runMovement CANNOT produce a REFUSED_GHOST, and that is enumerated rather than argued', () => {
+    // **The finding that corrects this milestone's own instructions.** Tasks 3
+    // and 4 each recorded a labelled-inert mutant in `cars.ts` and named Task 5
+    // as the task whose `REFUSED_GHOST` would kill it; the M1d plan says the
+    // code is "reachable only from a hand-built state" but attributes that to
+    // `dist[cell]` being INF, which is a statement about DISPATCH. The stronger
+    // and simpler fact is about MOVEMENT: `advanceCar` asks `canEnter` about
+    // exactly one cell — `next = stepCell(carCell, dir)`, where `dir` is the
+    // current step of its own committed route — and `isCommittedTo` walks that
+    // same route from that same cell with that same step, so `next` is the first
+    // cell it visits and the answer is always `true`.
+    //
+    // Enumerated here rather than left as a reading of two functions: both
+    // phases x every cursor x seven start cells x 500 pseudo-random routes, and
+    // the count of exceptions must be **zero**. Any change that makes it
+    // non-zero — a different commitment definition, a route the cursor does not
+    // track — turns this red and hands the next reader the case that reopens the
+    // branch.
+    const r = makeRig('ghost-unreachable', 'ghost-unreachable')
+    const routeLen = 6
+    let checked = 0
+    let notCommitted = 0
+    for (const phase of [PHASE_OUTBOUND, PHASE_RETURNING]) {
+      for (let seed = 1; seed <= 500; seed++) {
+        let x = (seed * 2654435761) % 4294967296
+        for (let k = 0; k < routeLen; k++) {
+          x = (x * 1103515245 + 12345) % 2147483648
+          packRouteStep(r.state, 0, k, x % 8)
+        }
+        r.state.carRouteLen[0] = routeLen
+        r.state.carPhase[0] = phase
+        for (let cursor = 0; cursor <= routeLen; cursor++) {
+          for (const cell of [23, 45, 150, 151, 88, 106, 199]) {
+            const outbound = phase === PHASE_OUTBOUND
+            if (outbound ? cursor >= routeLen : cursor <= 0) continue
+            r.state.carRouteCursor[0] = cursor
+            r.state.carCell[0] = cell
+            const dir = outbound
+              ? routeStep(r.state, 0, cursor)
+              : (OPPOSITE[routeStep(r.state, 0, cursor - 1)] as number)
+            const next = stepCell(cell, dir, r.world.w, r.world.h)
+            if (next < 0) continue // `advanceCar` throws on this before it asks
+            checked++
+            if (!isCommittedTo(r.state, r.world, 0, next)) notCommitted++
+          }
+        }
+      }
+    }
+    expect(checked, 'vacuity: the enumeration must actually range over something').toBeGreaterThan(10000)
+    expect(notCommitted, 'a car can be refused at a ghost it is committed to').toBe(0)
+  })
+
+  it('isEntryGranted names the two grants and refuses the two refusals — including the ghost', () => {
+    // **The detector `cars.ts`'s labelled-inert mutant never got, relocated to
+    // where it can exist.** The mutant is "treat `REFUSED_GHOST` as a grant",
+    // and at `advanceCar`'s call site it is unfalsifiable (the test above proves
+    // why). As a property of the outcome code it is one line and four
+    // assertions, and the fail-open spelling — `return outcome !==
+    // REFUSED_OCCUPIED` — fails on the third of them.
+    expect(isEntryGranted(EnterOutcome.ENTER_FREE)).toBe(true)
+    expect(isEntryGranted(EnterOutcome.ENTER_VALVE)).toBe(true)
+    expect(isEntryGranted(EnterOutcome.REFUSED_OCCUPIED)).toBe(false)
+    expect(isEntryGranted(EnterOutcome.REFUSED_GHOST)).toBe(false)
+    // Total over the declared enum, so a fifth code cannot be added and quietly
+    // fall on the grant side of a comparison nobody updated.
+    let grants = 0
+    for (const v of Object.values(EnterOutcome)) if (isEntryGranted(v)) grants++
+    expect(grants).toBe(2)
+  })
+
+  it('a committed car crosses a ghost it is standing next to, and is never refused or blocked', () => {
+    // The production-shaped statement of the rule: the ghost does not stop the
+    // cars it is waiting for. This is the arm that would fail if the ghost check
+    // were inverted, or if `isCommittedTo` did not count the cell the car is
+    // standing on.
+    const r = makeRig('ghost-committed-drives', 'ghost-committed-drives')
+    handCar(r, { i: 0, cell: 149, progress: ORTHO_THRESHOLD - SPEED, step: DIR_E, enteredBy: DIR_E })
+    r.state.ghostMask[GHOST_CELL] = GHOST_BIT
+    r.state.ghostCommitted[GHOST_CELL] = 1
+    expect(canEnter(r.state, r.world, 0, GHOST_CELL, DIR_E)).toBe(EnterOutcome.ENTER_FREE)
+    runMovement(r.state, r.world)
+    expect(r.state.carCell[0], 'the committed car drove its ghost').toBe(GHOST_CELL)
+    expect(r.state.carBlockedTicks[0]).toBe(0)
+  })
+
+  it('no route committed AFTER the erase contains the ghost cell: dist[ghostCell] is INF', () => {
+    // The load-bearing half of "REFUSED_GHOST is production-unreachable", and it
+    // is asserted against a real flow field rather than argued. `eraseRoad`
+    // clears the live bits, so the cell has no edges and the Dijkstra cannot
+    // reach it — which is what makes the erase-time count SOUND, since every car
+    // that ever departs the cell afterwards is one of the cars counted.
+    const r = buildFixture('ghost-dist-inf')
+    step(r.state, r.world, r.fields, r.scratch, { actions: corridorActions() })
+    r.state.destPins[0] = 2
+    step(r.state, r.world, r.fields, r.scratch, NO_ACTIONS)
+    const mid = 145 // (5,7), mid-corridor: two road bits, so two erases
+    const before = fieldFor(r.state, r.world, r.fields, 0, r.scratch)
+    expect(before.dist[mid], 'vacuity: the cell is reachable BEFORE the erase').toBeLessThan(INF)
+
+    // A car is committed to it, so this ghosts rather than refunding.
+    expect(r.state.carPhase[0]).toBe(PHASE_OUTBOUND)
+    expect(isCommittedTo(r.state, r.world, 0, mid)).toBe(true)
+    expect(eraseRoad(r.state, r.world, mid - 1, mid)).toBe(true)
+    expect(eraseRoad(r.state, r.world, mid, mid + 1)).toBe(true)
+    expect(r.state.ghostMask[mid]).not.toBe(0)
+
+    step(r.state, r.world, r.fields, r.scratch, NO_ACTIONS)
+    const after = fieldFor(r.state, r.world, r.fields, 0, r.scratch)
+    expect(after.dist[mid], 'a ghost cell is unreachable, so no later route can contain it').toBe(INF)
+  })
+})
+
+describe('assertEnterCarValid: the third parameter of canEnter s signature, guarded like the other two', () => {
+  it('throws by name for a car index that is not a car, rather than answering from undefined', () => {
+    // The catalogue entry this closes is verbatim: *"a guard that fail-closes on
+    // one parameter and not its sibling is worse than no guard, because the
+    // unguarded path returns a PLAUSIBLE answer."* `assertEnterDirValid` was
+    // added when review found `cell` guarded and `dir` not. `i` was the third,
+    // and Task 5 is what made it load-bearing: the ghost branch reads five
+    // car-indexed regions through it, and `carRoute`'s `undefined >> 0 & 0xf` is
+    // **0** — direction N — so an out-of-range car would walk a fabricated route
+    // and get a confident answer.
+    const r = makeRig('enter-car-guard', 'enter-car-guard')
+    const carCount = r.state.carPhase.length
+    expect(() => assertEnterCarValid(carCount, carCount)).toThrow(/is not a car index/)
+    expect(() => assertEnterCarValid(-1, carCount)).toThrow(/is not a car index/)
+    expect(() => assertEnterCarValid(1.5, carCount)).toThrow(/is not a car index/)
+    // Both ends of the real range are fine, so the guard is not merely refusing
+    // everything.
+    expect(() => assertEnterCarValid(0, carCount)).not.toThrow()
+    expect(() => assertEnterCarValid(carCount - 1, carCount)).not.toThrow()
+  })
+
+  it('canEnter itself throws for it, on a cell and direction that are both perfectly valid', () => {
+    // Aimed so that only the car index can be the cause: cell 150 is on the
+    // board and DIR_E is one of the eight, so the other two guards pass.
+    const r = makeRig('enter-car-guard-live', 'enter-car-guard-live')
+    const carCount = r.state.carPhase.length
+    expect(() => canEnter(r.state, r.world, carCount, 150, DIR_E)).toThrow(/is not a car index/)
+    expect(() => canEnter(r.state, r.world, 0, 150, DIR_E)).not.toThrow()
   })
 })

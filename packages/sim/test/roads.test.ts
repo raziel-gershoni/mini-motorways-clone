@@ -15,6 +15,12 @@ import {
   stepCell,
   canPlaceRoad,
   assertPlaceCost,
+  assertGhostCommittedFits,
+  assertGhostCommittedPositive,
+  ghostMaskOf,
+  ghostCommittedOf,
+  noteGhostDeparture,
+  GHOST_COMMITTED_MAX,
   type PlaceResult,
   placeRoad,
   eraseRoad,
@@ -24,7 +30,16 @@ import {
   assertSymmetric,
   assertNoRoadOnImpassable,
 } from '../src/roads'
-import { ORIENTATION_N, DEST_KIND_SQUARE, carparkCell, isFootprintCell, placeHouse, placeDestination } from '../src/buildings'
+import {
+  ORIENTATION_N,
+  DEST_KIND_SQUARE,
+  PHASE_IDLE,
+  PHASE_OUTBOUND,
+  carparkCell,
+  isFootprintCell,
+  placeHouse,
+  placeDestination,
+} from '../src/buildings'
 
 /**
  * Non-square (w=6, h=4) fixture containing all four terrain codes, each
@@ -1074,5 +1089,204 @@ describe('the driveway rule (M1c decision 5)', () => {
     // (2,1) [a footprint cell] to (1,1) [off-footprint, genuinely adjacent].
     expect(placeRoad(state, world, destCell, destCell - 1)).toBe(false)
     expect(hashState(state)).toBe(before)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M1d Task 5 — the ghost guards, called directly
+// ---------------------------------------------------------------------------
+
+describe('the ghostCommitted guards (M1d Task 5, Task 1d s standing obligation)', () => {
+  it('assertGhostCommittedPositive throws at 0 rather than letting a Uint8 wrap to 255', () => {
+    // **Task 1d named `ghostCommitted` as the milestone's one genuine new
+    // `Uint8Array` decrement path and handed it this guard by name.** The class:
+    // an unguarded `--` at 0 stores 255, silently, and here that means a cell
+    // that stays a ghost for 255 more departures and then pays its refund at a
+    // moment unrelated to any car — a tile printed out of nothing, on the
+    // Worker's own replay.
+    expect(() => assertGhostCommittedPositive(0, 42)).toThrow(/no committed car left to clear/)
+    expect(() => assertGhostCommittedPositive(-1, 42)).toThrow(/wrap the Uint8 slot to 255/)
+    expect(() => assertGhostCommittedPositive(1, 42)).not.toThrow()
+  })
+
+  it('and it names the cell, because a bare "count was 0" from inside a tick points at nothing', () => {
+    expect(() => assertGhostCommittedPositive(0, 137)).toThrow(/cell 137/)
+  })
+
+  it('assertGhostCommittedFits throws above the Uint8 ceiling — parseMap does not bound maxCars', () => {
+    // The mirror guard, and the same coercion class as
+    // `assertMaxCarsFitsOccupancy`: a count of 256 would be STORED as 0, which
+    // reads as "no car is committed" and pays the deferred refund on the next
+    // departure while 256 cars are still driving the ghost.
+    expect(() => assertGhostCommittedFits(GHOST_COMMITTED_MAX + 1, 7)).toThrow(/cannot hold/)
+    expect(() => assertGhostCommittedFits(-1, 7)).toThrow(/cannot hold/)
+    expect(() => assertGhostCommittedFits(1.5, 7)).toThrow(/cannot hold/)
+    // Both ends of the admissible range pass, so the guard is not refusing
+    // everything.
+    expect(() => assertGhostCommittedFits(0, 7)).not.toThrow()
+    expect(() => assertGhostCommittedFits(GHOST_COMMITTED_MAX, 7)).not.toThrow()
+  })
+
+  it('noteGhostDeparture is a no-op on a cell that is not a ghost, whatever the count says', () => {
+    // The early return is what makes the guard above production-unreachable, so
+    // it is asserted rather than assumed: `ghostMask === 0` wins even over an
+    // inconsistent count, which is the state a half-applied mutation leaves.
+    const { map, world } = fixture(40, 'ghost-noop')
+    const state = createState('ghost-noop', map)
+    state.ghostCommitted[5] = 3 // inconsistent on purpose: mask is 0
+    const tiles = tilesLeft(state)
+    expect(() => noteGhostDeparture(state, 5)).not.toThrow()
+    expect(ghostCommittedOf(state, 5)).toBe(3)
+    expect(tilesLeft(state)).toBe(tiles)
+    expect(world.cells).toBe(W * H)
+  })
+
+  it('noteGhostDeparture pays exactly one tile at the LAST departure and clears both regions', () => {
+    const { map } = fixture(40, 'ghost-pay')
+    const state = createState('ghost-pay', map)
+    state.ghostMask[5] = 1 << eastDir()
+    state.ghostCommitted[5] = 2
+    const tiles = tilesLeft(state)
+
+    noteGhostDeparture(state, 5)
+    expect(ghostCommittedOf(state, 5)).toBe(1)
+    expect(ghostMaskOf(state, 5), 'still a ghost').not.toBe(0)
+    expect(tilesLeft(state), 'no refund on the first departure').toBe(tiles)
+
+    noteGhostDeparture(state, 5)
+    expect(ghostCommittedOf(state, 5)).toBe(0)
+    expect(ghostMaskOf(state, 5), 'and the mask is cleared with the count').toBe(0)
+    expect(tilesLeft(state)).toBe(tiles + 1)
+
+    // A third departure — the return-leg case — finds no ghost and must be
+    // inert rather than refunding again or throwing.
+    noteGhostDeparture(state, 5)
+    expect(tilesLeft(state), 'exactly one tile, ever').toBe(tiles + 1)
+  })
+
+  it('THE CALL SITE, not just the function: a ghost with a zero count throws on the next departure', () => {
+    // **Measured, and the reason this test exists rather than the direct call
+    // above alone.** Deleting the `assertGhostCommittedPositive(...)` CALL from
+    // `noteGhostDeparture` scored **0 detectors** across the whole suite on its
+    // first run: on the reachable manifold `ghostMask !== 0` implies
+    // `ghostCommitted > 0`, because the mask is cleared in the same statement
+    // that takes the count to 0, so the guard can never fire through
+    // `runMovement`. That is the same shape `assertPlaceCost`'s call site
+    // carries a paragraph about — except this one HAS a detector, because the
+    // inconsistent state is one line to build.
+    //
+    // A ghost with a zero count is exactly what a half-applied refund leaves
+    // behind, and what the wrap would turn into 255 more departures.
+    const { map } = fixture(40, 'ghost-callsite')
+    const state = createState('ghost-callsite', map)
+    state.ghostMask[5] = 1 << eastDir()
+    state.ghostCommitted[5] = 0
+    expect(() => noteGhostDeparture(state, 5)).toThrow(/no committed car left to clear/)
+  })
+
+  it('THE CALL SITE for the ceiling too: 256 committed cars on one cell throw rather than wrapping to 0', () => {
+    // The same treatment for `assertGhostCommittedFits`, and it needs a map
+    // `parseMap` will happily build and no shipped map is: 200 houses is 400
+    // cars, so the count can exceed a `Uint8` slot. **Without the guard the
+    // count is STORED as 0** — `Uint8Array` coerces — which reads as "no car is
+    // committed", and the very next departure pays the refund while 256 cars are
+    // still driving the ghost.
+    //
+    // Deleting the call scored 1 "detector" on its first run and that detector
+    // was a sampling-profiler allocation test, i.e. noise; this is the real one.
+    const rows = Array.from({ length: 4 }, () => '.'.repeat(6))
+    const bigMap = parseMap('ghost-many-cars', rows, 999, 200, 16, 5)
+    const bigWorld = createWorld(bigMap)
+    const state = createState('ghost-many-cars', bigMap)
+    expect(state.ghostCommitted.length).toBe(24)
+    expect(state.carPhase.length).toBe(400) // vacuity: the map really does allow 400 cars
+
+    // 256 cars standing on cell 18, each with a live route. `isCommittedTo`
+    // returns true for the cell a car is standing on, so no route bytes are
+    // needed beyond a non-zero length.
+    for (let i = 0; i < 256; i++) {
+      state.carPhase[i] = PHASE_OUTBOUND
+      state.carCell[i] = 18
+      state.carRouteLen[i] = 1
+      state.carRouteCursor[i] = 0
+    }
+    expect(placeRoad(state, bigWorld, 18, 19)).toBe(true)
+    expect(() => eraseRoad(state, bigWorld, 18, 19)).toThrow(/cannot hold/)
+    // The throw lands AFTER the road bits are cleared, so this buffer is
+    // half-mutated — which is exactly what the plan's atomicity rule expects of
+    // any throw inside a tick (`H_EPOCH` stays non-zero and the run is not
+    // resumable). The 255 arm therefore gets its own state rather than
+    // continuing on this one, which would silently be measuring a no-op erase.
+    const ok = createState('ghost-many-cars-255', bigMap)
+    for (let i = 0; i < 255; i++) {
+      ok.carPhase[i] = PHASE_OUTBOUND
+      ok.carCell[i] = 18
+      ok.carRouteLen[i] = 1
+      ok.carRouteCursor[i] = 0
+    }
+    ok.carPhase[255] = PHASE_IDLE
+    expect(placeRoad(ok, bigWorld, 18, 19)).toBe(true)
+    // 255 is admissible and must not throw, so the bound is exact rather than
+    // merely conservative — this is the arm that fails if the guard is
+    // tightened to `>= GHOST_COMMITTED_MAX`.
+    expect(() => eraseRoad(ok, bigWorld, 18, 19)).not.toThrow()
+    expect(ghostCommittedOf(ok, 18)).toBe(255)
+  })
+
+  it('a later erase RECOUNTS from scratch rather than accumulating onto the old count', () => {
+    // The brief's rule: *recounted from scratch on any later erase that
+    // re-ghosts the same cell — the currently-committed set is exactly the set
+    // that must clear.* On the reachable manifold `+=` and `=` are the same
+    // function, and that was measured rather than assumed: a ghost cell has no
+    // road bit left to erase, so the only way back to a second erase is through
+    // `placeRoad`, which zeroes the count on the way in — `+=` scored **0
+    // detectors** across the whole suite.
+    //
+    // So the state is built by hand and labelled: a cell that is a ghost AND
+    // carries a live road, which nothing production can produce. It is worth
+    // pinning anyway, because the rule is what makes the count sound, and the
+    // day something else clears a ghost without zeroing the count the two
+    // spellings stop agreeing.
+    const { map, world } = fixture(40, 'ghost-recount')
+    const state = createState('ghost-recount', map)
+    state.carPhase[0] = PHASE_OUTBOUND
+    state.carCell[0] = 18
+    state.carRouteLen[0] = 1
+    expect(placeRoad(state, world, 18, 19)).toBe(true)
+    // Off the manifold, deliberately: a stale count of 5 left on a live cell.
+    state.ghostMask[18] = 1 << eastDir()
+    state.ghostCommitted[18] = 5
+
+    expect(eraseRoad(state, world, 18, 19)).toBe(true)
+    expect(ghostCommittedOf(state, 18), 'the count is the CURRENT set, not the old one plus it').toBe(1)
+  })
+
+  it('a fresh state has no ghost anywhere: both regions are all-zero at creation', () => {
+    // The complement of `occupancy`'s FREE fill: these two are ordinary
+    // zero-initialised regions, and 0 is the correct "not a ghost" value for
+    // both — a mask of 0 is exactly "no road bit", which is why the renderer's
+    // "mask 0 is never blitted" rule needs no ghost-specific exception.
+    const { map } = fixture(40, 'ghost-fresh')
+    const state = createState('ghost-fresh', map)
+    expect(state.ghostMask.every((b) => b === 0)).toBe(true)
+    expect(state.ghostCommitted.every((b) => b === 0)).toBe(true)
+    expect(state.ghostMask.length).toBe(W * H)
+    expect(state.ghostCommitted.length).toBe(W * H)
+  })
+
+  it('eraseRoad with no car on the board never ghosts — every refund is immediate', () => {
+    // The whole pre-Task-5 behaviour, re-asserted as a control on the file that
+    // owns `eraseRoad`: with no cars, `countCommittedCars` is 0 for every cell
+    // and the deferral branch is never taken. Every other erase test in this
+    // file depends on that and none of them said so.
+    const { map, world } = fixture(40, 'ghost-carless')
+    const state = createState('ghost-carless', map)
+    expect(placeRoad(state, world, 18, 19)).toBe(true) // row 3, all LAND
+    const spent = tilesLeft(state)
+    expect(eraseRoad(state, world, 18, 19)).toBe(true)
+    expect(tilesLeft(state)).toBe(spent + 2)
+    expect(ghostMaskOf(state, 18)).toBe(0)
+    expect(ghostMaskOf(state, 19)).toBe(0)
+    expect(state.ghostCommitted.every((b) => b === 0)).toBe(true)
   })
 })

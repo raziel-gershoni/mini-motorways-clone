@@ -1,8 +1,8 @@
 import { CAR_SPEED_UNITS_PER_TICK, COST_UNIT_SCALE, DENOM, LANE_SPEED_DEFAULT, ORTHO_COST } from '@laneways/shared'
 import type { GameState } from './state'
 import type { WorldData } from './world'
-import { OPPOSITE, stepCell } from './roads'
-import { canEnter, claimCell, releaseCell, noteEntryGranted, noteEntryRefused, EnterOutcome } from './blocking'
+import { OPPOSITE, noteGhostDeparture, stepCell } from './roads'
+import { canEnter, claimCell, releaseCell, isEntryGranted, noteEntryGranted, noteEntryRefused } from './blocking'
 import { edgeCost } from './graph'
 import { routeStep } from './dispatch'
 import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
@@ -28,10 +28,17 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
  * corridor.
  *
  * This module also never reads `state.roads`. A road erased under an
- * in-flight car therefore does not touch it: the refund lands immediately
- * (`eraseRoad`) and the car drives the erased segment to the end of its
- * committed route. That is decision 6's stated, tested deviation from spec
- * §5.11's delayed "ghost lane" refund, deferred to M1d.
+ * in-flight car therefore does not touch its PATH: the car drives the erased
+ * segment to the end of its committed route, whatever happens to the world
+ * underneath it.
+ *
+ * **M1c's deviation from spec §5.11 is discharged as of M1d Task 5, and this
+ * paragraph used to record it as outstanding.** The refund no longer "lands
+ * immediately" when a car is committed to the cell: `eraseRoad` defers it, the
+ * cell becomes a ghost, and `advanceCar` below pays the debt down by one on
+ * every departure from a ghost cell (`noteGhostDeparture`, roads.ts). That is a
+ * write to two `Uint8` regions, keyed by CELL — it is still not a read of
+ * `state.roads`, and the committed route is still never re-derived.
  *
  * **It does import from `roads.ts`, and that is not the same claim.** `OPPOSITE`
  * and `stepCell` (M1d Task 1a) are pure grid geometry over `DX`/`DY` — neither
@@ -51,9 +58,11 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
  * notes below are written to that, not to the M1c premise.
  *
  * **This is still not a read of `state.roads`.** The sentence above about the
- * committed route stands exactly as strong as it was: `canEnter` asks
- * occupancy, never the road bits, and it has no `NO_ROAD` outcome on purpose
- * (blocking.ts says why, and Task 5's ghost roads are the reason it matters).
+ * committed route stands exactly as strong as it was: `canEnter` asks occupancy
+ * and (from Task 5) `ghostMask`, never the road bits, and it has no `NO_ROAD`
+ * outcome on purpose — blocking.ts says why, and the ghost roads that made it
+ * matter are now shipped: a committed car HAS to be able to drive a road that
+ * has been erased, or §5.11's delayed refund could never be paid at all.
  * M1d Task 7's intersection multiplier is the change that ends the `state.roads`
  * claim, and it must amend the paragraph above in its own commit.
  *
@@ -325,27 +334,33 @@ export function advanceCar(state: GameState, world: WorldData, i: number, speed:
   // current holder, which `claimCell`'s unconditional write and `releaseCell`'s
   // identity guard between them make sound (blocking.ts's Decision 6 trace).
   //
-  // **The condition is "refuse unless explicitly granted", and today that is
-  // still a labelled-inert choice rather than an observable one.** Writing it
-  // the other way round — `if (outcome === EnterOutcome.REFUSED_OCCUPIED) {
-  // noteEntryRefused(state, i); return }` — remains a measured **0-detector**
-  // mutant across the whole suite, because `REFUSED_OCCUPIED` is still the only
-  // refusal `canEnter` can return, so the two forms are the same function.
-  // **It stops being inert at Task 5**, which adds `REFUSED_GHOST`: under the
-  // fail-open form that code falls through and the car drives onto a road that
-  // has been erased — the one thing the ghost feature must never do, and the
-  // reason the valve is forbidden from releasing a `REFUSED_GHOST` either.
-  // Task 5 is the named recipient of this mutant's detector; do not "simplify"
-  // the condition on the strength of its survival before then. Task 4 widened
-  // the grant set from one code to two and left the shape alone for the same
-  // reason.
+  // **The grant set is `isEntryGranted` (blocking.ts) and is deliberately NOT
+  // spelled out here, and Task 5 is why.** Tasks 3 and 4 both recorded the
+  // fail-open spelling — `if (outcome === EnterOutcome.REFUSED_OCCUPIED) {
+  // noteEntryRefused(state, i); return }` — as a measured 0-detector mutant and
+  // both named Task 5, which adds `REFUSED_GHOST`, as the task that would kill
+  // it. **Task 5 landed and it did not, and the reason is a proof rather than a
+  // missing fixture:** the only cell this function ever asks about is `next`,
+  // the next cell of its OWN committed route, and `isCommittedTo` answers `true`
+  // for that cell by construction — so `canEnter` cannot return `REFUSED_GHOST`
+  // to this call site, ever, for any car, on any board. Enumerated as well as
+  // argued: 131,930 in-flight shapes, zero exceptions (blocking.ts).
   //
-  // Task 5 must also decide whether a `REFUSED_GHOST` should feed
-  // `noteEntryRefused` at all. It does today, by falling into this arm, and it
-  // is inert while the code is unreachable; the saturating ceiling is what keeps
-  // it harmless if it ever becomes reachable (blocking.ts says why).
+  // So the branch stays unfalsifiable no matter what fixture is written, and the
+  // repair is to move the RULE somewhere it can be tested rather than to
+  // manufacture a fixture that cannot exist. `isEntryGranted` is a pure function
+  // of one enum value with a test against all four codes by name; the fail-open
+  // spelling applied THERE dies immediately. Do not re-inline it here.
+  //
+  // **A `REFUSED_GHOST` would feed `noteEntryRefused`, and that is a decision
+  // rather than a fall-through** — it is the same wait as any other refusal from
+  // the car's point of view, and the saturating ceiling is what keeps it
+  // harmless. It is also, for the same reason as above, not something
+  // `runMovement` can produce; `noteEntryRefused`'s clamp therefore remains
+  // production-unreachable after Task 5, contrary to what Task 4's own comment
+  // predicted. Its direct test in `blocking.test.ts` is still its only observer.
   const outcome = canEnter(state, world, i, next, dir)
-  if (outcome !== EnterOutcome.ENTER_FREE && outcome !== EnterOutcome.ENTER_VALVE) {
+  if (!isEntryGranted(outcome)) {
     noteEntryRefused(state, i)
     return
   }
@@ -374,6 +389,15 @@ export function advanceCar(state: GameState, world: WorldData, i: number, speed:
   // rests on that: the displaced car's own later `releaseCell` finds a slot
   // naming somebody else and correctly does nothing.
   releaseCell(state, i, state.carCell[i] as number)
+  // Occupancy lifecycle event 3 has a SECOND consumer as of Task 5, and it is
+  // deliberately not folded into `releaseCell`: a lane slot and a deferred
+  // refund are two different ledgers over the same event, one keyed by (cell,
+  // lane) and one by cell alone, and the release is guarded by car identity
+  // while this one is not. Read from `carCell[i]` BEFORE the write below, for
+  // the same reason `releaseCell` is: the cell the car is standing on is the
+  // cell whose ghost it is clearing. `noteGhostDeparture` returns immediately
+  // for the overwhelmingly common case of a cell that is not a ghost.
+  noteGhostDeparture(state, state.carCell[i] as number)
   state.carCell[i] = next
   claimCell(state, i, next, dir)
   state.carRouteCursor[i] = outbound ? cursor + 1 : cursor - 1

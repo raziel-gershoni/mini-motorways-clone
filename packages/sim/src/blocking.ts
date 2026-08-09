@@ -3,6 +3,14 @@ import type { GameState } from './state'
 import type { WorldData } from './world'
 import { DIR_COUNT, LANE_COUNT, LANE_OF_DIR } from './roads'
 import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
+/**
+ * Deferred import, and the same rule every cycle in this package follows: read
+ * only inside a function body (`canEnter`'s ghost branch), never at module
+ * evaluation time. `dispatch.ts` does not import this module, so this edge is
+ * one-way and not even a cycle — the walk lives there because that module owns
+ * the `carRoute` codec and the definition of a committed route.
+ */
+import { isCommittedTo } from './dispatch'
 
 /**
  * Occupancy: who is standing on which (cell, lane), and the claim/release
@@ -150,8 +158,9 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
  * to stop a car. That is what made Task 2's golden re-bless provably
  * layout-only: no car's motion could have changed, so the only difference in
  * the four whole-buffer digests was buffer SHAPE. **Task 3 adds `canEnter` and
- * refusal**; **Task 4 the valve and `carBlockedTicks`'s semantics**; Task 5 the
- * ghost regions.
+ * refusal**; **Task 4 the valve and `carBlockedTicks`'s semantics**; **Task 5
+ * the two ghost regions and `REFUSED_GHOST`**, which completes the enum — every
+ * one of the four codes is now returned by the code below.
  *
  * ---------------------------------------------------------------------------
  * THE ANTI-DEADLOCK VALVE — TASK 4, DECISION 6
@@ -352,12 +361,21 @@ export function noteEntryGranted(state: GameState, i: number): void {
  *     GRANT, not a refusal: `advanceCar` crosses on it, and it is grouped with
  *     `ENTER_FREE` at that call site rather than being treated as a special
  *     case of the refusal.
- *   - `REFUSED_GHOST` — **Task 5**, and still unreachable. Returned when the
- *     cell is a ghost (its last road bit was erased with cars still committed to
- *     it) and this car is not one of the committed ones. Production-unreachable
- *     by construction even then, and exercised directly. **The valve must not
+ *   - `REFUSED_GHOST` — **wired in Task 5**, and still unreachable THROUGH
+ *     `runDispatch` + `runMovement`, which is a property to record rather than a
+ *     bug to fix. Returned when the cell is a ghost (its last road bit was
+ *     erased with cars still committed to it) and this car is not one of the
+ *     committed ones. The two halves of that conjunction cannot both hold on the
+ *     reachable manifold: `eraseRoad` clears the live bits, so `dist[cell]` is
+ *     INF and no route committed AFTER the erase can contain the cell, and every
+ *     car committed BEFORE it is by definition committed. So it is a fail-closed
+ *     guard, reachable only from a hand-built state, and it is exercised
+ *     directly in `blocking.test.ts` and labelled there. Do not delete it on the
+ *     strength of its own survival — the same idiom as `assertSingleCrossing`
+ *     (cars.ts) and `assertDispatchProgress` (dispatch.ts). **The valve must not
  *     release it**, which is why the valve test lives inside `canEnter`'s
- *     occupied branch rather than in front of the function.
+ *     occupied branch rather than in front of the function, and why the ghost
+ *     test is an early return in front of BOTH.
  *
  * **There is deliberately no `NO_ROAD` code and no `OUT_OF_BOUNDS` code**, and
  * the omissions are load-bearing rather than an oversight — see `canEnter`.
@@ -375,6 +393,49 @@ export const EnterOutcome = Object.freeze({
 
 /** An `EnterOutcome` value, derived from the const rather than hand-written. */
 export type EnterOutcomeCode = (typeof EnterOutcome)[keyof typeof EnterOutcome]
+
+/**
+ * **Is this outcome a GRANT?** — the one place the grant set is written down.
+ *
+ * `ENTER_FREE` and `ENTER_VALVE` are grants; `REFUSED_OCCUPIED` and
+ * `REFUSED_GHOST` are not. `advanceCar` (cars.ts) crosses iff this says so, and
+ * it delegates rather than testing the codes itself for a reason that is worth
+ * stating, because the obvious reading is that this function is a wrapper around
+ * one comparison.
+ *
+ * **The reason is that `advanceCar`'s own branch is not testable and this
+ * is.** Tasks 3 and 4 both recorded the fail-open spelling — `if (outcome ===
+ * REFUSED_OCCUPIED) return` — as a measured 0-detector mutant, and both named
+ * Task 5 as the task whose `REFUSED_GHOST` would kill it. **It does not, and the
+ * reason is a proof rather than a missing fixture.** `advanceCar` asks
+ * `canEnter` about exactly one cell: `next = stepCell(carCell, dir)`, where
+ * `dir` is the current step of its own committed route. `isCommittedTo`
+ * (dispatch.ts) walks that same route from that same cell with that same step,
+ * so `next` is the FIRST cell it visits and the answer is `true` — for every
+ * car, on every tick, ghost or no ghost, corrupt route or not. Verified by
+ * enumeration as well as by reading: 131,930 in-flight shapes (both phases,
+ * every cursor, seven start cells, 2,000 random routes) gave **zero**
+ * non-committed next cells. So `advanceCar` can never observe a
+ * `REFUSED_GHOST`, and no fixture built on `runMovement` can tell the two
+ * spellings apart.
+ *
+ * Moving the decision here does not make the branch reachable — nothing can —
+ * but it moves the RULE to a pure function of one enum value, where
+ * `blocking.test.ts` tests it against all four codes by name and the fail-open
+ * spelling dies immediately. That is the difference between a rule nobody can
+ * check and a rule with one owner and one test. **Do not re-inline it at the
+ * call site**: the inlined form is provably unfalsifiable, which is the state
+ * this function exists to leave behind.
+ *
+ * Total over `EnterOutcome` by construction — it names the two grants and
+ * refuses everything else, so a fifth code added later is a refusal until
+ * somebody decides otherwise. Fail-closed, which for this predicate means "a
+ * car that the code does not recognise does not move".
+ */
+export function isEntryGranted(outcome: EnterOutcomeCode): boolean {
+  return outcome === EnterOutcome.ENTER_FREE || outcome === EnterOutcome.ENTER_VALVE
+}
+
 
 /**
  * Throws if `canEnter` is asked about a cell that is not on the board.
@@ -438,6 +499,42 @@ export function assertEnterDirValid(i: number, cell: number, dir: number): void 
       `blocking: car ${i} was asked whether it can enter cell ${cell} in direction ${dir}, which is ` +
         `not one of the eight (0..${DIR_COUNT - 1}) — LANE_OF_DIR would be undefined, the slot index ` +
         'NaN, and the answer a refusal from a slot that does not exist',
+    )
+  }
+}
+
+/**
+ * Throws if `canEnter` is asked on behalf of a car index that is not a car.
+ *
+ * **The third guard in this signature, and the reason it exists now is the
+ * reason the second one existed then.** `assertEnterDirValid` was added after a
+ * review found `cell` guarded and `dir` not — an out-of-range direction read a
+ * `NaN` slot and returned a plausible `REFUSED_OCCUPIED`. `i` was the remaining
+ * unguarded parameter of the same signature, and it had already stopped being
+ * decorative at Task 4: `carBlockedTicks[i]` for an out-of-range `i` is
+ * `undefined`, `undefined >= MAX_BLOCKED_TICKS` is false, and the valve silently
+ * never fires for that car. **Task 5 makes it worse in exactly the way the
+ * catalogue predicts**: the ghost branch below reads `carPhase[i]`,
+ * `carCell[i]`, `carRouteCursor[i]`, `carRouteLen[i]` and car `i`'s `carRoute`
+ * nibbles, and an out-of-range `i` reads `undefined` from each — `carRoute`'s
+ * `undefined >> 0 & 0xf` is **0**, a perfectly plausible direction N — so the
+ * commitment walk would follow a fabricated route and answer `REFUSED_GHOST` or
+ * `ENTER_FREE` from a car that does not exist.
+ *
+ * So: guard every argument in the signature, or write down why they differ.
+ * There is nothing left to differ here.
+ *
+ * Unreachable through `advanceCar`, which is driven by `runMovement`'s
+ * `i < state.carPhase.length` loop. Exercised directly in `blocking.test.ts`.
+ *
+ * @internal `canEnter` is the production call site.
+ */
+export function assertEnterCarValid(i: number, carCount: number): void {
+  if (!Number.isInteger(i) || i < 0 || i >= carCount) {
+    throw new Error(
+      `blocking: car ${i} is not a car index on this board (0..${carCount - 1}) — every car-indexed ` +
+        'read would return undefined, and the answer would be a refusal (or a grant) derived from a ' +
+        'car that does not exist',
     )
   }
 }
@@ -540,6 +637,19 @@ export function canEnter(
 ): EnterOutcomeCode {
   assertEnterCellOnBoard(i, cell, world.cells)
   assertEnterDirValid(i, cell, dir)
+  assertEnterCarValid(i, state.carPhase.length)
+  // The ghost check is a SEPARATE EARLY RETURN IN FRONT of the occupancy read,
+  // and Task 4's comment above predicted this shape for exactly one reason: the
+  // valve lives inside the occupied branch, so it can never see — and therefore
+  // can never release — a `REFUSED_GHOST`. A car that has waited 45 seconds
+  // still may not drive onto a road that no longer exists.
+  //
+  // `ghostMask[cell] !== 0` is the cheap half and it is checked first: a ghost
+  // is rare, and the commitment walk behind it is O(remaining route). On a board
+  // with no ghost this costs one `Uint8Array` read per crossing.
+  if ((state.ghostMask[cell] as number) !== 0 && !isCommittedTo(state, world, i, cell)) {
+    return EnterOutcome.REFUSED_GHOST
+  }
   const occupant = state.occupancy[occupancySlot(cell, LANE_OF_DIR[dir] as number)] as number
   if (occupant === FREE) return EnterOutcome.ENTER_FREE
   if ((state.carBlockedTicks[i] as number) >= MAX_BLOCKED_TICKS) return EnterOutcome.ENTER_VALVE

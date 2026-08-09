@@ -15,6 +15,7 @@ import { createFieldInputRanges } from '../src/regions'
 import { createScratch, createFlowFields, INF, type FlowField, type Scratch } from '../src/scratch'
 import { syncFields } from '../src/flowfield'
 import { placeRoad, roadMask, DIR_COUNT } from '../src/roads'
+import { isCommittedTo, countCommittedCars } from '../src/dispatch'
 import {
   placeHouse,
   placeDestination,
@@ -1706,5 +1707,118 @@ describe('4b: a walk that would leave the grid is refused, not committed — one
     expect(r.state.header[H_ROUTES_REFUSED]).toBe(before + 1)
     expect(routeBytesOf(r, 0)).toEqual(new Array(ROUTE_BYTES).fill(0))
     assertReservationInvariants(r)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M1d Task 5 — the committed-car walk
+// ---------------------------------------------------------------------------
+
+describe('isCommittedTo / countCommittedCars: the definition of "committed" (M1d Task 5)', () => {
+  /**
+   * A straight corridor on row 2, cells 42..50, and a car committed to all of
+   * it. `commitByHand` writes exactly what `dispatchColour` leaves behind, so
+   * the walk is being asked about the same shape production produces.
+   *
+   * The route is 8 EAST steps from 42, so `c_0..c_8` = 42..50.
+   */
+  const E_DIR = 2
+  const ROUTE_START = 42
+  const ROUTE_CELLS = [42, 43, 44, 45, 46, 47, 48, 49, 50]
+
+  function commitByHand(r: Rig, car: number, cell: number, steps: readonly number[]): void {
+    for (let k = 0; k < steps.length; k++) packRouteStep(r.state, car, k, steps[k] as number)
+    r.state.carCell[car] = cell
+    r.state.carRouteLen[car] = steps.length
+    r.state.carRouteCursor[car] = 0
+    r.state.carPhase[car] = PHASE_OUTBOUND
+  }
+
+  function eastRoute(n: number): number[] {
+    return Array.from({ length: n }, () => E_DIR)
+  }
+
+  it('an OUTBOUND car is committed to the cell it stands on and every cell still ahead of it', () => {
+    // The whole suffix, including the current cell — which is not a rounding
+    // choice: `ghostCommitted` is decremented when a car DEPARTS the cell, and a
+    // car standing on it will depart it, so leaving it out would make the
+    // departures outnumber the count.
+    const r = rig('committed-outbound')
+    commitByHand(r, 0, ROUTE_START, eastRoute(8))
+    r.state.carCell[0] = 45
+    r.state.carRouteCursor[0] = 3
+    const committed = ROUTE_CELLS.filter((c) => isCommittedTo(r.state, r.world, 0, c))
+    expect(committed).toEqual([45, 46, 47, 48, 49, 50])
+    // And not the cells behind it, nor a cell off the route entirely.
+    expect(isCommittedTo(r.state, r.world, 0, 44)).toBe(false)
+    expect(isCommittedTo(r.state, r.world, 0, 102)).toBe(false)
+  })
+
+  it('a RETURNING car is committed to the PREFIX — the retrace is the route read backwards', () => {
+    const r = rig('committed-returning')
+    commitByHand(r, 0, ROUTE_START, eastRoute(8))
+    r.state.carPhase[0] = PHASE_RETURNING
+    r.state.carCell[0] = 47
+    r.state.carRouteCursor[0] = 5
+    const committed = ROUTE_CELLS.filter((c) => isCommittedTo(r.state, r.world, 0, c))
+    expect(committed).toEqual([42, 43, 44, 45, 46, 47])
+    // The asymmetry with the outbound case is the point: a returning car has
+    // already finished with everything ahead of where it turned round.
+    expect(isCommittedTo(r.state, r.world, 0, 48)).toBe(false)
+  })
+
+  it('an OUTBOUND car at cursor 0 is committed to its whole route, and one at the end only to the carpark', () => {
+    // Both extremes of the suffix, so an off-by-one in the loop bound shows up
+    // rather than being hidden by a mid-route cursor.
+    const r = rig('committed-extremes')
+    commitByHand(r, 0, ROUTE_START, eastRoute(8))
+    expect(ROUTE_CELLS.filter((c) => isCommittedTo(r.state, r.world, 0, c))).toEqual(ROUTE_CELLS)
+    r.state.carCell[0] = 50
+    r.state.carRouteCursor[0] = 8
+    expect(ROUTE_CELLS.filter((c) => isCommittedTo(r.state, r.world, 0, c))).toEqual([50])
+  })
+
+  it('an idle car is committed to nothing, even standing on a cell of a route it still holds', () => {
+    // The phase filter, isolated: the car's bytes still describe a route, so
+    // "committed to nothing" has to come from the phase and not from an empty
+    // route. That is the catalogue's "disable every OTHER mechanism" rule for a
+    // negative assertion.
+    const r = rig('committed-idle')
+    commitByHand(r, 0, ROUTE_START, eastRoute(8))
+    expect(isCommittedTo(r.state, r.world, 0, 47), 'vacuity: committed while OUTBOUND').toBe(true)
+    r.state.carPhase[0] = PHASE_IDLE
+    expect(r.state.carRouteLen[0], 'the route bytes are still there').toBe(8)
+    expect(isCommittedTo(r.state, r.world, 0, 47)).toBe(false)
+    expect(isCommittedTo(r.state, r.world, 0, ROUTE_START)).toBe(false)
+  })
+
+  it('countCommittedCars counts the committed ones, not every in-flight car', () => {
+    // The fixture the "count every in-flight car" mutation needs: three cars in
+    // flight, two of them committed to cell 47 and one running down a different
+    // row entirely. A count of 3 here is that mutation; a count of 2 is the
+    // rule.
+    const r = rig('committed-count')
+    commitByHand(r, 0, ROUTE_START, eastRoute(8)) // 42..50
+    commitByHand(r, 1, 44, eastRoute(6)) // 44..50
+    commitByHand(r, 2, 102, eastRoute(8)) // row 5: never touches 47
+    expect(countCommittedCars(r.state, r.world, 47)).toBe(2)
+    // Vacuity: car 2 really is in flight, so the difference is about commitment
+    // and not about liveness.
+    expect(r.state.carPhase[2]).toBe(PHASE_OUTBOUND)
+    expect(countCommittedCars(r.state, r.world, 103)).toBe(1)
+    // A cell no car is committed to at all, so the immediate-refund branch of
+    // `eraseRoad` has an observer here too.
+    expect(countCommittedCars(r.state, r.world, 200)).toBe(0)
+  })
+
+  it('a route that walks off the board stops the walk instead of wrapping the row seam', () => {
+    // The fail-closed arm. A corrupted route pointing east from the last column
+    // would, under naive index arithmetic, "reach" the first column of the next
+    // row — which is exactly the row-seam false neighbour `stepCell` exists to
+    // prevent, and a membership question must not resurrect it.
+    const r = rig('committed-off-board')
+    commitByHand(r, 0, 59, eastRoute(4)) // (19,2): the last column
+    expect(isCommittedTo(r.state, r.world, 0, 59), 'its own cell still counts').toBe(true)
+    expect(isCommittedTo(r.state, r.world, 0, 60), 'cell 60 is (0,3) — the seam').toBe(false)
   })
 })

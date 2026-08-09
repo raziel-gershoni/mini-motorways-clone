@@ -154,14 +154,19 @@ import { seedStartingCity } from './startingCity'
  * re-bless. It is also the weaker lever: 292 ticks is still **9.7 s** of dead
  * board, against 4.0 s here.
  *
- * The two figures, restated at M1d Task 2 because the state buffer grew from
- * 7,908 to 11,908 bytes there (`occupancy` + `carBlockedTicks`) and both moved
- * for layout: the seeded golden is **`3576722662`** (was `2505371110` at M2) and
- * the rejected circle variant is **`947517150`** (was `4171132894`). Nothing
- * greps this comment, so it is re-derived rather than trusted whenever the
- * buffer changes shape — both numbers were re-measured here, and splicing the
- * inserted bytes back out reproduced the two M2-era values exactly, which is
- * what confirms the pair still describes the same two states.
+ * The two figures, restated at M1d Task 5 because the state buffer grew from
+ * 11,908 to 13,828 bytes there (`ghostMask` + `ghostCommitted`) and both moved
+ * for layout: the seeded golden is **`1178110182`** (was `3576722662` at M1d
+ * Task 2, `2505371110` at M2) and the rejected circle variant is
+ * **`996383454`** (was `947517150`, `4171132894`). Nothing greps this comment,
+ * so it is re-derived rather than trusted whenever the buffer changes shape —
+ * both numbers were re-measured here, and splicing the inserted bytes back out
+ * reproduced the two Task 2 values (`3576722662` and `947517150`) exactly,
+ * which is what confirms the pair still describes the same two states. That the
+ * REJECTED figure reproduces as well as the accepted one is a second,
+ * independent check on the splice method itself. **M1d changes the buffer shape
+ * twice and no more; this is the second, so these two numbers are final for the
+ * milestone.**
  *
  * **What it costs, measured:** 258 `step` calls at boot, 6.8 ms on the
  * development machine, once. Nothing visible changes across those ticks — no

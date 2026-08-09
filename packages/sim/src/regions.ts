@@ -80,6 +80,25 @@ export function regionsFor(map: MapData): readonly Region[] {
     { name: 'destReserved', ctor: Uint8Array, len: maxDestinations },
     { name: 'carPhase', ctor: Uint8Array, len: maxCars },
     { name: 'carRoute', ctor: Uint8Array, len: maxCars * routeBytes },
+    // M1d Task 5, appended to the END of the Uint8 tier so no pad byte can be
+    // inserted anywhere (a 1-byte tier is a multiple of every alignment below
+    // it, and 13,828 is still a multiple of 4). These are the LAST two regions
+    // this milestone adds: "Why exactly two re-blesses are true" fixes the
+    // buffer shape at 26 regions and 13,828 B for `firstCity`, and every task
+    // after this one appends behaviour, never shape.
+    //
+    // `ghostMask` is the road bit the erase REMOVED, not a boolean, and the
+    // difference is load-bearing for the renderer: `canvas.ts` blits one atlas
+    // tile per cell keyed by that cell's 8-bit mask and never blits mask 0 —
+    // and a ghost cell is BY DEFINITION one whose live mask reached 0, so a
+    // boolean could not be drawn at all (M1d Task 8 consumes this).
+    { name: 'ghostMask', ctor: Uint8Array, len: cells },
+    // The number of in-flight cars committed to this ghost cell, counted once
+    // at erase time and only ever falling. It is the milestone's one genuine
+    // new `Uint8Array` decrement path — Task 1d's standing obligation, by name
+    // — so `roads.ts` guards the decrement with `assertGhostCommittedPositive`
+    // rather than letting a `--` at 0 wrap to 255.
+    { name: 'ghostCommitted', ctor: Uint8Array, len: cells },
   ]
 }
 
@@ -157,6 +176,29 @@ export const FIELD_INPUT_REGIONS = Object.freeze(['mapIdentity', 'destCell', 'ro
  *                      `H_TICK` was split out of a hashed region to avoid.
  *                      Dated: M1e, with occupancy, if lights ever make waiting
  *                      cars a routing input.
+ *
+ * M1d Task 5 adds the last two, and BOTH are FIELD_IRRELEVANT for one shared
+ * reason that is stronger than the occupancy argument above: **the ghost's
+ * entire effect on routing is already carried by `roads`, which is already
+ * FIELD_INPUT.** `eraseRoad` clears the live bit from `roads` exactly as it did
+ * before — the bit MOVES to `ghostMask`, it is not duplicated — so the field's
+ * view of the world is byte-for-byte what it would have been without either
+ * region, `dist[ghostCell]` is INF from the erase tick onward, and no route
+ * committed after the erase can contain the cell. Hashing `ghostMask` would
+ * therefore rebuild every colour a second time for a change the `roads` hash
+ * has already seen.
+ *
+ *   - ghostMask:      see above. It changes only on an erase or a place, both
+ *                     of which move `roads` in the same call, so it carries no
+ *                     information the hashed region does not. Dated: M1e, if
+ *                     ghosts ever become traversable-but-costly rather than
+ *                     un-routable — at which point they are an edge weight and
+ *                     `edgeCost` would have to see them.
+ *   - ghostCommitted: the same, and MORE so — it changes on car CROSSINGS, so
+ *                     classifying it FIELD_INPUT would rebuild every colour on
+ *                     nearly every tick a ghost exists, with byte-identical
+ *                     output. That is the `H_TICK` failure and the occupancy
+ *                     failure a third time. Dated: M1e, with occupancy.
  */
 export const FIELD_IRRELEVANT_REGIONS = Object.freeze([
   'rng',
@@ -178,6 +220,8 @@ export const FIELD_IRRELEVANT_REGIONS = Object.freeze([
   'destReserved',
   'carPhase',
   'carRoute',
+  'ghostMask',
+  'ghostCommitted',
 ] as const)
 
 /**

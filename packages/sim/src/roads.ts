@@ -3,6 +3,7 @@ import type { GameState } from './state'
 import { H_TILES, H_DEST_COUNT } from './state'
 import type { WorldData } from './world'
 import { isFootprintCell, destMetaOrientation } from './buildings'
+import { countCommittedCars } from './dispatch'
 
 /**
  * Road placement, erasure, the tile budget, and tree clearing — spec §5.11
@@ -62,11 +63,29 @@ import { isFootprintCell, destMetaOrientation } from './buildings'
  * here decomposes both `from` and `to` to `x`/`y` via `% w` and `/ w`, so a
  * wrapped pair is caught as `|dx| > 1` rather than silently accepted.
  *
- * **Erase refunds immediately. There is no delayed refund here.** Spec
- * §5.11's "ghost roads" — a deleted segment stays rendered, thinner, until
- * the last car already committed to it clears — needs cars, which do not
- * exist yet in M1b. This is M1c's problem, deliberately deferred, not
- * forgotten.
+ * **Erase refunds immediately ONLY when no car is committed to the cell. Spec
+ * §5.11's delayed refund is live as of M1d Task 5, and this paragraph used to
+ * say the opposite.** M1b wrote "there is no delayed refund here" because cars
+ * did not exist; M1c inherited it and recorded the deviation as deferred to
+ * M1d. It is now discharged: a deleted segment whose endpoint cell still has a
+ * committed car keeps its last bit in `ghostMask`, records how many cars must
+ * clear in `ghostCommitted`, and pays its one tile when the last of them
+ * departs — or when a road is placed over it, whichever comes first.
+ * `eraseRoad` keeps its shape (both mirrored bits cleared, refund computed per
+ * endpoint whose mask becomes 0); what is new is where that refund goes.
+ * **`packages/sim/test/cars.test.ts`'s "refunds immediately and does not touch
+ * the car" test asserted the old behaviour on purpose and is rewritten in the
+ * same commit** — see the note at its site.
+ *
+ * **This module now imports `dispatch.ts`, which imports it back.** A genuine
+ * two-way cycle, and the same one `buildings.ts` already forms with this file:
+ * safe by the invariant `state.ts` documents, because every cross-reference is
+ * read inside a function body (`settleErasedCell`'s `countCommittedCars` call),
+ * never at module-evaluation time, and both modules export only hoisted
+ * `function` declarations plus module-scope constants that touch neither. The
+ * walk lives there rather than here because `dispatch.ts` owns the `carRoute`
+ * nibble codec and the meaning of a committed route; duplicating it here is the
+ * `stepCell` mistake M1d Task 1a spent a task undoing.
  *
  * **Nothing here notifies the pathfinder.** Design decision 3 derives
  * per-colour flow-field staleness from a content hash of the `roads` region
@@ -409,6 +428,25 @@ export function canPlaceRoad(state: GameState, world: WorldData, a: number, b: n
  * segment (cost 0) still runs this logic, but every write it performs is
  * idempotent — the bits are already set and `cleared` is already 1 if it was
  * ever going to be — so the buffer is unchanged and the hash does not move.
+ *
+ * **Placing over a GHOST cell pays that cell's pending refund and charges the
+ * placement normally** (Decision 8, M1d Task 5). Not "cancels the refund":
+ * cancelling charges the player twice for one cell — they paid 1 to build it, 1
+ * to rebuild it, and got nothing back — and violates §5.11's "refunds in full".
+ * Paying it means erase-then-replace nets **exactly zero**, repeatably, so
+ * nothing is printed and nothing is confiscated. That matters more than usual
+ * here: the Worker replays the identical input log, so an inflated budget would
+ * verify as legitimate on the leaderboard rather than being caught.
+ *
+ * A ghost cell has a road mask of 0 by definition, so `canPlaceRoad` prices it
+ * at 1 tile and the refund is 1 tile — the two cancel per cell, and both
+ * endpoints can be ghosts at once. **One consequence, disclosed rather than
+ * discovered: at exactly 0 tiles left the placement is still refused for
+ * budget**, because `canPlaceRoad` is a pure predicate over `roads` and knows
+ * nothing about pending refunds. That is "charges the placement normally" taken
+ * literally; teaching the budget check about ghosts would make the cost model
+ * depend on two regions instead of one, which is a change to the economy rather
+ * than to this function.
  */
 export function placeRoad(state: GameState, world: WorldData, a: number, b: number): boolean {
   const result = canPlaceRoad(state, world, a, b)
@@ -424,8 +462,155 @@ export function placeRoad(state: GameState, world: WorldData, a: number, b: numb
   if (world.terrain[b] === TERRAIN.TREE) state.cleared[b] = 1
 
   state.header[H_TILES] = (state.header[H_TILES] as number) - result.cost
+  // AFTER the charge, and through the same one function `noteGhostDeparture`
+  // uses, so "the pending refund is paid the moment the cell stops being a
+  // ghost" has exactly one implementation. Order is arithmetically irrelevant
+  // (both are unconditional adds to `H_TILES`); it is written this way so the
+  // sequence reads as "you are charged for the placement, and handed back the
+  // tile the erase owed you".
+  if ((state.ghostMask[a] as number) !== 0) payGhostRefund(state, a)
+  if ((state.ghostMask[b] as number) !== 0) payGhostRefund(state, b)
 
   return true
+}
+
+/**
+ * The largest value a `ghostCommitted` slot can hold. It is a `Uint8Array`, and
+ * `Uint8Array` COERCES rather than throwing — a count of 256 would be stored as
+ * 0, which reads as "no car is committed" and pays the refund on the next
+ * departure while 256 cars are still driving the ghost.
+ *
+ * The plan states the bound as `maxCars`, which is 80 on `firstCity`; `parseMap`
+ * puts no ceiling on `maxCars` at all, so the ceiling that actually protects the
+ * slot is the element type's, and that is what is checked. Same class as
+ * `assertMaxCarsFitsOccupancy` (blocking.ts) and the same treatment.
+ */
+export const GHOST_COMMITTED_MAX = 255
+
+/**
+ * Throws if a map's car count would overflow a `ghostCommitted` slot.
+ *
+ * Unreachable on every map that ships (`firstCity`'s `maxCars` is 80) and
+ * exercised directly, on the precedent of `assertSingleCrossing` (cars.ts) and
+ * `assertMaxCarsFitsOccupancy` (blocking.ts).
+ *
+ * @internal `eraseRoad` is the production call site.
+ */
+export function assertGhostCommittedFits(count: number, cell: number): void {
+  if (!Number.isInteger(count) || count < 0 || count > GHOST_COMMITTED_MAX) {
+    throw new Error(
+      `roads: cell ${cell} has ${count} committed cars, which a Uint8 ghostCommitted slot cannot hold ` +
+        `(0..${GHOST_COMMITTED_MAX}) — Uint8Array coerces rather than throwing, so the count would wrap ` +
+        'and the deferred refund would be paid under cars still driving the ghost',
+    )
+  }
+}
+
+/**
+ * Throws if `ghostCommitted` is about to be decremented at 0 — **M1d Task 1d's
+ * standing obligation, discharged here by name.**
+ *
+ * The class, restated at the site that inherits it: an unguarded `--` at 0 on a
+ * `Uint8Array` slot wraps to 255, silently, and it survives snapshot/restore and
+ * replays identically in the Worker. Here it would mean a cell that stays a
+ * ghost for 255 more departures and pays its refund at a moment unrelated to any
+ * car, i.e. a tile printed out of nothing on the leaderboard's own replay.
+ *
+ * **Unreachable through `runMovement` + `runArrivals`, by construction rather
+ * than by luck:** `noteGhostDeparture` is the only decrement site and it returns
+ * early unless `ghostMask[cell] !== 0`, and the mask is cleared in the same
+ * statement that takes the count to 0. So a zero count and a non-zero mask
+ * cannot coexist. Exercised directly in `roads.test.ts`.
+ *
+ * @internal `noteGhostDeparture` is the production call site.
+ */
+export function assertGhostCommittedPositive(count: number, cell: number): void {
+  if (count <= 0) {
+    throw new Error(
+      `roads: cell ${cell} is a ghost with ghostCommitted ${count} — there is no committed car left to ` +
+        'clear, and decrementing would wrap the Uint8 slot to 255',
+    )
+  }
+}
+
+/** The ghosted road bit of `cell`: 0 when the cell is not a ghost. */
+export function ghostMaskOf(state: GameState, cell: number): number {
+  return state.ghostMask[cell] as number
+}
+
+/** How many committed cars `cell` is still waiting on before its refund is paid. */
+export function ghostCommittedOf(state: GameState, cell: number): number {
+  return state.ghostCommitted[cell] as number
+}
+
+/**
+ * A cell has stopped being a ghost: clear both regions and pay the one tile the
+ * erase deferred.
+ *
+ * **One rule, two triggers** (Decision 8): *the pending refund is paid the
+ * moment the cell stops being a ghost, and a cell stops being a ghost when its
+ * committed count reaches 0 or a road is placed on it.* Both callers below go
+ * through this function, so the two triggers cannot drift apart and neither can
+ * pay a different amount.
+ *
+ * **One tile, always, and never the mask's popcount.** The erase deferred
+ * exactly one tile for this cell — `eraseRoad` refunds per ENDPOINT CELL whose
+ * mask becomes 0, not per bit — so paying anything else here would change the
+ * whole tile economy §5.10's flat income is tuned against.
+ */
+function payGhostRefund(state: GameState, cell: number): void {
+  state.ghostMask[cell] = 0
+  state.ghostCommitted[cell] = 0
+  state.header[H_TILES] = (state.header[H_TILES] as number) + 1
+}
+
+/**
+ * Car `i` has just left `cell`, by crossing off it (`advanceCar`) or by ending
+ * its trip on it (`completeTrip`). If the cell is a ghost, one committed car has
+ * cleared; the last one to clear pays the deferred refund.
+ *
+ * **Takes no car index, deliberately.** Every car that can depart a ghost cell
+ * is one the erase counted — a car dispatched afterwards cannot be routed
+ * through it (`dist[cell]` is INF the moment `eraseRoad` clears the live bits)
+ * and a non-committed car cannot even enter it (`canEnter` answers
+ * `REFUSED_GHOST`). Passing `i` here would invite a per-car check that reads as
+ * defence and is really a second, weaker copy of the commitment definition;
+ * `isCommittedTo` (dispatch.ts) is the one copy, and its comment derives what
+ * this asymmetry does and does not cost.
+ *
+ * @internal `advanceCar` (cars.ts) and `completeTrip` (trips.ts) are the two
+ * production call sites, and there are no others: they are the only two places
+ * a car stops standing on a cell.
+ */
+export function noteGhostDeparture(state: GameState, cell: number): void {
+  if ((state.ghostMask[cell] as number) === 0) return
+  const committed = state.ghostCommitted[cell] as number
+  assertGhostCommittedPositive(committed, cell)
+  const left = committed - 1
+  state.ghostCommitted[cell] = left
+  if (left === 0) payGhostRefund(state, cell)
+}
+
+/**
+ * An erase has just taken `cell`'s last road bit. Either refund the tile now, or
+ * defer it and make the cell a ghost.
+ *
+ * @returns the tiles to refund immediately: 1 with no committed car, 0 when the
+ *          refund is deferred.
+ */
+function settleErasedCell(state: GameState, world: WorldData, cell: number, bit: number): number {
+  // Deferred import (see the module comment's note on the `dispatch.ts` cycle).
+  const committed = countCommittedCars(state, world, cell)
+  if (committed === 0) return 1
+  assertGhostCommittedFits(committed, cell)
+  // Assignment, never `+=`: a later erase that re-ghosts this cell RECOUNTS
+  // from scratch, because the currently-committed set is exactly the set that
+  // must clear. (Reachable only via place-then-erase, since a ghost cell has no
+  // road bit to erase — `placeRoad` pays the old refund on the way in, so the
+  // slot this overwrites is always 0.)
+  state.ghostMask[cell] = bit
+  state.ghostCommitted[cell] = committed
+  return 0
 }
 
 /**
@@ -435,8 +620,21 @@ export function placeRoad(state: GameState, world: WorldData, a: number, b: numb
  * endpoint whose mask becomes entirely 0 as a result. A segment that does
  * not exist is a no-op: returns `false`, refunds nothing, changes nothing.
  *
- * The refund is immediate. See the module comment for why a delayed refund
- * (spec §5.11's ghost roads) is out of scope here.
+ * **The refund is DEFERRED for an endpoint that still has a car committed to it
+ * — spec §5.11's ghost roads, M1d Task 5.** The shape of this function is
+ * unchanged: it still clears both mirrored bits, and it still computes the
+ * refund per endpoint whose mask becomes 0. What changed is that such an
+ * endpoint now asks `countCommittedCars` first, and a non-zero answer moves the
+ * cell's last bit into `ghostMask`, records the count in `ghostCommitted`, and
+ * pays nothing until the last of those cars clears.
+ *
+ * **The scope of the ghost is exactly "the cell whose last bit went", and that
+ * is what makes the count SOUND rather than arbitrary.** With the live bits
+ * gone, `dist[cell]` is INF and no route committed after the erase can contain
+ * the cell, so every car that ever crosses off it afterwards is one of the cars
+ * counted here. Ghost a cell whose other bits survive and that identity breaks:
+ * a car dispatched later could be routed through it and would decrement a count
+ * it was never part of.
  */
 export function eraseRoad(state: GameState, world: WorldData, a: number, b: number): boolean {
   if (!inBounds(a, world.cells) || !inBounds(b, world.cells)) return false
@@ -455,12 +653,16 @@ export function eraseRoad(state: GameState, world: WorldData, a: number, b: numb
   const newMaskA = maskA & ~bitA
   const newMaskB = maskB & ~bitB
 
-  let refund = 0
-  if (newMaskA === 0) refund++
-  if (newMaskB === 0) refund++
-
+  // Written BEFORE the endpoints are settled, so that `dist[cell]` is already
+  // INF for anything that looks at the board from inside `settleErasedCell` —
+  // and so that the bit `ghostMask` receives is provably the cell's LAST one,
+  // rather than a bit some later reader could mistake for a live road.
   state.roads[a] = newMaskA
   state.roads[b] = newMaskB
+
+  let refund = 0
+  if (newMaskA === 0) refund += settleErasedCell(state, world, a, bitA)
+  if (newMaskB === 0) refund += settleErasedCell(state, world, b, bitB)
   state.header[H_TILES] = (state.header[H_TILES] as number) + refund
 
   return true

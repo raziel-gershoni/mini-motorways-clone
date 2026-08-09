@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, it, expect } from 'vitest'
 import { parseMap, CARS_PER_HOUSE, type MapData } from '@laneways/shared'
-import { createState, H_SCORE, type GameState } from '../src/state'
+import { createState, H_SCORE, H_DEST_COUNT, type GameState } from '../src/state'
 import { createWorld, type WorldData } from '../src/world'
 import { packRouteStep, ROUTE_BYTES } from '../src/dispatch'
 import {
@@ -13,6 +13,8 @@ import {
   PHASE_RETURNING,
 } from '../src/buildings'
 import { runArrivals, assertArrivalHonoured } from '../src/trips'
+import { tilesLeft, ghostMaskOf, ghostCommittedOf } from '../src/roads'
+import { claimCell, occupantOf, FREE } from '../src/blocking'
 
 /**
  * Unit coverage for phase 7 — arrival, pin consumption, reservation release,
@@ -616,5 +618,95 @@ describe('the anti-double-act invariant, and iteration order', () => {
     // `j` found none and threw. Descending would show the exact mirror.
     expect(r.state.carPhase[i]).toBe(PHASE_RETURNING)
     expect(r.state.carPhase[j]).toBe(PHASE_OUTBOUND)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M1d Task 5 — trip end is a ghost departure
+// ---------------------------------------------------------------------------
+
+describe('a trip ending on a ghost cell decrements it (M1d Task 5)', () => {
+  const HOUSE = 20 // (4,2) on the 8x6 board
+  const GHOST_BIT = 1 << 2 // 1 << E
+
+  /**
+   * A RETURNING car whose retrace is over: cursor 0, standing on its house
+   * cell, holding that cell's claim from its last crossing. That is exactly the
+   * state `runArrivals` collects, and it is the state the plan's lifecycle event
+   * 4 is about.
+   */
+  function homeCar(state: GameState, i: number, cell: number): void {
+    state.carPhase[i] = PHASE_RETURNING
+    state.carCell[i] = cell
+    state.carHome[i] = 0
+    state.houseCell[0] = cell
+    state.carRouteLen[i] = 4
+    state.carRouteCursor[i] = 0
+    for (let k = 0; k < 4; k++) packRouteStep(state, i, k, 2)
+    claimCell(state, i, cell, 2)
+  }
+
+  it('pays the deferred refund when the LAST committed car s trip ends on the cell', () => {
+    // **Without this the tile is confiscated for the rest of the run** — the
+    // mirror of a double refund, and just as silent. It is not exotic: a house
+    // cell carries a road like any other (roads.ts keeps house and carpark cells
+    // placeable), so this is every trip whose own front door gets erased.
+    const { state } = rig('ghost-trip-end')
+    homeCar(state, 0, HOUSE)
+    state.ghostMask[HOUSE] = GHOST_BIT
+    state.ghostCommitted[HOUSE] = 1
+    const tiles = tilesLeft(state)
+
+    runArrivals(state)
+
+    expect(state.carPhase[0], 'vacuity: the trip really did end').toBe(PHASE_IDLE)
+    expect(tilesLeft(state)).toBe(tiles + 1)
+    expect(ghostMaskOf(state, HOUSE)).toBe(0)
+    expect(ghostCommittedOf(state, HOUSE)).toBe(0)
+    // The occupancy release still happens too — the two ledgers are separate
+    // events over the same departure, and losing either is a different bug.
+    expect(occupantOf(state, HOUSE, 0)).toBe(FREE)
+    expect(occupantOf(state, HOUSE, 1)).toBe(FREE)
+  })
+
+  it('decrements without refunding when another committed car is still to clear', () => {
+    // Split from the test above so "refund on the first trip end" and "never
+    // decrement" are different failures.
+    const { state } = rig('ghost-trip-end-partial')
+    homeCar(state, 0, HOUSE)
+    state.ghostMask[HOUSE] = GHOST_BIT
+    state.ghostCommitted[HOUSE] = 2
+    const tiles = tilesLeft(state)
+    runArrivals(state)
+    expect(ghostCommittedOf(state, HOUSE)).toBe(1)
+    expect(ghostMaskOf(state, HOUSE)).toBe(GHOST_BIT)
+    expect(tilesLeft(state)).toBe(tiles)
+  })
+
+  it('a car ARRIVING at its destination is not a departure and must not decrement', () => {
+    // `arriveAtDestination` flips the phase in place on the carpark cell: the
+    // car does not move, so it has not cleared anything. This is the same ruling
+    // `blocking.ts`'s lifecycle event 5 makes for the occupancy release, carried
+    // across to the ghost ledger — the sibling case the catalogue says gets
+    // missed.
+    const { state } = rig('ghost-arrival-not-departure')
+    const CARPARK = 21
+    state.carPhase[0] = PHASE_OUTBOUND
+    state.carCell[0] = CARPARK
+    state.carRouteLen[0] = 4
+    state.carRouteCursor[0] = 4
+    state.carTargetDest[0] = 0
+    state.destPins[0] = 1
+    state.destReserved[0] = 1
+    state.header[H_DEST_COUNT] = 1
+    state.ghostMask[CARPARK] = GHOST_BIT
+    state.ghostCommitted[CARPARK] = 1
+    const tiles = tilesLeft(state)
+
+    runArrivals(state)
+
+    expect(state.carPhase[0], 'vacuity: it really did arrive').toBe(PHASE_RETURNING)
+    expect(ghostCommittedOf(state, CARPARK), 'the car is still standing on it').toBe(1)
+    expect(tilesLeft(state)).toBe(tiles)
   })
 })
