@@ -9,6 +9,8 @@ import {
   DX,
   DY,
   OPPOSITE,
+  LANE_OF_DIR,
+  LANE_COUNT,
   dirBetween,
   stepCell,
   canPlaceRoad,
@@ -86,6 +88,82 @@ describe('DIR_COUNT / DX / DY / OPPOSITE', () => {
       expect((DX[opp] as number) + (DX[k] as number)).toBe(0)
       expect((DY[opp] as number) + (DY[k] as number)).toBe(0)
     }
+  })
+})
+
+/**
+ * M1d design decision 1. `LANE_OF_DIR` is the table the whole blocking
+ * milestone rests on, and the property in the third test below — that a
+ * direction and its opposite never share a lane — is what makes a head-on
+ * meeting STRUCTURALLY impossible rather than valve-resolved.
+ */
+describe('LANE_OF_DIR (M1d decision 1)', () => {
+  it('has exactly 8 entries, each 0 or 1, four of each', () => {
+    expect(LANE_OF_DIR.length).toBe(DIR_COUNT)
+    expect(LANE_COUNT).toBe(2)
+    let zeroes = 0
+    let ones = 0
+    for (let d = 0; d < DIR_COUNT; d++) {
+      const lane = LANE_OF_DIR[d] as number
+      expect(lane === 0 || lane === 1, `LANE_OF_DIR[${d}] = ${lane} is not a lane`).toBe(true)
+      if (lane === 0) zeroes++
+      else ones++
+    }
+    // Four of each, so the table is a genuine partition of the eight
+    // directions and not, say, all-zeroes (which would make every cell a
+    // single undirected slot again — the exact model decision 1 rejects, and
+    // one that passes "every entry is 0 or 1" without complaint).
+    expect([zeroes, ones]).toEqual([4, 4])
+  })
+
+  it('is the exact table decision 1 prints, entry by entry', () => {
+    // The literal, verbatim. The rule below is the CHECK; this is the source
+    // of truth, and a reader can compare all eight entries at a glance
+    // against the plan's own table without running anything.
+    expect(Array.from(LANE_OF_DIR)).toEqual([1, 0, 0, 0, 0, 1, 1, 1])
+  })
+
+  it('LANE_OF_DIR[d] !== LANE_OF_DIR[OPPOSITE[d]] for EVERY d — the whole-table property, not a sample', () => {
+    // Decision 1's one load-bearing property, asserted over all eight
+    // directions rather than over the four opposite pairs written out in
+    // prose. Two cars travelling in exactly opposite directions can never
+    // contend for the same slot, so a head-on swap resolves in one tick, in
+    // either index order, with no valve and no give-way rule — and no
+    // 2-cycle deadlock can exist at all.
+    //
+    // Sampling would be enough to catch a table that is uniformly wrong and
+    // would miss a table with ONE row swapped, which is the mutation that
+    // matters: `[1,0,0,0,0,1,1,1]` -> `[1,0,0,0,1,1,1,1]` makes S and its
+    // opposite N both lane 1 and leaves the other three pairs correct.
+    let pairsChecked = 0
+    for (let d = 0; d < DIR_COUNT; d++) {
+      const opp = OPPOSITE[d] as number
+      expect(
+        LANE_OF_DIR[d],
+        `direction ${d} and its opposite ${opp} share lane ${LANE_OF_DIR[d]} — head-on is no longer structural`,
+      ).not.toBe(LANE_OF_DIR[opp])
+      pairsChecked++
+    }
+    // Vacuity: the loop above must genuinely have ranged over all eight
+    // directions, not over an empty or truncated table.
+    expect(pairsChecked).toBe(8)
+  })
+
+  it('agrees with the rule decision 1 states it can be checked against: lane 0 iff DX > 0 || (DX === 0 && DY > 0)', () => {
+    // The rule is the CHECK and the table is the source of truth, never the
+    // other way round — which is why this is a separate test from the literal
+    // above rather than the way the literal is derived. If these two ever
+    // disagree, one of them is a typo and the diff says which direction.
+    for (let d = 0; d < DIR_COUNT; d++) {
+      const dx = DX[d] as number
+      const dy = DY[d] as number
+      const ruleLane = dx > 0 || (dx === 0 && dy > 0) ? 0 : 1
+      expect(LANE_OF_DIR[d], `direction ${d} = (${dx}, ${dy})`).toBe(ruleLane)
+    }
+  })
+
+  it('is frozen, so no caller can scribble a lane assignment onto the shared table', () => {
+    expect(Object.isFrozen(LANE_OF_DIR)).toBe(true)
   })
 })
 

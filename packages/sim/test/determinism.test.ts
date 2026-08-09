@@ -335,6 +335,7 @@ describe('sim source obeys the determinism rules', () => {
       'shared/src/index.ts',
       'shared/src/mapFormat.ts',
       'shared/src/maps/firstCity.ts',
+      'sim/src/blocking.ts',
       'sim/src/buildings.ts',
       'sim/src/cars.ts',
       'sim/src/clock.ts',
@@ -546,12 +547,16 @@ describe('golden replay', () => {
       step(s, GOLDEN_WORLD, fields, scratch, NO_INPUT)
       if (i % 1000 === 0) nextRandom(s.rng, 0)
     }
-    // Re-blessed in M1c Task 1 (was 1073292924, M1b's value): the buffer
-    // grew to the full M1c region list — `mapIdentity` split out of
-    // `header`, the header widened from 7 to 9 slots, and eighteen new
-    // zero-initialised building/car/demand regions added — per the plan's
-    // "Why one re-bless is now true": this is the milestone's one
-    // deliberate golden re-bless. No later M1c task should need another.
-    expect(hashState(s)).toBe(2413319809)
+    // Re-blessed in M1d Task 2 (was 2413319809, M1c's value; 1073292924 at
+    // M1b): the buffer grew from 7,908 to 11,908 bytes with the two Int16
+    // regions M1d's blocking primitive needs — `occupancy` (2 x cells,
+    // FREE-filled) and `carBlockedTicks` (maxCars) — per the plan's "Why
+    // exactly two re-blesses are true". **Layout only, and derived rather
+    // than assumed**: splicing the 4,000 inserted bytes back out of this
+    // buffer reproduces 2413319809 exactly, so no pre-existing byte moved.
+    // This fixture places no building and therefore has no car, so it cannot
+    // move for a behavioural reason in this milestone at all — after Task 2
+    // it is a pure layout tripwire until Task 5's second (and last) change.
+    expect(hashState(s)).toBe(1729791425)
   })
 })

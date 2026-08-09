@@ -149,9 +149,19 @@ import { seedStartingCity } from './startingCity'
  * **It moves no golden**, and that is why it is the lever this task took. The
  * plan's own suggestion — make destination 0 a circle, `slotCount` 3, first pin
  * at tick 292 — was measured and **rejected**: it changes `destMeta[0]`, so
- * `hashState` after seeding moves from `2505371110` to `4171132894`, and the
- * task's constraints say to stop and report rather than re-bless. It is also the
- * weaker lever: 292 ticks is still **9.7 s** of dead board, against 4.0 s here.
+ * `hashState` after seeding moves from the seeded-state golden to a different
+ * number, and the task's constraints say to stop and report rather than
+ * re-bless. It is also the weaker lever: 292 ticks is still **9.7 s** of dead
+ * board, against 4.0 s here.
+ *
+ * The two figures, restated at M1d Task 2 because the state buffer grew from
+ * 7,908 to 11,908 bytes there (`occupancy` + `carBlockedTicks`) and both moved
+ * for layout: the seeded golden is **`3576722662`** (was `2505371110` at M2) and
+ * the rejected circle variant is **`947517150`** (was `4171132894`). Nothing
+ * greps this comment, so it is re-derived rather than trusted whenever the
+ * buffer changes shape — both numbers were re-measured here, and splicing the
+ * inserted bytes back out reproduced the two M2-era values exactly, which is
+ * what confirms the pair still describes the same two states.
  *
  * **What it costs, measured:** 258 `step` calls at boot, 6.8 ms on the
  * development machine, once. Nothing visible changes across those ticks — no

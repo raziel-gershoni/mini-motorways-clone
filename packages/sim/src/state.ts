@@ -1,4 +1,4 @@
-import type { MapData } from '@laneways/shared'
+import { CARS_PER_HOUSE, type MapData } from '@laneways/shared'
 import { seedFromString } from './rng'
 import { hashBytes } from './hash'
 import { computeLayout, type RegionCtor } from './layout'
@@ -126,6 +126,12 @@ export const MAP_IDENTITY_LENGTH = 3
  * the cross-module cycle documented above stays safe.
  */
 import { regionsFor } from './regions'
+/**
+ * Deferred import, same rule: `blocking.ts` reads `GameState` from this module
+ * (type-only) and this module reads `FREE`/`assertMaxCarsFitsOccupancy` from
+ * there, used only inside `createState`'s body.
+ */
+import { FREE, assertMaxCarsFitsOccupancy } from './blocking'
 
 /** Total buffer size for a given map. */
 export function stateBytesFor(map: MapData): number {
@@ -160,6 +166,21 @@ export interface GameState {
   readonly carTargetDest: Int32Array
   readonly carRouteLen: Int16Array
   readonly carRouteCursor: Int16Array
+  /**
+   * Per-(cell, lane) occupancy, `slot = cell * 2 + lane`, `FREE = -1` — M1d
+   * Task 2. `blocking.ts` owns the slot arithmetic and the whole claim/release
+   * protocol; this is only where the bytes live. **The one region `createState`
+   * does not leave all-zero**, because a zero-filled occupancy region would
+   * read as "car 0 occupies every lane of every cell".
+   */
+  readonly occupancy: Int16Array
+  /**
+   * Consecutive ticks car `i` has been refused entry — declared with the rest
+   * of the blocking buffer shape in M1d Task 2, given its semantics by Task 4.
+   * Buffer state and not `Scratch` state, and `Int16` and not `Uint8`; both
+   * choices are load-bearing and `regions.ts` records why.
+   */
+  readonly carBlockedTicks: Int16Array
   readonly roads: Uint8Array
   readonly cleared: Uint8Array
   readonly houseColour: Uint8Array
@@ -186,6 +207,8 @@ const REGION_FIELD_NAMES = Object.freeze([
   'carTargetDest',
   'carRouteLen',
   'carRouteCursor',
+  'occupancy',
+  'carBlockedTicks',
   'roads',
   'cleared',
   'houseColour',
@@ -226,6 +249,8 @@ function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
   const carTargetDest = views.get('carTargetDest')
   const carRouteLen = views.get('carRouteLen')
   const carRouteCursor = views.get('carRouteCursor')
+  const occupancy = views.get('occupancy')
+  const carBlockedTicks = views.get('carBlockedTicks')
   const roads = views.get('roads')
   const cleared = views.get('cleared')
   const houseColour = views.get('houseColour')
@@ -249,6 +274,8 @@ function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
     !(carTargetDest instanceof Int32Array) ||
     !(carRouteLen instanceof Int16Array) ||
     !(carRouteCursor instanceof Int16Array) ||
+    !(occupancy instanceof Int16Array) ||
+    !(carBlockedTicks instanceof Int16Array) ||
     !(roads instanceof Uint8Array) ||
     !(cleared instanceof Uint8Array) ||
     !(houseColour instanceof Uint8Array) ||
@@ -277,6 +304,8 @@ function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
     carTargetDest,
     carRouteLen,
     carRouteCursor,
+    occupancy,
+    carBlockedTicks,
     roads,
     cleared,
     houseColour,
@@ -304,16 +333,32 @@ export function nonZeroWord(v: number): number {
 }
 
 /**
- * A fresh `GameState` is all-zero in every region except `rng` and
- * `mapIdentity` (and `header[H_TILES]`) — no `-1` sentinel is written
- * anywhere at creation. Unused house/destination slots are simply those at
- * index >= `H_HOUSE_COUNT`/`H_DEST_COUNT` (both 0 here); unused cars are
- * `PHASE_NONE = 0`. This is what makes "a building-free state is
- * byte-identical to a from-scratch M1c-shaped state" true, which is the
- * property the single re-bless (Task 1) and every later task's
- * unchanged-goldens assertion both depend on.
+ * A fresh `GameState` is all-zero in every region except `rng`,
+ * `mapIdentity`, `header[H_TILES]` — and, as of M1d Task 2, `occupancy`.
+ *
+ * **`occupancy` is the ONE region that carries a `-1` sentinel at creation**,
+ * and it is not an exception to the liveness convention below: every LIVENESS
+ * marker in this buffer is still a prefix count or a phase byte, never a `-1`.
+ * Unused house/destination slots are simply those at index >=
+ * `H_HOUSE_COUNT`/`H_DEST_COUNT` (both 0 here); unused cars are `PHASE_NONE =
+ * 0`. `occupancy` holds `FREE = -1` because 0 is a valid CAR INDEX there, so a
+ * zero-filled occupancy region would read as "car 0 occupies every lane of
+ * every cell" and nothing on the board could move (`blocking.ts`, lifecycle
+ * event 1).
+ *
+ * Every other region stays all-zero, which is what keeps "a building-free
+ * state is byte-identical to a from-scratch state of the same shape" true —
+ * the property every task's unchanged-goldens assertion depends on. The `-1`
+ * fill is deterministic and unconditional, so two fresh states of the same
+ * shape are still byte-identical to each other.
  */
 export function createState(seed: string, map: MapData): GameState {
+  // Before any view is built: `parseMap` puts no ceiling on `maxCars`, and an
+  // `Int16` occupancy slot cannot name a car index above 32,767. `Int16Array`
+  // coerces rather than throwing, so without this the failure is a slot holding
+  // a negative number no lookup can ever match. Named, in the
+  // `assertSingleCrossing`/`assertDispatchProgress` idiom.
+  assertMaxCarsFitsOccupancy(CARS_PER_HOUSE * map.maxHouses)
   const s = viewsOver(new ArrayBuffer(stateBytesFor(map)), map)
   // Seed can hash to 0; mulberry32 tolerates it, but a zero here is also the
   // value an uninitialised buffer would hold, so force it non-zero to keep
@@ -323,6 +368,8 @@ export function createState(seed: string, map: MapData): GameState {
   s.mapIdentity[MI_MAP_W] = map.w
   s.mapIdentity[MI_MAP_H] = map.h
   s.header[H_TILES] = map.startingTiles
+  // Lifecycle event 1 (blocking.ts): a whole-region fill, never a prefix.
+  s.occupancy.fill(FREE)
   return s
 }
 
@@ -372,10 +419,12 @@ export function hashState(s: GameState): number {
 
 /**
  * The house at live index `h`: `houseCell[h]`, valid only for `h` in
- * `[0, H_HOUSE_COUNT)`. Throws otherwise — there is no `-1` unused marker
- * anywhere in this milestone's region list ("Why one re-bless is now true"),
- * so the live-prefix length (`H_HOUSE_COUNT`) is the ONLY signal that
- * distinguishes a real house from an unused, all-zero slot. Reading past the
+ * `[0, H_HOUSE_COUNT)`. Throws otherwise — no region carrying a BUILDING or CAR
+ * slot uses a `-1` unused marker (narrowed at M1d Task 2, which added
+ * `occupancy`'s `FREE = -1`; that region indexes cells, not slots, and has no
+ * liveness prefix), so the live-prefix length (`H_HOUSE_COUNT`) is the ONLY
+ * signal that distinguishes a real house from an unused, all-zero slot.
+ * Reading past the
  * prefix without this accessor would silently return house 0's own cell
  * (index 0 reinterpreted) rather than an error.
  *

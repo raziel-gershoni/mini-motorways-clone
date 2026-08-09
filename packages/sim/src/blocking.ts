@@ -1,0 +1,381 @@
+import type { GameState } from './state'
+import type { WorldData } from './world'
+import { LANE_COUNT, LANE_OF_DIR } from './roads'
+import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
+
+/**
+ * Occupancy: who is standing on which (cell, lane), and the claim/release
+ * protocol that keeps that true — M1d design decisions 1, 3 and 6.
+ *
+ * **What this module is for.** Spec §5.5 asks one blocking question: *does an
+ * inbound vehicle collide with a traversing vehicle on this chunk?* M1d answers
+ * it with per-(cell, lane) occupancy in the state buffer, where the lane is a
+ * frozen function of the direction of travel (`LANE_OF_DIR`, `roads.ts`).
+ * Queueing, carpark queues and emergent gridlock all fall out of it, with no
+ * collision physics anywhere.
+ *
+ * **Slot arithmetic: `slot = cell * LANE_COUNT + lane`.** This is the SECOND
+ * index arithmetic this codebase carries, beside `index = y * w + x`, and the
+ * two must not be confused. `occupancySlot` below is the single place it is
+ * written; nothing else should compute it inline.
+ *
+ * ---------------------------------------------------------------------------
+ * THE FIVE LIFECYCLE EVENTS, IN FULL — DECISION 3
+ * ---------------------------------------------------------------------------
+ *
+ * This is the single place the protocol is written down. All of them, and no
+ * others:
+ *
+ *   1. **Creation.** `createState` (`state.ts`) fills the `occupancy` region
+ *      with `FREE = -1`. An `Int16Array` region zero-initialises, and a
+ *      zero-filled occupancy region reads as *"car 0 occupies every lane of
+ *      every cell"* — nothing on the board could move. This is the ONE region
+ *      in the whole buffer that is not all-zero at creation, and six prose
+ *      sites that used to say "a fresh state writes no -1 sentinel anywhere"
+ *      were narrowed in the same commit as this fill.
+ *
+ *   2. **A crossing INTO a cell claims `(cell, LANE_OF_DIR[dir])`**, where
+ *      `dir` is the direction of that crossing — the value `advanceCar` already
+ *      computes. `claimCell` below. The write is UNCONDITIONAL, so a slot
+ *      always names the most recent car to have entered it.
+ *
+ *   3. **A crossing OUT of a cell releases it**, guarded by identity and
+ *      clearing BOTH lanes: `releaseCell` below.
+ *
+ *   4. **Trip end releases.** `completeTrip` (`trips.ts`) is a release site. A
+ *      returning car's last crossing genuinely enters the house cell, so it
+ *      holds a claim there; if `completeTrip` did not release it, the car would
+ *      hold its own front door forever and its sibling would stall the full
+ *      valve on EVERY return leg. That is the most common trip in the game.
+ *
+ *   5. **Nothing else claims.** Not dispatch, not `placeHouse`, not an idle
+ *      car. `arriveAtDestination` is deliberately NOT a release site either:
+ *      the car does not move, it flips phase in place on the carpark cell, and
+ *      it is still standing on the cell whose slot it holds.
+ *
+ * **The tick-0 ruling, decided: cars stack legally at their home cell.**
+ * `placeHouse` puts `CARS_PER_HOUSE = 2` cars on one cell before any tick runs,
+ * and dispatch can flip both of them OUTBOUND in the same tick. A house cell
+ * necessarily carries a road (the flow field propagates only over road bits, so
+ * a house whose cell has no road is never dispatched from), so this is the
+ * steady state of every house, not a fixture artefact. Rule 2 above does the
+ * work: a car that has not yet crossed on its current leg holds nothing, and an
+ * idle car holds nothing, so two, three or `CARS_PER_HOUSE` cars on a house
+ * cell is representable and correct.
+ *
+ * Note what that is NOT: house cells are **not exempt from occupancy**. A car
+ * driving THROUGH a house cell claims it exactly like any other cell.
+ * Exempting the cell would put a permanent hole in the blocking primitive that
+ * a player could route traffic through.
+ *
+ * **A house's front door does not queue; the first crossing does.** Two cars
+ * dispatched from one house in one tick both leave with no claim; the
+ * lower-indexed one takes the first crossing and (from Task 3) the
+ * higher-indexed one is refused at it. That is correct queueing, one cell later
+ * than a naive reading, and it is what keeps dispatch correct without dispatch
+ * ever being refused.
+ *
+ * ---------------------------------------------------------------------------
+ * THE RELEASE RULE IS PART OF DECISION 6, NOT AN IMPLEMENTATION DETAIL
+ * ---------------------------------------------------------------------------
+ *
+ * **Release is guarded by identity, and clears BOTH lanes of the vacated
+ * cell.** Two comparisons, and it needs no direction at all.
+ *
+ * Releasing *"the lane derived from the direction I am leaving by"* is wrong
+ * and is the corruption case: a car that entered a cell heading E and leaves it
+ * heading N claimed lane 0 and would clear lane 1, leaving lane 0 claimed by a
+ * car that is not there — a cell that silently stops blocking for the rest of
+ * the run. **Every turn is an instance**, which is why `blocking.test.ts`'s
+ * release fixture is built around a route with a genuine 90-degree turn and
+ * asserts the two lanes it touches actually differ. On a straight corridor the
+ * two rules are indistinguishable.
+ *
+ * **Unconditional release is the natural extension of `advanceCar`'s single
+ * in-place write and it is also wrong.** On the four-car ring M1d Task 4 tests,
+ * with all four valves firing on one tick, it leaves three of four cells
+ * reading FREE with a car standing on each — blocking silently stops working
+ * for the rest of the run. Guarded release self-heals instead: processed
+ * ascending, car 0 clears its own slot on c0 and overwrites c1's; car 1's
+ * guarded clear on c1 now correctly FAILS (car 0 is there) and it overwrites
+ * c2's; and so on, ending with every cell named by exactly the car standing on
+ * it and zero holes.
+ *
+ * ---------------------------------------------------------------------------
+ * SOUND AT ALL TIMES, COMPLETE ONLY CONDITIONALLY
+ * ---------------------------------------------------------------------------
+ *
+ * Together, guarded release and overwriting claim make the array **sound**:
+ * every slot that names a car names a car that is standing on that cell. They
+ * do not make it **complete**: a cell can carry more cars than its slots name,
+ * because a car that has not yet crossed on its current leg holds nothing
+ * (Decision 3) and because of the valve's transient (Decision 6). So
+ * `assertOccupancyConsistent` has two halves of different strength, separately
+ * named, and the weaker half's exception set is spelled out at its own site
+ * rather than left to be inferred.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT THIS MODULE DOES NOT DO — YET
+ * ---------------------------------------------------------------------------
+ *
+ * **Task 2 adds no refusals.** It declares the whole blocking buffer shape and
+ * wires claim/release so that occupancy is always correct, and nothing yet
+ * reads it to stop a car. That is deliberate and it is what makes Task 2's
+ * golden re-bless provably layout-only: no car's motion can have changed, so
+ * the only difference in the four whole-buffer digests is buffer SHAPE. Task 3
+ * adds `canEnter` and refusal; Task 4 the valve and `carBlockedTicks`'s
+ * semantics; Task 5 the ghost regions.
+ *
+ * **Nothing here allocates.** No object literal, no array, no closure, no
+ * `.map`/`.filter`/`.slice`; every value is a bare number and the only buffer
+ * written is the caller-owned state buffer. Zero, not "small" — the assertion
+ * functions are the exception and they are test/diagnostic entry points, never
+ * called from `step`.
+ */
+
+/**
+ * The value an unoccupied lane slot holds. Not 0: 0 is a valid car index, and a
+ * zero-filled occupancy region would read as "car 0 occupies every lane of
+ * every cell".
+ */
+export const FREE = -1
+
+/**
+ * The largest car index an `Int16` occupancy slot can name. `parseMap` does not
+ * bound `maxCars`, so `createState` asserts it rather than trusting the map —
+ * see `assertMaxCarsFitsOccupancy`.
+ */
+export const OCCUPANCY_MAX_CAR_INDEX = 32767
+
+/**
+ * `slot = cell * LANE_COUNT + lane`. The single owner of the occupancy index
+ * arithmetic; see the module comment for why it is not inlined at call sites.
+ */
+export function occupancySlot(cell: number, lane: number): number {
+  return cell * LANE_COUNT + lane
+}
+
+/**
+ * Throws if a map's `maxCars` would produce a car index an `Int16` occupancy
+ * slot cannot name.
+ *
+ * `parseMap` enforces no bound on `maxCars` (`CARS_PER_HOUSE * maxHouses`), and
+ * the failure without this check is silent rather than loud: `Int16Array`
+ * COERCES, so car 32,768 would be stored as -32,768 and car 32,769 as -32,767,
+ * and no slot lookup could ever match them again. That is the same coercion
+ * class as the `Int32Array` pointer-id latch in the testing catalogue — an
+ * out-of-contract input must not be able to brick the thing, however
+ * unreachable it looks. `firstCity`'s `maxCars` is 80.
+ *
+ * Unreachable through every map that ships; exercised directly in
+ * `blocking.test.ts`, on the precedent of `assertSingleCrossing` (cars.ts) and
+ * `assertDispatchProgress` (dispatch.ts).
+ *
+ * The bound is on the largest INDEX, not on the count: with
+ * `OCCUPANCY_MAX_CAR_INDEX = 32767` the admissible counts are `0..32768`.
+ *
+ * @internal `createState` is the production call site.
+ */
+export function assertMaxCarsFitsOccupancy(maxCars: number): void {
+  if (!Number.isInteger(maxCars) || maxCars < 0 || maxCars - 1 > OCCUPANCY_MAX_CAR_INDEX) {
+    throw new Error(
+      `blocking: maxCars ${maxCars} would produce a car index above ${OCCUPANCY_MAX_CAR_INDEX}, which an ` +
+        'Int16 occupancy slot cannot name — Int16Array coerces rather than throwing, so the slot would ' +
+        'silently hold a negative number no lookup could ever match',
+    )
+  }
+}
+
+/**
+ * Event 2: car `i` has just crossed INTO `cell` travelling in direction `dir`.
+ *
+ * The write is unconditional — a slot always names the MOST RECENT car to have
+ * entered it. That is what makes the array self-heal after the valve fires
+ * (Decision 6): the displaced car's later guarded release correctly does
+ * nothing, and the entrant's claim is already correct.
+ *
+ * `dir` is the direction of THIS crossing, which is the value `advanceCar`
+ * already holds; the lane is `LANE_OF_DIR[dir]` and nothing else.
+ */
+export function claimCell(state: GameState, i: number, cell: number, dir: number): void {
+  state.occupancy[occupancySlot(cell, LANE_OF_DIR[dir] as number)] = i
+}
+
+/**
+ * Events 3 and 4: car `i` no longer stands on `cell`.
+ *
+ * **Guarded by identity, and clears BOTH lanes.** It takes no direction, on
+ * purpose — see the module comment: releasing the lane derived from the
+ * OUTGOING direction corrupts the array at every turn, and unconditional
+ * release corrupts it whenever the valve has displaced somebody. Two
+ * comparisons is the whole cost.
+ */
+export function releaseCell(state: GameState, i: number, cell: number): void {
+  const base = occupancySlot(cell, 0)
+  for (let lane = 0; lane < LANE_COUNT; lane++) {
+    if (state.occupancy[base + lane] === i) state.occupancy[base + lane] = FREE
+  }
+}
+
+/** The car standing in `(cell, lane)`, or `FREE`. */
+export function occupantOf(state: GameState, cell: number, lane: number): number {
+  return state.occupancy[occupancySlot(cell, lane)] as number
+}
+
+/**
+ * True iff car `i` has crossed at least once on its CURRENT leg, and therefore
+ * holds a claim on the cell it is standing on.
+ *
+ * Outbound the cursor starts at 0 and increments, so a crossing has happened
+ * iff `cursor > 0`. Returning the cursor starts at `routeLen` and decrements,
+ * so a crossing has happened iff `cursor < routeLen`. Exported because
+ * `assertOccupancyConsistent`'s completeness half is defined in terms of it and
+ * `blocking.test.ts` asserts the fixtures it runs on are non-vacuous by it.
+ *
+ * Note the asymmetry this predicate deliberately does NOT capture: a car that
+ * has just flipped to RETURNING on the carpark cell has crossed zero times on
+ * its current leg and yet still holds a claim, carried over from the outbound
+ * leg's last crossing. Completeness is a one-way implication ("crossed =>
+ * named"), so a car named without having crossed is permitted; soundness
+ * covers that car instead, and does so correctly, because it IS standing on the
+ * cell its slot names.
+ */
+export function hasCrossedThisLeg(state: GameState, i: number): boolean {
+  const phase = state.carPhase[i] as number
+  const cursor = state.carRouteCursor[i] as number
+  if (phase === PHASE_OUTBOUND) return cursor > 0
+  if (phase === PHASE_RETURNING) return cursor < (state.carRouteLen[i] as number)
+  return false
+}
+
+/**
+ * SOUNDNESS: every slot that names a car names a car that is OUTBOUND or
+ * RETURNING and standing on that cell.
+ *
+ * **Asserted unconditionally** — it holds at every tick of every run, including
+ * across a valve firing, and there is no exception set. It is the half that
+ * catches the two release mutations directly and by a second, independent
+ * route: a slot naming a car that has gone `PHASE_IDLE` is a soundness
+ * violation BY DEFINITION, so "skip the release in `completeTrip`" is caught
+ * here as well as by the direct slot assertion.
+ *
+ * Split out from the completeness half rather than folded into one function, in
+ * the house style of `assertSymmetric` (roads.ts) and `assertArrivalHonoured`
+ * (trips.ts), so a caller that can only legitimately assert the weaker half
+ * still asserts the stronger one, and so a failure names WHICH half broke.
+ */
+export function assertOccupancySound(state: GameState, world: WorldData): void {
+  const cells = world.cells
+  for (let cell = 0; cell < cells; cell++) {
+    const base = occupancySlot(cell, 0)
+    for (let lane = 0; lane < LANE_COUNT; lane++) {
+      const i = state.occupancy[base + lane] as number
+      if (i === FREE) continue
+      if (i < 0 || i >= state.carPhase.length) {
+        throw new Error(
+          `assertOccupancySound: cell ${cell} lane ${lane} names car ${i}, which is not a car index ` +
+            `(0..${state.carPhase.length - 1}) and is not FREE (${FREE})`,
+        )
+      }
+      const phase = state.carPhase[i] as number
+      if (phase !== PHASE_OUTBOUND && phase !== PHASE_RETURNING) {
+        throw new Error(
+          `assertOccupancySound: cell ${cell} lane ${lane} names car ${i}, whose phase is ${phase} — ` +
+            'only an OUTBOUND or RETURNING car may hold a slot, so a claim outlived its car',
+        )
+      }
+      if ((state.carCell[i] as number) !== cell) {
+        throw new Error(
+          `assertOccupancySound: cell ${cell} lane ${lane} names car ${i}, which is standing on cell ` +
+            `${state.carCell[i]} — the slot names a car that is not there`,
+        )
+      }
+    }
+  }
+}
+
+/**
+ * COMPLETENESS: every car that has crossed at least once on its current leg is
+ * named by one of its cell's two slots.
+ *
+ * **Weaker than soundness, and its exception set is spelled out here rather
+ * than inferred.** The property does NOT hold for:
+ *
+ *   - a car that has not crossed on its current leg (Decision 3's tick-0
+ *     ruling: an idle car holds nothing, and a just-dispatched car holds
+ *     nothing until its first crossing) — excluded by `hasCrossedThisLeg`, and
+ *     that exclusion is the rule, not an exception;
+ *   - a car displaced by the anti-deadlock valve (Decision 6's stated residual,
+ *     from Task 4 onward). When the valve fires for car *i* into a slot held by
+ *     car *j* and *j* does not move that tick, both are on the cell and the
+ *     slot names *i*; if *i* leaves first, its guarded clear frees a slot *j*
+ *     is still standing on. That is a **transient completeness gap, never a
+ *     soundness violation**, and the next entrant overwrites it back into a
+ *     correct state. So this half is asserted only on fixtures where the valve
+ *     has not fired;
+ *   - **a car displaced by an ordinary same-lane crossing, which is reachable
+ *     in TASK 2 ONLY and is not in the plan's stated exception set.** Task 2
+ *     declares the primitive and adds no refusal, so two cars may cross into
+ *     the same `(cell, lane)` and the later writer's unconditional claim
+ *     displaces the earlier car's. Both are standing on the cell, so soundness
+ *     holds; completeness does not, for the displaced one. From Task 3 onward
+ *     `canEnter` refuses the second entry outright and this arm disappears,
+ *     leaving the valve as the only source of displacement — which is why the
+ *     plan lists only the valve. Task 2's own fixtures are built so it does not
+ *     arise and assert that it did not, rather than relying on it not arising.
+ *
+ * **Vacuity.** Over a board with no car that has crossed, this holds over an
+ * empty set and proves nothing. `blocking.test.ts` therefore asserts a non-zero
+ * count of qualifying cars wherever it calls this — and the count is returned
+ * rather than merely counted internally, so the caller can make that assertion
+ * against the same enumeration this function used rather than against a
+ * re-implementation of it.
+ *
+ * @returns the number of cars the assertion actually ranged over.
+ */
+export function assertOccupancyComplete(state: GameState, world: WorldData): number {
+  const carCount = state.carPhase.length
+  let checked = 0
+  for (let i = 0; i < carCount; i++) {
+    if (!hasCrossedThisLeg(state, i)) continue
+    checked++
+    const cell = state.carCell[i] as number
+    if (cell < 0 || cell >= world.cells) {
+      throw new Error(`assertOccupancyComplete: car ${i} is on cell ${cell}, which is off the board`)
+    }
+    const base = occupancySlot(cell, 0)
+    let named = false
+    for (let lane = 0; lane < LANE_COUNT; lane++) {
+      if (state.occupancy[base + lane] === i) named = true
+    }
+    if (!named) {
+      throw new Error(
+        `assertOccupancyComplete: car ${i} has crossed on its current leg and stands on cell ${cell}, ` +
+          `but neither of that cell's slots names it (they hold ${state.occupancy[base]}, ` +
+          `${state.occupancy[base + 1]}) — a claim went missing`,
+      )
+    }
+  }
+  return checked
+}
+
+/**
+ * Both halves, in the house style of `assertSymmetric` / `assertArrivalHonoured`.
+ *
+ * Called from every blocking fixture and from Task 9's long run. Soundness is
+ * unconditional; completeness is opt-in via `checkComplete`, because from Task
+ * 4 onward a fixture in which the valve has fired may legitimately carry a
+ * transient completeness gap (see `assertOccupancyComplete`). It defaults to
+ * ON, so a caller has to say out loud that it is skipping the weaker half.
+ *
+ * @returns the number of cars the completeness half ranged over, or 0 when it
+ *          was skipped — the caller's vacuity handle.
+ */
+export function assertOccupancyConsistent(
+  state: GameState,
+  world: WorldData,
+  checkComplete = true,
+): number {
+  assertOccupancySound(state, world)
+  return checkComplete ? assertOccupancyComplete(state, world) : 0
+}

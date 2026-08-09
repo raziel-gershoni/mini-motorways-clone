@@ -2,6 +2,7 @@ import { CAR_SPEED_UNITS_PER_TICK, COST_UNIT_SCALE, DENOM, LANE_SPEED_DEFAULT, O
 import type { GameState } from './state'
 import type { WorldData } from './world'
 import { OPPOSITE, stepCell } from './roads'
+import { claimCell, releaseCell } from './blocking'
 import { edgeCost } from './graph'
 import { routeStep } from './dispatch'
 import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
@@ -39,6 +40,15 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
  * was. Anything that makes movement depend on the *contents* of `roads`
  * (M1d Task 7's intersection multiplier is the first) must amend that sentence
  * in the same commit rather than leaning on this one.
+ *
+ * **As of M1d Task 2 this module WRITES `state.occupancy`, and that is a new
+ * kind of write for it.** Every other region `advanceCar` touches is indexed by
+ * the car; `occupancy` is indexed by the CELL, so for the first time one car's
+ * advance can write a slot another car's advance will read. It does not yet
+ * READ occupancy — Task 2 adds no refusal — but the shared-write is already
+ * enough to retire this module's "no car can observe another" claim, and
+ * `runMovement`'s iteration-order note below is amended accordingly rather than
+ * left standing on a premise that has stopped being true.
  *
  * **Progress is accumulated in the pathfinder's own cost units:**
  *
@@ -217,7 +227,27 @@ export function advanceCar(state: GameState, world: WorldData, i: number, speed:
     )
   }
 
+  // Occupancy, lifecycle events 3 then 2 (blocking.ts). This is the ONE
+  // crossing site in the codebase, so it is the one place both events fire.
+  //
+  // Release BEFORE the `carCell` write, because `releaseCell` is about the cell
+  // the car is standing on and that write is what stops it standing there. The
+  // two cells are always distinct (`stepCell` never returns its own argument —
+  // no direction has `DX === 0 && DY === 0`), so the order is not load-bearing
+  // for correctness; it is written this way so it reads as "leave, then enter".
+  //
+  // `releaseCell` is guarded by identity and clears BOTH lanes, and takes no
+  // direction at all: releasing the lane derived from the OUTGOING direction is
+  // wrong at every turn, which is decision 6's corruption case. `claimCell`
+  // overwrites unconditionally with the lane of THIS crossing's direction.
+  //
+  // **Task 2 adds no refusal here.** `dir` is computed, the crossing happens,
+  // and occupancy records it. Task 3 inserts `canEnter` between
+  // `assertSingleCrossing` and this block; nothing about a car's motion changes
+  // in Task 2, which is what makes Task 2's golden re-bless layout-only.
+  releaseCell(state, i, state.carCell[i] as number)
   state.carCell[i] = next
+  claimCell(state, i, next, dir)
   state.carRouteCursor[i] = outbound ? cursor + 1 : cursor - 1
   state.carProgress[i] = residual
 }
@@ -232,13 +262,31 @@ export function advanceCar(state: GameState, world: WorldData, i: number, speed:
  * tick is collected this tick rather than sitting a tick on the carpark cell.
  *
  * Cars are iterated in ascending index and each car's phase byte is read
- * exactly once, per the anti-double-act invariant. **Iteration order is a
- * provable no-op today, not an untested choice** — `advanceCar` reads and
- * writes only car `i`'s own slots, so no car can observe another, and
- * "iterate descending" survives the whole suite (recorded, in the idiom
- * `demand.ts`'s overflow-walk bound already uses for a checked no-op).
- * Ascending is kept because M1d's blocking makes the order observable the day
- * a car can be held up by the one in front of it.
+ * exactly once, per the anti-double-act invariant.
+ *
+ * **Iteration order stopped being a PROVABLE no-op at M1d Task 2, and the note
+ * that used to live here has to be retired rather than reworded.** Until Task
+ * 2, `advanceCar` read and wrote only car `i`'s own slots, so no car could
+ * observe another and "iterate descending" was a no-op by reading. It now
+ * writes `state.occupancy`, which is cell-indexed and shared: if two cars cross
+ * into the same `(cell, lane)` on the same tick, the LAST writer wins, so the
+ * surviving occupant is a function of the order. That state is reachable in
+ * Task 2 precisely because Task 2 adds no refusal; from Task 3 it becomes
+ * unreachable through the ordinary path (the second car is refused) and
+ * reachable again only through Task 4's valve.
+ *
+ * So the honest statement is now: **descending is no longer a no-op, and it is
+ * no longer unobserved.** Measured at Task 2, not assumed: `for (let i =
+ * carCount - 1; i >= 0; i--)` is killed by exactly **one** test — the same-lane
+ * displacement fixture in `blocking.test.ts`, which dispatches both of a house's
+ * cars on one tick and asserts that the shared lane names car **1**, the last
+ * writer under ascending order. One detector is thin, and it is thin for a real
+ * reason rather than a coverage gap: two cars can only contend for one slot at
+ * all while nothing refuses them, so Task 2 is the *only* task in which the
+ * ordinary path produces this state. From Task 3 `canEnter` refuses the second
+ * entry and the order becomes outcome-visible in the much stronger sense the
+ * plan describes — different survivors, different arrival ticks — at which point
+ * that fixture is rewritten as a refusal test and the detector count rises.
  */
 export function runMovement(state: GameState, world: WorldData): void {
   const speed = speedUnits(LANE_SPEED_DEFAULT)

@@ -1,6 +1,7 @@
 import type { GameState } from './state'
 import { H_SCORE } from './state'
 import { PHASE_IDLE, PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
+import { releaseCell } from './blocking'
 import { ROUTE_BYTES } from './dispatch'
 
 /**
@@ -137,6 +138,15 @@ export function assertArrivalHonoured(pins: number, reserved: number, d: number,
  * `carRoute` and `carTargetDest` survive too — the return leg is the same
  * route read backwards, and the target is what the plan's own trip-end rule
  * clears. Only trip end zeroes bytes.
+ *
+ * **This is deliberately NOT an occupancy release site** (M1d Task 2,
+ * `blocking.ts` lifecycle event 5). The car does not move: it flips phase in
+ * place on the carpark cell, which its last outbound crossing entered and whose
+ * slot it therefore holds. Releasing here would free a slot with a car standing
+ * on it — a completeness hole that lasts until the next entrant overwrites it,
+ * and, once Task 3 refuses entries, a cell that silently stops blocking. The
+ * claim carries across the leg flip and is released by the FIRST crossing of
+ * the return leg, exactly as it would be on any other cell.
  */
 function arriveAtDestination(state: GameState, i: number): void {
   const d = state.carTargetDest[i] as number
@@ -151,13 +161,19 @@ function arriveAtDestination(state: GameState, i: number): void {
 /**
  * The return leg is over: the car is home.
  *
- * The byte set is spelled out rather than left to judgement, because Task 1g's
- * compression measurement — and through it M3's 4,096-character CloudStorage
- * budget — depends on it exactly: `carRoute` is 3,840 B of the 7,908 B state
- * buffer, and the prediction that a snapshot compresses is the prediction that
- * an idle car's route slice is a run of zeros. After this runs, the car's slot
- * is byte-identical to a freshly created car's slot, which is what
- * `trips.test.ts` and `loop.test.ts` both assert AS A SLOT.
+ * The byte set is spelled out rather than left to judgement, because M1c Task
+ * 1g's compression measurement — and through it M3's 4,096-character
+ * CloudStorage budget — depends on it exactly: `carRoute` is 3,840 B of the
+ * state buffer (of 7,908 B at M1c; of 11,908 B after M1d Task 2 added
+ * `occupancy` and `carBlockedTicks`, and 13,828 B after Task 5's two ghost
+ * regions — M3 must re-measure, not extrapolate), and the prediction that a
+ * snapshot compresses is the prediction that an idle car's route slice is a run
+ * of zeros. After this runs, the car's own slot in every CAR region is
+ * byte-identical to a freshly created car's slot, which is what
+ * `trips.test.ts` and `loop.test.ts` both assert AS A SLOT. `occupancy` is not
+ * a car region and is not part of that claim: it is cell-indexed, and the
+ * release above returns the vacated slot to `FREE`, which is exactly its
+ * freshly-created value.
  *
  * The `carCell` write is a no-op on the reachable manifold and is not
  * decoration: the retrace ends on the cell the route started from, which is
@@ -176,6 +192,32 @@ function arriveAtDestination(state: GameState, i: number): void {
 function completeTrip(state: GameState, i: number): void {
   state.header[H_SCORE] = (state.header[H_SCORE] as number) + 1
   state.carPhase[i] = PHASE_IDLE
+  // Occupancy lifecycle event 4 (blocking.ts). A returning car's last crossing
+  // genuinely ENTERS the house cell, so it holds a claim there; without this
+  // release the car holds its own front door forever, and its sibling stalls
+  // the full 1,350-tick valve on every return leg — the most common trip in the
+  // game. It is also caught a second, independent way: a slot naming a car that
+  // has gone PHASE_IDLE is an `assertOccupancySound` violation by definition.
+  //
+  // Released from `state.carCell[i]` read BEFORE the write below, not from the
+  // house cell. On the reachable manifold they are the same cell (the retrace
+  // ends where the route started), but the cell the car is STANDING on is the
+  // cell whose slot it claimed, and that is the one the protocol is about.
+  // Reading the house cell instead would silently release the wrong cell under
+  // exactly the corruption the `carCell` write below exists to repair.
+  //
+  // **Measured, because "the ordering matters" is the kind of claim that turns
+  // out to be decoration.** Moving this call BELOW the `carCell` write scored
+  // **0 detectors** across the whole suite on its first run — a genuine
+  // equivalence *on the manifold*, and exactly the shape the catalogue warns
+  // reads as coverage. It is not an equivalent mutant off the manifold, and the
+  // detector was constructible: `blocking.test.ts` hand-builds a RETURNING car
+  // with an exhausted cursor standing on a cell that is not its house, and the
+  // wrong ordering then strands a claim naming a PHASE_IDLE car. Do not
+  // "simplify" this to read the house cell on the strength of the manifold
+  // argument; the manifold argument is what the `carCell` write below already
+  // declines to trust.
+  releaseCell(state, i, state.carCell[i] as number)
   state.carCell[i] = state.houseCell[state.carHome[i] as number] as number
   state.carTargetDest[i] = -1
   state.carProgress[i] = 0
@@ -218,8 +260,10 @@ function completeTrip(state: GameState, i: number): void {
  * it is.
  *
  * Every car slot is visited, including `PHASE_NONE` ones past the live prefix
- * — the phase byte is the liveness marker (there is no `-1` sentinel anywhere
- * in this milestone's region list), and both branches are keyed on it.
+ * — the phase byte is the liveness marker (no CAR region uses a `-1` sentinel;
+ * narrowed at M1d Task 2, which added `occupancy`'s `FREE = -1`, a cell-indexed
+ * region with no liveness prefix and no car slot in it), and both branches are
+ * keyed on it.
  */
 export function runArrivals(state: GameState): void {
   const carCount = state.carPhase.length

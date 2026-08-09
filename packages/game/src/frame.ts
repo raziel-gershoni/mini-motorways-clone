@@ -67,8 +67,11 @@ import type { LoopDriver } from './loop'
  * LIVENESS IS A PREFIX, AND CARS ARE DENSE
  * ---------------------------------------------------------------------------
  *
- * A fresh `GameState` writes no `-1` sentinel: unused house/destination slots
- * are those at index >= `H_HOUSE_COUNT`/`H_DEST_COUNT`, and an unused car is
+ * **No region `render` reads carries a `-1` sentinel** (narrowed at M1d Task 2,
+ * which gave `sim` its first one — `occupancy`, filled with `FREE = -1`; it is
+ * cell-indexed, has no liveness prefix, and is not folded into `RenderFrame`).
+ * Unused house/destination slots are those at index >=
+ * `H_HOUSE_COUNT`/`H_DEST_COUNT`, and an unused car is
  * `PHASE_NONE` with `carCell = 0` — a real, in-bounds cell. So `render` gets
  * counts, and cars get the strongest form of it: `carXY` holds two floats per
  * LIVE car with `carCount` of them packed at the front, so a phantom is

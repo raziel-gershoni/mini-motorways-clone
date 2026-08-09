@@ -1,6 +1,7 @@
 import { CARS_PER_HOUSE, MAX_PATH_LEN, type MapData } from '@laneways/shared'
 import { computeLayout, type Region, type LayoutEntry } from './layout'
 import { HEADER_LENGTH, MAP_IDENTITY_LENGTH } from './state'
+import { LANE_COUNT } from './roads'
 
 /**
  * The whole M1c buffer shape, declared once, and the FIELD_INPUT /
@@ -50,6 +51,22 @@ export function regionsFor(map: MapData): readonly Region[] {
     // --- 2-byte-aligned tier: Int16 ---
     { name: 'carRouteLen', ctor: Int16Array, len: maxCars },
     { name: 'carRouteCursor', ctor: Int16Array, len: maxCars },
+    // M1d Task 2, appended to the END of the Int16 tier so the tier's
+    // cumulative length stays a multiple of 2 and `computeLayout` inserts no
+    // pad byte. `occupancy` is `LANE_COUNT` slots per cell, addressed
+    // `cell * 2 + lane` — the SECOND index arithmetic this codebase carries,
+    // beside `index = y * w + x`, and the two must not be confused.
+    { name: 'occupancy', ctor: Int16Array, len: cells * LANE_COUNT },
+    // Declared here with the rest of the blocking buffer shape; given its
+    // semantics (increment on refusal, saturate, reset on entry) by M1d Task 4.
+    // It is Int16 and NOT Uint8 deliberately: `MAX_BLOCKED_TICKS` is 1,350 and
+    // 1,350 > 255, so a Uint8 counter could never reach the threshold and the
+    // valve would simply never fire. It is buffer state and NOT `Scratch`
+    // state, equally deliberately: `Scratch` is rebuilt every tick, so a
+    // Scratch-resident counter would reset, the valve would fire in a browser
+    // and never in a Worker replay — the exact divergence this product exists
+    // to prevent.
+    { name: 'carBlockedTicks', ctor: Int16Array, len: maxCars },
     // --- 1-byte-aligned tier: Uint8 ---
     { name: 'roads', ctor: Uint8Array, len: cells },
     { name: 'cleared', ctor: Uint8Array, len: cells },
@@ -101,6 +118,41 @@ export const FIELD_INPUT_REGIONS = Object.freeze(['mapIdentity', 'destCell', 'ro
  *   - houseColour:    see houseCell.
  *   - destReserved:   never enters `sources` (decision 4) — the
  *                      classification the whole reservation design buys.
+ *
+ * M1d (2026) adds two, and BOTH are FIELD_IRRELEVANT. **This reads as a
+ * contradiction with "occupancy is in `hashState`" until you know what the
+ * partition is for, so:** the FIELD_INPUT / FIELD_IRRELEVANT partition is the
+ * flow-field staleness key and NOTHING ELSE. It is not a statement about which
+ * bytes matter for determinism — `hashState` is FNV over the WHOLE buffer
+ * (`state.ts`) and `snapshot`/`restore` copy the whole buffer, so occupancy is
+ * covered for determinism, replay and rollback whatever partition it is in. It
+ * needs no help from the partition to survive a Worker cold start.
+ *
+ *   - occupancy:       irrelevant for the same dated reason every car region
+ *                      carries, and it is literally the cell->car inverse of
+ *                      `carCell`: no edge cost, source set or `dir` read
+ *                      depends on it (`edgeCost` is pure length; routes are
+ *                      committed once at dispatch and never re-pathed). Dated:
+ *                      M1e's demand-actuated lights make car positions a field
+ *                      input. **What classifying it FIELD_INPUT would cost,
+ *                      measured:** occupancy changes on any tick any car
+ *                      crosses a cell, so `syncFields` would run a full
+ *                      960-cell Dijkstra for all five colours on nearly every
+ *                      tick, forever, with BYTE-IDENTICAL output — 1.14 ms
+ *                      (mid-density) to 1.91 ms (full grid) per rebuild x 5
+ *                      colours = 5.7-9.6 ms/tick on a desktop core, multiples
+ *                      worse on the phone M2 shipped to, and landing equally in
+ *                      the Cloudflare Worker that verifies leaderboard scores.
+ *                      Classifying the projection FIELD_INPUT while its source
+ *                      (`carCell`) stays FIELD_IRRELEVANT would also be an
+ *                      internal contradiction with the shipped layout.
+ *   - carBlockedTicks: a per-car counter that gates M1d Task 4's valve. Nothing
+ *                      in routing reads it, and it moves on any tick any car is
+ *                      refused an entry — the same "rebuild every colour every
+ *                      tick forever, silently, with correct answers" failure
+ *                      `H_TICK` was split out of a hashed region to avoid.
+ *                      Dated: M1e, with occupancy, if lights ever make waiting
+ *                      cars a routing input.
  */
 export const FIELD_IRRELEVANT_REGIONS = Object.freeze([
   'rng',
@@ -115,6 +167,8 @@ export const FIELD_IRRELEVANT_REGIONS = Object.freeze([
   'carTargetDest',
   'carRouteLen',
   'carRouteCursor',
+  'occupancy',
+  'carBlockedTicks',
   'cleared',
   'houseColour',
   'destReserved',

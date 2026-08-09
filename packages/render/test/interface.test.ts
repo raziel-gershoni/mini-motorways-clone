@@ -39,10 +39,12 @@ const RECT = { x0: 1, y0: 1, cols: 6, rows: 4 } as const
  * Deliberately built the way a LIVENESS fixture must be built (plan Decision 2,
  * and the catalogue's "a bounds check can hide the defect a fixture was built
  * to expose"): the dead house/dest/car slots below carry cell indices INSIDE
- * the drawn region, not the sim's real dead value of 0. A fresh `GameState`
- * writes no -1 sentinel — unused building slots are simply those at index >=
- * H_HOUSE_COUNT / H_DEST_COUNT and unused cars are PHASE_NONE — so every
- * unused cell reads 0, which is a real, in-bounds cell. At M2's camera cell 0
+ * the drawn region, not the sim's real dead value of 0. No region behind
+ * `RenderFrame` carries a -1 sentinel — unused building slots are simply those
+ * at index >= H_HOUSE_COUNT / H_DEST_COUNT and unused cars are PHASE_NONE — so
+ * every unused cell reads 0, which is a real, in-bounds cell. (Narrowed at M1d
+ * Task 2: `sim` gained its first -1-filled region, `occupancy`, which is
+ * cell-indexed, has no liveness prefix, and is not part of this interface.) At M2's camera cell 0
  * is OUTSIDE the revealed rect, so a fixture that leaves dead slots at 0 is
  * proved correct by the renderer's bounds check rather than by the liveness
  * prefix, and the prefix is never exercised.

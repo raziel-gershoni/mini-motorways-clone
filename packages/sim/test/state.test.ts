@@ -25,6 +25,8 @@ import {
 import { nextRandom } from '../src/rng'
 import { computeLayout } from '../src/layout'
 import { createWorld, mapIdHash } from '../src/world'
+import { LANE_COUNT } from '../src/roads'
+import { FREE } from '../src/blocking'
 
 /**
  * A small non-square (w=5, h=3) fixture map, shared across this file. Not
@@ -264,6 +266,8 @@ describe('view layout wiring', () => {
     { name: 'carTargetDest', ctor: Int32Array, len: maxCars },
     { name: 'carRouteLen', ctor: Int16Array, len: maxCars },
     { name: 'carRouteCursor', ctor: Int16Array, len: maxCars },
+    { name: 'occupancy', ctor: Int16Array, len: cells * LANE_COUNT },
+    { name: 'carBlockedTicks', ctor: Int16Array, len: maxCars },
     { name: 'roads', ctor: Uint8Array, len: cells },
     { name: 'cleared', ctor: Uint8Array, len: cells },
     { name: 'houseColour', ctor: Uint8Array, len: MAP.maxHouses },
@@ -292,6 +296,8 @@ describe('view layout wiring', () => {
       carTargetDest: s.carTargetDest,
       carRouteLen: s.carRouteLen,
       carRouteCursor: s.carRouteCursor,
+      occupancy: s.occupancy,
+      carBlockedTicks: s.carBlockedTicks,
       roads: s.roads,
       cleared: s.cleared,
       houseColour: s.houseColour,
@@ -328,9 +334,10 @@ describe('view layout wiring', () => {
   // correctly appends a 2-byte TAIL pad for it (layout.ts's own documented
   // "rounds the total up to 4 even when no region is that wide" behaviour —
   // this is expected, not a defect). The plan's zero-padding claim is
-  // specifically about `firstCity`'s sizes (960 cells, total exactly 7,908
-  // B), and is asserted against the real, exported `regionsFor(firstCity())`
-  // in `regions.test.ts`, not re-derived here against an unrelated fixture.
+  // specifically about `firstCity`'s sizes (960 cells, total exactly 11,908 B
+  // after M1d Task 2's two Int16 regions; 7,908 B at M1c), and is asserted
+  // against the real, exported `regionsFor(firstCity())` in `regions.test.ts`,
+  // not re-derived here against an unrelated fixture.
 })
 
 describe('atomicity (H_EPOCH)', () => {
@@ -370,9 +377,12 @@ describe('the new M1c header slots exist and start at 0', () => {
   })
 })
 
-describe('a building-free fresh state is all-zero outside rng/mapIdentity/header[H_TILES]', () => {
-  // The property "Why one re-bless is now true" depends on: every M1c region
-  // is zero-initialised, with no `-1` sentinel written anywhere at creation.
+describe('a building-free fresh state is all-zero outside rng/mapIdentity/header[H_TILES]/occupancy', () => {
+  // The property every unchanged-goldens assertion depends on: every region is
+  // zero-initialised except `occupancy`, which M1d Task 2 fills with `FREE =
+  // -1` (a zero-filled occupancy region would read as "car 0 occupies every
+  // lane of every cell"). The exception is named in the title and asserted
+  // separately below rather than being quietly dropped from the list.
   it('every car/house/destination region reads back as all zero on a fresh state', () => {
     const s = createState('all-zero-fresh', MAP)
     const regions: readonly (Int32Array | Int16Array | Uint8Array)[] = [
@@ -387,6 +397,7 @@ describe('a building-free fresh state is all-zero outside rng/mapIdentity/header
       s.carTargetDest,
       s.carRouteLen,
       s.carRouteCursor,
+      s.carBlockedTicks,
       s.roads,
       s.cleared,
       s.houseColour,
@@ -399,5 +410,16 @@ describe('a building-free fresh state is all-zero outside rng/mapIdentity/header
     for (const region of regions) {
       expect(Array.from(region).every((v) => v === 0)).toBe(true)
     }
+  })
+
+  it('occupancy is the ONE exception: every slot reads FREE, and not one reads 0', () => {
+    const s = createState('all-free-fresh', MAP)
+    expect(s.occupancy.length).toBe(MAP.w * MAP.h * LANE_COUNT)
+    expect(Array.from(s.occupancy).every((v) => v === FREE)).toBe(true)
+    // Stated as its own assertion, not as a corollary: 0 is a valid CAR INDEX
+    // in this region, so "zero-fill instead of -1-fill" is the mutation that
+    // makes the whole board unenterable, and `every(v => v === FREE)` above is
+    // the only thing standing between it and a green suite.
+    expect(Array.from(s.occupancy).some((v) => v === 0)).toBe(false)
   })
 })

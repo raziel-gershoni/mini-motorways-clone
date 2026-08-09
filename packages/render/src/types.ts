@@ -248,7 +248,9 @@ export interface Palette {
  * reallocated.
  *
  * **The liveness prefixes are part of the interface, and they are not
- * decoration.** A fresh `GameState` writes no `-1` sentinel (`sim/state.ts`):
+ * decoration.** No region behind this interface carries a `-1` sentinel
+ * (`sim/state.ts`; narrowed at M1d Task 2, whose `occupancy` region is the sim's
+ * first `-1` fill and is deliberately not part of `RenderFrame`):
  * unused house and destination slots are simply those at index >=
  * `H_HOUSE_COUNT` / `H_DEST_COUNT`, and an unused car is `PHASE_NONE = 0` with
  * `carCell = 0`. So **every unused cell reads 0 — a real, in-bounds cell**, not

@@ -693,10 +693,13 @@ describe('blessed goldens', () => {
     )
     expect(tilesLeft(state), 'and must not have overspent the budget').toBeGreaterThanOrEqual(0)
 
-    // Re-blessed in M1c Task 1 (was 3183850973, M1b's value): the buffer
-    // grew to the full M1c region list. See "Why one re-bless is now true"
-    // in the M1c plan — this is the milestone's one deliberate re-bless.
-    expect(hashState(state)).toBe(2790151213)
+    // Re-blessed in M1d Task 2 (was 2790151213, M1c's value; 3183850973 at
+    // M1b): the buffer grew from 7,908 to 11,908 bytes with `occupancy` and
+    // `carBlockedTicks`. See "Why exactly two re-blesses are true" in the M1d
+    // plan. **Layout only, derived**: splicing the inserted bytes back out
+    // reproduces 2790151213 exactly. This fixture never calls `step`, so it
+    // cannot move for a behavioural reason in this milestone.
+    expect(hashState(state)).toBe(3949962277)
   })
 
   it("field golden: pins hashBytes over each colour's dist/dir bytes, folded together, computed over the SAME fixed network above", () => {

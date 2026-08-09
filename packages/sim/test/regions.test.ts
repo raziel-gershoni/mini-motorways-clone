@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { firstCity } from '@laneways/shared'
+import { firstCity, CARS_PER_HOUSE } from '@laneways/shared'
 import { computeLayout, type LayoutEntry } from '../src/layout'
 import {
   regionsFor,
@@ -44,12 +44,34 @@ describe('regionsFor', () => {
     expect(totalBytes).toBe(declaredBytes)
   })
 
-  it('totals exactly 7,908 bytes for firstCity, per the plan\'s region table', () => {
+  it('totals exactly 11,908 bytes for firstCity, per the plan\'s region table', () => {
+    // M1c: 7,908 B over 22 regions. M1d Task 2 appends two `Int16` regions to
+    // the end of the `Int16` tier — `occupancy` (2 x 960 cells = 1,920
+    // elements, 3,840 B) and `carBlockedTicks` (maxCars = 80, 160 B) — for
+    // 7,908 + 4,000 = 11,908, exactly the figure the plan's "Why exactly two
+    // re-blesses are true" table predicts. Task 5 takes it to 13,828 and no
+    // task after that changes it.
     const { totalBytes } = computeLayout(regionsFor(MAP))
-    expect(totalBytes).toBe(7908)
+    expect(totalBytes).toBe(11908)
   })
 
-  it('declares exactly the 22 named regions the plan lists, no more and no fewer', () => {
+  it('the two M1d Task 2 regions have the exact element counts and byte sizes the plan predicts', () => {
+    // Spelled out separately from the total, because a total is satisfied by
+    // any two regions that happen to sum to 4,000 B — including one of the
+    // wrong element type or the wrong length, which is exactly what "Int16 vs
+    // Uint8 for carBlockedTicks" and "one slot per cell vs two" both look like.
+    const byName = new Map(regionsFor(MAP).map((r) => [r.name, r]))
+    const occupancy = byName.get('occupancy')!
+    const blocked = byName.get('carBlockedTicks')!
+    expect(occupancy.ctor).toBe(Int16Array)
+    expect(occupancy.len).toBe(2 * MAP.w * MAP.h)
+    expect(occupancy.len * occupancy.ctor.BYTES_PER_ELEMENT).toBe(3840)
+    expect(blocked.ctor).toBe(Int16Array)
+    expect(blocked.len).toBe(CARS_PER_HOUSE * MAP.maxHouses)
+    expect(blocked.len * blocked.ctor.BYTES_PER_ELEMENT).toBe(160)
+  })
+
+  it('declares exactly the 24 named regions the plan lists, no more and no fewer', () => {
     const names = regionsFor(MAP).map((r) => r.name)
     expect(names).toEqual([
       'rng',
@@ -66,6 +88,8 @@ describe('regionsFor', () => {
       'carTargetDest',
       'carRouteLen',
       'carRouteCursor',
+      'occupancy',
+      'carBlockedTicks',
       'roads',
       'cleared',
       'houseColour',
@@ -122,6 +146,21 @@ describe('FIELD_INPUT / FIELD_IRRELEVANT partition', () => {
     expect(new Set<string>(FIELD_INPUT_REGIONS)).toEqual(
       new Set(['mapIdentity', 'destCell', 'roads', 'destMeta', 'destPins']),
     )
+  })
+
+  it('both M1d Task 2 regions are FIELD_IRRELEVANT, by name', () => {
+    // The exact-set pin above already fires if either is misclassified, but it
+    // fires with a message about a set. This one names the region and the
+    // reason, so a failure points at Decision 4 rather than at a diff of two
+    // sets: occupancy changes on any tick any car crosses a cell, and
+    // classifying it FIELD_INPUT costs five whole-board Dijkstras per tick
+    // (5.7-9.6 ms) for byte-identical output. The behavioural half of that
+    // claim — CT_REBUILDS staying put on a tick where a car crosses — is
+    // asserted in `blocking.test.ts`, which is where the car fixture lives.
+    expect(isFieldIrrelevantRegion('occupancy')).toBe(true)
+    expect(isFieldInputRegion('occupancy')).toBe(false)
+    expect(isFieldIrrelevantRegion('carBlockedTicks')).toBe(true)
+    expect(isFieldInputRegion('carBlockedTicks')).toBe(false)
   })
 })
 

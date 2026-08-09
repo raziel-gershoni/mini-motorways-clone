@@ -758,7 +758,18 @@ describe('golden replay: the whole trip loop', () => {
     // movement, arrivals, scoring, the route encoding, the tick order, or the
     // buffer layout. When a rule change makes it fail intentionally, re-bless
     // it in the same commit as the change, never separately.
-    expect(hashState(r.state)).toBe(3896659943)
+    //
+    // Re-blessed in M1d Task 2 (was 3896659943): the buffer grew from 7,908 to
+    // 11,908 bytes with `occupancy` and `carBlockedTicks`. **Layout only, and
+    // this is the fixture that PROVES it rather than merely asserting it** —
+    // unlike the three static goldens, 130 real ticks of dispatch, movement,
+    // arrivals and scoring have run here with a car mid-flight, so the
+    // occupancy region is genuinely populated. Splicing the 4,000 inserted
+    // bytes back out of this buffer reproduces 3896659943 bit-for-bit, so not
+    // one byte of any pre-existing region moved across a live trip loop. Every
+    // behavioural literal above is likewise unchanged, and the field golden did
+    // not move. Task 5 is the second and last re-bless of this number.
+    expect(hashState(r.state)).toBe(452702392)
   })
 
   it('leaves the three existing goldens alone — this task adds a golden, it does not move one', () => {
@@ -778,8 +789,8 @@ describe('golden replay: the whole trip loop', () => {
     const determinism = readFileSync(`${here}determinism.test.ts`, 'utf8')
     const rollback = readFileSync(`${here}rollback.test.ts`, 'utf8')
 
-    expect(determinism, 'the M1c state golden moved').toContain('toBe(2413319809)')
-    expect(rollback, 'the road-network golden moved').toContain('toBe(2790151213)')
+    expect(determinism, 'the state golden moved').toContain('toBe(1729791425)')
+    expect(rollback, 'the road-network golden moved').toContain('toBe(3949962277)')
     expect(rollback, 'the field golden moved — that one is a tripwire, not a re-bless').toContain(
       'toBe(252514232)',
     )
@@ -787,7 +798,7 @@ describe('golden replay: the whole trip loop', () => {
     // empty strings that trivially fail to contain anything else either.
     expect(determinism.length).toBeGreaterThan(1000)
     expect(rollback.length).toBeGreaterThan(1000)
-    expect(determinism).not.toContain('toBe(2790151213)') // the two files own different numbers
+    expect(determinism).not.toContain('toBe(3949962277)') // the two files own different numbers
   })
 })
 

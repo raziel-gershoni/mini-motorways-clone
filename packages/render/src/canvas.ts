@@ -591,9 +591,11 @@ function drawDestinations(ctx: DrawContext, frame: RenderFrame, palette: Palette
  * road on a house cell.
  *
  * Reads `[0, houseCount)` and nothing beyond it. That prefix is the whole
- * liveness contract (plan Decision 3): a fresh `GameState` writes no `-1`
- * sentinel, so an unused slot holds cell 0 — a real, in-bounds cell — and the
- * count is the only thing separating a house from a phantom.
+ * liveness contract (plan Decision 3): no region behind `RenderFrame` carries a
+ * `-1` sentinel, so an unused slot holds cell 0 — a real, in-bounds cell — and
+ * the count is the only thing separating a house from a phantom. (Narrowed at
+ * M1d Task 2: `sim` now has one `-1`-filled region, `occupancy`, and `render`
+ * neither receives it nor could.)
  */
 function drawHouses(ctx: DrawContext, frame: RenderFrame, palette: Palette): void {
   const camera = frame.camera

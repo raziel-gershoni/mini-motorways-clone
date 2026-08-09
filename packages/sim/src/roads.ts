@@ -94,6 +94,64 @@ export const DX = Object.freeze([0, 1, 1, 1, 0, -1, -1, -1] as const)
 export const DY = Object.freeze([-1, -1, 0, 1, 1, 1, 0, -1] as const)
 export const OPPOSITE = Object.freeze([4, 5, 6, 7, 0, 1, 2, 3] as const)
 
+/**
+ * Which of a cell's TWO occupancy lanes a car travelling in direction `d`
+ * claims — M1d design decision 1. Lives here, beside `DX`/`DY`/`OPPOSITE`,
+ * because this is where every other direction table already lives; the
+ * claim/release protocol that consumes it is `blocking.ts`.
+ *
+ * Spec §5.11 line 275: a road is "Bidirectional, one lane each way." A single
+ * undirected slot per cell is not a simplification of that — it makes opposing
+ * traffic mutually exclusive on every shared cell, and opposing traffic is the
+ * MODAL event in this game, not an edge case (the return leg is the outbound
+ * route read backwards, `trips.ts` flips the phase in place on the carpark cell
+ * with no dwell, and every colour's field is seeded at a single carpark cell).
+ *
+ * | dir | name | (DX, DY) | lane |
+ * |-----|------|----------|------|
+ * |  0  |  N   | ( 0, -1) |  1   |
+ * |  1  |  NE  | ( 1, -1) |  0   |
+ * |  2  |  E   | ( 1,  0) |  0   |
+ * |  3  |  SE  | ( 1,  1) |  0   |
+ * |  4  |  S   | ( 0,  1) |  0   |
+ * |  5  |  SW  | (-1,  1) |  1   |
+ * |  6  |  W   | (-1,  0) |  1   |
+ * |  7  |  NW  | (-1, -1) |  1   |
+ *
+ * **A frozen table, not a computed rule**, so a reader can check all eight
+ * entries at a glance. The rule it can be checked AGAINST is *lane 0 iff the
+ * travel vector points east, or due south when it does not point east* —
+ * `DX[d] > 0 || (DX[d] === 0 && DY[d] > 0)` — but the table is the source of
+ * truth and the rule is the check, never the other way round. The mapping is
+ * total: all eight directions listed, each mapping to exactly one lane, four to
+ * each.
+ *
+ * **The one property that makes head-on structurally impossible:**
+ * `LANE_OF_DIR[d] !== LANE_OF_DIR[OPPOSITE[d]]` for every `d`. Two cars
+ * travelling in exactly opposite directions can never contend for the same
+ * slot, so a head-on swap always resolves in one tick, in either index order,
+ * with no valve, no give-way rule and no special case. It also means no
+ * 2-cycle deadlock can exist at all — a mutual block needs each car standing on
+ * the other's target, which makes their directions exact opposites, which puts
+ * them in different lanes. Only cycles of length >= 3 can deadlock, which is
+ * what M1d Task 4's valve is for. `roads.test.ts` asserts that property over
+ * the WHOLE table rather than over sampled pairs, because it is what the entire
+ * milestone rests on.
+ *
+ * **The model's real limit, stated plainly: two lanes do not model an
+ * intersection crossing.** Two cars may share a cell whenever their directions
+ * land in different lanes — on a straight corridor that means exactly "one each
+ * way", but at a junction it also permits an eastbound car and a northbound car
+ * to occupy the same cell simultaneously. They cross paths inside that cell and
+ * nothing stops them. That is the spec's own model (§5.5 prices intersections
+ * with a *speed* multiplier and a *wait*, not with mutual exclusion) and it is
+ * what M1e's traffic lights and roundabouts are for.
+ */
+export const LANE_OF_DIR = Object.freeze([1, 0, 0, 0, 0, 1, 1, 1] as const)
+
+/** The number of occupancy lanes per cell. `LANE_OF_DIR` is total onto `[0, LANE_COUNT)`. */
+export const LANE_COUNT = 2
+
 function inBounds(cell: number, cells: number): boolean {
   return Number.isInteger(cell) && cell >= 0 && cell < cells
 }
@@ -163,8 +221,14 @@ export function dirBetween(from: number, to: number, w: number, h: number): numb
  *     `dispatch.ts`'s walk does `if (next < 0) break`.
  *
  * Re-verified exhaustively at M1d: 1,600 geometries x every in-range cell x
- * Int32 extremes x all 8 directions gave 97,040 raw return-value differences
- * and **0** differences in the sign. **Do not manufacture a detector for it**,
+ * Int32 extremes x all 8 directions gave **0** differences in the sign. **The
+ * raw difference COUNT is deliberately not stated** (M1d Task 2 corrected this
+ * paragraph, which had cited 97,040): an independent exhaustive run gave 92,040
+ * in-range and 118,640 including extremes, because the total depends entirely
+ * on which extreme cells are enumerated and no prose description fixes that.
+ * Only the sign result is load-bearing and only it reproduces robustly — a
+ * five-digit figure that cannot be re-derived from its own description reads as
+ * measurement without being any. **Do not manufacture a detector for it**,
  * and in particular **do not tighten either caller's `next < 0` to
  * `next === -1`** — that satisfies the letter of "every bound has a detector"
  * by strictly weakening two guards, in a milestone that is about to hand this

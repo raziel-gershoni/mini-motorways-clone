@@ -610,10 +610,17 @@ describe('the seeded-state golden', () => {
     expect(state.header[H_DEST_COUNT] as number).toBe(3)
     expect(state.destCell[2] as number).toBe(D2_ORIGIN)
     expect(state.houseCell[2] as number).toBe(H2_CELL)
-    // Blessed in this task. It moves if any literal in the city moves, which
+    // Blessed in M2 Task 2. It moves if any literal in the city moves, which
     // is the point: this is the only assertion that sees a change nobody
     // wrote a named test for.
-    expect(hashState(state)).toBe(2505371110)
+    //
+    // Re-blessed in M1d Task 2 (was 2505371110): the state buffer grew from
+    // 7,908 to 11,908 bytes with `occupancy` and `carBlockedTicks`. **Layout
+    // only, derived**: splicing the 4,000 inserted bytes back out of this
+    // buffer reproduces 2505371110 exactly. This golden is taken immediately
+    // after `seedStartingCity`, before any tick, so it cannot move for a
+    // behavioural reason in this milestone.
+    expect(hashState(state)).toBe(3576722662)
   })
 
   it('differs from the unseeded state — otherwise the golden pins nothing', () => {
