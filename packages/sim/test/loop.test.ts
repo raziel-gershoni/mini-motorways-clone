@@ -4,6 +4,7 @@ import { describe, it, expect } from 'vitest'
 import {
   parseMap,
   CARS_PER_HOUSE,
+  MAX_BLOCKED_TICKS,
   MAX_PATH_LEN,
   PIN_PERIOD_TICKS,
   FIRST_PIN_DELAY_TICKS,
@@ -29,7 +30,14 @@ import { createWorld, type WorldData } from '../src/world'
 import { createFieldInputRanges } from '../src/regions'
 import { createScratch, createFlowFields, type FlowField, type Scratch } from '../src/scratch'
 import { fieldFor, hashFieldInputRegions } from '../src/flowfield'
-import { roadMask, tilesLeft } from '../src/roads'
+import { roadMask, tilesLeft, dirBetween, LANE_OF_DIR, OPPOSITE, DX, DY } from '../src/roads'
+import {
+  canEnter,
+  occupantOf,
+  assertOccupancyConsistent,
+  EnterOutcome,
+  FREE,
+} from '../src/blocking'
 import {
   placeHouse,
   placeDestination,
@@ -41,7 +49,7 @@ import {
   PHASE_OUTBOUND,
   PHASE_RETURNING,
 } from '../src/buildings'
-import { ROUTE_BYTES } from '../src/dispatch'
+import { ROUTE_BYTES, routeStep } from '../src/dispatch'
 import { step, type TickAction, type TickInputs } from '../src/step'
 
 /**
@@ -146,6 +154,67 @@ import { step, type TickAction, type TickInputs } from '../src/step'
  * demand does can move `destPins` inside 150 ticks — asserted, not assumed.
  * The cost of freezing it is that this fixture is blind to where phase 1 sits,
  * which is why the tick advance gets its own boundary test at the bottom.
+ *
+ * ---------------------------------------------------------------------------
+ * THE SAME TIMELINE UNDER M1d's BLOCKING — RE-DERIVED, NOT INHERITED
+ * ---------------------------------------------------------------------------
+ *
+ * M1d makes cell entry conditional: `canEnter` (blocking.ts) grants a crossing
+ * into `cell` in direction `dir` only if the slot `(cell, LANE_OF_DIR[dir])` is
+ * free. **The first revision of M1d's plan used ONE undirected slot per cell
+ * and that killed this fixture** — car 0 returning east and car 1 heading west
+ * would deadlock on cell 113 at tick 73, the valve would not release them until
+ * tick 1,423 against `RUN_TICKS = 150`, and the four observation arrays, the
+ * `scoreAfterTick` ladder, the not-nearest-house test, the mid-flight
+ * `carPhase[1]` assertion, the idle-hygiene count and the golden would all
+ * become physically unachievable. Under Decision 1's TWO lanes that deadlock
+ * does not exist, and Task 6's job was to prove that rather than inherit it.
+ * Recomputed from scratch, every value, with `abs = dispatchTick + rel_k - 1`:
+ *
+ *   car 0 (H0 116, dispatched 2)  out W  115@9   114@17  113@24  112@32  111@39 110@47
+ *   car 0                         ret E  111@55  112@62  113@70  114@77  115@85 116@92  (SCORE)
+ *   car 1 (H0 116, dispatched 51) out W  115@58  114@66  113@73  112@81  111@88 110@96
+ *   car 1                         ret E  111@104 112@111 113@119 114@126 115@134 116@141 (SCORE)
+ *   car 2 (H1 105, dispatched 2)  out W  104@9   103@17  102@24;  ret E 103@32 104@39 105@47 (SCORE)
+ *   car 2 (dispatched 51)         out W  104@58  103@66  102@73;  ret E 103@81 104@88 105@96 (SCORE)
+ *   car 3                         never dispatched, idle on 105 throughout
+ *
+ * A car holds the cell it crossed into from that tick until the tick it crosses
+ * into the next one. Intersecting those holds pairwise over all 150 ticks gives
+ * **exactly one cell on which two cars both hold a claim: cell 113, ticks 73 to
+ * 76 inclusive.** Car 0 holds it EASTBOUND from tick 70 — `LANE_OF_DIR[E] = 0`
+ * — and car 1 enters it WESTBOUND at tick 73 — `LANE_OF_DIR[W] = 1`. Different
+ * lanes, so car 1 is granted; car 0 leaves for 114 on tick 77, which car 1
+ * itself vacated on tick 73. Every other pair of holds on 110-116 is disjoint
+ * (nearest miss: car 1 leaves 114 on tick 73 and car 0 enters it on tick 77),
+ * cars 2 and 3 never leave 102-105, and the two ranges never meet. **Zero
+ * refusals, zero blocked ticks, zero valve ticks, and not one literal above
+ * moves.** All of that is asserted below, per tick, rather than left as prose:
+ * `runScripted` now checks occupancy consistency and records every crossing,
+ * every refusal and every shared-cell event on every tick of every run it
+ * drives.
+ *
+ * **Two corrections to the interval rule as the plan states it**, because a
+ * reader applying it literally arrives at a different answer:
+ *
+ *   - *"until the tick it enters the next"* omits occupancy lifecycle event 4.
+ *     `completeTrip` releases the house cell on the arrival tick (blocking.ts),
+ *     so car 0's hold on 116 ends at tick 92 rather than running to the end of
+ *     the run. Without that release, car 1's arrival on 116 at tick 141 would
+ *     read as a second shared-cell event. It is not one.
+ *   - The rule says nothing about cells cars STAND on without having crossed.
+ *     Cars 0 and 1 share 116 on ticks 1-8, and cars 2 and 3 share 105 for most
+ *     of the run — Decision 3's tick-0 ruling, under which an idle car and a
+ *     car that has not yet crossed on its current leg both hold nothing. Those
+ *     are legal, unclaimed and invisible to occupancy. **"Shared-cell event"
+ *     below therefore means what the occupancy array can see: two DIFFERENT
+ *     cars named by the two lanes of one cell.**
+ *
+ * The positive case — a same-direction queue that genuinely refuses entries —
+ * is a SECOND fixture at the bottom of this file, with a golden of its own.
+ * Forcing a block into this corridor would retire the four-route cost matrix
+ * the vacuity test above exists to protect, and would move the loop golden for
+ * a third time.
  */
 
 const W = 20
@@ -174,6 +243,25 @@ const GOLDEN_TICK = 130
 const SNAPSHOT_TICK = 30
 const WAVE2_TICK = 50
 const STARTING_TILES = 999
+
+/**
+ * The two directions every route in this file travels in, derived through
+ * `dirBetween` rather than written as 6 and 2, and then checked against
+ * `DX`/`DY` — so a renumbering of `DIRS` moves both together instead of
+ * silently turning "west" into something else.
+ *
+ * Both fixtures below are one-wide east-west corridors, which is what makes
+ * `LANE_OF_DIR` injective over the directions they use: lane 1 is reached only
+ * by W and lane 0 only by E. That is the premise the same-direction argument in
+ * the queue fixture rests on, and it is asserted where it is used.
+ */
+const DIR_WEST = dirBetween(H0_CELL, H0_CELL - 1, W, H)
+const DIR_EAST = OPPOSITE[DIR_WEST] as number
+
+/** Cell 113, ticks 73-76: the loop fixture's one and only shared-cell event. */
+const HEAD_ON_CELL = 113
+const HEAD_ON_FIRST_TICK = 73
+const HEAD_ON_LAST_TICK = 76
 
 function allLandRows(w: number, h: number): string[] {
   const row = '.'.repeat(w)
@@ -264,10 +352,49 @@ interface Observations {
   readonly scores: string[]
   readonly violations: string[]
   readonly scoreAfterTick: number[]
+  /**
+   * M1d Task 6. Every cell crossing, as `tick=T car=I from->to dir=D`, with the
+   * direction read back through `dirBetween` rather than through the route
+   * nibbles — so this observes where the car actually WENT rather than
+   * re-decoding what it was told to do.
+   */
+  readonly crossings: string[]
+  /**
+   * M1d Task 6. Every tick on which a car's `carBlockedTicks` is non-zero,
+   * which is an exact detector for "this car was refused an entry on this
+   * tick": `advanceCar` raises the counter on a refusal and `noteEntryGranted`
+   * zeroes it on any grant, so a non-zero value after a tick means that tick.
+   */
+  readonly refusals: string[]
+  /**
+   * M1d Task 6. Every tick on which two DIFFERENT cars are named by the two
+   * lanes of one cell — the only kind of shared cell the occupancy array can
+   * see. Cars stacked on a house cell without having crossed hold nothing and
+   * do not appear here; see this file's header for why that distinction is the
+   * one that matters.
+   */
+  readonly sharedCells: string[]
+  /**
+   * M1d Task 6. `assertOccupancyConsistent`'s completeness count, per tick.
+   * Recorded rather than discarded because that half holds vacuously over a
+   * board where no car has crossed: a caller has to be able to show it ranged
+   * over somebody.
+   */
+  readonly completeChecked: number[]
 }
 
 function newObservations(): Observations {
-  return { dispatches: [], pinsConsumed: [], scores: [], violations: [], scoreAfterTick: [] }
+  return {
+    dispatches: [],
+    pinsConsumed: [],
+    scores: [],
+    violations: [],
+    scoreAfterTick: [],
+    crossings: [],
+    refusals: [],
+    sharedCells: [],
+    completeChecked: [],
+  }
 }
 
 /**
@@ -303,24 +430,62 @@ function countInPhase(s: GameState, phase: number): number {
 }
 
 /**
+ * What a run's inputs are, as two pure functions of the tick number.
+ *
+ * Extracted at M1d Task 6 so the same-direction queue fixture at the bottom of
+ * this file is driven through the SAME runner as the loop fixture, and
+ * therefore inherits every per-tick invariant it checks — the allowed phase
+ * transitions, `sum(destReserved) === count(PHASE_OUTBOUND)`, the
+ * per-destination pin bound, monotone score, `H_TICK`, `H_EPOCH`, and now
+ * occupancy consistency. A second copy of that loop would have been a second
+ * place for one of those checks to be missing.
+ */
+interface Script {
+  readonly actions: (tick: number) => TickInputs
+  readonly pins: (state: GameState, tick: number) => void
+}
+
+const LOOP_SCRIPT: Script = { actions: actionsForTick, pins: applyScriptedPins }
+
+/**
  * Steps `state` from tick `from + 1` through tick `to`, applying the script,
  * and records every phase transition plus the per-tick invariants.
  *
  * Violations are COLLECTED rather than asserted per car per tick: 150 ticks x
  * 80 cars is 12,000 assertions, and an empty-array comparison at the end
  * reports the first offender with its tick and car index just as precisely.
+ *
+ * **M1d Task 6 adds four occupancy observations and one hard assertion.**
+ * `assertOccupancyConsistent` throws rather than collecting, in the house style
+ * of `assertSymmetric` / `assertArrivalHonoured`: a slot naming a car that is
+ * not standing on that cell is a corrupted array, not a bad outcome, and the
+ * run after it is not worth continuing. Its completeness half is checked
+ * unconditionally here because neither fixture in this file ever fires the
+ * valve — the only source of a legitimate completeness gap (blocking.ts) — and
+ * both assert that they do not.
  */
-function runScripted(r: Rig, from: number, to: number, obs: Observations): void {
+function runScripted(r: Rig, from: number, to: number, obs: Observations, script: Script = LOOP_SCRIPT): void {
   const before = new Uint8Array(r.state.carPhase.length)
+  const beforeCell = new Int32Array(r.state.carCell.length)
   const beforePins = new Uint8Array(r.state.destPins.length)
   let previousScore = r.state.header[H_SCORE] as number
   for (let tick = from + 1; tick <= to; tick++) {
     before.set(r.state.carPhase)
+    beforeCell.set(r.state.carCell)
     beforePins.set(r.state.destPins)
     const targetBefore = Array.from(r.state.carTargetDest)
 
-    step(r.state, r.world, r.fields, r.scratch, actionsForTick(tick))
-    applyScriptedPins(r.state, tick)
+    step(r.state, r.world, r.fields, r.scratch, script.actions(tick))
+    script.pins(r.state, tick)
+
+    obs.completeChecked.push(assertOccupancyConsistent(r.state, r.world))
+    for (let cell = 0; cell < r.world.cells; cell++) {
+      const lane0 = occupantOf(r.state, cell, 0)
+      const lane1 = occupantOf(r.state, cell, 1)
+      if (lane0 !== FREE && lane1 !== FREE && lane0 !== lane1) {
+        obs.sharedCells.push(`tick=${tick} cell=${cell} lane0=car${lane0} lane1=car${lane1}`)
+      }
+    }
 
     if ((r.state.header[H_TICK] as number) !== tick) {
       obs.violations.push(`tick ${tick}: H_TICK is ${r.state.header[H_TICK]}`)
@@ -353,6 +518,18 @@ function runScripted(r: Rig, from: number, to: number, obs: Observations): void 
         obs.scores.push(
           `tick=${tick} car=${i} home=${r.state.carHome[i]} cell=${r.state.carCell[i]}`,
         )
+      }
+
+      // M1d Task 6's two occupancy observations, per car per tick.
+      const blocked = r.state.carBlockedTicks[i] as number
+      if (blocked !== 0) {
+        obs.refusals.push(`tick=${tick} car=${i} blocked=${blocked} cell=${r.state.carCell[i]}`)
+      }
+      const wasCell = beforeCell[i] as number
+      const nowCell = r.state.carCell[i] as number
+      if (nowCell !== wasCell) {
+        const dir = dirBetween(wasCell, nowCell, r.world.w, r.world.h)
+        obs.crossings.push(`tick=${tick} car=${i} ${wasCell}->${nowCell} dir=${dir}`)
       }
     }
 
@@ -608,6 +785,109 @@ describe('the trip loop, end to end through step()', () => {
     expect(moved).toEqual([H_TICK, H_SCORE])
     expect((r.state.header[H_SCORE] as number) - (before[H_SCORE] as number)).toBe(1)
   })
+
+  it('has exactly one shared-cell event in 150 ticks — cars 0 and 1 on cell 113, ticks 73-76, in opposite lanes', () => {
+    // **The fixture's single most valuable property under M1d, and it was
+    // unasserted until this task.** A change back to one undirected slot per
+    // cell stalls this pair for `MAX_BLOCKED_TICKS` = 1,350 ticks against a
+    // 150-tick run, and without this test the only signal would be a moved
+    // golden — which is exactly the signal a standing re-bless licence absorbs.
+    //
+    // Decision 1's table is what makes it work, so it is checked here rather
+    // than referred to: the two directions this corridor uses are exact
+    // opposites and they land in DIFFERENT lanes.
+    expect(DX[DIR_WEST]).toBe(-1)
+    expect(DY[DIR_WEST]).toBe(0)
+    expect(DX[DIR_EAST]).toBe(1)
+    expect(DY[DIR_EAST]).toBe(0)
+    expect(OPPOSITE[DIR_WEST]).toBe(DIR_EAST)
+    expect(LANE_OF_DIR[DIR_EAST]).toBe(0)
+    expect(LANE_OF_DIR[DIR_WEST]).toBe(1)
+    expect(LANE_OF_DIR[DIR_EAST]).not.toBe(LANE_OF_DIR[DIR_WEST])
+
+    const r = buildLoopFixture()
+    const obs = newObservations()
+
+    // One tick BEFORE the meeting: car 0 already holds 113 eastbound and car 1
+    // is still one cell east of it. Without this the co-location below would be
+    // satisfied by a car that had been sitting there since tick 24.
+    runScripted(r, 0, HEAD_ON_FIRST_TICK - 1, obs)
+    expect(r.state.carCell[0]).toBe(HEAD_ON_CELL)
+    expect(r.state.carCell[1]).toBe(HEAD_ON_CELL + 1)
+    expect(occupantOf(r.state, HEAD_ON_CELL, LANE_OF_DIR[DIR_EAST] as number)).toBe(0)
+    expect(occupantOf(r.state, HEAD_ON_CELL, LANE_OF_DIR[DIR_WEST] as number)).toBe(FREE)
+
+    // The meeting tick itself: both cars on cell 113, each named by the lane
+    // its own direction of travel claims.
+    runScripted(r, HEAD_ON_FIRST_TICK - 1, HEAD_ON_FIRST_TICK, obs)
+    expect(r.state.carCell[0]).toBe(HEAD_ON_CELL)
+    expect(r.state.carCell[1]).toBe(HEAD_ON_CELL)
+    expect(occupantOf(r.state, HEAD_ON_CELL, LANE_OF_DIR[DIR_EAST] as number)).toBe(0)
+    expect(occupantOf(r.state, HEAD_ON_CELL, LANE_OF_DIR[DIR_WEST] as number)).toBe(1)
+    expect(r.state.carPhase[0]).toBe(PHASE_RETURNING) // car 0 is the one heading east
+    expect(r.state.carPhase[1]).toBe(PHASE_OUTBOUND)
+
+    runScripted(r, HEAD_ON_FIRST_TICK, RUN_TICKS, obs)
+    expect(obs.violations).toEqual([])
+
+    // The crossings that put them there, by direction, read back from where the
+    // cars actually went.
+    expect(obs.crossings).toContain(`tick=70 car=0 112->${HEAD_ON_CELL} dir=${DIR_EAST}`)
+    expect(obs.crossings).toContain(`tick=73 car=1 114->${HEAD_ON_CELL} dir=${DIR_WEST}`)
+
+    // ONE event, four ticks, and nothing else anywhere on the board for 150
+    // ticks. Asserted as the whole list rather than as a count: a count would
+    // be satisfied by four ticks on the wrong cell.
+    expect(obs.sharedCells).toEqual([
+      `tick=73 cell=${HEAD_ON_CELL} lane0=car0 lane1=car1`,
+      `tick=74 cell=${HEAD_ON_CELL} lane0=car0 lane1=car1`,
+      `tick=75 cell=${HEAD_ON_CELL} lane0=car0 lane1=car1`,
+      `tick=76 cell=${HEAD_ON_CELL} lane0=car0 lane1=car1`,
+    ])
+    expect(HEAD_ON_LAST_TICK).toBe(76)
+
+    // Car 0 leaves for 114 on tick 77 — a cell car 1 itself vacated on tick 73,
+    // which is the nearest miss anywhere in this run and the one a one-slot
+    // world would turn into the second half of the deadlock.
+    expect(obs.crossings).toContain(`tick=77 car=0 ${HEAD_ON_CELL}->114 dir=${DIR_EAST}`)
+    expect(obs.crossings).toContain(`tick=73 car=1 114->${HEAD_ON_CELL} dir=${DIR_WEST}`)
+
+    // And neither car was ever refused — not on these four ticks, not on any.
+    expect(obs.refusals).toEqual([])
+  })
+
+  it('runs 150 ticks without refusing a single entry, with occupancy consistent and non-vacuously complete throughout', () => {
+    const r = buildLoopFixture()
+    const obs = newObservations()
+    runScripted(r, 0, RUN_TICKS, obs)
+    expect(obs.violations).toEqual([])
+
+    // `carBlockedTicks` is 0 for every car at every tick. `obs.refusals` is
+    // populated from that region after every tick of the run, so an empty list
+    // IS the per-tick claim rather than an end-state snapshot of it.
+    expect(obs.refusals).toEqual([])
+    for (let i = 0; i < r.state.carBlockedTicks.length; i++) {
+      expect(r.state.carBlockedTicks[i], `car ${i} ended with a non-zero blocked counter`).toBe(0)
+    }
+
+    // `assertOccupancyConsistent` ran on all 150 ticks and would have thrown.
+    // Its completeness half holds vacuously over a board where nobody has
+    // crossed, so the count it ranged over is asserted too: three cars are in
+    // flight and claim-holding at the peak (0, 1 and 2 during the second wave).
+    expect(obs.completeChecked.length).toBe(RUN_TICKS)
+    expect(Math.max(...obs.completeChecked)).toBe(3)
+    expect(obs.completeChecked[0]).toBe(0) // and it genuinely starts empty
+
+    // Every crossing in the run is one of the two directions the corridor
+    // admits, in both of them — which is what makes the head-on above a head-on
+    // rather than two cars that happened to overlap.
+    const offAxis = obs.crossings.filter(
+      (c) => !c.endsWith(`dir=${DIR_WEST}`) && !c.endsWith(`dir=${DIR_EAST}`),
+    )
+    expect(offAxis).toEqual([])
+    expect(obs.crossings.some((c) => c.endsWith(`dir=${DIR_WEST}`))).toBe(true)
+    expect(obs.crossings.some((c) => c.endsWith(`dir=${DIR_EAST}`))).toBe(true)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -748,6 +1028,15 @@ describe('golden replay: the whole trip loop', () => {
     expect(r.state.carRouteLen[1]).toBe(6)
     expect(r.state.carProgress[1]).not.toBe(0)
     expect(routeBytesOf(r.state, 1).some((b) => b !== 0)).toBe(true)
+    // WHICH cell it is mid-flight on, recomputed for M1d Task 6 rather than
+    // left as "somewhere": car 1 entered 114 on tick 126 and leaves for 115 on
+    // tick 134, so tick 130 finds it on 114 with a live claim in lane 0. "A car
+    // is in flight" is satisfied by a car anywhere on the corridor; this is
+    // not, and it is the assertion that would fail first if a refusal appeared
+    // anywhere in the run and shifted the ladder by a tick.
+    expect(r.state.carCell[1]).toBe(114)
+    expect(occupantOf(r.state, 114, LANE_OF_DIR[DIR_EAST] as number)).toBe(1)
+    expect(r.state.carBlockedTicks[1]).toBe(0)
 
     // Nothing was refused or dropped, so the hash is over a clean run.
     expect(r.state.header[H_ROUTES_REFUSED]).toBe(0)
@@ -1070,5 +1359,630 @@ describe('phase 3 sits before phase 4: a pin fired by demand is served by dispat
     expect(r.state.carTargetDest[0]).toBe(0)
     expect(r.state.destReserved[0]).toBe(1)
     expect(r.state.carRouteLen[0]).toBe(3) // 27 -> 26 -> 25 -> 24
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The same-direction queue, and a blocking golden of its own — M1d Task 6
+// ---------------------------------------------------------------------------
+
+/**
+ * The loop fixture above exercises M1d's blocking primitive only in the
+ * NEGATIVE: its one shared-cell event is head-on, which Decision 1 makes
+ * structurally free, and it never refuses an entry. This is the positive case
+ * — a SAME-DIRECTION queue that genuinely blocks — and it is a second fixture
+ * rather than an edit to the first because editing that corridor to force a
+ * block would retire the four-route cost matrix the vacuity test at the top of
+ * this file exists to protect, and would move the loop golden for a third time
+ * after both of M1d's buffer changes are already behind us.
+ *
+ * All-land 20 x 12 again, so `cell = y * 20 + x` — but on ROW 7 and with its
+ * own geometry, so no literal from the fixture above transfers to this one:
+ *
+ *      x:   2                                8   9
+ *   row 7:  [d]------------------------------HN--HF
+ *           142                              148 149
+ *
+ *   d:  origin (2,4) orientation S -> footprint x2..3 y4..6, carpark (2,7) = 142
+ *   HF: (9,7) = 149, house index 0 -> cars 0 and 1,  cost 7 cells = 70
+ *   HN: (8,7) = 148, house index 1 -> cars 2 and 3,  cost 6 cells = 60
+ *
+ * **The two houses are ADJACENT, and that is the whole mechanism.** HN's cars
+ * stand on the cell HF's cars must cross into first. Nothing forbids it —
+ * `canPlaceHouse` has no spacing rule of its own, deliberately (buildings.ts)
+ * — and it is the cheapest way to build a queue deeper than one house's
+ * `CARS_PER_HOUSE`. `destPins[0] = 4` on tick 1 lets all four cars dispatch on
+ * tick 2: `dist[HN] = 60 < dist[HF] = 70`, so the nearer house is selected
+ * first and, as in the fixture above, **the nearer house is at the HIGHER
+ * index** — "pick the lowest index" is wrong here too.
+ *
+ * Every outbound route is a pure run of WEST steps and every return leg a pure
+ * run of EAST steps. That is what makes "same-direction" CHECKABLE rather than
+ * merely asserted: `LANE_OF_DIR[W] = 1` and `LANE_OF_DIR[E] = 0` are the only
+ * two lanes this fixture ever claims, so on this board a same-LANE refusal is
+ * necessarily a same-DIRECTION refusal. The premise is asserted (every route
+ * nibble is W; every crossing in the run is W or E) rather than assumed, and
+ * the conclusion is then also checked directly, by asking `canEnter` about the
+ * same car, cell and tick in both directions.
+ *
+ * ---------------------------------------------------------------------------
+ * THE LADDER, HAND-COMPUTED, AND THE THREE BLOCK WINDOWS
+ * ---------------------------------------------------------------------------
+ *
+ * Same constants as the fixture above: 330 progress units per tick, 2,500 per
+ * orthogonal cell, `rel_k = ceil(k * 2500 / 330)`. Two M1d rules do the rest.
+ * **On a refusal `carProgress` is left exactly as it was** (Decision 5) — not
+ * clamped to the threshold — so a blocked car's progress is frozen and the
+ * ticks it waits are simply not accumulated. **`runMovement` processes cars in
+ * ASCENDING index** (Decision 2), so within one tick a lower-indexed car
+ * releases its cell before a higher-indexed one asks about it; every "granted
+ * on the same tick the car in front left" below is that rule, and this fixture
+ * is the file's first place where it is outcome-visible.
+ *
+ *   tick 1   7 place actions, 142-143 .. 148-149; then destPins[0] = 4
+ *   tick 2   all four cars dispatched to d; destReserved = 4
+ *
+ *   car 2 (HN, leader)    147@9  146@17 145@24 144@32 143@39 142@47 (arrive)
+ *                         143@55 144@62 145@70 146@77 147@85 148@92 (SCORE 1)
+ *   car 3 (HN, follower)  147@17 146@25 145@32 144@40 143@47 142@55 (arrive)
+ *                         143@63 144@70 145@78 146@85 147@93 148@100 (SCORE 2)
+ *   car 0 (HF, leader)    148@9  147@26 146@33 145@41 144@48 143@56 142@64 (arrive)
+ *                         143@71 144@79 145@86 146@94 147@101 148@109 149@117 (SCORE 3)
+ *   car 1 (HF, follower)  148@26 147@34 146@41 145@49 144@56 143@64 142@72 (arrive)
+ *                         143@79 144@87 145@94 146@102 147@109 148@117 149@125 (SCORE 4)
+ *
+ * Three block windows, 34 refused tick-events, every one WEST against WEST:
+ *
+ *   car 3, ticks  9-16 ( 8 ticks) — on 148, wanting 147, behind car 2
+ *   car 1, ticks  9-25 (17 ticks) — on 149, wanting 148, behind car 0
+ *   car 0, ticks 17-25 ( 9 ticks) — on 148, wanting 147, behind car 3
+ *
+ * Worked, because this is the part a reader has to be able to check. Every car
+ * reaches 2,640 progress on tick 9 (8 x 330, `rel_1 = 8`, dispatched on tick 2).
+ * Car 0 goes first and enters 148 — cars 2 and 3 are STANDING on it and hold
+ * nothing, because neither has crossed yet on this leg (Decision 3's tick-0
+ * ruling) — and claims lane 1. Car 1 asks for the same slot and is refused.
+ * Car 2 enters 147 and claims lane 1; its `releaseCell` on 148 correctly does
+ * nothing, because that slot now names car 0 and the release is guarded by
+ * identity (Decision 6). Car 3 asks for 147 and is refused.
+ *
+ * On tick 17 car 0's held 2,450 reaches the threshold, but car 2 has not been
+ * processed yet — so car 0 is refused, car 2 then leaves 147, and car 3 takes
+ * the slot car 0 wanted. Car 0 waits for car 3 to leave 147 on tick 25 and
+ * crosses on tick 26; car 1 takes 148 on that same tick, after seventeen
+ * consecutive refusals. **Ticks 9 to 25 are a genuine two-deep queue** — two
+ * cars refused on the same tick, both stationary, each behind the next.
+ *
+ * The largest counter reached is 17, which is 1,333 short of
+ * `MAX_BLOCKED_TICKS`. **The valve is never involved and this fixture says
+ * nothing about it** — asserted, because a fixture that silently valved would
+ * still produce arrival ticks and still hash.
+ *
+ * The head-on path is exercised here too and never refuses anything: sixteen
+ * (tick, cell) shared-cell events across fifteen ticks between 56 and 71 — tick
+ * 63 carries two of them — as the leaders come back east through the followers
+ * still heading west. All sixteen are listed and checked below.
+ */
+
+const Q_DEST_ORIGIN = 82 // (2,4)
+const Q_CARPARK = 142 // (2,7)
+const Q_HOUSE_FAR = 149 // (9,7) — house index 0, cars 0 and 1
+const Q_HOUSE_NEAR = 148 // (8,7) — house index 1, cars 2 and 3
+const Q_MERGE_CELL = 147 // the cell cars 2, 3 and 0 contend for in turn
+
+const Q_COST_NEAR = 6 * ORTHO_COST // 60
+const Q_COST_FAR = 7 * ORTHO_COST // 70
+
+const Q_PINS = 4
+const Q_DISPATCH_TICK = 2
+const Q_RUN_TICKS = 130
+/** Mid-jam, and the last tick of it: both block windows are at their longest. */
+const Q_GOLDEN_TICK = 25
+const Q_MID_JAM_TICK = 20
+
+/**
+ * The three block windows, hand-computed above. `car` is refused entry to
+ * `wanted` while standing on `cell`, on every tick of `[from, to]`.
+ */
+const Q_BLOCK_WINDOWS = Object.freeze([
+  Object.freeze({ car: 3, from: 9, to: 16, cell: Q_HOUSE_NEAR, wanted: Q_MERGE_CELL }),
+  Object.freeze({ car: 1, from: 9, to: 25, cell: Q_HOUSE_FAR, wanted: Q_HOUSE_NEAR }),
+  Object.freeze({ car: 0, from: 17, to: 25, cell: Q_HOUSE_NEAR, wanted: Q_MERGE_CELL }),
+] as const)
+
+/**
+ * Every crossing of every car, transcribed from the ladder in the comment
+ * above: `[cellEntered, tick]` in order, from each car's own house cell.
+ *
+ * Written as four per-car tracks rather than as 52 flat literals because that
+ * is the shape a reader can check against the ladder line by line; the flat,
+ * tick-ordered list the runner produces is derived from it below. The derived
+ * step is pure rearrangement of hand-written data — it reads no state and
+ * calls nothing under test.
+ */
+const Q_TRACKS = Object.freeze([
+  Object.freeze({
+    car: 0,
+    start: Q_HOUSE_FAR,
+    at: Object.freeze([
+      [148, 9], [147, 26], [146, 33], [145, 41], [144, 48], [143, 56], [142, 64],
+      [143, 71], [144, 79], [145, 86], [146, 94], [147, 101], [148, 109], [149, 117],
+    ]),
+  }),
+  Object.freeze({
+    car: 1,
+    start: Q_HOUSE_FAR,
+    at: Object.freeze([
+      [148, 26], [147, 34], [146, 41], [145, 49], [144, 56], [143, 64], [142, 72],
+      [143, 79], [144, 87], [145, 94], [146, 102], [147, 109], [148, 117], [149, 125],
+    ]),
+  }),
+  Object.freeze({
+    car: 2,
+    start: Q_HOUSE_NEAR,
+    at: Object.freeze([
+      [147, 9], [146, 17], [145, 24], [144, 32], [143, 39], [142, 47],
+      [143, 55], [144, 62], [145, 70], [146, 77], [147, 85], [148, 92],
+    ]),
+  }),
+  Object.freeze({
+    car: 3,
+    start: Q_HOUSE_NEAR,
+    at: Object.freeze([
+      [147, 17], [146, 25], [145, 32], [144, 40], [143, 47], [142, 55],
+      [143, 63], [144, 70], [145, 78], [146, 85], [147, 93], [148, 100],
+    ]),
+  }),
+] as const)
+
+/** `Q_TRACKS`, flattened into the tick-then-car order `runScripted` records in. */
+function queueLadderLines(): string[] {
+  const rows: { tick: number; car: number; text: string }[] = []
+  for (const track of Q_TRACKS) {
+    let from = track.start as number
+    for (const entry of track.at) {
+      const to = entry[0] as number
+      const tick = entry[1] as number
+      const dir = to < from ? DIR_WEST : DIR_EAST
+      rows.push({ tick, car: track.car, text: `tick=${tick} car=${track.car} ${from}->${to} dir=${dir}` })
+      from = to
+    }
+  }
+  rows.sort((a, b) => a.tick - b.tick || a.car - b.car)
+  return rows.map((row) => row.text)
+}
+
+/**
+ * The largest `carBlockedTicks` value any car was OBSERVED to carry during a
+ * run, read back out of the recorded refusals. Not derived from
+ * `Q_BLOCK_WINDOWS`: the point of the comparison against `MAX_BLOCKED_TICKS` is
+ * that it is about what the cars did, and a figure taken from the expected
+ * table would compare the table against a constant instead.
+ */
+function maxBlockedSeen(obs: Observations): number {
+  let max = 0
+  for (const line of obs.refusals) {
+    const m = /blocked=(\d+)/.exec(line)
+    if (m !== null) max = Math.max(max, Number(m[1]))
+  }
+  return max
+}
+
+/** `Q_BLOCK_WINDOWS`, flattened the same way, with the counter each tick carries. */
+function queueRefusalLines(): string[] {
+  const rows: { tick: number; car: number; text: string }[] = []
+  for (const window of Q_BLOCK_WINDOWS) {
+    for (let tick = window.from; tick <= window.to; tick++) {
+      const blocked = tick - window.from + 1
+      rows.push({
+        tick,
+        car: window.car,
+        text: `tick=${tick} car=${window.car} blocked=${blocked} cell=${window.cell}`,
+      })
+    }
+  }
+  rows.sort((a, b) => a.tick - b.tick || a.car - b.car)
+  return rows.map((row) => row.text)
+}
+
+function buildQueueFixture(): Rig {
+  const r = makeRig('queue-fixture', allLandRows(W, H), STARTING_TILES)
+  expect(placeDestination(r.state, r.world, Q_DEST_ORIGIN, ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+  // The FAR house first, so the nearer one lands at the higher index.
+  expect(placeHouse(r.state, r.world, Q_HOUSE_FAR, 0)).toBe(true)
+  expect(placeHouse(r.state, r.world, Q_HOUSE_NEAR, 0)).toBe(true)
+  expect(r.state.header[H_DEST_COUNT]).toBe(1)
+  expect(r.state.header[H_HOUSE_COUNT]).toBe(2)
+  return r
+}
+
+/** The corridor, as `step` input actions: 142-143, 143-144, ... 148-149. */
+function queueActionsForTick(tick: number): TickInputs {
+  if (tick !== 1) return NO_ACTIONS
+  const actions: TickAction[] = []
+  for (let cell = Q_CARPARK; cell < Q_HOUSE_FAR; cell++) actions.push({ kind: 'place', a: cell, b: cell + 1 })
+  return { actions }
+}
+
+/**
+ * One wave of four pins on the single destination, written directly after tick
+ * 1 — the same idiom, and for the same reason, as the loop fixture's two waves:
+ * it is exactly the byte a pin fire writes, and it pins the demand timer
+ * instead of waiting for it. Four rather than one because four cars have to
+ * dispatch on one tick for the queue to exist at all.
+ */
+function applyQueuePins(state: GameState, tick: number): void {
+  if (tick === 1) state.destPins[0] = Q_PINS
+}
+
+const QUEUE_SCRIPT: Script = { actions: queueActionsForTick, pins: applyQueuePins }
+
+describe('a same-direction queue, end to end through step()', () => {
+  it('the fixture really is a dead-end corridor with two ADJACENT houses, the nearer at the higher index, and four pure-west routes', () => {
+    // Vacuity, and it must come first, exactly as it does for the loop fixture:
+    // every claim below about who blocks whom rests on the four cars genuinely
+    // sharing one one-wide corridor and on all four committing on one tick.
+    expect(Q_HOUSE_FAR - Q_HOUSE_NEAR).toBe(1)
+    expect(Q_COST_NEAR).toBeLessThan(Q_COST_FAR)
+
+    const r = buildQueueFixture()
+    const obs = newObservations()
+    runScripted(r, 0, Q_DISPATCH_TICK, obs, QUEUE_SCRIPT)
+    expect(obs.violations).toEqual([])
+
+    expect(r.state.houseCell[0]).toBe(Q_HOUSE_FAR)
+    expect(r.state.houseCell[1]).toBe(Q_HOUSE_NEAR) // the nearer house, at the HIGHER index
+
+    // Safe to read here for the same reason the loop fixture's first test is:
+    // no arrival happened on tick 2, so the fields are not yet stale.
+    const field = fieldFor(r.state, r.world, r.fields, 0, r.scratch)
+    expect(field.dist[Q_HOUSE_NEAR]).toBe(Q_COST_NEAR)
+    expect(field.dist[Q_HOUSE_FAR]).toBe(Q_COST_FAR)
+
+    // All four cars committed on tick 2, to the one destination, and every step
+    // of every route is WEST. That last part is the premise the same-direction
+    // argument rests on, and it is read through `routeStep` — dispatch.ts's own
+    // nibble codec — rather than re-decoded here.
+    expect(obs.dispatches).toEqual([
+      'tick=2 car=0 home=0 dest=0',
+      'tick=2 car=1 home=0 dest=0',
+      'tick=2 car=2 home=1 dest=0',
+      'tick=2 car=3 home=1 dest=0',
+    ])
+    expect(r.state.destReserved[0]).toBe(Q_PINS)
+    for (let i = 0; i < 4; i++) {
+      expect(r.state.carPhase[i]).toBe(PHASE_OUTBOUND)
+      expect(r.state.carCell[i]).toBe(i < 2 ? Q_HOUSE_FAR : Q_HOUSE_NEAR)
+      const len = r.state.carRouteLen[i] as number
+      expect(len).toBe(i < 2 ? 7 : 6)
+      for (let k = 0; k < len; k++) {
+        expect(routeStep(r.state, i, k), `car ${i} route step ${k} is not west`).toBe(DIR_WEST)
+      }
+    }
+
+    // And nobody holds anything yet: four cars, two cells, zero claims —
+    // Decision 3's tick-0 ruling, which is what lets car 0 cross INTO 148 on
+    // tick 9 while cars 2 and 3 are standing on it.
+    expect(occupantOf(r.state, Q_HOUSE_FAR, 0)).toBe(FREE)
+    expect(occupantOf(r.state, Q_HOUSE_FAR, 1)).toBe(FREE)
+    expect(occupantOf(r.state, Q_HOUSE_NEAR, 0)).toBe(FREE)
+    expect(occupantOf(r.state, Q_HOUSE_NEAR, 1)).toBe(FREE)
+    expect(obs.refusals).toEqual([])
+  })
+
+  it('forms a two-deep same-direction queue on the hand-computed ticks, and holds each blocked car`s progress bit-for-bit', () => {
+    const r = buildQueueFixture()
+    const obs = newObservations()
+
+    // Up to the tick before the first refusal. Nobody has crossed, nobody is
+    // blocked, and the four progresses agree: 7 accumulating ticks x 330.
+    runScripted(r, 0, 8, obs, QUEUE_SCRIPT)
+    expect(obs.refusals).toEqual([])
+    expect(obs.crossings).toEqual([])
+    for (let i = 0; i < 4; i++) expect(r.state.carProgress[i]).toBe(7 * 330)
+
+    // Then tick by tick through the jam, checking the frozen progress AS IT IS
+    // FROZEN rather than once at the end: "held, not clamped" is a claim about
+    // every tick of the wait, and a clamp to the threshold would be invisible
+    // in the final value if the car crossed afterwards anyway.
+    const perTickBlocked: string[] = []
+    for (let tick = 9; tick <= Q_GOLDEN_TICK; tick++) {
+      runScripted(r, tick - 1, tick, obs, QUEUE_SCRIPT)
+      const blocked: number[] = []
+      for (let i = 0; i < 4; i++) if ((r.state.carBlockedTicks[i] as number) !== 0) blocked.push(i)
+      perTickBlocked.push(`tick=${tick} refused=[${blocked.join(',')}]`)
+
+      // Car 1 never crosses in this window, so its progress is the value it
+      // reached on tick 8 and nothing else, on all seventeen ticks.
+      expect(r.state.carProgress[1], `car 1's held progress moved on tick ${tick}`).toBe(7 * 330)
+      if (tick <= 16) {
+        expect(r.state.carProgress[3], `car 3's held progress moved on tick ${tick}`).toBe(7 * 330)
+      }
+      if (tick >= 17) {
+        // Car 0 crossed into 148 on tick 9 with a residual of 140, accumulated
+        // to 140 + 7 x 330 = 2,450 by tick 16, and then froze there.
+        expect(r.state.carProgress[0], `car 0's held progress moved on tick ${tick}`).toBe(2450)
+      }
+    }
+    expect(obs.violations).toEqual([])
+
+    // TWO cars refused on every tick of the window, and WHICH two changes
+    // half way through: the queue re-forms behind a different leader when car 3
+    // takes the slot car 0 was waiting for.
+    const expectedBlocked: string[] = []
+    for (let tick = 9; tick <= 16; tick++) expectedBlocked.push(`tick=${tick} refused=[1,3]`)
+    for (let tick = 17; tick <= 25; tick++) expectedBlocked.push(`tick=${tick} refused=[0,1]`)
+    expect(perTickBlocked).toEqual(expectedBlocked)
+
+    // The refusals themselves, with the counter each tick carries — which is
+    // what pins "increment by one per consecutive refused tick" rather than
+    // merely "non-zero while blocked".
+    expect(obs.refusals).toEqual(queueRefusalLines())
+
+    // The middle of the jam, cell by cell: two cars moving, two stationary
+    // behind them, and the occupancy array saying exactly that. Car 1 holds
+    // NOTHING — it has never crossed — which is why its own house cell reads
+    // FREE while it stands on it.
+    const rMid = buildQueueFixture()
+    const midObs = newObservations()
+    runScripted(rMid, 0, Q_MID_JAM_TICK, midObs, QUEUE_SCRIPT)
+    expect([0, 1, 2, 3].map((i) => rMid.state.carCell[i])).toEqual([148, 149, 146, 147])
+    expect([0, 1, 2, 3].map((i) => rMid.state.carBlockedTicks[i])).toEqual([4, 12, 0, 0])
+    const west = LANE_OF_DIR[DIR_WEST] as number
+    const east = LANE_OF_DIR[DIR_EAST] as number
+    expect(occupantOf(rMid.state, 146, west)).toBe(2)
+    expect(occupantOf(rMid.state, 147, west)).toBe(3)
+    expect(occupantOf(rMid.state, 148, west)).toBe(0)
+    expect(occupantOf(rMid.state, 149, west)).toBe(FREE)
+    for (const cell of [146, 147, 148, 149]) expect(occupantOf(rMid.state, cell, east)).toBe(FREE)
+  })
+
+  it('refuses only SAME-DIRECTION entries: the same car, cell and tick is refused westbound and granted eastbound', () => {
+    // **The discriminator the plan asks for, in its sharpest available form.**
+    // Asserting "the blocks are same-direction" by reading the lane back would
+    // be reading the implementation's own arithmetic. Asking `canEnter` the
+    // same question twice — same state, same car, same cell, same tick, one
+    // direction each way — cannot be satisfied by a fixture that is quietly
+    // exercising the head-on path: the westbound answer would not be a refusal.
+    const r = buildQueueFixture()
+    const obs = newObservations()
+    runScripted(r, 0, Q_MID_JAM_TICK, obs, QUEUE_SCRIPT)
+
+    // Car 1, standing on 149, blocked by car 0 on 148 — both westbound.
+    expect(r.state.carCell[1]).toBe(Q_HOUSE_FAR)
+    expect(r.state.carCell[0]).toBe(Q_HOUSE_NEAR)
+    expect(occupantOf(r.state, Q_HOUSE_NEAR, LANE_OF_DIR[DIR_WEST] as number)).toBe(0)
+    expect(canEnter(r.state, r.world, 1, Q_HOUSE_NEAR, DIR_WEST)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+    expect(canEnter(r.state, r.world, 1, Q_HOUSE_NEAR, DIR_EAST)).toBe(EnterOutcome.ENTER_FREE)
+
+    // Car 0, standing on 148, blocked by car 3 on 147 — both westbound. A
+    // second instance, because one pair could be an accident of one geometry.
+    expect(r.state.carCell[3]).toBe(Q_MERGE_CELL)
+    expect(occupantOf(r.state, Q_MERGE_CELL, LANE_OF_DIR[DIR_WEST] as number)).toBe(3)
+    expect(canEnter(r.state, r.world, 0, Q_MERGE_CELL, DIR_WEST)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+    expect(canEnter(r.state, r.world, 0, Q_MERGE_CELL, DIR_EAST)).toBe(EnterOutcome.ENTER_FREE)
+
+    // The premise that makes the two answers above generalise to the whole run:
+    // on this corridor lane 1 is reached only by W and lane 0 only by E, so a
+    // same-lane conflict cannot be anything but a same-direction one. Both
+    // directions occur, so neither half of the filter is empty.
+    runScripted(r, Q_MID_JAM_TICK, Q_RUN_TICKS, obs, QUEUE_SCRIPT)
+    expect(obs.violations).toEqual([])
+    const offAxis = obs.crossings.filter(
+      (c) => !c.endsWith(`dir=${DIR_WEST}`) && !c.endsWith(`dir=${DIR_EAST}`),
+    )
+    expect(offAxis).toEqual([])
+    expect(obs.crossings.some((c) => c.endsWith(`dir=${DIR_WEST}`))).toBe(true)
+    expect(obs.crossings.some((c) => c.endsWith(`dir=${DIR_EAST}`))).toBe(true)
+
+    // And the head-on path IS reachable on this board — sixteen (tick, cell)
+    // events across fifteen ticks, as the leaders come back east through the
+    // followers still heading west — without producing a single extra refusal.
+    // That is what makes "the refusals are same-direction" a statement about
+    // this fixture rather than about a board where nothing ever meets head-on.
+    //
+    // Listed rather than counted, because a count is the one form of this
+    // assertion that a wrong cell or a wrong pair of cars would still satisfy —
+    // and because the count and the tick total differ here (tick 63 carries
+    // two), which is exactly the kind of thing a cardinality hides. Each line
+    // is hand-checkable against the ladder: car 2 enters 143 eastbound on tick
+    // 55 and car 0 enters it westbound on tick 56, so they share it until car 2
+    // leaves on 62; car 2 and car 1 share 144 from 62 until car 1 leaves on 64;
+    // car 3 and car 0 share 143 from 63 until car 0 leaves on 64; car 3 and car
+    // 1 share it from 64 until car 3 leaves on 70; and car 0 and car 1 share it
+    // for the single tick 71, before car 1 leaves on 72.
+    const headOn: string[] = []
+    for (let tick = 56; tick <= 61; tick++) headOn.push(`tick=${tick} cell=143 lane0=car2 lane1=car0`)
+    headOn.push('tick=62 cell=144 lane0=car2 lane1=car1')
+    headOn.push('tick=63 cell=143 lane0=car3 lane1=car0')
+    headOn.push('tick=63 cell=144 lane0=car2 lane1=car1')
+    for (let tick = 64; tick <= 69; tick++) headOn.push(`tick=${tick} cell=143 lane0=car3 lane1=car1`)
+    headOn.push('tick=71 cell=143 lane0=car0 lane1=car1')
+    expect(obs.sharedCells).toEqual(headOn)
+    expect(obs.refusals).toEqual(queueRefusalLines())
+  })
+
+  it('clears the queue and completes all four trips on the hand-computed ticks, never touching the valve', () => {
+    const r = buildQueueFixture()
+    const obs = newObservations()
+    runScripted(r, 0, Q_RUN_TICKS, obs, QUEUE_SCRIPT)
+    expect(obs.violations).toEqual([])
+
+    // Every crossing of every car, in tick order, against the ladder in this
+    // section's header. 52 of them; a block one tick too long or too short
+    // moves every line after it.
+    expect(obs.crossings).toEqual(queueLadderLines())
+
+    expect(obs.pinsConsumed).toEqual([
+      'tick=47 car=2 dest=0 stillTargeting=0',
+      'tick=55 car=3 dest=0 stillTargeting=0',
+      'tick=64 car=0 dest=0 stillTargeting=0',
+      'tick=72 car=1 dest=0 stillTargeting=0',
+    ])
+    expect(obs.scores).toEqual([
+      `tick=92 car=2 home=1 cell=${Q_HOUSE_NEAR}`,
+      `tick=100 car=3 home=1 cell=${Q_HOUSE_NEAR}`,
+      `tick=117 car=0 home=0 cell=${Q_HOUSE_FAR}`,
+      `tick=125 car=1 home=0 cell=${Q_HOUSE_FAR}`,
+    ])
+    expect(r.state.header[H_SCORE]).toBe(4)
+
+    // Blocking DELAYED the run rather than breaking it: car 1 is the follower
+    // that waited seventeen ticks and it is the last car home, 33 ticks after
+    // the leader of its own house. An unblocked run of the same geometry would
+    // have brought both HF cars home on tick 117.
+    expect(obs.scoreAfterTick[116]).toBe(3) // after tick 117
+    expect(obs.scoreAfterTick[Q_RUN_TICKS - 1]).toBe(4)
+
+    // Nothing was refused a ROUTE, no pin was dropped, and the four pins that
+    // were written are the four that were consumed.
+    expect(r.state.header[H_ROUTES_REFUSED]).toBe(0)
+    expect(r.state.header[H_PINS_DROPPED]).toBe(0)
+    expect(r.state.destPins[0]).toBe(0)
+    expect(r.state.destReserved[0]).toBe(0)
+
+    // The board is clean at the end: every car home and idle, every slot FREE,
+    // every counter back to 0. A queue that leaked a claim would leave a cell
+    // permanently blocked and nothing else in this file would notice.
+    for (let i = 0; i < 4; i++) {
+      expect(r.state.carPhase[i]).toBe(PHASE_IDLE)
+      expect(r.state.carBlockedTicks[i]).toBe(0)
+    }
+    for (let cell = 0; cell < r.world.cells; cell++) {
+      expect(occupantOf(r.state, cell, 0), `cell ${cell} lane 0 still claimed`).toBe(FREE)
+      expect(occupantOf(r.state, cell, 1), `cell ${cell} lane 1 still claimed`).toBe(FREE)
+    }
+
+    // The valve was never involved. Read off the run rather than off
+    // `Q_BLOCK_WINDOWS`: `expect(17).toBeLessThan(MAX_BLOCKED_TICKS)` compares
+    // two constants and would stay green through any change to how long cars
+    // actually wait, which is the assertion-that-cannot-fail shape. The longest
+    // wait any car OBSERVABLY served is the comparison worth making.
+    expect(maxBlockedSeen(obs)).toBe(17)
+    expect(maxBlockedSeen(obs)).toBeLessThan(MAX_BLOCKED_TICKS)
+    expect(obs.completeChecked.length).toBe(Q_RUN_TICKS)
+    expect(Math.max(...obs.completeChecked)).toBe(4)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The blocking golden — new in M1d Task 6, not a re-bless of anything
+// ---------------------------------------------------------------------------
+
+describe('golden replay: a jammed same-direction queue', () => {
+  it('hashes the state mid-jam, with two cars refused, their progress held and the occupancy array contended', () => {
+    const r = buildQueueFixture()
+    const obs = newObservations()
+    runScripted(r, 0, Q_GOLDEN_TICK, obs, QUEUE_SCRIPT)
+    expect(obs.violations).toEqual([])
+
+    // ---------------------------------------------------------------------
+    // The fixture must genuinely exercise BLOCKING, and these assertions must
+    // come BEFORE the hash. A golden over a fixture that does nothing is a
+    // hash of nothing, and it re-blesses just as smoothly as a real one —
+    // M1b's road-network golden nearly shipped that way, and the loop golden
+    // above carries the same guard for the same reason. The difference here is
+    // what the guards are ABOUT: this is the only golden in the repo taken
+    // over a state with a non-zero `carBlockedTicks` and a contended occupancy
+    // array, so its guards have to be about those two regions and not about
+    // roads and scores. Every one of them was run RED on purpose before it was
+    // trusted; the report for this task lists the edit that did it.
+    // ---------------------------------------------------------------------
+
+    // 1. Roads were placed, and through `step`'s input path.
+    expect(tilesLeft(r.state)).toBeLessThan(STARTING_TILES)
+    expect(roadMask(r.state, Q_CARPARK)).not.toBe(0)
+    expect(roadMask(r.state, Q_HOUSE_FAR)).not.toBe(0)
+
+    // 2. Entries were REFUSED — the whole point, and the one thing a golden
+    //    over a free-flowing board would silently be missing. Asserted as the
+    //    full list of refused tick-events, not as a count.
+    expect(obs.refusals).toEqual(queueRefusalLines())
+    expect(obs.refusals.length).toBe(34)
+
+    // 3. There was a QUEUE, not one isolated block: two cars are refused on
+    //    this very tick, each stationary behind the next, and both counters are
+    //    in the digest below.
+    expect(r.state.carBlockedTicks[0]).toBe(9)
+    expect(r.state.carBlockedTicks[1]).toBe(17)
+    expect(r.state.carBlockedTicks[2]).toBe(0)
+    expect(r.state.carBlockedTicks[3]).toBe(0)
+    expect(r.state.carCell[0]).toBe(Q_HOUSE_NEAR)
+    expect(r.state.carCell[1]).toBe(Q_HOUSE_FAR)
+
+    // 4. The refusals are SAME-DIRECTION, asked of `canEnter` directly in both
+    //    directions on the same cell at this same tick. A fixture silently
+    //    exercising the head-on path instead would answer ENTER_FREE westbound.
+    expect(canEnter(r.state, r.world, 1, Q_HOUSE_NEAR, DIR_WEST)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+    expect(canEnter(r.state, r.world, 1, Q_HOUSE_NEAR, DIR_EAST)).toBe(EnterOutcome.ENTER_FREE)
+
+    // 5. The occupancy array is genuinely contended: three cells claimed, all
+    //    in the westbound lane, with every eastbound lane free.
+    const west = LANE_OF_DIR[DIR_WEST] as number
+    const east = LANE_OF_DIR[DIR_EAST] as number
+    expect(occupantOf(r.state, 145, west)).toBe(2)
+    expect(occupantOf(r.state, 146, west)).toBe(3)
+    expect(occupantOf(r.state, Q_HOUSE_NEAR, west)).toBe(0)
+    for (const cell of [145, 146, Q_MERGE_CELL, Q_HOUSE_NEAR, Q_HOUSE_FAR]) {
+      expect(occupantOf(r.state, cell, east)).toBe(FREE)
+    }
+
+    // 6. The held progress is in the digest, at the exact values Decision 5's
+    //    "left exactly as it was" produces. Clamping to the threshold would put
+    //    2,500 in both of these and move the hash.
+    expect(r.state.carProgress[0]).toBe(2450)
+    expect(r.state.carProgress[1]).toBe(2310)
+
+    // 7. Four cars are mid-trip with live routes, cursors and reservations, so
+    //    the hash covers more than a stalled pair.
+    for (let i = 0; i < 4; i++) {
+      expect(r.state.carPhase[i]).toBe(PHASE_OUTBOUND)
+      expect(routeBytesOf(r.state, i).some((b) => b !== 0)).toBe(true)
+    }
+    expect(r.state.destReserved[0]).toBe(Q_PINS)
+    expect(r.state.header[H_SCORE]).toBe(0)
+
+    // 8. The valve has not fired: the largest counter here is 17 against
+    //    `MAX_BLOCKED_TICKS` = 1,350.
+    //
+    //    **Labelled SUBSUMED, not load-bearing, because it was measured to be.**
+    //    This task tried to falsify it independently — `MAX_BLOCKED_TICKS = 17`,
+    //    the smallest value that makes `17 < MAX_BLOCKED_TICKS` false — and
+    //    guard 4 above fired first, because a saturated counter turns that same
+    //    `canEnter` call from `REFUSED_OCCUPIED` into `ENTER_VALVE`. And it
+    //    cannot be otherwise: guard 3 pins this counter at exactly 17, so this
+    //    line can only fail when `MAX_BLOCKED_TICKS <= 17`, and every such value
+    //    arms the valve at guard 4's call site. Its coverage is a strict subset
+    //    of guard 4's, which is the catalogue's "decoration that reads as
+    //    defence" — so it stays as the statement of the margin a reader wants,
+    //    and the detector is guard 4's outcome code. That separation is only
+    //    available because `canEnter` returns a REASON rather than a boolean.
+    expect(r.state.carBlockedTicks[1] as number).toBeLessThan(MAX_BLOCKED_TICKS)
+
+    // 9. Nothing was refused a route, no pin was dropped, and no road was ever
+    //    erased — so both ghost regions are all-zero and cannot be contributing
+    //    to the digest.
+    expect(r.state.header[H_ROUTES_REFUSED]).toBe(0)
+    expect(r.state.header[H_PINS_DROPPED]).toBe(0)
+    expect(r.state.ghostMask.every((b) => b === 0), 'the queue fixture erases nothing').toBe(true)
+    expect(r.state.ghostCommitted.every((b) => b === 0)).toBe(true)
+
+    // ---------------------------------------------------------------------
+    // **A NEW golden, blessed for the first time in M1d Task 6. This is not a
+    // re-bless of anything** — no number changed to produce it, and none of the
+    // five existing goldens moves in this task. It is deliberately taken AFTER
+    // both of M1d's buffer changes (Tasks 2 and 5), so it never has to be
+    // re-blessed for layout; a re-bless of a brand-new number is
+    // indistinguishable from getting it wrong the first time.
+    //
+    // What it covers that no other golden does: `carBlockedTicks` non-zero and
+    // unequal across two cars, `occupancy` contended in one lane with the other
+    // free, and two cars' progress FROZEN at a sub-threshold value. It moves
+    // for a change anywhere in the blocking primitive — the lane table, the
+    // refusal, the held progress, the claim/release protocol, the ascending
+    // iteration order — as well as for everything the loop golden already
+    // covers.
+    // ---------------------------------------------------------------------
+    expect(hashState(r.state)).toBe(294084758)
   })
 })
