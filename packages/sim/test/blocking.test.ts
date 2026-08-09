@@ -2897,10 +2897,28 @@ describe('a gridlocked ring of four cars: same-lane, no head-on pair, genuinely 
     expect(r.state.destReserved[0]).not.toBe(4)
   })
 
-  it('deadlocks for all 1,350 ticks — no car, no progress unit, no slot moves', () => {
+  it('deadlocks for all 1,350 ticks, and the byte-identity proves it deadlocks FOREVER', () => {
     // **This IS the no-valve world**, byte for byte: the valve's only effect is
     // the comparison `counter >= 1,350`, which is false on every one of these
     // ticks. No test-only disable seam is needed to establish it.
+    //
+    // **And the byte-identity below is not a restatement of the per-tick
+    // assertions — it is the inductive step.** The per-tick loop says nothing
+    // moved during the window; the buffer comparison says the state at the end
+    // of tick 1,350 is IDENTICAL to the state before tick 1, once the four
+    // counters are set aside. Those counters are write-only in the no-valve
+    // world — nothing reads `carBlockedTicks` except the valve comparison — and
+    // `runMovement` is a pure function of the buffer. So tick 1,351 of a
+    // valve-less world would be handed exactly the input tick 1 was handed and
+    // would produce exactly the same output, and so on without end. **The ring
+    // deadlocks permanently, and this one assertion is the whole proof.**
+    //
+    // The 3,000-tick arm below is therefore CORROBORATION, not the load-bearing
+    // evidence, and it is worth keeping for what an induction cannot give: it
+    // exercises the real `runMovement` over a window three times longer than
+    // this one and would catch any way the premise is false — a hidden reader
+    // of the counter, an accumulator elsewhere in the buffer, a non-determinism
+    // in the loop — rather than assuming the premise.
     const r = ringRig('ring-deadlock', [AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD])
     const before = new Uint8Array(r.state.buffer).slice()
     const jam = driveHand(r, RING_WATCH, VALVE_AT, { cells: RING_CELL })
@@ -2922,18 +2940,30 @@ describe('a gridlocked ring of four cars: same-lane, no head-on pair, genuinely 
     // anybody, so both halves hold on all 1,350 ticks.
     expect(jam.maxCompletenessChecked).toBe(4)
 
-    // **And the whole buffer is byte-identical apart from the four counters.**
-    // 1,350 ticks of a four-car gridlock cost exactly eight bytes of state.
+    // **THE INDUCTIVE STEP: the whole buffer is byte-identical apart from the
+    // four counters.** 1,350 ticks of a four-car gridlock cost exactly eight
+    // bytes of state, and the state `runMovement` would be handed on tick 1,351
+    // of a valve-less world is bit-for-bit the state it was handed on tick 1.
     r.state.carBlockedTicks.fill(0)
     expect(new Uint8Array(r.state.buffer)).toEqual(before)
+    // The premise the induction rests on, asserted rather than assumed: the
+    // counter is the ONLY region that moved, so it is the only thing that could
+    // carry information out of the window.
+    expect(jam.blocked[VALVE_AT]).toEqual([VALVE_AT, VALVE_AT, VALVE_AT, VALVE_AT])
   })
 
-  it('and the deadlock is PERMANENT without the valve, not merely long: 3,000 ticks, nothing', () => {
-    // The stronger arm, and the only one that needs a disable. Zeroing the
-    // counter after every tick is exactly the world a counter that did not
-    // persist would produce — which is also why this doubles as the behavioural
-    // form of "put the counter on Scratch". Test-side only: no branch is added
-    // to `sim` and there is nothing here that can rot into production.
+  it('corroborates that permanence over 3,000 real ticks with the counter held cold', () => {
+    // The induction above is the proof; this is the arm that would catch its
+    // PREMISE being false — a hidden reader of the counter, an accumulator
+    // elsewhere in the buffer, a non-determinism in the loop — by driving the
+    // real `runMovement` over a window more than twice the valve period rather
+    // than reasoning about it.
+    //
+    // Zeroing the counter after every tick is exactly the world a counter that
+    // did not persist would produce, which is also why this doubles as the
+    // behavioural form of "put the counter on Scratch". Test-side only: no
+    // branch is added to `sim` and there is nothing here that can rot into
+    // production.
     const r = ringRig('ring-no-valve', [AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD, AT_THRESHOLD])
     const before = new Uint8Array(r.state.buffer).slice()
     for (let tick = 1; tick <= NO_VALVE_TICKS; tick++) {

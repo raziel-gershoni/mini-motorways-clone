@@ -511,9 +511,18 @@ export function assertEnterDirValid(i: number, cell: number, dir: number): void 
  *     visible in the four-car ring: the first valve to fire vacates a cell, and
  *     the car behind that cell is then granted `ENTER_FREE` on the same tick
  *     with an UNSATURATED counter.
- *   - **`>=`, not `===`.** The counter saturates at exactly the threshold so the
- *     two cannot differ today, but `===` would turn any future ceiling change
- *     into a valve that silently never fires rather than one that fires early.
+ *   - **`>=`, not `===`, and the difference is observable NOW.** It is easy to
+ *     write this off as future-proofing on the grounds that the counter
+ *     saturates at exactly the threshold, so `advanceCar` can never present a
+ *     larger value — that much is true, and it is a statement about
+ *     `runMovement`, not about this function. **`canEnter` is a public query
+ *     with its own contract**, called directly by tests, by probes and (from
+ *     Task 5) by more of the tick than today; it answers whatever counter it is
+ *     handed. `blocking.test.ts`'s edge table hands it 1,351 and 32,767 and
+ *     requires `ENTER_VALVE` for both, so `===` is killed by this file's own
+ *     tests rather than by a hypothetical future. The future-proofing is real
+ *     as well — a raised ceiling under `===` gives a valve that silently never
+ *     fires — but it is the second reason, not the first.
  *
  * @param i    the car asking. Read by `assertEnterCellOnBoard`'s message, and —
  *             from Task 4 — by the valve, which is per car: `carBlockedTicks[i]`
