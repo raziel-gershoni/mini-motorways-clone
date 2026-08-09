@@ -1150,8 +1150,22 @@ const TICK_RIG_ROW = 28
 const TICK_RIG_COL = 38
 /** Ticks profiled in the clean (no-arrival, no-rebuild) window. */
 const PROFILED_TICKS = 400
-/** Ticks profiled in the window that contains trip completions. */
-const ARRIVAL_TICKS = 900
+/**
+ * Ticks profiled in the window that contains trip completions.
+ *
+ * **Raised from 900 to 2,600 by M1d Task 3, and the reason is the milestone
+ * landing rather than a loosened bound.** This rig is 32 cars on a 19-cell
+ * corridor with the carpark in the middle of it, which is a jam the moment
+ * `canEnter` starts refusing entries: measured throughput fell from ~630
+ * completed trips per 900 ticks to **225** (four consecutive windows: 224, 226,
+ * 225, 229), and crossings from ~2,600 to ~1,110. Both of this test's vacuity
+ * floors — 400 completions and 2,000 crossings — are floors on the SIGNAL the
+ * bound is derived from, so the honest repair is a longer window, not a smaller
+ * signal. At 2,600 ticks the rig turns over 652 completions and 3,218 crossings
+ * (measured twice, 652 both times) for ~100 ms, and the 12x margin below holds
+ * again.
+ */
+const ARRIVAL_TICKS = 2600
 /** Ticks the completion-dense rig needs before every car is in flight. */
 const DENSE_WARMUP = 120
 /**
@@ -1312,7 +1326,16 @@ function bytesIn(all: readonly Allocator[], file: string): number {
   return all.filter((a) => a.file === `packages/sim/src/${file}`).reduce((sum, a) => sum + a.bytes, 0)
 }
 
-/** The three files M1d Task 2 changed on the tick path. */
+/**
+ * The three files M1d Tasks 2 and 3 changed on the tick path.
+ *
+ * Task 3 added `canEnter` and the refusal branch to the first two of them, so
+ * the scope already covers the new code — but "already covered" is exactly the
+ * claim this harness has been wrong about four times across two milestones, so
+ * liveness was re-proved by injecting into `canEnter` and into the refusal
+ * branch specifically rather than inherited from Task 2's proof. See the task
+ * report's allocation section for the figures.
+ */
 const TASK2_TICK_FILES = ['blocking.ts', 'cars.ts', 'trips.ts'] as const
 
 describe('the tick allocates nothing on the blocking path, measured', () => {

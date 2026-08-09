@@ -13,9 +13,16 @@ import {
   H_SCORE,
   H_TICK,
   H_TILES,
+  LANE_OF_DIR,
+  PHASE_IDLE,
   PHASE_NONE,
   PHASE_OUTBOUND,
   PHASE_RETURNING,
+  EnterOutcome,
+  canEnter,
+  claimCell,
+  occupantOf,
+  packRouteStep,
 } from '@laneways/sim'
 import { PALETTE, type AtlasContext, type AtlasSurface } from '@laneways/render'
 import { TICK_MS } from '../src/loop'
@@ -1331,3 +1338,153 @@ function runTripSetup(rig: Rig): void {
   }
   rig.game.pointer.up(1)
 }
+
+// ---------------------------------------------------------------------------
+// A queued car, drawn — M1d Task 3
+// ---------------------------------------------------------------------------
+
+/**
+ * **The assembly-level consequence of Decision 5's held progress: a blocked car
+ * is not drawn on top of the car it is waiting for.**
+ *
+ * `resolve.test.ts` proves the resolver keeps `f < 1`; this proves the whole
+ * pipeline does — sim, resolver, snapshots, lerp, `buildFrame`, `draw` — by
+ * reading the two car sprites back out of the recorded canvas commands. It is
+ * the only place in the suite where "the sim writes `carProgress = threshold`
+ * while blocked" shows up as what it actually is on screen: two cars painted at
+ * the same pixel.
+ *
+ * ---------------------------------------------------------------------------
+ * EVERY TICK AND EVERY COORDINATE, HAND-COMPUTED
+ * ---------------------------------------------------------------------------
+ *
+ * The seeded trip is this file's own: dispatch on `SEED_FIRST_PIN_TICK` = 378,
+ * route NW / N / NE out of house 1 at (8, 13), scoring on 435. Thresholds are
+ * 3,500 (diagonal) and 2,500 (orthogonal) against 330 a tick, and the carry
+ * crosses cells, so:
+ *
+ * ```
+ *   crossing 1  NW  ceil(3500/330)      = 11 ticks  -> tick 388, carry  130
+ *   crossing 2  N   ceil((2500-130)/330)=  8 ticks  -> tick 396, carry  270
+ *   crossing 3  NE  ceil((3500-270)/330)= 10 ticks  -> tick 406, carry   70
+ * ```
+ *
+ * So the car sits on **(7, 11) from tick 396 to tick 406**, heading NE toward
+ * the carpark at (8, 10). On tick **405** its progress is `270 + 9 x 330 =
+ * 3,240` — one tick short. A blocker is inserted on (8, 10) at that moment, in
+ * lane `LANE_OF_DIR[NE] = 0`, and from tick **406** the car is refused and
+ * holds 3,240 forever after.
+ *
+ * `f = 3240 / 3500 = 0.9257142857...`, and `(DX, DY)` for NE is `(1, -1)`, so
+ * the blocked car resolves at **(7.9257142857, 10.0742857142)** — inside its own
+ * cell by 0.0743 of a cell in each axis, and the blocker is at (8, 10) exactly.
+ * Under `carProgress = threshold` the blocked car resolves at (8, 10) too: the
+ * same point, to the float.
+ */
+const BLOCK_INSERT_TICK = 405
+const BLOCK_FIRST_REFUSED_TICK = 406
+const BLOCK_HELD_PROGRESS = 3240
+const BLOCK_F = 3240 / 3500
+const BLOCKED_CELL = [7, 11] as const
+const BLOCKER_CELL = [8, 10] as const
+const NE_DIR = 1
+/** A spare live car slot: house 0's first car, idle at tick 0 and never dispatched by this seed. */
+const BLOCKER_SLOT = 0
+
+describe('a queued car is drawn inside its own cell, not on top of the car it waits for', () => {
+  it('holds 3,240 progress from tick 406 and draws 0.074 of a cell short of the blocker', () => {
+    const rig = buildRig({ warmStartTicks: WARM_START_TICKS })
+    const { game, ctx } = rig
+    const state = game.state
+    const camera = game.shell.camera
+    rig.advance(0)
+
+    // Draw the road, exactly as `runTrip` does.
+    const first = PATH[0] as readonly [number, number]
+    expect(game.pointer.down(1, rig.cx(first[0]), rig.cy(first[1]))).toBe(PointerOutcome.DRAG_START)
+    for (let i = 1; i < PATH.length; i++) {
+      const cell = PATH[i] as readonly [number, number]
+      expect(game.pointer.move(1, rig.cx(cell[0]), rig.cy(cell[1]))).toBe(PointerOutcome.DRAW)
+    }
+    expect(game.pointer.up(1)).toBe(PointerOutcome.DRAG_END)
+
+    while ((state.header[H_TICK] as number) < BLOCK_INSERT_TICK) rig.oneTick(ABS_ALPHA)
+
+    // Vacuity, all of it hand-computed above and none of it read back: the car
+    // is where the arithmetic says, one tick short of a crossing it is about to
+    // be refused.
+    const w = game.world.w
+    const blockedCell = (BLOCKED_CELL[1] as number) * w + (BLOCKED_CELL[0] as number)
+    const blockerCell = (BLOCKER_CELL[1] as number) * w + (BLOCKER_CELL[0] as number)
+    expect(state.header[H_TICK]).toBe(BLOCK_INSERT_TICK)
+    expect(state.carPhase[TRIP_CAR_SLOT]).toBe(PHASE_OUTBOUND)
+    expect(state.carCell[TRIP_CAR_SLOT]).toBe(blockedCell)
+    expect(state.carProgress[TRIP_CAR_SLOT]).toBe(BLOCK_HELD_PROGRESS)
+
+    // The blocker: a real in-flight car standing on the carpark cell, holding
+    // the lane a north-eastbound car needs. Reservation-free on purpose — the
+    // five-tick window below contains no arrival, so nothing reads its target.
+    expect(state.carPhase[BLOCKER_SLOT]).toBe(PHASE_IDLE)
+    state.carPhase[BLOCKER_SLOT] = PHASE_OUTBOUND
+    state.carCell[BLOCKER_SLOT] = blockerCell
+    state.carRouteLen[BLOCKER_SLOT] = 4
+    state.carRouteCursor[BLOCKER_SLOT] = 0
+    state.carProgress[BLOCKER_SLOT] = 0
+    for (let k = 0; k < 4; k++) packRouteStep(state, BLOCKER_SLOT, k, 4) // four S steps
+    claimCell(state, BLOCKER_SLOT, blockerCell, NE_DIR)
+    expect(LANE_OF_DIR[NE_DIR]).toBe(0)
+    expect(occupantOf(state, blockerCell, 0)).toBe(BLOCKER_SLOT)
+    expect(canEnter(state, game.world, TRIP_CAR_SLOT, blockerCell, NE_DIR)).toBe(
+      EnterOutcome.REFUSED_OCCUPIED,
+    )
+
+    // Five frames from the first refused tick. The blocker's own progress
+    // reaches its threshold on tick 413 (0 + 8 x 330 = 2,640 against 2,500), so
+    // it holds the cell across the whole window — asserted, not assumed.
+    const samples: { tick: number; gx: number; gy: number; bx: number; by: number }[] = []
+    for (let i = 0; i < 5; i++) {
+      rig.oneTick(ABS_ALPHA)
+      const cars = drawnCars(ctx.log, camera.tileSize)
+      expect(cars.length).toBe(LIVE_CAR_SLOTS)
+      const car = cars[TRIP_CAR_SLOT] as (typeof cars)[number]
+      const blocker = cars[BLOCKER_SLOT] as (typeof cars)[number]
+      const toGx = (x: number) => (x - camera.tileSize / 4 - camera.originX) / camera.tileSize + camera.x0
+      const toGy = (y: number) => (y - camera.tileSize / 4 - camera.originY) / camera.tileSize + camera.y0
+      samples.push({
+        tick: state.header[H_TICK] as number,
+        gx: toGx(car.x),
+        gy: toGy(car.y),
+        bx: toGx(blocker.x),
+        by: toGy(blocker.y),
+      })
+    }
+
+    expect(samples[0]!.tick).toBe(BLOCK_FIRST_REFUSED_TICK)
+    for (const s of samples) {
+      // The sim held its progress: bit-identical every tick, so prev and curr
+      // resolve to the same point and the lerp cannot move it either.
+      expect(state.carProgress[TRIP_CAR_SLOT], `tick ${s.tick}`).toBe(BLOCK_HELD_PROGRESS)
+      expect(state.carCell[TRIP_CAR_SLOT], `tick ${s.tick}`).toBe(blockedCell)
+      // Drawn strictly inside its own cell, at the hand-computed point.
+      expect(s.gx, `tick ${s.tick}`).toBeCloseTo((BLOCKED_CELL[0] as number) + BLOCK_F, 4)
+      expect(s.gy, `tick ${s.tick}`).toBeCloseTo((BLOCKED_CELL[1] as number) - BLOCK_F, 4)
+      expect(s.gx, `tick ${s.tick}`).toBeLessThan(BLOCKER_CELL[0] as number)
+      expect(s.gy, `tick ${s.tick}`).toBeGreaterThan(BLOCKER_CELL[1] as number)
+      // The blocker is a REAL driving car, so it drifts southward inside its
+      // own cell as its own progress accumulates (route S, `f` rising 0.132 a
+      // tick) — it just never crosses, because it needs 8 ticks and the window
+      // is 5. Its `gx` is therefore pinned at exactly 8 while its `gy` moves,
+      // which makes the x axis the clean separation to assert.
+      expect(s.bx, `tick ${s.tick}`).toBeCloseTo(BLOCKER_CELL[0] as number, 4)
+      expect(s.by, `tick ${s.tick}`).toBeGreaterThanOrEqual(BLOCKER_CELL[1] as number)
+      // **The claim, in one line.** Under `carProgress = threshold` the blocked
+      // car's `gx` is exactly 8 and this is false; under "accumulate while
+      // blocked" it passes 8 on the first tick and keeps going.
+      expect(s.gx, `tick ${s.tick}`).toBeLessThan(s.bx)
+    }
+    // The blocker really did hold the cell for the whole window: it never
+    // crossed, so nothing but the refusal can be what stopped the trip car.
+    expect(state.carCell[BLOCKER_SLOT]).toBe(blockerCell)
+    expect(state.header[H_SCORE]).toBe(0)
+  })
+})

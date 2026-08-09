@@ -115,16 +115,47 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
  * rather than left to be inferred.
  *
  * ---------------------------------------------------------------------------
+ * THE REFUSAL, AND WHY THE ANSWER IS A CODE RATHER THAN A BOOLEAN — TASK 3
+ * ---------------------------------------------------------------------------
+ *
+ * `canEnter` is the single question movement asks of occupancy, and it returns
+ * an `EnterOutcome` code, never a boolean. That is the house pattern M2's
+ * `PointerOutcome` established and it is the direct mechanical answer to this
+ * project's most-repeated defect family — *"a negative assertion satisfied by
+ * the wrong mechanism"*. "The car did not move" is satisfied in `advanceCar` by
+ * four different things (a non-driving phase, an exhausted route, progress
+ * below the threshold, and a refusal), and only the reason-in-the-return-value
+ * separates the fourth from the other three for every test at once.
+ *
+ * The whole four-code enum is declared here even though Task 3 can only ever
+ * return two of them, so that no later task WIDENS a return type a caller is
+ * already switching on: `ENTER_VALVE` is wired in Task 4 and `REFUSED_GHOST` in
+ * Task 5.
+ *
+ * **Blocking is checked at cell ENTRY, never mid-cell, and a refused car does
+ * not accumulate** (Decision 5). `advanceCar` computes `progress = carProgress
+ * + speed`; if that reaches the edge's threshold it asks `canEnter`, and on a
+ * refusal it writes NOTHING AT ALL — not the progress, not the cell, not the
+ * cursor, not occupancy. The car retries the same comparison next tick and
+ * crosses on the first tick it is granted. See `cars.ts` for why "write
+ * `carProgress = threshold` instead" is wrong twice over.
+ *
+ * ---------------------------------------------------------------------------
  * WHAT THIS MODULE DOES NOT DO — YET
  * ---------------------------------------------------------------------------
  *
- * **Task 2 adds no refusals.** It declares the whole blocking buffer shape and
- * wires claim/release so that occupancy is always correct, and nothing yet
- * reads it to stop a car. That is deliberate and it is what makes Task 2's
- * golden re-bless provably layout-only: no car's motion can have changed, so
- * the only difference in the four whole-buffer digests is buffer SHAPE. Task 3
- * adds `canEnter` and refusal; Task 4 the valve and `carBlockedTicks`'s
- * semantics; Task 5 the ghost regions.
+ * **Task 2 added no refusals.** It declared the whole blocking buffer shape and
+ * wired claim/release so that occupancy is always correct, and nothing read it
+ * to stop a car. That is what made Task 2's golden re-bless provably
+ * layout-only: no car's motion could have changed, so the only difference in
+ * the four whole-buffer digests was buffer SHAPE. **Task 3 adds `canEnter` and
+ * refusal**; Task 4 the valve and `carBlockedTicks`'s semantics; Task 5 the
+ * ghost regions.
+ *
+ * **Task 3 writes nothing to `carBlockedTicks`.** The region is declared and
+ * zero-filled; giving it semantics is Task 4's whole job, and a Task 3 that
+ * incremented it "ready for the valve" would be an untested second value in a
+ * region whose only consumer does not exist yet.
  *
  * **Nothing here allocates.** No object literal, no array, no closure, no
  * `.map`/`.filter`/`.slice`; every value is a bare number and the only buffer
@@ -220,6 +251,138 @@ export function releaseCell(state: GameState, i: number, cell: number): void {
 /** The car standing in `(cell, lane)`, or `FREE`. */
 export function occupantOf(state: GameState, cell: number, lane: number): number {
   return state.occupancy[occupancySlot(cell, lane)] as number
+}
+
+/**
+ * What `canEnter` decided, and why. Every code is **non-zero**, in
+ * `PointerOutcome`'s idiom, so a caller writing `if (outcome)` cannot
+ * accidentally treat one outcome as false.
+ *
+ * **All four are declared here in Task 3, and only two of them are reachable
+ * until Task 5.** That is deliberate: the alternative is a later task widening
+ * a return type that `advanceCar` is already switching on, and a switch that
+ * was exhaustive when it was written silently stops being exhaustive. The two
+ * that are not yet reachable each have a named owner —
+ *
+ *   - `ENTER_VALVE` — **Task 4.** Returned when a `REFUSED_OCCUPIED` meets a
+ *     `carBlockedTicks[i]` saturated at `MAX_BLOCKED_TICKS`.
+ *   - `REFUSED_GHOST` — **Task 5.** Returned when the cell is a ghost (its last
+ *     road bit was erased with cars still committed to it) and this car is not
+ *     one of the committed ones. Production-unreachable by construction even
+ *     then, and exercised directly.
+ *
+ * **There is deliberately no `NO_ROAD` code and no `OUT_OF_BOUNDS` code**, and
+ * the omissions are load-bearing rather than an oversight — see `canEnter`.
+ */
+export const EnterOutcome = Object.freeze({
+  /** The slot is free. The crossing happens. */
+  ENTER_FREE: 1,
+  /** The slot is taken and the blocked counter reached `MAX_BLOCKED_TICKS` (Task 4). */
+  ENTER_VALVE: 2,
+  /** The slot is taken. The car holds its progress and retries next tick. */
+  REFUSED_OCCUPIED: 3,
+  /** The cell is a ghost and this car is not committed to it (Task 5). */
+  REFUSED_GHOST: 4,
+} as const)
+
+/** An `EnterOutcome` value, derived from the const rather than hand-written. */
+export type EnterOutcomeCode = (typeof EnterOutcome)[keyof typeof EnterOutcome]
+
+/**
+ * Throws if `canEnter` is asked about a cell that is not on the board.
+ *
+ * **The failure without this is silent and wrong, not loud.** `occupancySlot`
+ * on an off-board cell indexes past the end of the `occupancy` view, a typed
+ * array returns `undefined` there, `undefined === FREE` is false — so an
+ * out-of-range question would be answered `REFUSED_OCCUPIED` by a slot that
+ * does not exist. A car would sit blocked forever against nothing, which is the
+ * hardest possible thing to trace back to here. Same class as the `Int16Array`
+ * coercion `assertMaxCarsFitsOccupancy` guards, and the same treatment.
+ *
+ * Unreachable through `advanceCar`: `stepCell` returns -1 for every off-board
+ * step and `advanceCar` throws on that by name BEFORE it asks this question, so
+ * this guard exists for a hand-built or corrupted call. Exercised directly in
+ * `blocking.test.ts`, on the precedent of `assertSingleCrossing` (cars.ts) and
+ * `assertDispatchProgress` (dispatch.ts).
+ *
+ * `i` is in the message rather than in the condition: this is the only place
+ * that can say WHICH car asked, and a bare "cell 4821 is off the board" from
+ * inside a tick names nothing a reader can act on.
+ *
+ * @internal `canEnter` is the production call site.
+ */
+export function assertEnterCellOnBoard(i: number, cell: number, cells: number): void {
+  if (cell < 0 || cell >= cells) {
+    throw new Error(
+      `blocking: car ${i} was asked whether it can enter cell ${cell}, which is not on this board ` +
+        `(0..${cells - 1}) — an off-board slot read returns undefined and would answer "occupied" ` +
+        'from a slot that does not exist',
+    )
+  }
+}
+
+/**
+ * **The single blocking question**, spec §5.5: does an inbound vehicle collide
+ * with a traversing vehicle on this chunk? Answered as per-(cell, lane)
+ * occupancy — car `i` may enter `cell` travelling in direction `dir` iff the
+ * lane that direction uses is free.
+ *
+ * The lane is `LANE_OF_DIR[dir]` and nothing else. Two properties of that table
+ * do all the work and neither is re-derived here:
+ *
+ *   - **It is the lane of the cell being ENTERED, keyed by the direction of
+ *     THIS crossing.** Not the cell being left (which the car is releasing) and
+ *     not the opposite lane (which is the lane oncoming traffic uses, and is
+ *     exactly the slot that must stay free for a head-on to resolve).
+ *   - **`LANE_OF_DIR[d] !== LANE_OF_DIR[OPPOSITE[d]]` for every `d`** (Decision
+ *     1). Two cars travelling in exactly opposite directions can never contend
+ *     for the same slot, so a head-on swap resolves in one tick in either index
+ *     order, with no give-way rule and no valve. Give-way is not implemented
+ *     because it does not need to be.
+ *
+ * **Queueing is not implemented — it emerges.** There is no queue structure, no
+ * follower list and no "who is behind me" anywhere in this milestone. A car
+ * refused at the back of three others is refused for exactly the same reason
+ * the first one was, and the order they leave in is the order `runMovement`
+ * happens to reach them: ascending car index (Decision 2), which is
+ * outcome-visible for the first time in this task.
+ *
+ * ---------------------------------------------------------------------------
+ * TWO CODES THAT DELIBERATELY DO NOT EXIST
+ * ---------------------------------------------------------------------------
+ *
+ * **`NO_ROAD`.** Movement must not consult `roads` for permission. A car
+ * committed to a route drives it whatever happens to the world underneath —
+ * that is M1c's decision 2, it is what makes replay tractable, and from Task 5
+ * it is also the whole ghost-road feature (a committed car HAS to be able to
+ * drive a road that has been erased, or §5.11's delayed refund can never be
+ * paid). A `NO_ROAD` refusal would make an erase under an in-flight car freeze
+ * it instead.
+ *
+ * **`OUT_OF_BOUNDS`.** `stepCell` already returns -1 for a step off the grid
+ * and `advanceCar` already throws on it by name. Turning that into a refusal
+ * would convert a corrupted route — a loud, named, unresumable failure — into a
+ * car that quietly stops moving, which is the one outcome that looks like
+ * ordinary traffic. `assertEnterCellOnBoard` above keeps the loud form for the
+ * only path that could reach this function with a bad cell.
+ *
+ * @param i    the car asking. Read only by `assertEnterCellOnBoard`'s message in
+ *             Task 3; Task 4 reads `carBlockedTicks[i]` and Task 5 the ghost
+ *             commitment, which is why the parameter is here now.
+ * @param cell the cell being ENTERED, not the one being left.
+ * @param dir  the direction of THIS crossing.
+ */
+export function canEnter(
+  state: GameState,
+  world: WorldData,
+  i: number,
+  cell: number,
+  dir: number,
+): EnterOutcomeCode {
+  assertEnterCellOnBoard(i, cell, world.cells)
+  const occupant = state.occupancy[occupancySlot(cell, LANE_OF_DIR[dir] as number)] as number
+  if (occupant === FREE) return EnterOutcome.ENTER_FREE
+  return EnterOutcome.REFUSED_OCCUPIED
 }
 
 /**

@@ -10,13 +10,14 @@ import {
   ORTHO_COST,
   type MapData,
 } from '@laneways/shared'
-import { createState, snapshot, restore, H_TILES, type GameState } from '../src/state'
+import { createState, snapshot, restore, hashState, H_TILES, type GameState } from '../src/state'
 import { createWorld, type WorldData } from '../src/world'
 import { createFlowFields } from '../src/scratch'
 import { packRouteStep, routeStep, ROUTE_BYTES } from '../src/dispatch'
 import { placeRoad, eraseRoad, roadMask, tilesLeft, DX, DY, OPPOSITE } from '../src/roads'
 import { PHASE_IDLE, PHASE_NONE, PHASE_OUTBOUND, PHASE_RETURNING } from '../src/buildings'
 import { runMovement, advanceCar, speedUnits, assertSingleCrossing } from '../src/cars'
+import { EnterOutcome, canEnter, claimCell, releaseCell } from '../src/blocking'
 
 /**
  * Every fixture is an all-land 20 x 12 board (`W` x `H`), so a cell index is
@@ -580,6 +581,110 @@ describe('cars that must not move', () => {
     expect(state.carCell[0]).toBe(50)
     expect(state.carRouteCursor[0]).toBe(8)
     expect(state.carProgress[0]).toBe(0)
+  })
+})
+
+describe('the entry refusal is the FOURTH way advanceCar writes nothing (M1d Task 3)', () => {
+  /**
+   * One driver behind one parked car, both eastbound on row 2.
+   *
+   * The blocker is `PHASE_OUTBOUND` with an exhausted cursor — the arm the
+   * block above isolates — so it holds its cell indefinitely without any second
+   * blocking car behind it, and it is sound: an in-flight car genuinely
+   * standing on the cell its slot names.
+   */
+  function blockedRig(seed: string, progress: number) {
+    const { state, world } = rig(seed)
+    commit(state, 0, START + 1, ORTHO_ROUTE)
+    state.carRouteCursor[0] = 8 // exhausted: the blocker never moves
+    claimCell(state, 0, START + 1, E)
+
+    commit(state, 1, START, ORTHO_ROUTE)
+    state.carRouteCursor[1] = 1
+    state.carProgress[1] = progress
+    claimCell(state, 1, START, E)
+    return { state, world }
+  }
+
+  it('writes NOTHING AT ALL on a refused tick — the whole state buffer is byte-identical', () => {
+    // The strongest form the claim can take, and the reason it is available at
+    // all is that a refusal has no bookkeeping: no progress, no cursor, no
+    // occupancy, and no `carBlockedTicks` (Task 4 owns that region). Every
+    // named mutation on the refusal branch — accumulate, clamp to the
+    // threshold, advance the cursor, increment a counter — moves at least one
+    // byte and this assertion sees all of them at once.
+    const { state, world } = blockedRig('refusal-writes-nothing', 2200)
+    // Vacuity: the car must genuinely reach its threshold this tick, or
+    // "nothing changed" is satisfied by a car that was never going to cross.
+    expect((state.carProgress[1] as number) + SPEED).toBeGreaterThanOrEqual(ORTHO_T)
+    expect(state.carPhase[1]).toBe(PHASE_OUTBOUND)
+    expect(canEnter(state, world, 1, START + 1, E)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+
+    const before = new Uint8Array(state.buffer).slice()
+    const digest = hashState(state)
+    runMovement(state, world)
+    expect(new Uint8Array(state.buffer)).toEqual(before)
+    expect(hashState(state)).toBe(digest)
+  })
+
+  it('is not vacuous: the same rig with the slot FREE moves the car and moves the buffer', () => {
+    // The control that makes the byte-identity above evidence rather than an
+    // observation about a state where nothing was going to happen. One line
+    // different: the blocker's claim is released.
+    const { state, world } = blockedRig('refusal-control', 2200)
+    releaseCell(state, 0, START + 1)
+    expect(canEnter(state, world, 1, START + 1, E)).toBe(EnterOutcome.ENTER_FREE)
+
+    const before = new Uint8Array(state.buffer).slice()
+    runMovement(state, world)
+    expect(new Uint8Array(state.buffer)).not.toEqual(before)
+    expect(state.carCell[1]).toBe(START + 1)
+    expect(state.carProgress[1]).toBe(2200 + SPEED - ORTHO_T)
+    expect(state.carRouteCursor[1]).toBe(2)
+  })
+
+  it('separates the refusal from the sub-threshold arm, which also writes no cell and no cursor', () => {
+    // The catalogue's most-repeated family, at its sharpest: a car short of its
+    // threshold ALSO does not move, ALSO keeps its cell and ALSO keeps its
+    // cursor. The two are told apart by `carProgress` — which rises by exactly
+    // `speed` in one case and by exactly nothing in the other — and by the
+    // outcome code, which is why the code exists.
+    const { state, world } = blockedRig('refusal-vs-subthreshold', 0)
+    const cells: number[] = []
+    const progresses: number[] = []
+    for (let t = 1; t <= 10; t++) {
+      runMovement(state, world)
+      cells.push(state.carCell[1] as number)
+      progresses.push(state.carProgress[1] as number)
+    }
+    // Ticks 1-7 accumulate; from tick 8 the threshold is reached and the
+    // refusal freezes it. The cell is identical on all ten ticks, so the cell
+    // alone cannot tell the two apart — which is the point.
+    expect(cells.every((c) => c === START)).toBe(true)
+    expect(progresses).toEqual([330, 660, 990, 1320, 1650, 1980, 2310, 2310, 2310, 2310])
+    expect(state.carBlockedTicks[1]).toBe(0)
+  })
+
+  it('advanceCar consults the refusal directly too, not only through runMovement', () => {
+    // `advanceCar` is exported and independently driven by this file's guard
+    // tests, so the branch has to hold there as well — otherwise a caller that
+    // bypasses `runMovement` (Task 9's profile rig, for one) would move a car
+    // through an occupied cell.
+    const { state, world } = blockedRig('refusal-advance-car', 2200)
+    advanceCar(state, world, 1, SPEED)
+    expect(state.carCell[1]).toBe(START)
+    expect(state.carProgress[1]).toBe(2200)
+  })
+
+  it('still throws for a route that leaves the board, rather than refusing it quietly', () => {
+    // Ordering: `canEnter` is asked AFTER `stepCell`'s bounds throw, so a
+    // corrupted route stays a named, unresumable failure instead of becoming a
+    // car that silently stops. If the two were swapped this would refuse.
+    const { state, world } = rig('refusal-after-bounds')
+    commit(state, 0, 59, ORTHO_ROUTE) // (19, 2): the last column, stepping E
+    expect(() => runMovement(state, world)).not.toThrow() // sub-threshold ticks are fine
+    for (let t = 0; t < 6; t++) runMovement(state, world)
+    expect(() => runMovement(state, world)).toThrow(/would step off the grid/)
   })
 })
 

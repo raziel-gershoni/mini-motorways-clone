@@ -10,6 +10,10 @@ import {
 import {
   createState,
   createWorld,
+  runMovement,
+  canEnter,
+  claimCell,
+  EnterOutcome,
   packRouteStep,
   routeStep,
   edgeCost,
@@ -338,9 +342,21 @@ describe('phases', () => {
    * to `phase === PHASE_IDLE` — so an unrecognised byte falls through into the
    * driving path — survived the whole suite.
    *
-   * The extra behaviour is fail-safe and it is not hypothetical: M1d adds a
-   * blocking phase. Under the shipped form an unknown phase parks the car; under
-   * the narrowed form it runs `routeStep` on a route that may mean nothing.
+   * The extra behaviour is fail-safe and it is not hypothetical. Under the
+   * shipped form an unknown phase parks the car; under the narrowed form it runs
+   * `routeStep` on a route that may mean nothing.
+   *
+   * **The reason this comment used to give was wrong, and M1d Task 3 corrected
+   * it rather than marking it satisfied.** It said "M1d adds a blocking phase".
+   * M1d adds no phase byte at all: blocking is a per-tick refusal with no state
+   * of its own, a blocked car stays `PHASE_OUTBOUND`/`PHASE_RETURNING`, and
+   * `carPhase`'s four values are unchanged since M1c. The arm is still worth
+   * keeping and still needs this test — an unrecognised byte is reachable from a
+   * corrupted or forward-version buffer, which is the same fail-closed idiom
+   * `advanceCar` and `runArrivals` use — but the justification had to be one
+   * that is true. See `describe('a blocked car resolves strictly inside its own
+   * cell')` at the foot of this file for what M1d Task 3 actually needed from
+   * this module, which is nothing: held progress keeps `f < 1`.
    */
   it('parks a car whose phase byte this module does not recognise', () => {
     const { state, world } = rig()
@@ -567,5 +583,124 @@ describe('lerpCar', () => {
     const snap = createCarSnapshots(4)
     put(snap, 3, [0, 0], [8, 24])
     expect(lerped(snap, 3, 0.5)).toEqual([4, 12])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 8. A blocked car stays inside its own cell — M1d Task 3, Decision 5
+// ---------------------------------------------------------------------------
+
+/**
+ * **This is the renderer half of the held-progress rule, and it is the reason
+ * the rule is "leave `carProgress` alone" rather than "clamp it to the
+ * threshold".** `f = carProgress / (edgeCost(dir) * COST_UNIT_SCALE)` is
+ * UNCLAMPED here on purpose (`resolve.ts`), so whatever the sim writes while a
+ * car waits is drawn literally:
+ *
+ *   - held (shipped): `f = 2200 / 2500 = 0.88` — inside its own cell;
+ *   - clamped to the threshold: `f = 1.0` exactly — the centre of the cell it
+ *     has NOT entered, i.e. drawn on top of the car it is waiting for;
+ *   - accumulated: `f` grows without bound — 2.46 after twelve blocked ticks,
+ *     one and a half cells past the car in front.
+ *
+ * So `resolve.ts` needs no change for queued cars, and this file is where that
+ * is established rather than assumed. Nothing here is hand-set: the blocked
+ * car's progress comes out of a real `runMovement`, which is what makes the
+ * assertion a statement about the sim and the renderer together.
+ */
+describe('a blocked car resolves strictly inside its own cell', () => {
+  const BLOCKED_CELL_X = 11
+  const BLOCKED_CELL_Y = 12
+  const HELD_PROGRESS = 2200
+  const BLOCKED_TICKS = 12
+
+  /** Car 1 eastbound behind car 0, which is parked (outbound, exhausted cursor). */
+  function blockedRig(): Rig {
+    const r = rig()
+    const cell = cellOf(BLOCKED_CELL_X, BLOCKED_CELL_Y)
+    setCar(r.state, 0, { phase: PHASE_OUTBOUND, cell: cell + 1, cursor: 4, routeLen: 4, route: [E, E, E, E] })
+    claimCell(r.state, 0, cell + 1, E)
+    setCar(r.state, 1, {
+      phase: PHASE_OUTBOUND,
+      cell,
+      progress: HELD_PROGRESS,
+      cursor: 1,
+      routeLen: 4,
+      route: [E, E, E, E],
+    })
+    claimCell(r.state, 1, cell, E)
+    return r
+  }
+
+  it('holds f = 0.88 for twelve blocked ticks and never reaches the next cell centre', () => {
+    const r = blockedRig()
+    const cell = cellOf(BLOCKED_CELL_X, BLOCKED_CELL_Y)
+    // Vacuity: the car really is refused, by name, and really is at its
+    // threshold — not merely short of it.
+    expect(canEnter(r.state, r.world, 1, cell + 1, E)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+    expect(HELD_PROGRESS + CAR_SPEED_UNITS_PER_TICK).toBeGreaterThanOrEqual(ORTHO_THRESHOLD)
+
+    for (let t = 0; t < BLOCKED_TICKS; t++) {
+      runMovement(r.state, r.world)
+      const blocked = resolveXY(r.state, r.world, 1)
+      const f = (r.state.carProgress[1] as number) / ORTHO_THRESHOLD
+      expect(f, `tick ${t + 1}`).toBe(0.88)
+      expect(f, `tick ${t + 1}`).toBeLessThan(1)
+      // Strictly inside its own cell: past the centre, short of the boundary.
+      // `toBeCloseTo` at 5 places, not `toBe`: the resolver writes into a
+      // `Float32Array` and 0.88 is not exactly representable there (11.88
+      // stores as 11.880000114440918). Every exact `toBe` elsewhere in this
+      // file uses a value that IS — 0.5, 0.25 — and copying that idiom here
+      // was the first version's mistake.
+      expect(blocked.x, `tick ${t + 1}`).toBeCloseTo(BLOCKED_CELL_X + 0.88, 5)
+      expect(blocked.y, `tick ${t + 1}`).toBe(BLOCKED_CELL_Y)
+      expect(blocked.x, `tick ${t + 1}`).toBeLessThan(BLOCKED_CELL_X + 1)
+      // And, said the way it matters on screen: it is NOT drawn on top of the
+      // car it is waiting for. Under `carProgress = threshold` these two are
+      // the same point, to the float.
+      const blocker = resolveXY(r.state, r.world, 0)
+      expect(blocker.x, `tick ${t + 1}`).toBe(BLOCKED_CELL_X + 1)
+      expect(blocked.x, `tick ${t + 1}`).not.toBe(blocker.x)
+      expect(blocker.x - blocked.x, `tick ${t + 1}`).toBeCloseTo(0.12, 5)
+    }
+  })
+
+  it('is not vacuous: the same car on a clear road passes 1.0 and reaches the next cell', () => {
+    // The control. Without it, "f stays below 1" is satisfied by a resolver
+    // that cannot produce a large f at all, and by a car that was never moving.
+    const r = blockedRig()
+    const cell = cellOf(BLOCKED_CELL_X, BLOCKED_CELL_Y)
+    r.state.carPhase[0] = PHASE_NONE
+    r.state.occupancy[(cell + 1) * 2] = -1
+    expect(canEnter(r.state, r.world, 1, cell + 1, E)).toBe(EnterOutcome.ENTER_FREE)
+
+    runMovement(r.state, r.world)
+    // It crossed, so it is now inside the NEXT cell, with the carry the sim
+    // computed: (2200 + 330 - 2500) / 2500 = 0.012.
+    expect(r.state.carCell[1]).toBe(cell + 1)
+    const moved = resolveXY(r.state, r.world, 1)
+    expect(moved.x).toBeCloseTo(BLOCKED_CELL_X + 1 + 0.012, 5)
+    expect(moved.x).toBeGreaterThan(BLOCKED_CELL_X + 1)
+  })
+
+  it('the interpolated frame position of a blocked car does not move at all', () => {
+    // The rule reaches the frame, not only the resolved snapshot: prev and curr
+    // are identical while the car waits, so every alpha lerps to the same
+    // point. A car that jitters in place while queued would be the visible
+    // symptom of a sim that writes to `carProgress` on a refused tick.
+    const r = blockedRig()
+    const snap = createCarSnapshots(r.slots)
+    initCarSnapshots(snap, r.state, r.world)
+    for (let t = 0; t < 4; t++) {
+      snapshotPrev(snap, r.state, r.world)
+      runMovement(r.state, r.world)
+      snapshotCurr(snap, r.state, r.world)
+      for (const alpha of [0, 0.25, 0.5, 0.99]) {
+        const out = new Float32Array(2)
+        lerpCar(snap, 1, alpha, out, 0)
+        expect(out[0], `tick ${t + 1} alpha ${alpha}`).toBeCloseTo(BLOCKED_CELL_X + 0.88, 5)
+        expect(out[1], `tick ${t + 1} alpha ${alpha}`).toBe(BLOCKED_CELL_Y)
+      }
+    }
   })
 })

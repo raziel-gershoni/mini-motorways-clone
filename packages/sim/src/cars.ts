@@ -2,7 +2,7 @@ import { CAR_SPEED_UNITS_PER_TICK, COST_UNIT_SCALE, DENOM, LANE_SPEED_DEFAULT, O
 import type { GameState } from './state'
 import type { WorldData } from './world'
 import { OPPOSITE, stepCell } from './roads'
-import { claimCell, releaseCell } from './blocking'
+import { canEnter, claimCell, releaseCell, EnterOutcome } from './blocking'
 import { edgeCost } from './graph'
 import { routeStep } from './dispatch'
 import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
@@ -41,14 +41,21 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
  * (M1d Task 7's intersection multiplier is the first) must amend that sentence
  * in the same commit rather than leaning on this one.
  *
- * **As of M1d Task 2 this module WRITES `state.occupancy`, and that is a new
- * kind of write for it.** Every other region `advanceCar` touches is indexed by
- * the car; `occupancy` is indexed by the CELL, so for the first time one car's
- * advance can write a slot another car's advance will read. It does not yet
- * READ occupancy — Task 2 adds no refusal — but the shared-write is already
- * enough to retire this module's "no car can observe another" claim, and
- * `runMovement`'s iteration-order note below is amended accordingly rather than
- * left standing on a premise that has stopped being true.
+ * **As of M1d Task 2 this module WRITES `state.occupancy`, and as of Task 3 it
+ * READS it too.** Every other region `advanceCar` touches is indexed by the
+ * car; `occupancy` is indexed by the CELL, so one car's advance writes a slot
+ * another car's advance reads. Task 2's shared write was already enough to
+ * retire this module's "no car can observe another" claim; Task 3's read makes
+ * the observation OUTCOME-VISIBLE — a car is now stopped by another car, and
+ * `runMovement`'s iteration order decides which of two contenders moves. Both
+ * notes below are written to that, not to the M1c premise.
+ *
+ * **This is still not a read of `state.roads`.** The sentence above about the
+ * committed route stands exactly as strong as it was: `canEnter` asks
+ * occupancy, never the road bits, and it has no `NO_ROAD` outcome on purpose
+ * (blocking.ts says why, and Task 5's ghost roads are the reason it matters).
+ * M1d Task 7's intersection multiplier is the change that ends the `state.roads`
+ * claim, and it must amend the paragraph above in its own commit.
  *
  * **Progress is accumulated in the pathfinder's own cost units:**
  *
@@ -163,6 +170,16 @@ export function assertSingleCrossing(residual: number, minThreshold: number): vo
  * An exhausted car is one arrivals has not collected yet; letting it bank
  * progress would credit the next leg with time it did not spend driving.
  *
+ * **From M1d Task 3 there is a FOURTH way this function writes nothing: the
+ * entry refusal**, and the three above are exactly why the refusal's reason has
+ * to be in `canEnter`'s return value rather than inferred from "the car did not
+ * move". Distinguishing them from outside takes all three of: the phase is
+ * driving, the cursor is in range, and `carProgress` is bit-identical to last
+ * tick's. Only a refusal produces that combination — a sub-threshold tick
+ * raises `carProgress` by `speed`, and the other two arms need a non-driving
+ * phase or an exhausted cursor. `blocking.test.ts` states that derivation where
+ * it uses it.
+ *
  * The return leg is the same route read backwards, stepping
  * `OPPOSITE[route[cursor - 1]]` and decrementing. `edgeCost(OPPOSITE[d]) ===
  * edgeCost(d)` for every `d` (the table pairs each direction with its exact
@@ -227,6 +244,59 @@ export function advanceCar(state: GameState, world: WorldData, i: number, speed:
     )
   }
 
+  // ------------------------------------------------------------------------
+  // THE BLOCKING QUESTION — M1d Task 3, Decision 5. Asked HERE and nowhere
+  // else, because this is the only place a car changes cell.
+  // ------------------------------------------------------------------------
+  //
+  // **Checked at cell ENTRY, never mid-cell.** The car is at
+  // `(carCell, carProgress)` and becomes blocked only at the instant it would
+  // cross. Everything above this line has already happened on a refused tick —
+  // the threshold comparison, the residual, the single-crossing guard, the
+  // `stepCell` bounds throw — and none of it writes anything.
+  //
+  // **Placed AFTER the `next < 0` throw on purpose.** A corrupted route that
+  // walks off the grid must stay a named, unresumable failure; asking
+  // `canEnter` first would need `canEnter` to re-derive `next` itself, and a
+  // refusal there would silently convert the corruption into a car that stops.
+  //
+  // **On a refusal this writes NOTHING AT ALL.** Not `carProgress`, not
+  // `carCell`, not `carRouteCursor`, not occupancy, not `carBlockedTicks`
+  // (Task 4 owns that region's semantics). Two consequences, both load-bearing:
+  //
+  //   - **The progress is HELD, not clamped.** `carProgress` keeps the value it
+  //     had before this tick's `speed` was notionally added, which is in
+  //     `[threshold - speed, threshold)`. Writing `carProgress = threshold`
+  //     instead would discard up to `speed - 1` units — the carry-dropping bug
+  //     the module comment above forbids — and would make the renderer's
+  //     `f = carProgress / threshold` exactly 1.0, drawing the car at the
+  //     centre of the cell it has NOT entered, on top of the car it is waiting
+  //     for. Holding keeps `f < 1` and needs no renderer change at all.
+  //     Accumulating instead (writing `progress`) is worse again: the car
+  //     launches a whole cell forward the moment the way clears, and the
+  //     displacement grows without bound while it waits.
+  //   - **It advances exactly one cell when the way clears, never two.** On the
+  //     granting tick `progress` is in `[threshold, threshold + speed)`, so the
+  //     residual is below `speed`, which is below `MIN_EDGE_THRESHOLD`. By
+  //     construction, not by a clamp.
+  //
+  // **A blocked car cannot consume its pin, and that holds BY CONSTRUCTION
+  // rather than by a check here.** Arrival is cursor-driven: `runArrivals`
+  // (trips.ts) fires on `cursor >= carRouteLen`, and `carRouteCursor` is
+  // written in exactly one place — the crossing block below. A refused car
+  // therefore keeps its reservation and its destination's pin until it actually
+  // reaches the carpark, and letting it consume one early would take new code,
+  // not a missing guard. That matters because `destReserved` is what stops a
+  // second car being dispatched to a pin this one is still holding: consuming
+  // early breaks `sum(destReserved) === count(PHASE_OUTBOUND)` and the next
+  // car's `assertArrivalHonoured` throws by name.
+  //
+  // Task 4 inserts the counter increment/reset around this branch; Task 5 adds
+  // the second refusal code. The condition is written as "refuse unless
+  // explicitly granted" so that an unrecognised future code fails closed.
+  const outcome = canEnter(state, world, i, next, dir)
+  if (outcome !== EnterOutcome.ENTER_FREE) return
+
   // Occupancy, lifecycle events 3 then 2 (blocking.ts). This is the ONE
   // crossing site in the codebase, so it is the one place both events fire.
   //
@@ -241,10 +311,11 @@ export function advanceCar(state: GameState, world: WorldData, i: number, speed:
   // wrong at every turn, which is decision 6's corruption case. `claimCell`
   // overwrites unconditionally with the lane of THIS crossing's direction.
   //
-  // **Task 2 adds no refusal here.** `dir` is computed, the crossing happens,
-  // and occupancy records it. Task 3 inserts `canEnter` between
-  // `assertSingleCrossing` and this block; nothing about a car's motion changes
-  // in Task 2, which is what makes Task 2's golden re-bless layout-only.
+  // Reached only on a GRANT. `canEnter` above has already established that
+  // `(next, LANE_OF_DIR[dir])` is free, so the claim below cannot displace a
+  // car through this path — from Task 3 the only thing that can is Task 4's
+  // valve, which is why `assertOccupancyComplete`'s exception set names it and
+  // nothing else.
   releaseCell(state, i, state.carCell[i] as number)
   state.carCell[i] = next
   claimCell(state, i, next, dir)
@@ -264,29 +335,29 @@ export function advanceCar(state: GameState, world: WorldData, i: number, speed:
  * Cars are iterated in ascending index and each car's phase byte is read
  * exactly once, per the anti-double-act invariant.
  *
- * **Iteration order stopped being a PROVABLE no-op at M1d Task 2, and the note
- * that used to live here has to be retired rather than reworded.** Until Task
- * 2, `advanceCar` read and wrote only car `i`'s own slots, so no car could
- * observe another and "iterate descending" was a no-op by reading. It now
- * writes `state.occupancy`, which is cell-indexed and shared: if two cars cross
- * into the same `(cell, lane)` on the same tick, the LAST writer wins, so the
- * surviving occupant is a function of the order. That state is reachable in
- * Task 2 precisely because Task 2 adds no refusal; from Task 3 it becomes
- * unreachable through the ordinary path (the second car is refused) and
- * reachable again only through Task 4's valve.
+ * **Iteration order stopped being a PROVABLE no-op at M1d Task 2, and at Task 3
+ * it became outcome-visible in the strong sense.** Until Task 2, `advanceCar`
+ * read and wrote only car `i`'s own slots, so no car could observe another and
+ * "iterate descending" was a no-op by reading. Task 2 made it write
+ * `state.occupancy`, which is cell-indexed and shared. Task 3 makes it READ
+ * that region: when two cars would cross into the same `(cell, lane)` on one
+ * tick, the one the loop reaches first is granted and the other is REFUSED —
+ * different survivors, different arrival ticks, for the rest of the run.
  *
- * So the honest statement is now: **descending is no longer a no-op, and it is
- * no longer unobserved.** Measured at Task 2, not assumed: `for (let i =
- * carCount - 1; i >= 0; i--)` is killed by exactly **one** test — the same-lane
- * displacement fixture in `blocking.test.ts`, which dispatches both of a house's
- * cars on one tick and asserts that the shared lane names car **1**, the last
- * writer under ascending order. One detector is thin, and it is thin for a real
- * reason rather than a coverage gap: two cars can only contend for one slot at
- * all while nothing refuses them, so Task 2 is the *only* task in which the
- * ordinary path produces this state. From Task 3 `canEnter` refuses the second
- * entry and the order becomes outcome-visible in the much stronger sense the
- * plan describes — different survivors, different arrival ticks — at which point
- * that fixture is rewritten as a refusal test and the detector count rises.
+ * Measured, not assumed. `for (let i = carCount - 1; i >= 0; i--)`:
+ *
+ *   - at Task 2, killed by exactly **one** test (the same-lane displacement
+ *     fixture, which could only exist while nothing refused anything);
+ *   - at Task 3, killed by **8** — that fixture rewritten as a refusal test
+ *     (ascending grants car 0 and refuses car 1, descending the reverse), the
+ *     junction contention fixture, and the four-car queue, whose cascade clears
+ *     in ONE tick ascending and takes FOUR descending, so every arrival tick in
+ *     its hand-computed ladder moves.
+ *
+ * Ascending is the specified order (Decision 2), chosen over spec §5.5's
+ * "committed timestamp" because movement is discrete — a car either enters a
+ * cell this tick or it does not, and a timestamp orders nothing the index does
+ * not already order.
  */
 export function runMovement(state: GameState, world: WorldData): void {
   const speed = speedUnits(LANE_SPEED_DEFAULT)
