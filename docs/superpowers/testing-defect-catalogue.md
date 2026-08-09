@@ -14,6 +14,14 @@ Every task mutation-tests its own tests, **and confirms each mutant actually exe
 
 Plans do not state expected test counts. The author got them wrong five times.
 
+**Measure detector counts with this exact invocation, and no other:**
+
+```
+pnpm -r --no-bail --filter './packages/*' --filter './tools/*' test
+```
+
+`pnpm test` **bails at the first failing package**, so any mutation that breaks an early package reports zero detectors for every later one. And the obvious fix is also broken: **`pnpm --no-bail test` bails too**, because the root script is itself `pnpm -r …`, so the flag lands on the outer run rather than the recursive one. Verified under a deliberate failure — `pnpm test` and `pnpm --no-bail test` both stop at `shared` with 2 failures and never reach `sim`, which has its own detector; the recursive form reports all five packages. A per-package `--filter` run is safe; anything claiming a whole-suite count is not, unless it used the line above.
+
 ### The shapes that keep recurring
 
 - A test aimed slightly off-target — `snapshot()` already detaching masked `restore()`'s missing copy.
