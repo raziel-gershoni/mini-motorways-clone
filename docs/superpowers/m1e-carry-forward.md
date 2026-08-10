@@ -312,6 +312,44 @@ quietly measure less*.
    counter bump into `advanceCar`. Budgets are therefore applied per file across
    the whole set of candidate files, so the guard fires whichever one it lands on.
 
+### 8a. `sim/src/roads.ts`'s 4 B bound now sits inside the CONTENDED noise band
+
+**Owner: M1e Task 12**, which already runs the whole-suite verification and is
+the only remaining task with a reason to run the canonical invocation many
+times. The number lives at `NOISE_FLOOR_BYTES_PER_FRAME` and
+`GHOST_BUDGET_BYTES_PER_EVENT` in `packages/game/test/allocation.test.ts`; the
+two arms that fire are *"charges nothing to sim/roads.ts"* and *"covers the
+GHOST path"*. Naming a task and a constant, not "whoever owns the harness".
+
+**Measured under `pnpm -r --no-bail --filter './packages/*' --filter './tools/*'
+test`, where five vitest processes run concurrently:** the harness charges
+`sim/src/roads.ts` above its 4 B budget roughly **1 run in 12**. Figures seen:
+4.24, 5.18, 5.25 B/frame (M1e Task 2) and 10.50, 16.68, 19.10 (its review).
+
+**It is not an allocation, and both halves of that were measured.** In
+ISOLATION the same arm reports **literally 0 bytes, 12 of 12 runs** — a real
+per-call allocation would appear there too. And `runWeekBoundary`, the only code
+M1e Task 2 added to the tick, contains no allocating construct.
+
+**The flake is on BOTH sides, and Task 2's report first said otherwise.** Task 2
+measured 0 failures in 22 base runs against 3 in 35 head runs and reported the
+asymmetry as a finding, correctly declining to widen the budget but wrongly
+implying head had made it worse. The review's interleaved treatment/control — 8
+canonical runs per arm, alternating — got **base 1 of 8 and head 0 of 8**, at
+2-5x Task 2's figures. The direction reverses. **Sequential arms measure the
+machine's mood as much as the code**; interleave them, which is the same lesson
+as instrument lesson 1 above applied to the schedule rather than to the
+statistic.
+
+**What to do with it:** re-floor under contention, or give the `roads.ts` arm the
+**minimum over three windows** the completion and jam arms already have. Note
+that the ghost arm has a treatment/control delta *and still flakes*, so the
+minimum alone may not be enough and a measured contended floor is the safer fix.
+Do NOT simply raise the number to make it quiet: the signal these bounds watch
+for is **13.10 B/ghost-event** and **40-70 B/call**, so there is an order of
+magnitude of room, and a bound chosen without measuring the band is how the
+original flake was introduced.
+
 ---
 
 ## 9. Known residuals, each disclosed rather than hidden

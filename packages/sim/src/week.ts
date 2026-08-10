@@ -28,7 +28,24 @@ import { isWeekBoundary } from './clock'
  * explicitly rather than loosening to a range — the point of the invariant is
  * that the refund path conserves, and a range hides a leaking refund.
  *
- * Nothing here allocates: two reads, one comparison, one write.
+ * **Nothing here allocates — two reads, one comparison, one write — and that is
+ * an argument, not a measurement. The distinction matters because the harness
+ * structurally CANNOT check the half that does the work.** `packages/game`'s
+ * allocation harness is live on this file: an escaping object at the top of
+ * `runWeekBoundary` turns it red at 41.30 B/frame, which is the first time in
+ * four attempts on this project that the harness's SCOPE followed new code
+ * rather than staying where it was. But the same object inside the grant branch
+ * leaves the suite green, and by construction rather than by accident: the rigs
+ * drive 4,200-10,500 frames against a 4,500-tick week, so the branch fires a
+ * handful of times, ~3.3 B/frame, under the 4 B sampling floor no matter how
+ * badly it behaves. The gate is what hides it.
+ *
+ * **Carry this forward: Tasks 5 and 7 add week-gated work of the same shape**
+ * (the spawn cadences, the colour unlocks), and it will be equally unmeasurable
+ * for the same reason. Anything allocating inside a week-gated branch needs a
+ * rig that drives enough weeks to clear the floor, or an explicit note that no
+ * instrument covers it. A green harness is a claim about the inputs it was
+ * given.
  */
 export function runWeekBoundary(state: GameState): void {
   if (!isWeekBoundary(state.header[H_TICK] as number)) return

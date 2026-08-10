@@ -115,17 +115,42 @@ export interface TickInputs {
  *   — `H_EPOCH <- 0` on successful exit.
  *
  * **The one remaining checked no-op, disclosed in `cars.ts`'s idiom for exactly
- * this shape, and the reason it is kept anyway.** `3 <-> 4` (inputs after
- * demand — M1c's `2 <-> 3`) is 0-detector across the whole suite, for one
- * reason: **no `TickAction` reads `H_TICK`.** `roads.ts` is the only module
- * phase 3 calls, and it reads neither the clock nor the week.
+ * this shape — and the reason recorded for it for three milestones was the
+ * WRONG ONE.** `3 <-> 4` (inputs after demand — M1c's `2 <-> 3`) is 0-detector
+ * across the whole suite. Every prior version of this comment said that was
+ * because **no `TickAction` reads `H_TICK`**, and M1e Task 2's review measured
+ * that claim directly: with the trigger SATISFIED — `roads.ts` reading `H_TICK`
+ * in a live branch — transposing `3 <-> 4` still scores **0**. The clock has
+ * nothing to do with it.
  *
- * That is a property of today's action set, not of the design. `placeDestination`
- * (`buildings.ts`) stamps `destSpawnTick[d]` from `H_TICK`, so an action that
- * placed a building would end it — and anyone adding an action that reads the
- * clock owns re-deriving this position and pinning it. **M1e does NOT add one:
- * spawning is a `step` PHASE, not a `TickAction`**, and the action set is still
- * exactly `'place' | 'erase'`.
+ * **The operative reason is DISJOINTNESS.** `runDemand` writes `destPins`,
+ * `pinAccum`, `rotationCursor` and `H_PINS_DROPPED`, and reads those plus
+ * `destMeta`, `destSpawnTick`, `H_TICK` and `H_DEST_COUNT`. Phase 3 writes
+ * `roads`, `cleared`, `ghostMask`, `ghostCommitted` and `H_TILES`. **Neither
+ * set intersects the other's reads** — the only name both touch is
+ * `H_DEST_COUNT`, which both READ and neither writes. Two phases over disjoint
+ * state commute, and no clock reader can change that.
+ *
+ * How the wrong reason survived: it was true of `1 <-> 2`, which the same
+ * paragraph used to cover, and it rode along harmlessly on the pair it never
+ * explained. Task 2 gave `1 <-> 2` a detector and removed it from the
+ * paragraph, which left the borrowed reason standing alone on `3 <-> 4`.
+ *
+ * **The failure this enables, named because it is scheduled.** M1f adds §5.9's
+ * connectivity rule to `placeRoad`/`eraseRoad`: erasing a road that disconnects
+ * a destination drops its pending pins. That gains `roads.ts` no `H_TICK` at
+ * all — so the clock-shaped tripwire stays green — while making phase 3 write
+ * `destPins`, which phase 4 reads. `3 <-> 4` becomes a real one-tick
+ * pin-accumulation error on every tick a road is drawn or erased, at 0
+ * detectors.
+ *
+ * **So the tripwire watches the disjointness, not the clock.** `step.test.ts`
+ * now scans `roads.ts` for the four names `runDemand` writes, plus
+ * `destSpawnTick`. **What it cannot see, stated rather than left to be
+ * discovered:** an INDIRECT write — phase 3 calling a helper exported from
+ * `demand.ts` or elsewhere that mutates those regions on its behalf. The scan
+ * is a mechanism for the direct case and a prompt for the rest; it is not a
+ * proof of commutativity.
  *
  * **`1 <-> 3` (the clock advance after input application — M1c's `1 <-> 2`) WAS
  * a 0-detector no-op for that same single reason, and M1e Task 2 ended it.**
@@ -140,28 +165,35 @@ export interface TickInputs {
  * than by a test that could not exist.
  *
  * **What was re-confirmed by reading, at M1e Task 2**: `TickActionKind` is still
- * exactly `'place' | 'erase'`, phase 3 still calls nothing but
- * `placeRoad`/`eraseRoad`, and `roads.ts` still reads neither `H_TICK` nor
- * `H_WEEK` (it imports `H_TILES` and `H_DEST_COUNT` from `state.ts` and nothing
- * else from it; the only other module it calls into, `buildings.ts`, is reached
- * through `isFootprintCell`/`destMetaOrientation`, both of which take plain
- * numbers and no `GameState`). So `3 <-> 4` is still 0-detector for the same
- * single reason, and **no test that could fail exists to be written for it** —
- * demanding one would be demanding a test that cannot exist.
+ * exactly `'place' | 'erase'`, and phase 3 still calls nothing but
+ * `placeRoad`/`eraseRoad`. `roads.ts` imports `H_TILES` and `H_DEST_COUNT` from
+ * `state.ts` and nothing else from it, and reaches **two** other modules —
+ * `buildings.ts` through `isFootprintCell`/`destMetaOrientation`, and
+ * `dispatch.ts` through `countCommittedCars` (`roads.ts:6`). An earlier version
+ * of this sentence, labelled "re-confirmed by reading", said `buildings.ts` was
+ * the only one; the conclusion held but the recipe a future reader copies
+ * checked one module too few. None of the three takes a `GameState` and returns
+ * anything demand writes.
  *
  * Two things follow, and they are deliberately different in kind:
  *
- *   - **The trigger has a tripwire rather than only this paragraph.**
- *     `step.test.ts` reads this file and `roads.ts` off disk and pins both
- *     halves of the condition above. It is NOT a detector for `3 <-> 4` —
- *     nothing can be, while the condition holds — it is a mechanism that makes
- *     the person who ends the condition read this comment. A handoff whose only
- *     carrier is a comment is a handoff with no recipient.
- *   - **A 0-detector claim is only ever true of the suite that measured it.**
+ *   - **The condition has a tripwire rather than only this paragraph.**
+ *     `step.test.ts` reads this file and `roads.ts` off disk and pins the action
+ *     set, the clock-freedom of `roads.ts`, and the disjointness above. It is
+ *     NOT a detector for `3 <-> 4` — nothing can be, while the phases commute —
+ *     it is a mechanism that makes the person who ends the condition read this
+ *     comment. A handoff whose only carrier is a comment is a handoff with no
+ *     recipient.
+ *   - **A 0-detector claim is only ever true of the suite that measured it, and
+ *     a RECORDED REASON is only ever true of the argument that produced it.**
  *     M1d's Task 9 re-ran the reorderings against the finished milestone (table
- *     below), and M1e Task 2 re-ran the four pairs its own change can reach
- *     (table below that). Measuring before the new code lands says nothing
- *     about after.
+ *     below); M1e Task 2 re-ran the four pairs its own change can reach (table
+ *     below that); and Task 2's review re-ran the complete pairwise set
+ *     C(8,2) = 28 with ten interleaved baselines, confirming that **all seven
+ *     newly-possible swaps involving phase 2 are non-zero** and that no new
+ *     0-detector reordering exists. The number was re-measured three times and
+ *     the *reason* attached to it was wrong the whole way through — which is why
+ *     the paragraph above leads with the mutation that falsified it.
  *
  * ---------------------------------------------------------------------------
  * THE RE-MEASUREMENT, AT THE CLOSE OF M1d — TASK 9
@@ -230,6 +262,14 @@ export interface TickInputs {
  *
  * **The phase count went from 7 to 8, and `1 <-> 3` is no longer a member of
  * the inert set. `3 <-> 4` still is.**
+ *
+ * **This block's numbering is M1e Task 2's EIGHT-phase one, and it changes
+ * again.** The same forward note M1d's block above needed: Task 5 inserts the
+ * spawn phase at position 4, after which today's `3 <-> 4` (inputs vs demand)
+ * becomes `3 <-> 5`, and `3 <-> 4` names *inputs vs spawn* — a different pair
+ * with a real detector (the plan's Decision 1 table, and its line 4202, use
+ * that final ten-phase numbering). Every `n <-> m` below counts phases as this
+ * file lists them TODAY. Re-label, do not re-interpret.
  *
  * **The predictions were written into the task brief BEFORE the battery ran**,
  * which is the only thing that makes the numbers evidence: a measurement with

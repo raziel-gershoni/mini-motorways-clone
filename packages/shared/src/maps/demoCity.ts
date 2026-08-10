@@ -13,20 +13,30 @@ import { parseMap, type MapData } from '../mapFormat'
  * `mapIdHash` (`packages/sim/src/world.ts`) folds `id`, `w`, `h`,
  * `startingTiles`, `maxHouses`, `maxDestinations`, `groupCount` and every
  * terrain byte into `mapIdentity[MI_MAP]`, which lives in the state buffer. So
- * changing ONE integer on `firstCity` moves every golden folded over a state
- * built on it — the seed golden `968680755` and the demo golden `3152640907` —
- * the trap `docs/superpowers/plans/2026-08-04-m2-playable-renderer.md:20`
- * records. A new file, a new `id`, and `firstCity` untouched byte-for-byte is
- * the only shape that leaves all eight goldens where they are.
+ * changing ONE integer on `firstCity` moves the one golden folded over a state
+ * built on it — the seed golden `968680755` — plus `world.test.ts`'s
+ * `mapIdHash` pin, which exists to fire on exactly this edit. That is the trap
+ * `docs/superpowers/plans/2026-08-04-m2-playable-renderer.md:20` records. A new
+ * file, a new `id`, and `firstCity` untouched byte-for-byte is the shape that
+ * leaves all eight goldens where they are.
  *
- * (**Corrected in M1e Task 2, which had to touch this sentence for a stale
- * digest and found the claim over-broad while doing it.** It previously listed
- * the state golden, the road-network golden and the loop golden here as well.
- * Those three run on hand-authored fixture maps of their own —
- * `golden-fixture-v1` in `determinism.test.ts`, and the `parseMap` calls at
- * `rollback.test.ts:637` and `loop.test.ts:282` — so `firstCity` cannot reach
- * them at all. The trap is real; its blast radius was two goldens, not five.
- * Do not re-add them without checking which map each fixture builds on.)
+ * (**This sentence has now been wrong twice, in the same direction, and the
+ * second time was the correction of the first.** It originally named four
+ * goldens: state, road-network, loop and seed. M1e Task 2 had to touch it for a
+ * stale digest, noticed three of those run on hand-authored fixture maps of
+ * their own — `golden-fixture-v1` in `determinism.test.ts`, and the `parseMap`
+ * calls at `rollback.test.ts:637` and `loop.test.ts:282` — and cut it to two by
+ * READING. Still wrong: it kept the demo golden `3152640907`, which is
+ * `hashState` over a state built on `demoCity()` and which `firstCity` cannot
+ * reach either. The error was conflating *"`demoLayout.test.ts` also asserts the
+ * seed golden"* with *"the demo golden moves"* — a filename read as a golden.
+ *
+ * **The figure is now MEASURED, not read.** With `firstCity`'s `startingTiles`
+ * changed 30 -> 31 and the canonical suite run: 8 tests fail, the only golden
+ * among them is `968680755` at both its sites, `world.test.ts`'s `mapIdHash`
+ * pin fires, and `demoLayout.test.ts`'s demo-golden assertion **stays green**.
+ * A blast-radius claim is a measurement. Change the thing and run the suite;
+ * do not re-derive this list by reading.)
  *
  * (The numbers move: they were `340556353`, `2076760277`, `2942219448` and
  * `1178110182` until M1e Task 1 re-blessed every whole-buffer golden for pure

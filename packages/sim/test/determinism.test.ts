@@ -572,18 +572,36 @@ describe('golden replay', () => {
     // evidence**: a re-bless whose sole proof is "the digest moved" absorbs any
     // regression that lands in the same commit.
     //
-    // **The layout proof survives, and Task 2 makes it say something stronger.**
+    // **The layout proof survives, and Task 2 makes it say something stronger —
+    // but strictly less than the first version of this paragraph claimed.**
     // Task 1's splice (see `m1eSplice.ts`) removes the two inserted ranges —
     // 16 B of new header slots at offset 52 and 40 B of new regions at offset
     // 404, both MID-BUFFER — and had to reproduce 340556353 bit-for-bit. The
     // grant writes `H_TILES`, which is header slot 3 and therefore OUTSIDE both
     // ranges, so the splice alone can no longer reproduce that digest and this
     // assertion went red on the first run of Task 2's implementation. Backing
-    // the grant out before splicing restores it, and the restored proof is a
-    // sharper claim than the original: across 13,499 ticks, **`H_TILES` is the
-    // only byte in this buffer that Task 2 changed.** A grant that also nudged
-    // the rng stream, or wrote the wrong slot, or shifted a timer, fails here
-    // and not merely in the digest.
+    // the grant out before splicing restores it, and what the restored proof
+    // establishes is: across 13,499 ticks, **`H_TILES` is the only byte OUTSIDE
+    // THE TWO INSERTED RANGES that Task 2 changed.** A grant that also nudged
+    // the rng stream, or wrote a different header slot, or touched a region
+    // that predates M1e, fails here and not merely in the digest.
+    //
+    // **What it does NOT cover, and the correction is measured rather than
+    // reasoned.** This comment first said a grant that "shifted a timer" would
+    // fail here. It would not: both M1e timers live INSIDE the spliced ranges by
+    // construction — that is the whole reason Task 1's re-bless was pure layout,
+    // as `m1eSplice.ts`'s module comment says — so the splice is blind to them
+    // BY DESIGN. Making `runWeekBoundary` also write
+    // `H_DEST_SPAWN_TIMER = 12345` produces **exactly one failure, the
+    // whole-buffer digest below; this splice assertion passes.**
+    //
+    // **Task 5 is the reader this matters to.** Its subject is those timers and
+    // it holds this golden's last licensed move, so a Task 5 implementer who
+    // read the old sentence could conclude the splice covers a stray timer write
+    // and loosen the plan's hand-computed timer assertions accordingly. It does
+    // not cover it. Those assertions ARE the coverage; a one-tick timer error
+    // passes the splice, moves the digest, and would be absorbed by Task 5's own
+    // re-bless licence.
     //
     // Offsets are FOR THIS FIXTURE: GOLDEN_MAP is 4x4 with groupCount 2 and
     // maxDestinations 4, so block B is 40 B and the whole buffer goes

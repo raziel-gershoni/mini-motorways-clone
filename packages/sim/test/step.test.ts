@@ -198,33 +198,58 @@ describe('step', () => {
     })
 
     /**
-     * **A tripwire on the condition that keeps `1 <-> 2` and `2 <-> 3`
-     * 0-detector — not a detector for the transpositions themselves** (M1d Task
-     * 1c).
+     * **A tripwire on the condition that keeps `3 <-> 4` 0-detector — not a
+     * detector for that transposition** (M1d Task 1c; rewritten in M1e Task 2's
+     * fix round, and the rewrite is most of the point).
      *
-     * `step.ts`'s comment records that both adjacent swaps are 0-detector
-     * no-ops for exactly one reason: **no `TickAction` reads `H_TICK`.** That is
-     * a property of today's action set, and the change that ends it is already
-     * scheduled — `placeDestination` stamps `destSpawnTick[d]` from `H_TICK`,
-     * and M1e makes building placement a `TickAction`. On that day both swaps
-     * become real off-by-ones at once and nothing in the suite catches either.
+     * **Read the numbering first: these are EIGHT-phase labels.** Phase 1 is the
+     * clock advance, phase 2 is the week grant (`week.ts`), phase 3 is the input
+     * loop, phase 4 is demand. The version of this comment that stood until the
+     * fix round still used M1c's seven-phase labels and had become actively
+     * misleading in four ways at once: it named `1 <-> 2` and `2 <-> 3` as the
+     * inert pairs, which in this numbering are two of the three pairs M1e Task 2
+     * gave detectors to (3 and 1); it predicted M1e would make building
+     * placement a `TickAction`, which M1e explicitly does not do — spawning is a
+     * PHASE; it said no test that could fail exists for the swaps, when three
+     * now do; and it said "phase 2 still cannot observe the clock" of a phase
+     * whose entire job is now reading `H_TICK`. A tripwire exists to make the
+     * person who trips it read the comment, so a comment that hands them the
+     * wrong pairs is worse than no tripwire.
      *
-     * Until then **no test that could fail exists to be written for the swaps**,
-     * and manufacturing one would be manufacturing a test that cannot exist. So
-     * this pins the *condition* instead. It is the difference between a handoff
-     * whose only carrier is a paragraph and one with a mechanism: whoever widens
-     * the action set, or makes `roads.ts` read the clock, gets a red test whose
-     * message points at the derivation they now own.
+     * **What is actually still inert, and why.** `3 <-> 4` — the input loop
+     * against demand — scores 0. `step.ts` records the reason in full, and it is
+     * NOT the clock: the review measured `3 <-> 4` at 0 detectors even with
+     * `roads.ts` reading `H_TICK` in a live branch. The two phases commute
+     * because they touch **disjoint state**. So this test pins three things, and
+     * only the third is load-bearing for `3 <-> 4`:
+     *
+     *   1. The action set is still exactly the two road edits.
+     *   2. `roads.ts` still cannot observe the clock. **Kept, but demoted**: it
+     *      is the condition M1c and M1d recorded, it is cheap, and a
+     *      clock-reading `roads.ts` is still something whoever writes it should
+     *      re-derive the order for. It is no longer claimed to be what keeps
+     *      `3 <-> 4` inert.
+     *   3. **`roads.ts` writes nothing `runDemand` reads.** This is the one that
+     *      would have caught the scheduled failure: M1f's §5.9 connectivity rule
+     *      makes `eraseRoad` drop a disconnected destination's pending pins,
+     *      which gains `roads.ts` no `H_TICK` — so guard 2 stays green — while
+     *      making `3 <-> 4` a real one-tick pin error at 0 detectors.
+     *
+     * **What guard 3 cannot see, said here rather than left to be found:** an
+     * INDIRECT write, where phase 3 calls a helper exported from `demand.ts` (or
+     * anywhere else) that mutates those regions on its behalf. The scan is a
+     * mechanism for the direct case and a prompt for the rest. It is not a proof
+     * that the phases commute.
      *
      * A source read rather than a behavioural assertion, deliberately, on the
      * precedent of `loop.test.ts`'s cross-file golden scan and
      * `allocation.test.ts`'s `Float64Array` shape check: `TickActionKind` is a
      * type and is erased at run time, so there is nothing to observe otherwise.
-     * And nothing else catches either half — the sibling test above still passes
-     * with a third kind added, and `tsc` has no opinion about which header
-     * fields a module imports.
+     * And nothing else catches any of the three — the sibling test above still
+     * passes with a third kind added, and `tsc` has no opinion about which
+     * header fields or state regions a module touches.
      */
-    it('pins the trigger that keeps the two tick-order transpositions inert', () => {
+    it('pins the condition that keeps the 3 <-> 4 tick-order transposition inert', () => {
       const stepSrc = readFileSync(new URL('../src/step.ts', import.meta.url), 'utf8')
       const roadsSrc = readFileSync(new URL('../src/roads.ts', import.meta.url), 'utf8')
       // Vacuity: an empty or misresolved read satisfies both scans below.
@@ -242,11 +267,11 @@ describe('step', () => {
        */
       expect(
         stepSrc,
-        'the TickAction set changed — re-derive tick phases 1..3 before widening it; see step.ts',
+        'the TickAction set changed — re-derive tick phases 1..4 before widening it; see step.ts',
       ).toMatch(/^export type TickActionKind = 'place' \| 'erase'$/m)
 
       /**
-       * Half 2: phase 2 still cannot observe the clock. `roads.ts` is the only
+       * Half 2: phase 3 still cannot observe the clock. `roads.ts` is the
        * module it calls, and it must not import either header field.
        *
        * **One `RegExp` per field, shared by the guard and its own self-check —
@@ -264,9 +289,58 @@ describe('step', () => {
 
       expect(
         roadsSrc,
-        'roads.ts now reads the clock — phase 2 can observe H_TICK, so the tick order needs re-deriving',
+        'roads.ts now reads the clock — phase 3 can observe H_TICK, so the tick order needs re-deriving',
       ).not.toMatch(H_TICK_RE)
       expect(roadsSrc, 'roads.ts now reads H_WEEK — same re-derivation as above').not.toMatch(H_WEEK_RE)
+
+      /**
+       * Half 3, and the one that actually keeps `3 <-> 4` inert: **phase 3
+       * writes nothing phase 4 reads.**
+       *
+       * The four names `runDemand` WRITES (`destPins`, `pinAccum`,
+       * `rotationCursor`, `H_PINS_DROPPED`) plus `destSpawnTick`, which it reads
+       * and which a road edit has no business stamping. `destMeta` and
+       * `H_DEST_COUNT` are deliberately NOT here: both phases already read them
+       * and neither writes them, and a shared read is not a conflict — banning
+       * them would make this guard unsatisfiable against `roads.ts` as it
+       * stands, which is how a guard gets weakened back out again.
+       *
+       * Banned outright rather than "must not assign", because a `roads.ts` that
+       * so much as READS `destPins` is one edit away from writing it, and
+       * "assignment" is not expressible in a source scan without re-typing the
+       * language's grammar. All five score 0 occurrences in `roads.ts` today.
+       *
+       * Same hoisted-pattern discipline as Half 2: ONE array, used by the guard
+       * and by its own self-check, so a typo disarms both at once and is caught.
+       * **Both halves were proved rather than assumed** — adding
+       * `state.destPins[d] = 0` to `roads.ts` turns this red with the message
+       * below, and typoing `pinAccum` in the list turns the self-check red.
+       */
+      const DEMAND_STATE = ['destPins', 'pinAccum', 'rotationCursor', 'H_PINS_DROPPED', 'destSpawnTick']
+      const demandRe = (name: string): RegExp => new RegExp(`\\b${name}\\b`)
+
+      for (const name of DEMAND_STATE) {
+        expect(
+          roadsSrc,
+          `roads.ts now touches ${name}, which runDemand reads — phases 3 and 4 no longer commute, ` +
+            'and transposing them is a one-tick pin error nothing else catches; see step.ts',
+        ).not.toMatch(demandRe(name))
+      }
+
+      // Self-check on Half 3: THE SAME patterns must be able to match
+      // something. `demand.ts` is the positive control — it owns all five — so a
+      // typo in any pattern turns this red instead of silently disarming the
+      // guard above. Without it, misspelling `rotationCursor` is an assertion
+      // that cannot fail, which is exactly how the H_TICK pattern was found
+      // disarmed in M1d.
+      const demandSrc = readFileSync(new URL('../src/demand.ts', import.meta.url), 'utf8')
+      expect(demandSrc.length, 'demand.ts read back empty').toBeGreaterThan(4000)
+      for (const name of DEMAND_STATE) {
+        expect(
+          demandSrc,
+          `the ${name} pattern matches nothing in demand.ts — the guard above cannot fail`,
+        ).toMatch(demandRe(name))
+      }
 
       // Self-check on the scan: THE SAME two patterns must be able to match
       // something, or a typo in either is an assertion that cannot fail.
