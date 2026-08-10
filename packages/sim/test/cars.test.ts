@@ -1556,8 +1556,11 @@ describe('laneSpeedMul: averaged where several apply, not minimised (M1d Task 7)
     // either direction. That is the whole reachable set enumerated, not sampled,
     // so "round the average up" is a provable equivalent mutant through every
     // behavioural observer in this repo — arrival ticks, held progress, and all
-    // six goldens. `laneSpeedMul`'s own return value is the ONLY thing that can
-    // see it, which is what the two `toBe` lines above do.
+    // SEVEN goldens (the six M1d inherited plus this task's own, and the count
+    // is stated because it moved: Task 7 blesses one). `laneSpeedMul`'s own
+    // return value is the ONLY thing that can see it, which is what the two
+    // `toBe` lines above do — measured, not argued: with those two assertions
+    // removed the golden's digest is unchanged under "round the average up".
     //
     // The third pair, {333, 667}, is unreachable for the same reason: it would
     // need two turn angles at once. Recorded because it is the only one of the
@@ -1775,6 +1778,21 @@ describe('golden replay: a route through every lane-speed multiplier (M1d Task 7
   })
 })
 
+/**
+ * `source` with every block and line comment removed, so a scan for a token that
+ * is also ordinary English prose reads only the code.
+ *
+ * Deliberately naive — two regexes, no parser — and safe for `cars.ts` because
+ * the file contains no string or template literal holding `//` or `/*`. The
+ * caller asserts that on every run rather than trusting this note: it requires
+ * the code anchors to survive and a known comment phrase to be gone, so a
+ * stripper that ate too much or too little fails loudly instead of silently
+ * turning the guard vacuous.
+ */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '')
+}
+
 describe('movement cannot re-path, by signature', () => {
   /**
    * The re-pathing mutation ("read `dir[carCell]` instead of the committed
@@ -1817,10 +1835,27 @@ describe('movement cannot re-path, by signature', () => {
     // subscript of the region, and no second way in. `roadDegree` cannot express
     // a step — it takes a cell and returns a count — so this bounds what movement
     // can learn from `roads` to a number, by the helper's own signature.
-    expect(source).not.toMatch(/state\s*\.\s*roads\b/)
-    expect(source).toMatch(/import \{ edgeCost, roadDegree \} from '\.\/graph'/)
-    // Vacuity: the scan is looking at the right file.
-    expect(source).toMatch(/export function runMovement/)
+    //
+    // **Run against COMMENT-STRIPPED source, and the three scans above are not,
+    // and the difference is a real one rather than tidiness.** The scans above
+    // are anchored on an import specifier or a property access that no English
+    // sentence contains, so they are immune to this module's own prose. This one
+    // is not: `state.roads` is exactly how a reader would NAME the region in a
+    // sentence, and `cars.ts`'s module comment discusses that region at length.
+    // Left raw, the guard fires on documentation — a build broken for a
+    // non-behavioural reason — and, worse, it invites the next author to keep
+    // the code honest by rewording a comment. `stripComments` is why `cars.ts`
+    // may say `state.roads` in prose and may not write it in code.
+    const code = stripComments(source)
+    expect(code).not.toMatch(/state\s*\.\s*roads\b/)
+    expect(code).toMatch(/import \{ edgeCost, roadDegree \} from '\.\/graph'/)
+    // Vacuity, both halves, because a stripper that returned '' would satisfy
+    // the negative assertion above and a stripper that returned its input would
+    // reinstate the prose sensitivity: the code survives and the prose does not.
+    expect(code).toMatch(/export function runMovement/)
+    expect(source).toMatch(/the `roads` region/) // the module comment discusses it
+    expect(code).not.toMatch(/the `roads` region/) // and the stripper removed that
+    expect(code.length).toBeLessThan(source.length / 2) // this file is mostly comment
 
     // And, in the same idiom and for a reason worth stating: the loop's speed
     // comes from `speedUnits`, not from a copy of the number. That linkage has
@@ -1882,6 +1917,92 @@ describe('movement cannot re-path, by signature', () => {
     expect(wiredTrace.crossingTicks).toEqual(M_TICKS)
     expect(bareTrace.crossingTicks).toEqual(M_BARE_TICKS)
     expect(wiredTrace.crossingTicks).not.toEqual(bareTrace.crossingTicks)
+  })
+
+  it('drives a committed step whose ROAD BIT HAS BEEN ERASED, past the other bits still on that cell', () => {
+    // **The arm the review found missing, and the family it was missing is the
+    // one the deleted scan existed for.** The test above changes the road
+    // network between two runs, which catches a movement that FOLLOWS a road bit
+    // — but not one that follows the committed route wherever a bit exists and
+    // re-paths only where the route's own bit is ABSENT. On both of that test's
+    // boards every committed step either has its bit (wired) or has no bits at
+    // all to choose between (bare), so the absent-bit branch is never entered
+    // with an alternative available. That mutant passed both source scans, the
+    // import pin and the behavioural test, and was caught only by Task 5's ghost
+    // tests — i.e. by accident, from another task, for another reason.
+    //
+    // So: erase two of the car's own committed segments UNDER IT, mid-flight,
+    // leaving each affected cell carrying a different bit. Erasing an ORTHOGONAL
+    // step (124 -> 125) and a DIAGONAL one (145 -> 166), because a re-pather that
+    // scans a mask would take whichever bit it finds first and the two families
+    // differ in which that is.
+    //
+    // **Deliberately NOT a ghost**, so this arm cannot be satisfied by the ghost
+    // machinery: a cell becomes a ghost only when an erase takes its LAST bit,
+    // and all four endpoints keep one. That is asserted below, along with the
+    // untouched tile budget it implies.
+    //
+    // **And deliberately timed so no multiplier moves.** The erase lands on tick
+    // 26: the car entered the junction 124 at tick 23, so crossing 2 has already
+    // been charged its 500, and the degrees the erase changes (124: 3 -> 2,
+    // 125: 2 -> 1, 145: 2 -> 1, 166: 2 -> 1) are all read by crossings that are
+    // either behind the car or already below the intersection threshold. The
+    // ladder is therefore M_TICKS unchanged — which makes the assertion below a
+    // statement about the PATH with the timing held fixed, rather than a second
+    // timing test.
+    const { state, world } = multiplierRig('roads-erased-under-car')
+    const tilesBefore = tilesLeft(state)
+    const cells: number[] = [M_START]
+    const crossings: number[] = []
+    let cursor = 0
+    for (let t = 1; t <= 123; t++) {
+      if (t === 26) {
+        expect(state.carCell[0], 'the erase must land while the car is ON the junction').toBe(124)
+        expect(state.carRouteCursor[0]).toBe(2)
+        expect(eraseRoad(state, world, 124, 125)).toBe(true)
+        expect(eraseRoad(state, world, 145, 166)).toBe(true)
+        // The trap, stated as four facts rather than assumed. The route's own
+        // bit is gone from the cell the car is standing on...
+        expect((roadMask(state, 124) & (1 << E)) === 0, 'the E bit must be gone').toBe(true)
+        expect((roadMask(state, 145) & (1 << SE)) === 0, 'the SE bit must be gone').toBe(true)
+        // ...and every affected cell still offers a DIFFERENT bit to follow, so a
+        // re-pather has somewhere wrong to go rather than nowhere at all.
+        for (const cell of [124, 125, 145, 166]) {
+          expect(roadMask(state, cell), `cell ${cell} must still carry a bit`).not.toBe(0)
+        }
+        // ...no ghost, so Task 5's machinery is not what this arm is exercising...
+        expect(state.ghostMask.every((b) => b === 0), 'no cell lost its last bit').toBe(true)
+        expect(state.ghostCommitted.every((b) => b === 0)).toBe(true)
+        // ...and no refund, which is the same fact from the budget's side.
+        expect(tilesLeft(state)).toBe(tilesBefore)
+      }
+      runMovement(state, world)
+      const c = state.carRouteCursor[0] as number
+      // **Compared INSIDE the loop, on the tick of the divergence, and that is
+      // not a stylistic choice.** A re-pathing car wanders off its committed
+      // route and then presents `turnSpeedMul` with a direction pair the route
+      // never contained — which throws the 180-degree reversal error a few ticks
+      // later, aborting any trailing comparison before it runs. The kill would
+      // then be credited to the reversal guard, which is a real detector for
+      // something else entirely. `loop.test.ts`'s re-path test carries the same
+      // note for the same reason.
+      expect(state.carCell[0], `carCell left the committed route on tick ${t}`).toBe(
+        c === 0 ? M_START : (M_CELLS[c - 1] as number),
+      )
+      if (c !== cursor) {
+        crossings.push(t)
+        cells.push(state.carCell[0] as number)
+        cursor = c
+      }
+    }
+    // The car drove both erased segments, in order, on the same ticks as if the
+    // roads were still there. A re-pather that consults the mask when its own
+    // step has no bit leaves the route at 124 — for 123 or 104, both of which
+    // still carry a road — and the per-tick assertion above fires on the tick it
+    // does so, naming the cell.
+    expect(cells).toEqual([M_START, ...M_CELLS])
+    expect(crossings).toEqual(M_TICKS)
+    expect(state.carRouteCursor[0]).toBe(10)
   })
 
   it('follows the committed route even when a live field disagrees with it at a cell it occupies', () => {
