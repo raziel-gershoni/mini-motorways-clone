@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { Session } from 'node:inspector'
-import { PHASE_OUTBOUND, PHASE_RETURNING } from '@laneways/sim'
+import { CT_REBUILDS, PHASE_OUTBOUND, PHASE_RETURNING } from '@laneways/sim'
 import type { AtlasContext, AtlasSurface } from '@laneways/render'
 import { createGame, type GameContext } from '../src/main'
 import { DEMO_LAYOUT_ID } from '../src/layouts'
@@ -103,6 +103,54 @@ const PROFILED_SCOPES: readonly string[] = [
   'packages/sim/src/',
   'packages/render/src/',
 ]
+
+const FLOWFIELD_FILE = 'packages/sim/src/flowfield.ts'
+
+/**
+ * **A per-CALL budget for `flowfield.ts`, and it is the opposite of the
+ * allowance that used to stand here — read the difference before touching it.**
+ * The allowance asserted the violation was STILL PRESENT and was deleted the
+ * moment it stopped being. This asserts the violation is ABSENT, at a bound
+ * tight enough to see the smallest regression that could reintroduce it.
+ *
+ * **Why per call and not per frame, measured rather than argued.**
+ * `computeFlowField` runs 0.127 times per frame on this board, so a per-frame
+ * budget divides any regression by the event's rarity before comparing it to
+ * the floor. Counterfactual: one escaping object per rebuild, eight draws,
+ * three windows each, both statistics off the same windows.
+ *
+ *   - per FRAME (min over three windows): 4.96 / 4.79 / **2.67** / 4.44 /
+ *     **3.37** / 4.61 / 4.44 / 4.61 against a 4 B floor. **It misses the
+ *     regression outright on 2 of 8 draws**, and the six it catches it catches
+ *     by 1.11-1.24x. Not a tight guard — a coin-flip one, whose natural repair
+ *     when it flakes is to widen the budget, which is the exemption this task
+ *     just deleted growing back.
+ *   - per CALL (min over the same three windows): 39.06 / 37.69 / 20.83 /
+ *     34.96 / 26.35 / 36.33 / 34.96 / 36.33. **Fires on 8 of 8**, weakest draw
+ *     20.83.
+ *
+ * Clean, six draws: **0.00 on all eighteen windows**, the file absent from
+ * every profile. One stray sample over ~381 calls would read 512/381 = 1.34
+ * B/call, and the minimum-over-three-windows makes even that require a stray in
+ * all three.
+ *
+ * So the band is empty between ~1.3 and ~20.8, and **8** sits in it: 6x above a
+ * single stray, 2.6x below the weakest signal ever observed. (An earlier
+ * proposal of 20 was measured too tight — draw 3's 20.83 clears it by 4%, which
+ * is the same flake-red disease one level up.)
+ *
+ * **The condition this relies on, stated because it is what makes the arm work
+ * and it does NOT generalise.** Dividing by an event count does not improve
+ * signal-to-noise on its own — it divides the signal and the stray samples by
+ * the same denominator, so it is a change of units. What makes this arm sound
+ * is that the event fires **381-384 times per window**, which is enough draws
+ * for the sampler to see it at the shipped 512 B interval at all. For a
+ * genuinely RARE event — a week boundary at ~8 firings per window — no choice
+ * of denominator helps, and the sampling interval has to come down instead. The
+ * vacuity assertion below pins the rebuild count so this arm cannot silently
+ * become the rare case.
+ */
+const FLOWFIELD_BUDGET_BYTES_PER_CALL = 8
 
 function profileBytesByFile(body: () => void): Map<string, number> {
   interface RawSession {
@@ -236,7 +284,7 @@ function inFlight(game: ReturnType<typeof createGame>): number {
 
 describe('the frame loop on the demo board allocates nothing, measured', () => {
   it('charges no game, sim or render source file beyond its budget, over three windows', () => {
-    const { drive } = demoRig(false)
+    const { game, drive } = demoRig(false)
     drive(WARMUP_FRAMES)
 
     // **The minimum over three windows, which is the instrument this repo
@@ -247,13 +295,20 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     // (8.04), `atlas.ts` (7.71) and `hash.ts` (1.4-2.6) each appeared in one
     // draw and were absent from the rest. A single draw would have failed this
     // test about half the time, on files that allocate nothing.
+    // The rebuild count is captured around each window rather than in a rig of
+    // its own: a second profiled RUN in this file is the thing that let
+    // TurboFan inline `draw` and turned `drawAllocation`'s control red, so the
+    // per-call arm below reuses these same three windows and adds no profiling.
     const windows: Map<string, number>[] = []
+    const rebuildsPerWindow: number[] = []
     for (let w = 0; w < WINDOW_COUNT; w++) {
+      const before = game.scratch.counters[CT_REBUILDS] as number
       windows.push(
         profileBytesByFile(() => {
           drive(PROFILED_FRAMES)
         }),
       )
+      rebuildsPerWindow.push((game.scratch.counters[CT_REBUILDS] as number) - before)
     }
 
     const files = new Set<string>()
@@ -282,6 +337,38 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
       if (file.endsWith('/loop.ts')) return LOOP_BUDGET_BYTES_PER_FRAME
       return NOISE_FLOOR_BYTES_PER_FRAME
     }
+    // ---------------------------------------------------------------------
+    // `flowfield.ts` per CALL — see FLOWFIELD_BUDGET_BYTES_PER_CALL.
+    // ---------------------------------------------------------------------
+    // Asserted BEFORE the per-frame offenders list, deliberately: for this one
+    // file the per-frame arm is a weak instrument (its event is rare per
+    // frame), so if both fire the reader should get the well-separated
+    // diagnostic rather than a 4.1-against-4.0 one. The two are complementary
+    // rather than redundant — if a future regression's bytes land on a
+    // DIFFERENT file, because V8 attributed them across an inline boundary, the
+    // per-frame list below is what catches it.
+    //
+    // Vacuity, and the precondition from the constant's comment: enough
+    // rebuilds per window for the sampler to see the event at all. 381-384 is
+    // the measured figure; 300 is the floor asserted so this arm fails loudly
+    // if the board ever stops rebuilding rather than quietly measuring a ratio
+    // over a tiny denominator.
+    for (const rebuilds of rebuildsPerWindow) {
+      expect(
+        rebuilds,
+        'too few rebuilds per window for a per-call rate to mean anything',
+      ).toBeGreaterThan(300)
+    }
+    const flowfieldPerCall = Math.min(
+      ...windows.map((w, i) => (w.get(FLOWFIELD_FILE) ?? 0) / (rebuildsPerWindow[i] as number)),
+    )
+    expect(
+      flowfieldPerCall,
+      `flowfield.ts allocates ${flowfieldPerCall.toFixed(2)} B per computeFlowField call ` +
+        `(rebuilds/window: ${rebuildsPerWindow.join('/')}) — do NOT widen this budget; ` +
+        'the allocation it watches for was deleted in M1e Task 3 and a charge here is a regression',
+    ).toBeLessThan(FLOWFIELD_BUDGET_BYTES_PER_CALL)
+
     const offenders = [...perFrameMin]
       .filter(([file, perFrame]) => perFrame > budgetFor(file))
       .map(([file, perFrame]) => `${file} at ${perFrame.toFixed(2)} B/frame`)
@@ -342,6 +429,13 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     // reasoning.
     expect(LOOP_BUDGET_BYTES_PER_FRAME).toBe(32)
     expect(NOISE_FLOOR_BYTES_PER_FRAME).toBe(4)
+    // Owned HERE, not copied from anywhere — see the constant's derivation. The
+    // bound must stay clear of the signal in BOTH directions, or it is an
+    // allowance wearing a budget's name. Weakest observed signal over 8 draws:
+    // 20.83 B/call. Single stray sample over ~381 calls: 1.34 B/call.
+    expect(FLOWFIELD_BUDGET_BYTES_PER_CALL).toBe(8)
+    expect(FLOWFIELD_BUDGET_BYTES_PER_CALL * 2.5).toBeLessThan(20.83)
+    expect(FLOWFIELD_BUDGET_BYTES_PER_CALL).toBeGreaterThan(1.34 * 4)
     expect(PROFILED_FRAMES).toBeGreaterThanOrEqual(3000)
     expect(WINDOW_COUNT).toBeGreaterThanOrEqual(3)
     expect([...PROFILED_SCOPES].sort()).toEqual([

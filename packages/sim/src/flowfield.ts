@@ -98,21 +98,30 @@ import {
  * into a `Context`. It is not. Three variants on the same rig, same three-window
  * instrument:
  *
- *   - closure, `let top`/`let pending` captured (the original): 15.7-18.2 B/frame
- *   - closure, counters already moved to `scratch.cursor` so only `const`
- *     bindings are captured: **15.2-17.0 B/frame — essentially unchanged**
+ *   - closure, `let top`/`let pending` captured, 6 bindings (the original):
+ *     15.7-18.2 B/frame (~140 B/call)
+ *   - closure, counters already moved to `scratch.cursor` so every capture is a
+ *     `const`, same 6 bindings: **15.2-17.0 B/frame — unchanged.** Removing the
+ *     mutability removed nothing.
+ *   - closure capturing only `scratch`, destructuring inside, 1 binding:
+ *     10.4-10.9 B/frame (~82 B/call)
  *   - closure capturing NOTHING, everything passed as arguments: 5.4-6.1
- *     B/frame, still over the floor
+ *     B/frame (~45 B/call), still over both budgets
  *   - module scope (this): 0.00 B/frame, absent from the profile
  *
  * So roughly 45 B/call is the closure object itself, which V8 allocates per call
- * even with zero captures, and roughly 90 B/call is the `Context` — which costs
- * the same for `const` captures as for `let` ones. Moving the counters into
- * `scratch.cursor` was worth ~0 bytes on its own. **The rule this leaves behind
- * is "do not define a function inside this one", not "do not capture a mutable
- * variable"**: a future helper that captures nothing but is still spelled inline
- * would reinstate a quarter of the charge, and the old wording would have read
- * as permission for it.
+ * even with zero captures, and the rest is the `Context`, whose size tracks the
+ * NUMBER of captured bindings (~12 B/call each) and is indifferent to whether
+ * they are `let` or `const`. Moving the counters into `scratch.cursor` was worth
+ * ~0 bytes on its own — it is what makes the hoist possible, not what saves the
+ * bytes.
+ *
+ * **The rule this leaves behind is "do not define a function inside this one",
+ * not "do not capture a mutable variable" and not "capture fewer things"**:
+ * every inline spelling measured, down to zero captures, is over budget. Note
+ * the middle rows are the reason the rule is phrased that way — quoting only the
+ * 6-capture figure would suggest a slimmer closure is cheap, and it is merely
+ * cheaper.
  */
 function push(scratch: Scratch, cell: number, d: number): void {
   const { entryCell, entryNext, bucketHead, stats, pushesPerCell, cursor } = scratch

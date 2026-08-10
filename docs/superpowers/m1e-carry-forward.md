@@ -276,17 +276,45 @@ destinations move `destPins` almost every tick, so `syncFields` re-runs
 almost never does.
 
 **It is pre-existing, not introduced.** No `sim` file was touched by the demo
-layout; the code is M1b's and only the input is new. Likely mechanism, stated as
-a hypothesis because function-level profiler attribution is documented unstable
-in this repo: `computeFlowField`'s `push` helper is a closure over the mutable
-`top` and `pending`, which V8 boxes into a `Context` — the same shape `loop.ts`'s
-known residual has, one level up.
+layout; the code is M1b's and only the input is new.
 
-**Owner: M1e, and the evidence lives in `demoAllocation.test.ts`'s
-`FLOWFIELD_ALLOWANCE_BYTES_PER_FRAME`.** That allowance asserts the violation is
-STILL PRESENT as well as bounded, so fixing it turns the test red and forces the
-exemption to be deleted rather than outliving the problem it documents. This is
-a named recipient, not "whoever owns the perf budget".
+**CLOSED by M1e Task 3, and the mechanism this section used to assert was
+MEASURED AND REFUTED — read the correction before quoting the old sentence.**
+This paragraph said, as a hypothesis: *"`computeFlowField`'s `push` helper is a
+closure over the mutable `top` and `pending`, which V8 boxes into a `Context` —
+the same shape `loop.ts`'s known residual has."* The conclusion (hoist `push`)
+was right; **the causal clause was wrong, and it was relayed onward three times
+before anyone measured it** — from here into `demoAllocation.test.ts`'s allowance
+comment and from there into Task 3's brief, gaining confidence at every hop and
+no evidence. Five variants, same rig, same three-window instrument:
+
+| `push` spelling | B/frame | ≈B/call |
+|---|---|---|
+| closure, `let top`/`let pending` captured, 6 bindings (the original) | 15.7-18.2 | ~140 |
+| closure, counters in `scratch.cursor` so all 6 captures are `const` | **15.2-17.0 — unchanged** | ~130 |
+| closure capturing only `scratch`, destructuring inside (1 binding) | 10.4-10.9 | ~82 |
+| closure capturing NOTHING, all state passed as arguments | 5.4-6.1 | ~45 |
+| module-scope function (shipped) | **0.00, absent from the profile** | 0 |
+
+Mutability contributes **nothing**: row 2 is the fix's data half applied on its
+own and it removes essentially no bytes. ~45 B/call is the closure object, which
+V8 allocates per call even with zero captures; the remainder is the `Context`,
+scaling with the NUMBER of captured bindings (~12 B each) and indifferent to
+`let` versus `const`. `scratch.cursor` is what makes the hoist possible, not what
+saves the bytes. **The rule is "do not define a function inside `computeFlowField`",
+not "do not capture a mutable variable"** — every inline spelling measured, down
+to zero captures, is over budget. The correction also lives in `flowfield.ts`'s
+`push` doc comment, which is the copy a future editor will actually read.
+
+**The allowance is gone, and what replaced it is a tighter bound, not a
+looser one.** `FLOWFIELD_ALLOWANCE_BYTES_PER_FRAME` asserted the violation was
+STILL PRESENT, so the fix turned it red and it was deleted rather than widened.
+`demoAllocation.test.ts` now carries `FLOWFIELD_BUDGET_BYTES_PER_CALL = 8`,
+a per-CALL rate off `scratch.counters[CT_REBUILDS]` — because the per-FRAME arm
+is a weak instrument for an event that fires 0.127 times per frame: against one
+escaping object per rebuild it **misses the regression outright on 2 draws in 8**
+(2.67 and 3.37 against the 4 B floor), while the per-call arm fires 16 of 16 at
+20.8-43.3 B/call against a clean 0.00.
 
 At the close of M1d the tick side has four windows: a clean per-crossing window,
 a `completeTrip` window, a ghost treatment/control window, and Task 9's jam
