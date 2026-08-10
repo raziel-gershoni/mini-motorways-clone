@@ -251,3 +251,24 @@ At a 1-in-10 flake rate, two clean runs in a row happen 81% of the time. **The o
 perfectly uninformative and reads as reassurance.** If a flake matters to a claim, either run enough
 times to bound it or state the known rate beside the result; do not offer a small number of clean
 runs as stability.
+
+## A correction can repeat the exact error it is correcting
+
+M1e Task 2 found a wrong claim in `demoCity.ts` — that changing `firstCity` moves five goldens — and
+corrected it to two, reporting that it had "checked against the source before writing it down."
+The reviewer measured it by actually changing `firstCity`'s `startingTiles` from 30 to 31: **one**
+golden moves, not two. The demo golden is `hashState` over a state built on `demoCity()`, which
+`firstCity` cannot reach; the implementer had conflated *"`demoLayout.test.ts` also asserts the seed
+golden"* with *"the demo golden moves."*
+
+So a claim about blast radius, made without running the change, was replaced by another claim about
+blast radius made without running the change — **the same defect one iteration later, now wearing the
+authority of a correction.** A corrected figure reads as verified in a way the original never did.
+
+The rule that would have caught both: **a blast-radius claim is a measurement, not a reading.** To
+say "changing X moves goldens {A, B}", change X and run the suite. Tracing imports tells you what
+*could* be reachable; it does not tell you which fixture a golden's state was actually built on.
+
+Related: [I relayed a finding that was wrong], and [a handoff document can be complete in structure
+and still drop items]. The common thread is that secondhand claims about code acquire confidence at
+each hop while acquiring no evidence.
