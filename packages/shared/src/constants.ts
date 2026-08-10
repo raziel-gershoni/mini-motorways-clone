@@ -28,6 +28,32 @@ export const ORTHO_COST = 10
 export const DIAG_COST = 14
 
 // --- Lane speeds, scaled by DENOM (spec §5.5) ---
+/**
+ * **Three of these six got their first caller in M1d Task 7**, and which three
+ * is worth knowing here rather than only at the call site.
+ * `RIGHT_ANGLE_SPEED_MUL`, `SHARP_TURN_SPEED_MUL` and `INTERSECTION_SPEED_MUL`
+ * are selected per crossing by `laneSpeedMul` (`packages/sim/src/cars.ts`) and
+ * scale a car's per-tick progress; `LANE_SPEED_DEFAULT` is the identity, applied
+ * when none of the three does. `MOTORWAY_SPEED_MAX` and `ROUNDABOUT_SPEED_MUL`
+ * are still uncalled — both are M1e upgrade cards, and there is no card
+ * mechanism yet.
+ *
+ * **They are applied in MOVEMENT and never in `edgeCost`.** A turn multiplier is
+ * a property of the pair of edges either side of a cell and cannot be expressed
+ * as a cost on one edge; and a lane-speed term inside `edgeCost` would change
+ * the value set that `COST_UNIT_SCALE`, `CAR_SPEED_UNITS_PER_TICK`, `NB` and
+ * `DISTINCT_EDGE_COSTS` are jointly calibrated against. The consequence, which
+ * is real and deliberate: the flow field prices LENGTH, so a route it calls
+ * optimal may not be the fastest one. `cars.ts`'s module comment derives it.
+ *
+ * **Two of the three are averaged where both apply, and the averaging is the
+ * only place a value not in this list can appear**: (667 + 500) / 2 = 583 and
+ * (333 + 500) / 2 = 416, both truncated from a half-integer. That rounding
+ * direction is invisible after `speedUnits` at these six numbers and at
+ * `CAR_SPEED_UNITS_PER_TICK` = 330 — 583 and 584 both give 192, 416 and 417 both
+ * give 137 — and `cars.test.ts` pins the equivalence so that changing any of
+ * them turns the choice back into a real one.
+ */
 export const LANE_SPEED_DEFAULT = 1000
 export const MOTORWAY_SPEED_MAX = 3000
 export const ROUNDABOUT_SPEED_MUL = 2000
@@ -208,17 +234,28 @@ export const FIRST_PIN_DELAY_TICKS = 4 * TICKS_PER_SECOND
  * that constant for the two constraints that pin the pair.
  *
  * **Re-derive this WITH `NB`, `DISTINCT_EDGE_COSTS` and
- * `CAR_SPEED_UNITS_PER_TICK` when `edgeCost`'s value set changes** (M1d's
+ * `CAR_SPEED_UNITS_PER_TICK` when `edgeCost`'s value set changes** (M1e's
  * motorway tier, or any lane-speed term entering the cost). They are one
  * calibration, not four independent numbers.
+ *
+ * **M1d Task 7 was the first thing to test that sentence, and it did not fire.**
+ * Lane-speed multipliers now have a live caller, and they scale movement's
+ * per-tick progress rather than entering `edgeCost` — so the value set is still
+ * `{10, 14}`, all four numbers stand, and the field golden does not move.
+ * `graph.test.ts` pins the value set as the tripwire for the other answer.
  */
 export const COST_UNIT_SCALE = 250
 
 /**
  * A car's progress gain per tick at the default lane speed, in the same
  * `COST_UNIT_SCALE` units. `speedUnits(mul)` (`packages/sim/src/cars.ts`)
- * scales it by a lane-speed multiplier; M1c applies none, so the only live
- * call is the identity `speedUnits(LANE_SPEED_DEFAULT)`.
+ * scales it by a lane-speed multiplier.
+ *
+ * **M1c applied none and M1d Task 7 applies three**, so this is no longer the
+ * speed every car moves at — it is the speed a car moves at when no turn and no
+ * junction applies. The six values movement can produce are 109, 137, 165, 192,
+ * 220 and 330, and constraint 3 below is the one that made 330 the right base
+ * for them.
  *
  * Four constraints pin 330 against `COST_UNIT_SCALE` = 250:
  *
@@ -241,7 +278,8 @@ export const COST_UNIT_SCALE = 250
  *      times and make the diagonal carry identically zero. `constants.test.ts`
  *      asserts both remainders and both carries directly, so a future speed
  *      change cannot silently disarm every carry test in `cars.test.ts`.
- *   3. **Future multiplier rounding under 1%.** The smallest multiplier is
+ *   3. **Multiplier rounding under 1% — live as of M1d Task 7, not future.**
+ *      The smallest multiplier is
  *      `SHARP_TURN_SPEED_MUL` = 333, and 330 * 333 / 1000 truncates to 109
  *      units — an error bounded by 1 in 109. At a sub-cell-style base of 8-10
  *      units the same multiplier would be a 10-33% speed error, and a base

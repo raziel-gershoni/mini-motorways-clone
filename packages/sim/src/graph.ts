@@ -100,6 +100,46 @@ export function edgeCost(dir: number): number {
 }
 
 /**
+ * The road DEGREE of `cell`: how many of the eight direction bits its road mask
+ * carries. **The only change M1d Task 7 makes to this module**, and read-only
+ * like everything else here.
+ *
+ * Spec §5.5 prices *"approaching an intersection"* with a speed multiplier, and
+ * M1d decision 7 defines an intersection as **a cell of degree >= 3** — a cell
+ * where a third road meets, as opposed to a corridor cell (2), a dead end (1)
+ * or bare ground (0). `cars.ts`'s `intersectionSpeedMul` is the sole caller and
+ * asks about the cell a car is ENTERING.
+ *
+ * **Counted off the MASK, and that differs from `neighbours` in exactly one
+ * case, stated here rather than left to be found.** `neighbours` additionally
+ * drops any bit whose target is off the grid, because it is about to WALK to
+ * that target and the row seam would hand it a cell on the wrong row. This
+ * function walks nowhere, so it counts the bit. The two therefore agree for
+ * every state the game can reach — `placeRoad` validates adjacency through
+ * `dirBetween` before it writes any bit, so no reachable mask has an off-grid
+ * bit at all, and `graph.test.ts` asserts the agreement over a randomised
+ * placement sequence rather than leaving it as a reading. They disagree only
+ * for a bit written DIRECTLY into `state.roads`, and the consequence there is
+ * bounded by construction: a degree feeds a car's SPEED and never its path
+ * (`cars.ts`), so the worst a corrupted mask can do here is make one car
+ * traverse one cell at the wrong speed — never send it somewhere its committed
+ * route does not name.
+ *
+ * An off-board `cell` reads `undefined` from the typed array and answers 0,
+ * which is the same answer bare ground gives. No guard, deliberately: the one
+ * caller passes a cell `advanceCar` has already proved on-board by throwing on
+ * `stepCell`'s -1, and a guard here would be a second owner of that check.
+ */
+export function roadDegree(state: GameState, cell: number): number {
+  const mask = state.roads[cell] as number
+  let n = 0
+  for (let k = 0; k < DIR_COUNT; k++) {
+    if ((mask & (1 << k)) !== 0) n++
+  }
+  return n
+}
+
+/**
  * Whether `a` carries a road bit specifically toward `b` — not merely
  * whether both cells carry roads toward *something*.
  * `roadMask(a) !== 0 && roadMask(b) !== 0` is symmetric by construction and

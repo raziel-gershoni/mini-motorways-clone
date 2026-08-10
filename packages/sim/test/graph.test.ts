@@ -4,7 +4,7 @@ import { createState } from '../src/state'
 import { createWorld, type WorldData } from '../src/world'
 import { seedFromString, randomBelow } from '../src/rng'
 import { DIR_COUNT, DX, DY, dirBetween, placeRoad } from '../src/roads'
-import { neighbours, edgeCost, isConnected } from '../src/graph'
+import { neighbours, edgeCost, isConnected, roadDegree } from '../src/graph'
 
 /**
  * All-LAND fixture for pure connectivity geometry. Terrain never gates
@@ -258,6 +258,174 @@ describe('edgeCost', () => {
     expect(() => edgeCost(-1)).toThrow()
     expect(() => edgeCost(8)).toThrow()
     expect(() => edgeCost(1.5)).toThrow()
+  })
+})
+
+describe('roadDegree (M1d Task 7)', () => {
+  it('counts 0 for bare ground, 1 for a dead end, 2 for a corridor and 3 at a junction', () => {
+    // The four values the intersection rule cares about, one fixture, one cell
+    // growing a bit at a time — so the threshold has a value on each side of it
+    // rather than being asserted from one direction only.
+    const { map, world } = landFixture('degree-ladder')
+    const state = createState('s', map)
+    const cell = 1 * W + 2 // (2,1), interior on a 6x4 board
+    expect(roadDegree(state, cell)).toBe(0)
+    placeRoad(state, world, cell, cell + 1) // E
+    expect(roadDegree(state, cell)).toBe(1)
+    placeRoad(state, world, cell, cell - 1) // W — a straight corridor cell
+    expect(roadDegree(state, cell)).toBe(2)
+    placeRoad(state, world, cell, cell - W) // N — the third road: a junction
+    expect(roadDegree(state, cell)).toBe(3)
+    placeRoad(state, world, cell, cell + W) // S — a crossroads
+    expect(roadDegree(state, cell)).toBe(4)
+  })
+
+  it('counts a bend as 2, so a cell where the road turns is not an intersection', () => {
+    // The discriminator between "degree" and "the road does something here".
+    // `cars.ts` charges a turn and a junction separately and averages them, so a
+    // degree helper that reported a bend as 3 would double-charge every corner.
+    const { map, world } = landFixture('degree-bend')
+    const state = createState('s', map)
+    const cell = 1 * W + 2
+    placeRoad(state, world, cell, cell - 1) // W
+    placeRoad(state, world, cell, cell + W) // S — an L, not a T
+    expect(roadDegree(state, cell)).toBe(2)
+  })
+
+  it('counts diagonal bits too, and every one of the eight independently', () => {
+    // Eight separate cells, each carrying exactly one of the eight bits, so a
+    // helper that counted only the orthogonal nibble (a plausible popcount over
+    // 4 bits rather than 8) is caught on the four diagonals.
+    const { map, world } = landFixture('degree-all-eight')
+    const state = createState('s', map)
+    const x = 2
+    const y = 1
+    const cell = y * W + x
+    for (let k = 0; k < DIR_COUNT; k++) {
+      const fresh = createState(`degree-bit-${k}`, map)
+      const nb = (y + (DY[k] as number)) * W + (x + (DX[k] as number))
+      placeRoad(fresh, world, cell, nb)
+      expect(roadDegree(fresh, cell), `direction ${k} alone`).toBe(1)
+      expect(roadDegree(fresh, nb), `direction ${k}, the far end`).toBe(1)
+      placeRoad(state, world, cell, nb)
+    }
+    expect(roadDegree(state, cell)).toBe(DIR_COUNT)
+  })
+
+  it('agrees with `neighbours` cell for cell across a large seeded random placement sequence', () => {
+    // graph.ts states the one case where the two can differ — a bit whose target
+    // is off the grid, which `neighbours` drops and this counts — and claims no
+    // REACHABLE state has one, because `placeRoad` validates adjacency before it
+    // writes. This is that claim's honesty check, in the idiom of the passable
+    // property test above: placement goes exclusively through `placeRoad`, and
+    // the two are then compared on every cell of the board including the edges
+    // and corners, which are the only cells where an off-grid bit could exist.
+    const { map, world } = mixedFixture('degree-vs-neighbours', 1000)
+    const state = createState('degree-vs-neighbours-seed', map)
+    const driver = new Uint32Array(1)
+    driver[0] = seedFromString('degree-driver')
+
+    let placedOk = 0
+    for (let i = 0; i < 3000; i++) {
+      const a = randomBelow(driver, 0, world.cells)
+      const dir = randomBelow(driver, 0, DIR_COUNT)
+      const x = a % world.w
+      const y = (a / world.w) | 0
+      const nx = x + (DX[dir] as number)
+      const ny = y + (DY[dir] as number)
+      if (nx < 0 || nx >= world.w || ny < 0 || ny >= world.h) continue
+      if (placeRoad(state, world, a, ny * world.w + nx)) placedOk++
+    }
+    expect(placedOk).toBeGreaterThan(100)
+
+    // Vacuity, both directions: the comparison must range over cells of degree
+    // >= 3 AND over cells on the board edge, or it says nothing about either the
+    // intersection threshold or the off-grid case it exists for.
+    const { outCell, outDir } = makeOut()
+    let junctions = 0
+    let edgeCellsWithRoad = 0
+    for (let cell = 0; cell < world.cells; cell++) {
+      const degree = roadDegree(state, cell)
+      expect(degree, `cell ${cell}`).toBe(neighbours(state, world, cell, outCell, outDir))
+      if (degree >= 3) junctions++
+      const x = cell % world.w
+      const y = (cell / world.w) | 0
+      const onEdge = x === 0 || y === 0 || x === world.w - 1 || y === world.h - 1
+      if (onEdge && degree > 0) edgeCellsWithRoad++
+    }
+    expect(junctions).toBeGreaterThan(0)
+    expect(edgeCellsWithRoad).toBeGreaterThan(0)
+  })
+
+  it('reports the off-grid bit `neighbours` drops, when one is written directly', () => {
+    // The disclosed disagreement, exercised rather than asserted in prose. A bit
+    // pointing N from row 0 cannot be produced by `placeRoad`, so this writes the
+    // byte directly — the same technique the bounds-guard tests above use, and
+    // for the same reason. `neighbours` answers 0 because it is about to WALK
+    // there; `roadDegree` answers 1 because it is counting roads. Recorded so a
+    // future reader does not "fix" one to match the other without deciding which
+    // is right: for the intersection multiplier, over-counting a corrupted mask
+    // costs one car one wrong SPEED on one cell and can never move it off its
+    // committed route.
+    const { map, world } = landFixture('degree-off-grid')
+    const state = createState('s', map)
+    const topRow = 3 // (3,0)
+    state.roads[topRow] = 1 << dirFor(0, -1) // N, off the board
+    const { outCell, outDir } = makeOut()
+    expect(neighbours(state, world, topRow, outCell, outDir)).toBe(0)
+    expect(roadDegree(state, topRow)).toBe(1)
+  })
+
+  it('is read-only: asking about every cell of a placed network moves no byte of the buffer', () => {
+    const { map, world } = landFixture('degree-readonly')
+    const state = createState('s', map)
+    for (let cell = 0; cell < world.cells - 1; cell += 2) {
+      if ((cell + 1) % W !== 0) placeRoad(state, world, cell, cell + 1)
+    }
+    const before = new Uint8Array(state.buffer).slice()
+    for (let cell = 0; cell < world.cells; cell++) roadDegree(state, cell)
+    expect(new Uint8Array(state.buffer)).toEqual(before)
+  })
+})
+
+describe("edgeCost's value set is what four other constants are calibrated against (M1d Task 7)", () => {
+  it('is exactly {10, 14} — the tripwire for a lane-speed term leaking into routing', () => {
+    // M1d Task 7 gives lane-speed multipliers their first caller and puts them in
+    // `advanceCar`, NOT here. `NB = DIAG_COST + 1` (scratch.ts), the bucket
+    // count, `DISTINCT_EDGE_COSTS = 2`, `COST_UNIT_SCALE` = 250 and
+    // `CAR_SPEED_UNITS_PER_TICK` = 330 are one calibration against exactly this
+    // set, and a multiplier applied here would change all of them at once — and
+    // would move the field golden, which is `rollback.test.ts`'s independent
+    // detector for the same mutation. Written as the literal pair rather than as
+    // "two distinct values", because 667 and 933 are also two distinct values.
+    const values: number[] = []
+    for (let k = 0; k < DIR_COUNT; k++) {
+      const c = edgeCost(k)
+      if (!values.includes(c)) values.push(c)
+    }
+    values.sort((a, b) => a - b)
+    expect(values).toEqual([10, 14])
+    expect(values).toEqual([ORTHO_COST, DIAG_COST].sort((a, b) => a - b))
+  })
+
+  it('does not depend on the road network: the same direction costs the same at a junction', () => {
+    // The directed form of "the multiplier is not in here". `edgeCost` takes a
+    // direction and nothing else, so a junction cannot change it — but the
+    // mutation the plan names is "apply a multiplier inside `edgeCost`", which
+    // would have to reach the state to know about the junction. This pins the
+    // arity that makes that unconstructible, beside the value set it would move.
+    expect(edgeCost.length).toBe(1)
+    const { map, world } = landFixture('edgecost-junction')
+    const state = createState('s', map)
+    const cell = 1 * W + 2
+    placeRoad(state, world, cell, cell + 1)
+    placeRoad(state, world, cell, cell - 1)
+    placeRoad(state, world, cell, cell - W)
+    expect(roadDegree(state, cell)).toBe(3)
+    for (let k = 0; k < DIR_COUNT; k++) {
+      const isDiagonal = (DX[k] as number) !== 0 && (DY[k] as number) !== 0
+      expect(edgeCost(k)).toBe(isDiagonal ? DIAG_COST : ORTHO_COST)
+    }
   })
 })
 

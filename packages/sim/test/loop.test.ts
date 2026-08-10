@@ -1147,8 +1147,30 @@ const RP_HOUSE = 112 // (12,5)
 const RP_BRANCH = 108 // (8,5) — where run B's dir turns south and run A's does not
 const RP_MID = 128 // (8,6)
 const RP_PIN_TICK = 3
-const RP_ARRIVAL_TICK = 77 // rel_10 = 76, dispatched on tick 2
-const RP_TICKS = 80
+/**
+ * The outbound arrival, hand-computed — and **M1d Task 7 moved it, for a reason
+ * this fixture's own geometry creates.** `RP_BRANCH` (cell 108) carries three
+ * road bits (W, E and the S spur down to `RP_MID`), so it is a degree-3 cell:
+ * decision 7's intersection, worth `INTERSECTION_SPEED_MUL` = 500 on the
+ * crossing that ENTERS it. That is crossing 4 of the car's ten, at
+ * `speedUnits(500)` = 165 rather than 330; every other crossing is a plain
+ * westward step into a degree-2 corridor cell with no turn, so nothing else
+ * changes. The branch exists to make the FIELD differ mid-flight, which is what
+ * this section tests, and it makes the car slower as a side effect.
+ *
+ * Accumulating at 330 with the carry, and 165 across crossing 4, gives relative
+ * ticks 8, 16, 23, 38, 46, 53, 61, 69, 76, 84 (M1c's were 8, 16, 23, 31, 38, 46,
+ * 54, 61, 69, 76). Dispatch lands on tick 2 and `abs = rel + 1`, so the outbound
+ * leg ends on **85**, seven ticks later than M1c's 77.
+ */
+const RP_ARRIVAL_TICK = 85
+/**
+ * Long enough to reach the arrival and short enough that the car is still
+ * STANDING on the carpark when the run ends: the return leg's first crossing is
+ * at tick 92 (the flip leaves `carProgress` at 245, and 2500 - 245 needs eight
+ * more ticks at 330), so this has to land in [85, 91].
+ */
+const RP_TICKS = 90
 
 function buildRepathRig(id: string): Rig {
   const r = makeRig(id, allLandRows(W, H), STARTING_TILES)
@@ -1237,8 +1259,10 @@ describe('a car paths once at departure and does not re-target when the field ch
 
   it('arrives on the hand-computed tick in both runs, not merely on the same one', () => {
     // "The same tick" is satisfied by two identically-wrong runs. The literal
-    // is the assertion: 10 orthogonal cells, rel_10 = ceil(10 * 2500 / 330) =
-    // 76, dispatched on tick 2, so the outbound leg ends on tick 77.
+    // is the assertion: 10 orthogonal cells, nine of them entered at 330 and the
+    // fourth — into the degree-3 branch cell — at 165, giving rel_10 = 84 and,
+    // dispatched on tick 2, an outbound leg that ends on tick 85. See
+    // `RP_ARRIVAL_TICK` for the full derivation.
     const a = buildRepathRig('repath-tick-a')
     const b = buildRepathRig('repath-tick-b')
     let arrivalA = -1

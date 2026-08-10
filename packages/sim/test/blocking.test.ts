@@ -112,23 +112,43 @@ import { fieldFor } from '../src/flowfield'
  * `speedUnits(LANE_SPEED_DEFAULT)` = 330 progress units per tick; an orthogonal
  * cell costs `ORTHO_COST * COST_UNIT_SCALE` = 2500. Progress carries across a
  * cell crossing AND across the outbound -> return flip, so a car makes its k-th
- * crossing on the first tick whose accumulated progress reaches `k * 2500`:
- * `rel_k = ceil(250k / 33)`, counting the dispatch tick itself as rel 1
- * (movement is phase 6, dispatch phase 5, same tick).
+ * crossing on the first tick whose accumulated progress reaches the k-th
+ * cumulative threshold.
+ *
+ * **M1d Task 7 re-timed this fixture, and the reason is the turn the shape
+ * exists for.** The lane-speed multipliers (spec §5.5, decision 7) charge a
+ * 90-degree turn `RIGHT_ANGLE_SPEED_MUL` = 667, applied to the crossing that
+ * LEAVES the corner, and this L has exactly one such crossing per leg. **No cell
+ * on this board has degree >= 3**, so the intersection multiplier never applies
+ * anywhere here — corridor cells carry two bits, the house and carpark one each,
+ * and the corner's are W and N. So exactly two of the twenty crossings run at
+ * `speedUnits(667)` = 220 instead of 330 and the other eighteen are unchanged
+ * from M1c:
+ *
+ *   crossing  7 (148 -> 128, entered by E, leaving by N): 90 degrees, 220
+ *   crossing 15 (148 -> 147, entered by S, leaving by W): 90 degrees, 220
+ *
+ * Every other consecutive pair on both legs is straight on. Accumulating at
+ * those speeds, with the carry crossing every boundary:
  *
  *   k:      1  2  3  4  5  6  7  8  9 10  11  12  13  14  15  16  17  18  19  20
- *   rel_k:  8 16 23 31 38 46 54 61 69 76  84  91  99 107 114 122 129 137 144 152
+ *   rel_k:  8 16 23 31 38 46 57 65 72 80  87  95 103 110 121 129 137 144 152 159
+ *   (M1c:   8 16 23 31 38 46 54 61 69 76  84  91  99 107 114 122 129 137 144 152)
  *
  * Roads go in at tick 1 through `step`'s action path; the single pin is written
  * directly into `destPins` after tick 1 (exactly the byte a pin fire writes),
  * so dispatch lands on **tick 2** and `abs = 2 + rel_k - 1 = rel_k + 1`:
  *
- *   outbound   143@9  144@17 145@24 146@32 147@39 148@47 128@55 108@62 88@70 68@77
- *   return      88@85 108@92 128@100 148@108 147@115 146@123 145@130 144@138
- *              143@145 142@153
+ *   outbound   143@9  144@17 145@24 146@32 147@39 148@47 128@58 108@66 88@73 68@81
+ *   return      88@88 108@96 128@104 148@111 147@122 146@130 145@138 144@145
+ *              143@153 142@160
  *
- * Tick 77 is the arrival (cursor reaches routeLen, phase flips in place on the
- * carpark cell). Tick 153 is trip end: the car's LAST crossing enters the house
+ * The two 220 crossings are 148->128 at tick 58 (11 ticks rather than 8) and
+ * 148->147 at tick 122 (11 rather than 7); the six ticks the trip gains in total
+ * are those two plus the carry they push forward.
+ *
+ * Tick 81 is the arrival (cursor reaches routeLen, phase flips in place on the
+ * carpark cell). Tick 160 is trip end: the car's LAST crossing enters the house
  * cell in phase 6 and `completeTrip` releases it in phase 7, **on the same
  * tick**, which is the strongest form of the release assertion available.
  *
@@ -164,7 +184,7 @@ const DIR_W = 6
 
 const ROUTE_LEN = 10
 const DISPATCH_TICK = 2
-const RUN_TICKS = 160
+const RUN_TICKS = 175
 const STARTING_TILES = 999
 
 /**
@@ -178,20 +198,30 @@ const ORTHO_THRESHOLD = ORTHO_COST * COST_UNIT_SCALE // 2,500 per orthogonal cel
 
 /** Hand-computed absolute ticks; see the module comment. Never read back from a run. */
 const T_ENTER_CORNER_OUTBOUND = 47
-const T_LEAVE_CORNER_OUTBOUND = 55
-const T_ARRIVE_CARPARK = 77
-const T_ENTER_CORNER_RETURN = 108
-const T_LEAVE_CORNER_RETURN = 115
-const T_TRIP_END = 153
+const T_LEAVE_CORNER_OUTBOUND = 58
+const T_ARRIVE_CARPARK = 81
+const T_ENTER_CORNER_RETURN = 111
+const T_LEAVE_CORNER_RETURN = 122
+const T_TRIP_END = 160
 const T_ENTER_MID_HOUSE = 24 // crossing k=3
 const T_LEAVE_MID_HOUSE = 32 // crossing k=4
 /**
- * The sibling's trip end, with two pins in the L fixture: car 1 is refused at
- * the first crossing (tick 9), takes it at tick 17 carrying car 0's own tick-9
- * residual, and is therefore car 0's whole 153-tick trip shifted by exactly 8.
- * Derived in the `both cars score` test, never read back from a run.
+ * The sibling's trip end, with two pins in the L fixture.
+ *
+ * **M1c's shift was a single number and M1d Task 7's is two, which is the
+ * fixture's most interesting emergent consequence.** Car 1 is refused at the
+ * first crossing (tick 9), takes it at tick 17 carrying car 0's own tick-9
+ * residual, and is car 0's trip shifted by exactly **8** from there. Then the
+ * lane-speed multiplier slows car 0 through the corner: car 0 holds cell 148
+ * for eleven ticks (47..57) instead of eight, car 1 wants it at 47 + 8 = 55, and
+ * is refused on **55, 56 and 57** — the leader's turn backing the follower up,
+ * which is precisely the queueing this milestone exists to produce. Car 1 takes
+ * 148 at 58, the tick car 0 vacates it, again carrying car 0's own carry for
+ * that cell, so from the corner on it is car 0's trip shifted by **11**.
+ *
+ * `160 + 11 = 171`. Derived in the `both cars score` test, never read back.
  */
-const T_SIBLING_TRIP_END = T_TRIP_END + 8 // 161
+const T_SIBLING_TRIP_END = T_TRIP_END + 11 // 171
 /** A quiet mid-flight tick: a crossing happens, no road moves, no pin moves. */
 const T_QUIET_CROSSING = 9
 /**
@@ -680,11 +710,13 @@ describe('claim and release over the L fixture (lifecycle events 2, 3, 4)', () =
     }
     // Vacuity: the car must genuinely have held a slot for most of the run.
     // It holds nothing on ticks 1..8 (dispatched but not yet crossed) and
-    // nothing after trip end, so 144 of 153 is the hand-derived figure:
-    // ticks 9..152 inclusive.
-    expect(ticksHoldingOne).toBe(144)
+    // nothing after trip end, so 151 of 160 is the hand-derived figure:
+    // ticks 9..159 inclusive. (M1c's figure was 144 of 153; M1d Task 7's two
+    // 220-speed corner crossings lengthen the trip by 7 ticks and the car holds
+    // a slot on every one of them.)
+    expect(ticksHoldingOne).toBe(151)
     expect(trace.crossingTicks).toEqual([
-      9, 17, 24, 32, 39, 47, 55, 62, 70, 77, 85, 92, 100, 108, 115, 123, 130, 138, 145, 153,
+      9, 17, 24, 32, 39, 47, 58, 66, 73, 81, 88, 96, 104, 111, 122, 130, 138, 145, 153, 160,
     ])
   })
 
@@ -905,7 +937,10 @@ describe('two cars dispatched from one house in one tick queue at the FIRST cros
   it('the queue then clears on the tick the leader vacates, one cell, with the carry intact', () => {
     // The other half: a refusal is a WAIT, not a loss. Car 1 crosses on the
     // first tick it is granted and arrives carrying exactly the residual car 0
-    // carried, so from here it is car 0's trip shifted by a whole 8 ticks.
+    // carried, so from here it is car 0's trip shifted by a whole 8 ticks — as
+    // far as the corner, where M1d Task 7's turn multiplier makes car 0 hold
+    // cell 148 for three ticks longer than car 1's shift and the gap widens to
+    // 11 (see `T_SIBLING_TRIP_END`).
     const r = buildFixture('first-crossing-clears')
     runFixture(r, 17, 2)
     expect(r.state.header[H_TICK]).toBe(17)
@@ -924,7 +959,7 @@ describe('two cars dispatched from one house in one tick queue at the FIRST cros
     expect(assertOccupancyConsistent(r.state, r.world)).toBe(2)
   })
 
-  it('carries the whole trip through: BOTH cars score, the second exactly 8 ticks behind the first', () => {
+  it('carries the whole trip through: BOTH cars score, the second 8 ticks behind and then 11', () => {
     // The emergent end-to-end consequence, and the fixture that makes the
     // `completeTrip` release observable the way Task 2's direct slot assertion
     // could not be (C6's modal failure: without it the sibling stalls the full
@@ -932,22 +967,28 @@ describe('two cars dispatched from one house in one tick queue at the FIRST cros
     // stalls FOREVER and the score never reaches 2).
     //
     // Hand-computed. Car 0 is the single-car timeline from this file's module
-    // comment. Car 1 is refused at tick 9, crosses at 17 carrying 140 — car 0's
-    // tick-9 carry exactly — and is therefore car 0's whole trip plus 8:
+    // comment, unchanged by the queue. Car 1 is refused at tick 9, crosses at 17
+    // carrying 140 — car 0's tick-9 carry exactly — and is car 0's trip plus 8
+    // until the corner, where car 0's 220-speed crossing holds cell 148 for
+    // eleven ticks and refuses car 1 on 55, 56 and 57. Car 1 takes 148 on 58 and
+    // is car 0's trip plus 11 from there:
     //
-    //   car 0  out 143@9 ... 68@77 (arrive)   return 88@85 ... 142@153 (score)
-    //   car 1  out 143@17 ... 68@85 (arrive)  return 88@93 ... 142@161 (score)
+    //   car 0  out 143@9 144@17 145@24 146@32 147@39 148@47 128@58 108@66 88@73 68@81 (arrive)
+    //          return 88@88 108@96 128@104 148@111 147@122 146@130 145@138 144@145 143@153 142@160 (score)
+    //   car 1  out 143@17 144@25 145@32 146@40 147@47 148@58 128@69 108@77 88@84 68@92 (arrive)
+    //          return 88@99 108@107 128@115 148@122 147@133 146@141 145@149 144@156 143@164 142@171 (score)
     //
-    // The two legs interleave on the shared corridor and never conflict,
-    // because at every meeting the pair is exactly one cell and 8 ticks apart
-    // and ascending order processes the LEAVING car first.
+    // Apart from the corner the two legs interleave on the shared corridor and
+    // never conflict, because at every meeting the pair is one cell apart and
+    // ascending order processes the LEAVING car first — including the two
+    // exactly-simultaneous cases, 147@47 and 148@122.
     const r = buildFixture('both-cars-score')
     const trace = runFixture(r, T_SIBLING_TRIP_END, 2)
     expect(r.state.header[H_SCORE]).toBe(2)
     expect(trace.crossingTicks).toEqual([
       // car 0's crossings only — `Trace` follows car 0. Identical to the
       // single-car run, which is the point: the queue costs car 0 nothing.
-      9, 17, 24, 32, 39, 47, 55, 62, 70, 77, 85, 92, 100, 108, 115, 123, 130, 138, 145, 153,
+      9, 17, 24, 32, 39, 47, 58, 66, 73, 81, 88, 96, 104, 111, 122, 130, 138, 145, 153, 160,
     ])
     expect(trace.phaseAfterTick[T_TRIP_END]).toBe(PHASE_IDLE)
     expect(trace.phaseAfterTick[T_SIBLING_TRIP_END - 1]).toBe(PHASE_IDLE)
@@ -959,17 +1000,25 @@ describe('two cars dispatched from one house in one tick queue at the FIRST cros
     for (let slot = 0; slot < r.state.occupancy.length; slot++) {
       expect(r.state.occupancy[slot], `slot ${slot}`).toBe(FREE)
     }
-    // Nothing was ever refused after the first crossing — the sibling's return
-    // leg in particular. `H_SCORE` reaching 2 is the direct observer, and this
-    // is the same fact stated as a count so a partial stall cannot hide in it.
+    // No car was ever refused a ROUTE — a different thing from an entry, and
+    // the one that would mean dispatch had failed rather than a queue forming.
+    // `H_SCORE` reaching 2 is the direct observer that both trips completed, and
+    // this is the same fact stated so a partial stall cannot hide in it.
+    //
+    // **Entry refusals there certainly were, and Task 7 added a second cluster
+    // of them.** Car 1 was refused at ticks 9..16 at the first crossing and
+    // again at 55..57 behind the corner; both cleared, and both are in the
+    // ladder above rather than merely counted.
     expect(r.state.header[H_ROUTES_REFUSED]).toBe(0)
   })
 
   it('the sibling ENTERS the front door its sibling freed, with ENTER_FREE, on the tick it needs it', () => {
     // The observer Task 2's direct slot assertion could not have, stated as an
-    // outcome code rather than as "it moved". Car 0's trip ends on tick 153 and
+    // outcome code rather than as "it moved". Car 0's trip ends on tick 160 and
     // `completeTrip` releases cell 142 in phase 7 of that tick; car 1's last
-    // crossing needs (142, lane 1) on tick 161.
+    // crossing needs (142, lane 1) on tick 171 — eleven ticks later after M1d
+    // Task 7's corner slowdown, eight before it, and the gap is what makes the
+    // release observable at all.
     const r = buildFixture('sibling-front-door')
     runFixture(r, T_SIBLING_TRIP_END - 1, 2)
     expect(r.state.header[H_TICK]).toBe(T_SIBLING_TRIP_END - 1)

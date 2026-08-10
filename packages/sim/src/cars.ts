@@ -1,9 +1,18 @@
-import { CAR_SPEED_UNITS_PER_TICK, COST_UNIT_SCALE, DENOM, LANE_SPEED_DEFAULT, ORTHO_COST } from '@laneways/shared'
+import {
+  CAR_SPEED_UNITS_PER_TICK,
+  COST_UNIT_SCALE,
+  DENOM,
+  INTERSECTION_SPEED_MUL,
+  LANE_SPEED_DEFAULT,
+  ORTHO_COST,
+  RIGHT_ANGLE_SPEED_MUL,
+  SHARP_TURN_SPEED_MUL,
+} from '@laneways/shared'
 import type { GameState } from './state'
 import type { WorldData } from './world'
-import { OPPOSITE, noteGhostDeparture, stepCell } from './roads'
+import { DIR_COUNT, OPPOSITE, noteGhostDeparture, stepCell } from './roads'
 import { canEnter, claimCell, releaseCell, isEntryGranted, noteEntryGranted, noteEntryRefused } from './blocking'
-import { edgeCost } from './graph'
+import { edgeCost, roadDegree } from './graph'
 import { routeStep } from './dispatch'
 import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
 
@@ -27,10 +36,29 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
  * construction, on a path with two turns exactly as much as on a straight
  * corridor.
  *
- * This module also never reads `state.roads`. A road erased under an
- * in-flight car therefore does not touch its PATH: the car drives the erased
- * segment to the end of its committed route, whatever happens to the world
- * underneath it.
+ * **This module DOES read road topology, as of M1d Task 7, and the promise it
+ * used to make instead is written out here so the change is not silent.** Until
+ * Task 7 this paragraph read *"this module also never reads the `roads` region"*, and
+ * two later paragraphs named Task 7 as the change that would end it. It has.
+ * The intersection multiplier needs the DEGREE of the cell a car is entering,
+ * which it takes from `roadDegree` (graph.ts) — one read-only helper, one call,
+ * one purpose.
+ *
+ * **What survives is the sentence that was doing the work, and it is now
+ * narrower and exactly true: a road edit can change an in-flight car's SPEED
+ * and can never change its PATH.** The route is still committed once at
+ * dispatch and never re-derived; `next` is still `stepCell(carCell, dir)` with
+ * `dir` read from the car's own `carRoute` nibbles; nothing below consults a
+ * road bit to decide WHERE to go, only how fast to get there. A road erased
+ * under an in-flight car therefore still does not touch its path — the car
+ * drives the erased segment to the end of its committed route, whatever happens
+ * to the world underneath it — and a road ADDED under it cannot re-route it
+ * either. `cars.test.ts` enforces that BEHAVIOURALLY now rather than with the
+ * source scan it used to run, because the scan would have kept passing while the
+ * claim it stood for stopped being true: the degree read is one call away in
+ * graph.ts, so the region name never appears in this file at all. The
+ * replacement drives one committed route over two different road networks and
+ * requires the same cells in the same order, with only the tick ladder moving.
  *
  * **M1c's deviation from spec §5.11 is discharged as of M1d Task 5, and this
  * paragraph used to record it as outstanding.** The refund no longer "lands
@@ -38,15 +66,13 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
  * cell becomes a ghost, and `advanceCar` below pays the debt down by one on
  * every departure from a ghost cell (`noteGhostDeparture`, roads.ts). That is a
  * write to two `Uint8` regions, keyed by CELL — it is still not a read of
- * `state.roads`, and the committed route is still never re-derived.
+ * the `roads` region, and the committed route is still never re-derived.
  *
- * **It does import from `roads.ts`, and that is not the same claim.** `OPPOSITE`
- * and `stepCell` (M1d Task 1a) are pure grid geometry over `DX`/`DY` — neither
- * takes a `GameState` and neither can observe a road bit. The sentence above is
- * about `state.roads`, the buffer region, and it stays exactly as strong as it
- * was. Anything that makes movement depend on the *contents* of `roads`
- * (M1d Task 7's intersection multiplier is the first) must amend that sentence
- * in the same commit rather than leaning on this one.
+ * **It also imports pure geometry from `roads.ts`, and that was never the same
+ * claim.** `OPPOSITE`, `DIR_COUNT` and `stepCell` (M1d Task 1a) are pure grid
+ * arithmetic over `DX`/`DY` — none takes a `GameState` and none can observe a
+ * road bit. The paragraph above is about the `roads` buffer region, and
+ * Task 7 is the change that ended it, exactly as this paragraph used to predict.
  *
  * **As of M1d Task 2 this module WRITES `state.occupancy`, and as of Task 3 it
  * READS it too.** Every other region `advanceCar` touches is indexed by the
@@ -57,14 +83,54 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
  * `runMovement`'s iteration order decides which of two contenders moves. Both
  * notes below are written to that, not to the M1c premise.
  *
- * **This is still not a read of `state.roads`.** The sentence above about the
- * committed route stands exactly as strong as it was: `canEnter` asks occupancy
- * and (from Task 5) `ghostMask`, never the road bits, and it has no `NO_ROAD`
- * outcome on purpose — blocking.ts says why, and the ghost roads that made it
- * matter are now shipped: a committed car HAS to be able to drive a road that
- * has been erased, or §5.11's delayed refund could never be paid at all.
- * M1d Task 7's intersection multiplier is the change that ends the `state.roads`
- * claim, and it must amend the paragraph above in its own commit.
+ * **Blocking is still not a road read, and that is a separate claim from Task
+ * 7's.** `canEnter` asks occupancy and (from Task 5) `ghostMask`, never the road
+ * bits, and it has no `NO_ROAD` outcome on purpose — blocking.ts says why, and
+ * the ghost roads that made it matter are now shipped: a committed car HAS to be
+ * able to drive a road that has been erased, or §5.11's delayed refund could
+ * never be paid at all. Task 7's degree read is about SPEED and enters nowhere
+ * near PERMISSION: a car is never refused a cell because of a road bit, and a
+ * ghost cell (mask 0, degree 0) is simply a plain cell as far as the multiplier
+ * is concerned.
+ *
+ * ---------------------------------------------------------------------------
+ * LANE-SPEED MULTIPLIERS ENTER MOVEMENT AND NOT ROUTING — M1d TASK 7
+ * ---------------------------------------------------------------------------
+ *
+ * Spec §5.5's lane speeds get their first caller here, and the choice of WHERE
+ * is the whole decision, so it is written down rather than implied.
+ *
+ * **They scale `speedUnits` into `advanceCar` and they never touch
+ * `edgeCost`.** Two independent reasons, and either alone is sufficient:
+ *
+ *   1. **A turn multiplier is structurally inexpressible as an edge cost.** It
+ *      is a property of the PAIR of edges either side of a cell, not of one
+ *      edge: `edgeCost(dir)` is handed a single direction and could not see the
+ *      direction the car arrived by even in principle. Dijkstra over a
+ *      turn-priced graph needs (cell, incoming direction) nodes — an
+ *      eight-fold larger field, per colour, per tick.
+ *   2. **It would invalidate four constants that are one calibration.**
+ *      `edgeCost`'s value set is `{ORTHO_COST, DIAG_COST}` = `{10, 14}`, and
+ *      `NB = DIAG_COST + 1` (scratch.ts), `DISTINCT_EDGE_COSTS = 2`,
+ *      `COST_UNIT_SCALE` and `CAR_SPEED_UNITS_PER_TICK` are calibrated jointly
+ *      against exactly that set (see `COST_UNIT_SCALE`'s own note). A
+ *      lane-speed term in the cost changes the bucket count, the distinct-cost
+ *      count, the diagonal ratio and the carry arithmetic together, and moves
+ *      the field golden.
+ *
+ * **The consequence for the flow field, stated because it is a real cost and
+ * not a free win.** `dist`/`dir` keep pricing pure LENGTH, so the field routes
+ * a car down the shortest path and not the fastest one: a route with two right
+ * angles and a junction can now take strictly longer than a longer straight
+ * one, and the field will still prefer it. Routing and movement therefore
+ * disagree, on purpose. `speedUnits`'s own comment used to cite that divergence
+ * as the reason M1c applied no multipliers at all; M1d accepts it, because the
+ * alternative is either a turn-aware product graph (reason 1) or a recalibration
+ * of the whole cost model (reason 2), and neither is an M1d-sized change. M1e's
+ * motorway tier is the next thing that touches this, and it is a cost-model
+ * change rather than a movement one.
+ *
+ * The rule itself is decision 7 and it lives in `laneSpeedMul` below.
  *
  * **Progress is accumulated in the pathfinder's own cost units:**
  *
@@ -113,25 +179,207 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
 const MIN_EDGE_THRESHOLD = ORTHO_COST * COST_UNIT_SCALE
 
 /**
- * Progress units gained per tick at lane-speed multiplier `mul` (scaled by
+ * `base` progress units scaled by a lane-speed multiplier (an integer over
  * `DENOM`): truncating integer division, clamped to at least 1 so that no
  * multiplier, however small, can stall a car permanently.
  *
- * **M1c applies no lane-speed multipliers at all** — `edgeCost` is pure
- * length with no lane-speed term, and if movement applied turn or
- * intersection multipliers the flow field could not see them, so the routing
- * model and the movement model would diverge by design. The only live call is
- * `speedUnits(LANE_SPEED_DEFAULT)`, the identity.
+ * **The single owner of the multiplier rounding rule**, extracted at M1d Task 7
+ * so that `speedUnits` and `advanceCar` cannot round differently. `advanceCar`
+ * scales the `speed` it was HANDED rather than re-deriving from
+ * `CAR_SPEED_UNITS_PER_TICK`, which is what keeps its `speed` parameter
+ * meaningful (see there); `speedUnits` scales the constant. Two callers, one
+ * rounding rule.
  *
- * That is precisely why `cars.test.ts` checks this against a HAND-WRITTEN
- * LITERAL TABLE rather than against the formula: with only the identity call
- * live, the rounding rule and the clamp are dead code under the movement
- * tests alone, and "round instead of truncate" or "drop the clamp" would
- * survive every one of them. The table is the only observer either has until
- * M1d/M1e give them a caller.
+ * `scaleSpeed(base, LANE_SPEED_DEFAULT) === base` exactly, for every positive
+ * integer base — `base * 1000 / 1000` is exact and the clamp does not bite — so
+ * a car with no multiplier applied is bit-identical to M1c's arithmetic and no
+ * pre-M1d timing moves.
+ */
+export function scaleSpeed(base: number, mul: number): number {
+  return Math.max(1, ((base * mul) / DENOM) | 0)
+}
+
+/**
+ * Progress units gained per tick at lane-speed multiplier `mul` (scaled by
+ * `DENOM`), at the default car speed.
+ *
+ * **M1d Task 7 gave this its first non-identity caller**, and the paragraph
+ * that used to be here said why M1c had none: *"if movement applied turn or
+ * intersection multipliers the flow field could not see them, so the routing
+ * model and the movement model would diverge by design."* That divergence is
+ * now real and deliberate — the module comment above derives it in full, with
+ * the two reasons a lane-speed term cannot go in `edgeCost` instead.
+ *
+ * `cars.test.ts` still checks this against a HAND-WRITTEN LITERAL TABLE rather
+ * than against the formula, and that is still the right shape: the table pins
+ * the truncation at `speedUnits(333) === 109` (round-half-up gives 110) and the
+ * clamp at `speedUnits(3) === 1`, and **neither is reachable through the new
+ * caller** — the six multipliers movement can produce are 333, 416, 500, 583,
+ * 667 and 1000, giving 109..330, all far above the clamp, and only 333 has a
+ * fractional part big enough for the rounding direction to show. The table
+ * remains the only observer of both, exactly as it was; Task 7 adds an observer
+ * for multiplier SELECTION, not for this function's arithmetic.
  */
 export function speedUnits(mul: number): number {
-  return Math.max(1, ((CAR_SPEED_UNITS_PER_TICK * mul) / DENOM) | 0)
+  return scaleSpeed(CAR_SPEED_UNITS_PER_TICK, mul)
+}
+
+/**
+ * The road degree at which the cell being ENTERED counts as an intersection
+ * (M1d decision 7): a third road meets there. Degree 2 is a corridor cell, 1 a
+ * dead end, 0 bare ground; a car crossing into any of those is not "approaching
+ * an intersection" in spec §5.5's sense.
+ */
+const INTERSECTION_DEGREE = 3
+
+/**
+ * "No multiplier of this kind applies", as distinct from "a multiplier of 1.0
+ * applies". **The difference is load-bearing and is the whole reason this is not
+ * `LANE_SPEED_DEFAULT`:** §5.5 averages the multipliers that APPLY, so a lone
+ * intersection must give 500 and not `(1000 + 500) / 2 = 750`. Zero is not a
+ * legal lane-speed multiplier (it would stall a car), so it is free as a
+ * sentinel.
+ */
+const MUL_NONE = 0
+
+/**
+ * `previousLegDir`'s answer at the first crossing of a leg, where there is no
+ * in-leg predecessor and therefore no turn. Not a direction index; `turnSpeedMul`
+ * is the only reader and answers `MUL_NONE` for it.
+ */
+export const NO_PREVIOUS_DIR = -1
+
+/**
+ * The direction of car `i`'s PREVIOUS crossing on its current leg, or
+ * `NO_PREVIOUS_DIR` if this is the leg's first crossing.
+ *
+ * **Within a leg only, and that is decision 7's rule rather than a convenience.**
+ * Outbound the cursor starts at 0 and counts up, so the previous step is
+ * `cursor - 1` and there is none at cursor 0. Returning it starts at `routeLen`
+ * and counts down, retracing `OPPOSITE[route[cursor - 1]]`, so the previous
+ * return crossing used `cursor + 1` and there is none at `cursor === routeLen`.
+ *
+ * **The outbound -> return flip therefore emits no turn**, which is what makes
+ * the 180-degree case unreachable rather than merely unlikely: a car arrives at
+ * the carpark heading `d` and leaves heading `OPPOSITE[d]`, which is exactly the
+ * reversal `turnSpeedMul` throws on. `trips.ts` flips the phase IN PLACE on the
+ * carpark cell with no crossing, so the first crossing of the return leg is a
+ * leg-first crossing and is never asked about a predecessor.
+ */
+export function previousLegDir(state: GameState, i: number, outbound: boolean, cursor: number): number {
+  if (outbound) return cursor > 0 ? routeStep(state, i, cursor - 1) : NO_PREVIOUS_DIR
+  return cursor < (state.carRouteLen[i] as number)
+    ? (OPPOSITE[routeStep(state, i, cursor)] as number)
+    : NO_PREVIOUS_DIR
+}
+
+/**
+ * The turn component of the lane-speed multiplier for a crossing that ARRIVED
+ * at the current cell heading `dirIn` and LEAVES it heading `dirOut`, or
+ * `MUL_NONE` when the turn carries no multiplier.
+ *
+ * **The turn is a property of the cell being LEFT** — you turn where you turn —
+ * which is why it is computed from the pair of directions rather than from
+ * anything about a cell. The intersection component is the mirror image: a
+ * property of the cell being ENTERED. Both are charged to the SAME crossing, the
+ * one out of the corner and into the junction, which is what makes the two
+ * averageable at all.
+ *
+ * On the 8-direction lattice a turn is 45, 90, 135 or 180 degrees, and the angle
+ * is `45 * min(|d|, DIR_COUNT - |d|)` for `d` the difference of the two
+ * direction indices (M1d decision 7):
+ *
+ *   | eighths | angle | multiplier                       |
+ *   |---------|-------|----------------------------------|
+ *   | 0       | 0     | none — straight on                |
+ *   | 1       | 45    | **none** — the lattice's gentlest turn is free |
+ *   | 2       | 90    | `RIGHT_ANGLE_SPEED_MUL` = 667     |
+ *   | 3       | 135   | `SHARP_TURN_SPEED_MUL` = 333, the sharpest the lattice admits |
+ *   | 4       | 180   | **throws** — see below            |
+ *
+ * **180 degrees is asserted unreachable rather than given a behaviour**, in the
+ * fail-closed idiom `assertSingleCrossing` established. Within an outbound leg
+ * the route is the flow field's downhill walk and `dist` strictly decreases
+ * along it, so no two consecutive steps can be exact opposites; a return leg is
+ * that same sequence negated, which preserves every angle; and the flip between
+ * the two legs emits no pair at all (`previousLegDir`). So a reversal here means
+ * a corrupted route or a hand-built state, and the alternative to a named throw
+ * is a car that silently drives backwards at some plausible speed. Exercised
+ * directly in `cars.test.ts`.
+ *
+ * @param dirIn `NO_PREVIOUS_DIR` at the first crossing of a leg, which is the
+ *              "no turn" answer and not an error.
+ */
+export function turnSpeedMul(dirIn: number, dirOut: number): number {
+  if (dirIn === NO_PREVIOUS_DIR) return MUL_NONE
+  const d = dirIn > dirOut ? dirIn - dirOut : dirOut - dirIn
+  const eighths = d <= DIR_COUNT - d ? d : DIR_COUNT - d
+  if (eighths === 4) {
+    throw new Error(
+      `cars: a car turned 180 degrees within one leg, entering a cell heading ${dirIn} and leaving it ` +
+        `heading ${dirOut} — the field's downhill walk cannot produce a reversal and the outbound/return ` +
+        'flip emits no in-leg pair, so this is a corrupted route rather than a manoeuvre',
+    )
+  }
+  if (eighths === 3) return SHARP_TURN_SPEED_MUL
+  if (eighths === 2) return RIGHT_ANGLE_SPEED_MUL
+  return MUL_NONE
+}
+
+/**
+ * The intersection component for a crossing INTO `cell`, or `MUL_NONE`.
+ *
+ * **The cell being entered, never the cell being left**, per decision 7: the
+ * intersection is what you approach. A car LEAVING a junction is already through
+ * it and is not slowed by it — which is the discriminator `cars.test.ts` builds
+ * its junction fixture around, because "apply it to the cell being left" is
+ * otherwise an equivalent mutant on any route whose junction is not at an end.
+ */
+export function intersectionSpeedMul(state: GameState, cell: number): number {
+  return roadDegree(state, cell) >= INTERSECTION_DEGREE ? INTERSECTION_SPEED_MUL : MUL_NONE
+}
+
+/**
+ * The lane-speed multiplier for one crossing: out of the cell the car is
+ * standing on, heading `dirOut`, into `cell`, having arrived heading `dirIn`.
+ *
+ * **Averaged where several apply, not minimised** (spec §5.5). Exactly two
+ * combinations are reachable, because a turn has one angle and a cell has one
+ * degree:
+ *
+ *   | applicable  | average | `speedUnits` | a MINIMUM would give | orthogonal ticks |
+ *   |-------------|---------|--------------|----------------------|------------------|
+ *   | {667}       | 667     | 220          | —                    | 12               |
+ *   | {500}       | 500     | 165          | —                    | 16               |
+ *   | {333}       | 333     | 109          | —                    | 23               |
+ *   | {667, 500}  | 583     | **192**      | 500 -> 165           | **14** vs 16     |
+ *   | {333, 500}  | 416     | **137**      | 333 -> 109           | **19** vs 23     |
+ *
+ * "Take the minimum instead" is observable in both compound rows and
+ * `cars.test.ts` kills it there.
+ *
+ * **The rounding direction of the average is a labelled INERT choice, and this
+ * is the note that says when it stops being inert.** Both reachable averages are
+ * half-integers — 583.5 and 416.5 — and both round to the same `speedUnits`
+ * either way: 583 and 584 both give 192, 416 and 417 both give 137. That is the
+ * WHOLE reachable set, not a sample, so "round the average up" is a provable
+ * equivalent mutant through every behavioural observer in the repo (arrival
+ * ticks, held progress, every golden). It is truncated here, matching
+ * `scaleSpeed`'s own truncation, and `cars.test.ts` pins the two equivalences
+ * directly so that the day `CAR_SPEED_UNITS_PER_TICK` or any of the three
+ * multipliers moves, the pin fails and somebody has to make the choice on
+ * purpose. Only a direct assertion on this function's return value can see the
+ * direction today; nothing downstream can.
+ *
+ * Returns `LANE_SPEED_DEFAULT` when nothing applies — the identity, which
+ * `scaleSpeed` passes through exactly.
+ */
+export function laneSpeedMul(state: GameState, dirIn: number, dirOut: number, cell: number): number {
+  const turn = turnSpeedMul(dirIn, dirOut)
+  const junction = intersectionSpeedMul(state, cell)
+  if (turn === MUL_NONE) return junction === MUL_NONE ? LANE_SPEED_DEFAULT : junction
+  if (junction === MUL_NONE) return turn
+  return ((turn + junction) / 2) | 0
 }
 
 /**
@@ -210,8 +458,19 @@ export function assertSingleCrossing(residual: number, minThreshold: number): vo
  * precedent is `assertBucketCountExceedsEveryEdgeCost` (scratch.ts) and
  * `assertDispatchProgress` (dispatch.ts): make the unreachable branch
  * reachable from a test rather than leave it as the one thing nothing
- * executes. M1d, where a car's speed depends on its lane, passes a real
- * per-car value through here.
+ * executes.
+ *
+ * **From M1d Task 7 `speed` is the BASE speed and this function scales it, and
+ * that is not what M1c's version of this paragraph predicted.** It said *"M1d,
+ * where a car's speed depends on its lane, passes a real per-car value through
+ * here"* — which cannot be done: the multiplier depends on the PAIR of route
+ * steps either side of the current cell and on the degree of the cell being
+ * entered, none of which `runMovement` has without decoding the route itself.
+ * So `runMovement` still passes one number for every car and this function
+ * scales it per crossing, through `scaleSpeed`. The parameter keeps its meaning
+ * — `scaleSpeed(speed, LANE_SPEED_DEFAULT) === speed` exactly — so the
+ * guard test above still drives the call site with the speed it chooses,
+ * unchanged, on any route where no multiplier applies.
  *
  * @internal `runMovement` is the production call site; this is exported for
  * the guard test above.
@@ -236,15 +495,17 @@ export function advanceCar(state: GameState, world: WorldData, i: number, speed:
   // nibble, which is otherwise a plausible-looking wrong move.
   const threshold = edgeCost(dir) * COST_UNIT_SCALE
 
-  const progress = (state.carProgress[i] as number) + speed
-  if (progress < threshold) {
-    state.carProgress[i] = progress
-    return
-  }
-
-  const residual = progress - threshold
-  assertSingleCrossing(residual, MIN_EDGE_THRESHOLD)
-
+  // **Hoisted above the progress accumulation at M1d Task 7**, because the
+  // lane-speed multiplier needs the DEGREE of the cell being entered and the car
+  // accumulates toward that cell on every tick of the traversal, not only on the
+  // tick it crosses. Two consequences worth stating rather than discovering:
+  //
+  //   - A corrupted route that walks off the grid now throws on the FIRST tick
+  //     of the doomed crossing instead of the tick it would have completed on.
+  //     Strictly earlier, same error, same untouched car — `cars.test.ts`'s four
+  //     bounds tests assert the car did not move and still do.
+  //   - It runs once per driving car per tick rather than once per crossing.
+  //     `stepCell` is three comparisons and an add; it allocates nothing.
   const next = stepCell(state.carCell[i] as number, dir, world.w, world.h)
   if (next < 0) {
     // Unreachable through `runDispatch`: its downhill walk breaks the moment a
@@ -257,6 +518,35 @@ export function advanceCar(state: GameState, world: WorldData, i: number, speed:
         'its committed route leaves the board, which dispatch refuses to produce',
     )
   }
+
+  // ------------------------------------------------------------------------
+  // THE LANE-SPEED MULTIPLIER — M1d Task 7, decision 7
+  // ------------------------------------------------------------------------
+  //
+  // The turn is charged at the cell being LEFT (from the pair of in-leg
+  // directions) and the intersection at the cell being ENTERED (`next`'s
+  // degree); both are charged to THIS crossing and averaged where both apply.
+  // `laneSpeedMul` owns the rule; the module comment owns why it lives here and
+  // not in `edgeCost`.
+  //
+  // **Constant for the whole traversal, which is why it may be recomputed every
+  // tick without changing anything.** `dirIn`, `dir` and `next` are all fixed
+  // from the moment the car lands on this cell until it leaves, so a car that
+  // spends 23 ticks crossing one cell gains exactly 109 units on each of them.
+  // Recomputing beats caching: a cached per-car speed would be a second piece of
+  // movement state to snapshot, and Decision 5's refusal path would have to
+  // decide whether to keep it.
+  const dirIn = previousLegDir(state, i, outbound, cursor)
+  const tickSpeed = scaleSpeed(speed, laneSpeedMul(state, dirIn, dir, next))
+
+  const progress = (state.carProgress[i] as number) + tickSpeed
+  if (progress < threshold) {
+    state.carProgress[i] = progress
+    return
+  }
+
+  const residual = progress - threshold
+  assertSingleCrossing(residual, MIN_EDGE_THRESHOLD)
 
   // ------------------------------------------------------------------------
   // THE BLOCKING QUESTION — M1d Task 3, Decision 5. Asked HERE and nowhere

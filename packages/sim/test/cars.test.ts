@@ -6,18 +6,33 @@ import {
   CAR_SPEED_UNITS_PER_TICK,
   COST_UNIT_SCALE,
   DIAG_COST,
+  INTERSECTION_SPEED_MUL,
   LANE_SPEED_DEFAULT,
   ORTHO_COST,
+  RIGHT_ANGLE_SPEED_MUL,
+  SHARP_TURN_SPEED_MUL,
   type MapData,
 } from '@laneways/shared'
 import { createState, snapshot, restore, hashState, H_TILES, type GameState } from '../src/state'
 import { createWorld, type WorldData } from '../src/world'
 import { createFlowFields } from '../src/scratch'
 import { packRouteStep, routeStep, ROUTE_BYTES } from '../src/dispatch'
-import { placeRoad, eraseRoad, roadMask, tilesLeft, DX, DY, OPPOSITE } from '../src/roads'
+import { placeRoad, eraseRoad, roadMask, tilesLeft, stepCell, DX, DY, OPPOSITE } from '../src/roads'
 import { PHASE_IDLE, PHASE_NONE, PHASE_OUTBOUND, PHASE_RETURNING } from '../src/buildings'
-import { runMovement, advanceCar, speedUnits, assertSingleCrossing } from '../src/cars'
-import { EnterOutcome, canEnter, claimCell, releaseCell } from '../src/blocking'
+import {
+  runMovement,
+  advanceCar,
+  speedUnits,
+  scaleSpeed,
+  assertSingleCrossing,
+  turnSpeedMul,
+  intersectionSpeedMul,
+  laneSpeedMul,
+  previousLegDir,
+  NO_PREVIOUS_DIR,
+} from '../src/cars'
+import { edgeCost, roadDegree } from '../src/graph'
+import { EnterOutcome, FREE, canEnter, claimCell, occupantOf, releaseCell } from '../src/blocking'
 
 /**
  * Every fixture is an all-land 20 x 12 board (`W` x `H`), so a cell index is
@@ -58,6 +73,7 @@ const N = 0
 const E = 2
 const SE = 3
 const S = 4
+const SW = 5
 const W_DIR = 6
 const NW = 7
 
@@ -709,11 +725,27 @@ describe('the entry refusal is the FOURTH way advanceCar writes nothing (M1d Tas
     // Ordering: `canEnter` is asked AFTER `stepCell`'s bounds throw, so a
     // corrupted route stays a named, unresumable failure instead of becoming a
     // car that silently stops. If the two were swapped this would refuse.
+    //
+    // **M1d Task 7 moved the throw EARLIER WITHIN THE TICK, and this test used
+    // to assert the opposite.** It required the first, sub-threshold tick not to
+    // throw and the eighth to. `stepCell` is now hoisted above the progress
+    // accumulation, because the lane-speed multiplier needs the cell being
+    // ENTERED on every tick of a traversal and not only on the tick that
+    // completes it — so a route that leaves the board is now a named failure on
+    // the first tick of the doomed crossing. Strictly earlier, same error, same
+    // untouched car, and the ORDERING this test is about is unchanged:
+    // `stepCell`'s throw still precedes `canEnter`, so the corruption can never
+    // be downgraded into a refusal.
     const { state, world } = rig('refusal-after-bounds')
     commit(state, 0, 59, ORTHO_ROUTE) // (19, 2): the last column, stepping E
-    expect(() => runMovement(state, world)).not.toThrow() // sub-threshold ticks are fine
-    for (let t = 0; t < 6; t++) runMovement(state, world)
     expect(() => runMovement(state, world)).toThrow(/would step off the grid/)
+    // Nothing was written on the way out — not even the progress this tick's
+    // speed would have added, which is what says the throw precedes every write
+    // rather than merely preceding `canEnter`.
+    expect(state.carCell[0]).toBe(59)
+    expect(state.carRouteCursor[0]).toBe(0)
+    expect(state.carProgress[0]).toBe(0)
+    expect(state.carBlockedTicks[0]).toBe(0)
   })
 })
 
@@ -1149,6 +1181,600 @@ describe('a road erased under an in-flight car — §5.11 delayed refunds (M1d T
   })
 })
 
+// ---------------------------------------------------------------------------
+// Lane-speed multipliers — M1d Task 7, decision 7
+// ---------------------------------------------------------------------------
+
+/**
+ * `speedUnits` has been covered since M1c against a hand-written literal table,
+ * deliberately as a UNIT test, because every non-identity multiplier belonged to
+ * a later milestone. **This section is its first production caller and its first
+ * real detector**: under the movement tests alone, multiplier SELECTION — which
+ * multiplier applies, to which crossing, averaged or minimised — was not merely
+ * uncovered, it was inexpressible.
+ *
+ * **Where the multiplier is applied, stated once here and derived in `cars.ts`:
+ * into `advanceCar`'s per-tick speed, and never into `edgeCost`.** So routing is
+ * untouched, the field golden cannot move, and the flow field goes on pricing
+ * length rather than time. `graph.test.ts` holds the value-set tripwire for the
+ * other half of that claim.
+ *
+ * THE FIXTURE, all-land 20 x 12, `cell = y * 20 + x`, one hand-committed route of
+ * ten steps and three spurs that make three of the entered cells junctions:
+ *
+ *        x:   2   3   4   5   6
+ *   row 5:            104                     <- spur, makes 124 degree 3
+ *   row 6:  122-123-124-125
+ *   row 7:                145                 <- 125 turns S into 145
+ *   row 8:      163 164     165-166           <- 166 turns W into 165
+ *   row 9:      183-184     185-186           <- spurs at 184 and 185
+ *   row 10:         204
+ *
+ *   route  122 -E-> 123 -E-> 124 -E-> 125 -S-> 145 -SE-> 166 -W-> 165
+ *              -S-> 185 -SW-> 204 -N-> 184 -N-> 164
+ *
+ * Every one of the six cases decision 7 admits appears exactly once, and the
+ * turn and the junction sit on DIFFERENT cells wherever a case is meant to be
+ * single — which is the only way "apply the intersection multiplier to the cell
+ * being left" can be separated from the real rule:
+ *
+ *   | crossing | into | in -> out | angle | degree | applies      | mul  | speed |
+ *   |----------|------|-----------|-------|--------|--------------|------|-------|
+ *   | 1        | 123  | (none) E  | —     | 2      | nothing      | 1000 | 330   |
+ *   | 2        | 124  | E -> E    | 0     | **3**  | junction     | 500  | 165   |
+ *   | 3        | 125  | E -> E    | 0     | 2      | nothing      | 1000 | 330   |
+ *   | 4        | 145  | E -> S    | 90    | 2      | right angle  | 667  | 220   |
+ *   | 5        | 166  | S -> SE   | 45    | 2      | nothing      | 1000 | 330   |
+ *   | 6        | 165  | SE -> W   | 135   | 2      | sharp turn   | 333  | 109   |
+ *   | 7        | 185  | W -> S    | 90    | **3**  | both         | 583  | 192   |
+ *   | 8        | 204  | S -> SW   | 45    | 2      | nothing      | 1000 | 330   |
+ *   | 9        | 184  | SW -> N   | 135   | **3**  | both         | 416  | 137   |
+ *   | 10       | 164  | N -> N    | 0     | 1      | nothing      | 1000 | 330   |
+ *
+ * Crossing 3 is the discriminator the vacuity rule asks for: it LEAVES the
+ * degree-3 cell 124 and enters a degree-2 one, so it must run at 330. Under
+ * "apply the intersection multiplier to the cell being left" crossings 2 and 3
+ * swap their speeds and both isolated durations move.
+ *
+ * Crossings 5 and 8 are the 45-degree pair, and they are the only reason
+ * "classify 45 degrees as a right angle" is observable at all.
+ *
+ * THE ARITHMETIC. Every tick literal below is hand-computed from the two
+ * thresholds (2500 orthogonal, 3500 diagonal — crossings 5 and 8 are the
+ * diagonals) and the speed column above, with the remainder CARRYING across
+ * every crossing exactly as it does everywhere else in this file:
+ *
+ *   k :        1    2    3    4    5    6    7    8    9   10
+ *   speed :  330  165  330  220  330  109  192  330  137  330
+ *   thr   : 2500 2500 2500 2500 3500 2500 2500 3500 2500 2500
+ *   need  : 2500 2360 2385 2245 3325 2195 2406 3410 2280 2451   (thr - carry in)
+ *   ticks :    8   15    8   11   11   21   13   11   17    8
+ *   at    :    8   23   31   42   53   74   87   98  115  123
+ *   carry :  140  115  255  175  305   94   90  220   49  189
+ *
+ * and the same route with NO multipliers applied at all arrives on **82**
+ * against 123 — 8, 16, 23, 31, 41, 49, 57, 67, 75, 82.
+ */
+const M_START = 122
+const M_ROUTE = [E, E, E, S, SE, W_DIR, S, SW, N, N]
+const M_CELLS = [123, 124, 125, 145, 166, 165, 185, 204, 184, 164]
+
+/** The road segments, as `placeRoad` pairs. The last three are the spurs. */
+const M_SEGMENTS: readonly (readonly [number, number])[] = [
+  [122, 123],
+  [123, 124],
+  [124, 125],
+  [125, 145],
+  [145, 166],
+  [166, 165],
+  [165, 185],
+  [185, 204],
+  [204, 184],
+  [184, 164],
+  [124, 104],
+  [185, 186],
+  [184, 183],
+]
+
+/** Hand-written, one per entry in `M_CELLS`; the three 3s are the spur cells. */
+const M_DEGREES = [2, 3, 2, 2, 2, 2, 3, 2, 3, 1]
+const M_MULS = [1000, 500, 1000, 667, 1000, 333, 583, 1000, 416, 1000]
+const M_SPEEDS = [330, 165, 330, 220, 330, 109, 192, 330, 137, 330]
+const M_THRESHOLDS = [ORTHO_T, ORTHO_T, ORTHO_T, ORTHO_T, DIAG_T, ORTHO_T, ORTHO_T, DIAG_T, ORTHO_T, ORTHO_T]
+/** Absolute ticks, from the table above. Never read back from a run. */
+const M_TICKS = [8, 23, 31, 42, 53, 74, 87, 98, 115, 123]
+/**
+ * The cost of each crossing IN ISOLATION — `ceil(threshold / speed)`, the
+ * duration a crossing takes from zero carry.
+ *
+ * **This is the form the brief's figures are in, and the reason it needs its own
+ * measurement rather than falling out of `M_TICKS`.** The brief asks for "12, 16,
+ * 23 ticks for the first orthogonal crossing at 220/165/109 against 8 at 330".
+ * Only 16 can literally be a leg's FIRST crossing: a turn multiplier needs an
+ * in-leg predecessor and the first crossing of a leg has none (decision 7 —
+ * `previousLegDir`). So the two turn figures are measured by starting the car on
+ * the cell before the crossing with `carProgress` zeroed, which is the same
+ * arithmetic without the impossible geometry.
+ */
+const M_ISOLATED = [8, 16, 8, 12, 11, 23, 14, 11, 19, 8]
+/**
+ * The same route over a board with NO roads: every degree is 0, so the three
+ * junction terms vanish and the four turn terms remain. Speeds 330, 330, 330,
+ * 220, 330, 109, 220, 330, 109, 330.
+ */
+const M_BARE_TICKS = [8, 16, 23, 34, 45, 67, 79, 90, 111, 119]
+/** Mid-flight, inside crossing 9 — the sharp-turn-at-a-junction one. */
+const M_GOLDEN_TICK = 110
+
+function multiplierRig(id: string): { state: GameState; world: WorldData } {
+  const { state, world } = rig(id)
+  for (const [a, b] of M_SEGMENTS) {
+    expect(placeRoad(state, world, a, b), `segment ${a}-${b}`).toBe(true)
+  }
+  commit(state, 0, M_START, M_ROUTE)
+  return { state, world }
+}
+
+/** The cell the car stands on before crossing `k` (1-based). */
+function cellBefore(k: number): number {
+  return k === 1 ? M_START : (M_CELLS[k - 2] as number)
+}
+
+/**
+ * Ticks taken by crossing `k` alone, from zero carry: the car is placed on the
+ * cell before it with the cursor set and `carProgress` zeroed, then driven until
+ * the cursor moves. Returns a MEASURED number, so the literals in `M_ISOLATED`
+ * are assertions rather than restatements.
+ */
+function isolatedCrossingTicks(id: string, k: number): number {
+  const { state, world } = multiplierRig(id)
+  state.carCell[0] = cellBefore(k)
+  state.carRouteCursor[0] = k - 1
+  state.carProgress[0] = 0
+  for (let t = 1; t <= 120; t++) {
+    runMovement(state, world)
+    if ((state.carRouteCursor[0] as number) === k) return t
+  }
+  return -1
+}
+
+describe('the turn classification (M1d Task 7)', () => {
+  /**
+   * A HAND-WRITTEN 8 x 8 table, in the idiom of `speedUnits`'s literal table
+   * above and for the same reason: written as `45 * min(|d|, 8 - |d|)` it would
+   * re-implement the thing it checks and agree with any mutant that changed the
+   * formula consistently.
+   *
+   *   `.` no multiplier (0 or 45 degrees)   `R` right angle (90)
+   *   `S` sharp turn (135)                  `X` a reversal, which throws
+   *
+   * Row = the direction the car arrived by, column = the direction it leaves by,
+   * both in DIRS order (0 N, clockwise).
+   */
+  const TURN_TABLE = [
+    '..RSXSR.', // in = N
+    '...RSXSR', // in = NE
+    'R...RSXS', // in = E
+    'SR...RSX', // in = SE
+    'XSR...RS', // in = S
+    'SXSR...R', // in = SW
+    'RSXSR...', // in = W
+    '.RSXSR..', // in = NW
+  ]
+
+  it('matches the hand-written table at all 64 direction pairs', () => {
+    for (let dirIn = 0; dirIn < 8; dirIn++) {
+      const row = TURN_TABLE[dirIn] as string
+      for (let dirOut = 0; dirOut < 8; dirOut++) {
+        const want = row[dirOut] as string
+        const where = `in=${dirIn} out=${dirOut}`
+        if (want === 'X') {
+          expect(() => turnSpeedMul(dirIn, dirOut), where).toThrow(/180 degrees/)
+        } else if (want === 'R') {
+          expect(turnSpeedMul(dirIn, dirOut), where).toBe(RIGHT_ANGLE_SPEED_MUL)
+        } else if (want === 'S') {
+          expect(turnSpeedMul(dirIn, dirOut), where).toBe(SHARP_TURN_SPEED_MUL)
+        } else {
+          expect(turnSpeedMul(dirIn, dirOut), where).toBe(0)
+        }
+      }
+    }
+  })
+
+  it('is the table a reader can check against geometry, not just against itself', () => {
+    // Six spot checks whose answers can be read off the compass rather than off
+    // the formula, plus the counts. Without these the table is 64 characters
+    // nobody can verify.
+    expect(turnSpeedMul(E, E)).toBe(0) // straight on
+    expect(turnSpeedMul(S, SE)).toBe(0) // 45 degrees: the lattice's gentlest turn
+    expect(turnSpeedMul(E, S)).toBe(RIGHT_ANGLE_SPEED_MUL) // east then south
+    expect(turnSpeedMul(W_DIR, N)).toBe(RIGHT_ANGLE_SPEED_MUL) // west then north
+    expect(turnSpeedMul(SE, W_DIR)).toBe(SHARP_TURN_SPEED_MUL) // in diagonally, out back-and-across
+    expect(turnSpeedMul(SW, N)).toBe(SHARP_TURN_SPEED_MUL)
+    // Every row has exactly one reversal, two right angles, two sharp turns and
+    // three free pairs — 8, 16, 16 and 24 over the whole table.
+    const counts = { '.': 0, R: 0, S: 0, X: 0 }
+    for (const row of TURN_TABLE) {
+      expect(row.length).toBe(8)
+      for (const ch of row) counts[ch as keyof typeof counts]++
+    }
+    expect(counts).toEqual({ '.': 24, R: 16, S: 16, X: 8 })
+  })
+
+  it('throws exactly on the reversal of each direction, cross-checked against OPPOSITE', () => {
+    // The table's `X` cells, re-derived from a different source: `OPPOSITE` is
+    // the table `advanceCar` itself uses for the return leg, so if the two ever
+    // disagreed the reversal guard would be guarding the wrong pair.
+    for (let d = 0; d < 8; d++) {
+      expect(() => turnSpeedMul(d, OPPOSITE[d] as number), `d=${d}`).toThrow(
+        /turned 180 degrees within one leg/,
+      )
+      expect((TURN_TABLE[d] as string)[OPPOSITE[d] as number]).toBe('X')
+    }
+  })
+
+  it('answers "no turn" for the first crossing of a leg rather than throwing', () => {
+    // `NO_PREVIOUS_DIR` is not a direction and must not be run through the angle
+    // arithmetic: `|-1 - 3|` is 4, which is the reversal the guard throws on, so
+    // an implementation that forgot the early return would throw on the first
+    // crossing of every SE-bound leg in the game.
+    for (let dirOut = 0; dirOut < 8; dirOut++) {
+      expect(turnSpeedMul(NO_PREVIOUS_DIR, dirOut), `out=${dirOut}`).toBe(0)
+    }
+  })
+})
+
+describe('previousLegDir: the turn angle is computed WITHIN a leg only (M1d Task 7)', () => {
+  it('has no predecessor at the first crossing of either leg, and the leg`s own steps after that', () => {
+    const { state } = multiplierRig('prev-dir')
+    // Outbound: cursor 0 is the leg's first crossing.
+    expect(previousLegDir(state, 0, true, 0)).toBe(NO_PREVIOUS_DIR)
+    expect(previousLegDir(state, 0, true, 1)).toBe(E) // route[0]
+    expect(previousLegDir(state, 0, true, 4)).toBe(S) // route[3]
+    expect(previousLegDir(state, 0, true, 6)).toBe(W_DIR) // route[5]
+    // Returning: the cursor starts at routeLen and counts down, so the leg's
+    // first crossing is at routeLen and the predecessor is `OPPOSITE[route[k]]`.
+    expect(previousLegDir(state, 0, false, 10)).toBe(NO_PREVIOUS_DIR)
+    expect(previousLegDir(state, 0, false, 9)).toBe(OPPOSITE[N]) // OPPOSITE[route[9]]
+    expect(previousLegDir(state, 0, false, 6)).toBe(OPPOSITE[S]) // OPPOSITE[route[6]]
+  })
+
+  it('emits no pair across the outbound -> return flip, which is what makes 180 unreachable', () => {
+    // The flip is the one place in the game where a car's direction reverses:
+    // it arrives at the carpark heading `d` and leaves heading `OPPOSITE[d]`. If
+    // the predecessor were carried across the flip, `turnSpeedMul` would throw
+    // on the first crossing of every return leg in the game — so this is the
+    // assertion that says the guard is a corruption detector and not a live
+    // branch. Asserted as the predecessor being absent AND as the pair that
+    // would have been produced being the one that throws.
+    const { state } = multiplierRig('prev-dir-flip')
+    const routeLen = state.carRouteLen[0] as number
+    const lastOutbound = routeStep(state, 0, routeLen - 1)
+    const firstReturn = OPPOSITE[lastOutbound] as number
+    expect(() => turnSpeedMul(lastOutbound, firstReturn)).toThrow(/180 degrees/)
+    expect(previousLegDir(state, 0, false, routeLen)).toBe(NO_PREVIOUS_DIR)
+  })
+})
+
+describe('the intersection multiplier is the cell being ENTERED (M1d Task 7)', () => {
+  it('applies at degree 3 and above and not at 2, on the fixture`s own cells', () => {
+    const { state } = multiplierRig('intersection-degrees')
+    // The fixture's degrees are what the table in this section's header claims.
+    for (let k = 0; k < M_CELLS.length; k++) {
+      expect(roadDegree(state, M_CELLS[k] as number), `cell ${M_CELLS[k]}`).toBe(M_DEGREES[k])
+    }
+    expect(intersectionSpeedMul(state, 124)).toBe(INTERSECTION_SPEED_MUL)
+    expect(intersectionSpeedMul(state, 185)).toBe(INTERSECTION_SPEED_MUL)
+    expect(intersectionSpeedMul(state, 184)).toBe(INTERSECTION_SPEED_MUL)
+    expect(intersectionSpeedMul(state, 123)).toBe(0)
+    expect(intersectionSpeedMul(state, 125)).toBe(0)
+    expect(intersectionSpeedMul(state, 164)).toBe(0) // degree 1
+    // Vacuity for the threshold itself: a cell on each side of it, and the board
+    // genuinely contains both.
+    expect(M_DEGREES).toContain(3)
+    expect(M_DEGREES).toContain(2)
+  })
+})
+
+describe('laneSpeedMul: averaged where several apply, not minimised (M1d Task 7)', () => {
+  it('gives each multiplier alone, and 1000 when nothing applies', () => {
+    const { state } = multiplierRig('mul-alone')
+    // A plain cell with no turn.
+    expect(laneSpeedMul(state, E, E, 123)).toBe(LANE_SPEED_DEFAULT)
+    expect(laneSpeedMul(state, NO_PREVIOUS_DIR, E, 123)).toBe(LANE_SPEED_DEFAULT)
+    // 45 degrees is free.
+    expect(laneSpeedMul(state, S, SE, 166)).toBe(LANE_SPEED_DEFAULT)
+    // One term each, on cells where the other cannot be contributing.
+    expect(laneSpeedMul(state, E, E, 124)).toBe(INTERSECTION_SPEED_MUL) // junction, no turn
+    expect(laneSpeedMul(state, E, S, 145)).toBe(RIGHT_ANGLE_SPEED_MUL) // turn, no junction
+    expect(laneSpeedMul(state, SE, W_DIR, 165)).toBe(SHARP_TURN_SPEED_MUL) // turn, no junction
+  })
+
+  it('averages a right angle at a junction to 583, where the MINIMUM would give 500', () => {
+    const { state } = multiplierRig('mul-avg-right')
+    expect(laneSpeedMul(state, W_DIR, S, 185)).toBe(583)
+    // The mutation, spelled out beside the answer so the two cannot be confused:
+    // `Math.min` of the same pair is 500, and the two are 192 vs 165 units per
+    // tick and a 14- vs 16-tick crossing.
+    expect(Math.min(RIGHT_ANGLE_SPEED_MUL, INTERSECTION_SPEED_MUL)).toBe(500)
+    expect(speedUnits(583)).toBe(192)
+    expect(speedUnits(500)).toBe(165)
+  })
+
+  it('averages a sharp turn at a junction to 416, where the MINIMUM would give 333', () => {
+    const { state } = multiplierRig('mul-avg-sharp')
+    expect(laneSpeedMul(state, SW, N, 184)).toBe(416)
+    expect(Math.min(SHARP_TURN_SPEED_MUL, INTERSECTION_SPEED_MUL)).toBe(333)
+    expect(speedUnits(416)).toBe(137)
+    expect(speedUnits(333)).toBe(109)
+  })
+
+  it('does NOT average the identity in when only one term applies', () => {
+    // The `MUL_NONE` sentinel's whole reason for existing: if "nothing applies"
+    // were spelled 1000 and averaged, a lone junction would be (1000 + 500) / 2
+    // = 750 and a lone right angle 833. Both are asserted against, because the
+    // two differ from each other and from the correct answers.
+    const { state } = multiplierRig('mul-no-identity')
+    expect(laneSpeedMul(state, E, E, 124)).not.toBe(750)
+    expect(laneSpeedMul(state, E, S, 145)).not.toBe(833)
+    expect(laneSpeedMul(state, E, E, 124)).toBe(500)
+    expect(laneSpeedMul(state, E, S, 145)).toBe(667)
+  })
+
+  it('a cell that is itself BOTH a turn and a junction never averages — the two terms are read from different cells', () => {
+    // **The brief asks the fixture for "one cell that is both a turn and a
+    // junction", and under decision 7's own rule that configuration produces no
+    // average at all.** The turn is a property of the cell being LEFT and the
+    // intersection of the cell being ENTERED, so the two combine only when the
+    // car turns at cell X and enters a junction at the NEXT cell Y. A single
+    // cell that is both gives {500} on the crossing into it (no turn yet) and
+    // {667} on the crossing out of it (the junction is behind the car) — two
+    // crossings, one term each.
+    //
+    // Cell 124 is degree 3 on this board. A car arriving straight and leaving at
+    // a right angle onto a degree-0 cell is the whole case, asked directly:
+    const { state } = multiplierRig('both-on-one-cell')
+    expect(roadDegree(state, 124)).toBe(3)
+    expect(roadDegree(state, 144)).toBe(0) // (4,7), off the network entirely
+    expect(laneSpeedMul(state, E, E, 124)).toBe(INTERSECTION_SPEED_MUL) // in: junction only
+    expect(laneSpeedMul(state, E, S, 144)).toBe(RIGHT_ANGLE_SPEED_MUL) // out: turn only
+    // Neither is the average, which is what "both, on one cell" would predict.
+    expect(laneSpeedMul(state, E, E, 124)).not.toBe(583)
+    expect(laneSpeedMul(state, E, S, 144)).not.toBe(583)
+    // And the reachable average IS produced when the two sit on adjacent cells,
+    // which is the arrangement the fixture's crossings 7 and 9 use.
+    expect(laneSpeedMul(state, E, S, 185)).toBe(583)
+  })
+
+  it('the rounding direction of the average is INERT at this constant set — labelled, with its tripwire', () => {
+    // **Stated rather than tested for, per decision 7, and this is the pin that
+    // says when the statement stops being true.**
+    //
+    // Exactly two averages are REACHABLE, because a turn has one angle and a
+    // cell has one degree: {667, 500} and {333, 500}. Both sums are odd, so both
+    // averages are half-integers, and both round to the same `speedUnits` in
+    // either direction. That is the whole reachable set enumerated, not sampled,
+    // so "round the average up" is a provable equivalent mutant through every
+    // behavioural observer in this repo — arrival ticks, held progress, and all
+    // six goldens. `laneSpeedMul`'s own return value is the ONLY thing that can
+    // see it, which is what the two `toBe` lines above do.
+    //
+    // The third pair, {333, 667}, is unreachable for the same reason: it would
+    // need two turn angles at once. Recorded because it is the only one of the
+    // three that has no rounding question at all — it averages to exactly 500.
+    expect((RIGHT_ANGLE_SPEED_MUL + INTERSECTION_SPEED_MUL) % 2).toBe(1)
+    expect((SHARP_TURN_SPEED_MUL + INTERSECTION_SPEED_MUL) % 2).toBe(1)
+    expect((SHARP_TURN_SPEED_MUL + RIGHT_ANGLE_SPEED_MUL) % 2).toBe(0)
+    // Truncated (583, 416) and rounded up (584, 417) are indistinguishable after
+    // `speedUnits`. When a multiplier or `CAR_SPEED_UNITS_PER_TICK` changes, one
+    // of these four lines fails and somebody has to choose a direction on
+    // purpose instead of inheriting one.
+    expect(speedUnits(583)).toBe(192)
+    expect(speedUnits(584)).toBe(192)
+    expect(speedUnits(416)).toBe(137)
+    expect(speedUnits(417)).toBe(137)
+  })
+})
+
+describe('scaleSpeed: one rounding rule, two callers (M1d Task 7)', () => {
+  it('is the exact identity at LANE_SPEED_DEFAULT, for the base advanceCar is handed', () => {
+    // What keeps `advanceCar`'s `speed` parameter meaningful — and keeps every
+    // M1c timing on a plain corridor bit-identical. Checked at the production
+    // base and at the two out-of-range speeds the guard test drives.
+    expect(scaleSpeed(330, LANE_SPEED_DEFAULT)).toBe(330)
+    expect(scaleSpeed(3000, LANE_SPEED_DEFAULT)).toBe(3000)
+    expect(scaleSpeed(6000, LANE_SPEED_DEFAULT)).toBe(6000)
+  })
+
+  it('is what speedUnits is made of, at every multiplier the spec names', () => {
+    // The linkage has no behavioural observer — `speedUnits` could inline the
+    // same expression and nothing would change — so it is asserted directly,
+    // because two copies of a rounding rule is exactly how the two callers come
+    // to disagree.
+    for (const mul of [0, 3, 333, 416, 500, 583, 667, 1000, 2000, 3000]) {
+      expect(speedUnits(mul), `mul ${mul}`).toBe(scaleSpeed(CAR_SPEED_UNITS_PER_TICK, mul))
+    }
+  })
+})
+
+describe('a route through every multiplier, driven (M1d Task 7)', () => {
+  it('the fixture really has the degrees, the angles and the speeds its table claims', () => {
+    // The vacuity block, before anything is measured. A multiplier fixture whose
+    // junctions are not junctions measures the plain case ten times.
+    const { state } = multiplierRig('mul-fixture-shape')
+    expect(M_ROUTE.length).toBe(10)
+    expect(M_CELLS.length).toBe(10)
+    // The route really walks the cells the table names, stepped through the same
+    // geometry `advanceCar` uses.
+    let cell = M_START
+    for (let k = 0; k < M_ROUTE.length; k++) {
+      cell = stepCell(cell, M_ROUTE[k] as number, W, H)
+      expect(cell, `step ${k}`).toBe(M_CELLS[k])
+    }
+    // Degrees, and the per-crossing multiplier and speed, one row of the table
+    // at a time, against the implementation's own selection.
+    for (let k = 0; k < M_ROUTE.length; k++) {
+      const into = M_CELLS[k] as number
+      const dirIn = k === 0 ? NO_PREVIOUS_DIR : (M_ROUTE[k - 1] as number)
+      const dirOut = M_ROUTE[k] as number
+      expect(roadDegree(state, into), `degree of ${into}`).toBe(M_DEGREES[k])
+      expect(laneSpeedMul(state, dirIn, dirOut, into), `mul for crossing ${k + 1}`).toBe(M_MULS[k])
+      expect(speedUnits(M_MULS[k] as number), `speed for crossing ${k + 1}`).toBe(M_SPEEDS[k])
+      expect(edgeCost(dirOut) * COST_UNIT_SCALE, `threshold ${k + 1}`).toBe(M_THRESHOLDS[k])
+    }
+    // All six cases appear, and the two averaging cases are genuinely averages.
+    expect(new Set(M_MULS)).toEqual(new Set([1000, 500, 667, 333, 583, 416]))
+    // The single-multiplier crossings have the OTHER term absent, which is what
+    // makes them single: no turn at the junction-only cell, no junction at the
+    // two turn-only cells.
+    expect(turnSpeedMul(E, E)).toBe(0)
+    expect(roadDegree(state, 145)).toBeLessThan(3)
+    expect(roadDegree(state, 165)).toBeLessThan(3)
+  })
+
+  it('each multiplier alone costs its hand-computed number of ticks for one crossing', () => {
+    // The brief's headline figures: 12, 16 and 23 ticks against 8, plus 14 and 19
+    // for the two averages. Measured from zero carry, one crossing at a time, so
+    // each number is `ceil(threshold / speed)` and nothing else.
+    for (let k = 1; k <= 10; k++) {
+      expect(isolatedCrossingTicks(`isolated-${k}`, k), `crossing ${k}`).toBe(M_ISOLATED[k - 1])
+    }
+    // Read back as the claims they are, so a reader does not have to index the
+    // array to see them. The three singles against the plain baseline:
+    expect(M_ISOLATED[0]).toBe(8) // 330, nothing applies
+    expect(M_ISOLATED[3]).toBe(12) // 220, right angle
+    expect(M_ISOLATED[1]).toBe(16) // 165, junction
+    expect(M_ISOLATED[5]).toBe(23) // 109, sharp turn
+    // And the two averages, each beside what taking the MINIMUM would have cost.
+    expect(M_ISOLATED[6]).toBe(14) // 192, right angle at a junction — min would be 16
+    expect(M_ISOLATED[8]).toBe(19) // 137, sharp turn at a junction — min would be 23
+    expect(M_ISOLATED[6]).not.toBe(M_ISOLATED[1]) // 14 is not the junction's 16
+    expect(M_ISOLATED[8]).not.toBe(M_ISOLATED[5]) // 19 is not the sharp turn's 23
+  })
+
+  it('does not slow the crossing that LEAVES the junction — the cell entered is the one that counts', () => {
+    // The vacuity self-check decision 7 names. Crossing 2 enters the degree-3
+    // cell 124 and crossing 3 leaves it; under "apply it to the cell being left"
+    // the two swap and this pair of numbers swaps with them.
+    expect(isolatedCrossingTicks('leaves-junction-2', 2)).toBe(16)
+    expect(isolatedCrossingTicks('leaves-junction-3', 3)).toBe(8)
+    const { state } = multiplierRig('leaves-junction-degrees')
+    expect(roadDegree(state, 124)).toBe(3) // the cell being LEFT by crossing 3
+    expect(roadDegree(state, 125)).toBe(2) // the cell being ENTERED by crossing 3
+  })
+
+  it('crosses on every hand-computed tick of the whole route, carry and all', () => {
+    const { state, world } = multiplierRig('mul-ladder')
+    const trace = runTicks(state, world, 0, 123)
+    expect(trace.crossingTicks).toEqual(M_TICKS)
+    expect(trace.cellPerTick).toEqual(perTickCells(M_START, M_CELLS, M_TICKS, 123))
+    expect(state.carCell[0]).toBe(164)
+    expect(state.carRouteCursor[0]).toBe(10)
+    expect(state.carProgress[0]).toBe(189)
+    // Every crossing's DURATION, against the `need / speed` row of the table.
+    // The ladder alone is satisfied by an off-by-one that cancels; the gaps are
+    // the per-crossing statement, and crossing 6 taking 21 ticks while crossing
+    // 3 takes 8 is the multiplier being visible one crossing at a time.
+    const gaps = M_TICKS.map((t, k) => t - (k === 0 ? 0 : (M_TICKS[k - 1] as number)))
+    expect(gaps).toEqual([8, 15, 8, 11, 11, 21, 13, 11, 17, 8])
+  })
+
+  it('separates the turn terms from the junction terms: the same route over a road-less board', () => {
+    // A control for a specific thing. A bare board leaves every degree at 0, so
+    // the three junction terms disappear and the four turn terms stay — which
+    // splits decision 7's two halves with one fixture. Crossings 7 and 9 are the
+    // interesting ones: they keep their turn and lose their junction, so they
+    // drop from the averaged 583/416 to the bare 667/333.
+    const bare = rig('mul-bare-board')
+    commit(bare.state, 0, M_START, M_ROUTE)
+    for (const cell of M_CELLS) expect(roadDegree(bare.state, cell)).toBe(0)
+
+    const trace = runTicks(bare.state, bare.world, 0, 119)
+    // Hand-computed with speeds 330, 330, 330, 220, 330, 109, 220, 330, 109, 330.
+    expect(trace.crossingTicks).toEqual(M_BARE_TICKS)
+    expect(bare.state.carCell[0]).toBe(164)
+    // The crossings that carry no junction term are IDENTICAL in both runs, and
+    // the three that do are not — asserted per crossing, because "the two ladders
+    // differ" is satisfied by any difference anywhere.
+    const gaps = M_BARE_TICKS.map((t, k) => t - (k === 0 ? 0 : (M_BARE_TICKS[k - 1] as number)))
+    expect(gaps).toEqual([8, 8, 7, 11, 11, 22, 12, 11, 21, 8])
+    // crossing 2: 8 ticks bare against 15 wired; 7: 12 against 13; 9: 21 against 17.
+    expect([gaps[1], gaps[6], gaps[8]]).toEqual([8, 12, 21])
+  })
+})
+
+describe('golden replay: a route through every lane-speed multiplier (M1d Task 7)', () => {
+  it('hashes the state mid-flight, inside the sharp-turn-at-a-junction crossing', () => {
+    const { state, world } = multiplierRig('mul-golden')
+    const trace = runTicks(state, world, 0, M_GOLDEN_TICK)
+
+    // ---------------------------------------------------------------------
+    // The fixture must genuinely exercise the MULTIPLIERS, and these come
+    // BEFORE the hash. A golden over a fixture that applies none of them is a
+    // hash of an M1c run, and it re-blesses just as smoothly as a real one.
+    // Every guard below was run RED on purpose before it was trusted; the
+    // report for this task lists the edit that did it.
+    // ---------------------------------------------------------------------
+
+    // 1. Roads were placed, and the three junctions exist. Without them the
+    //    intersection multiplier is not in this digest at all.
+    expect(tilesLeft(state)).toBeLessThan(999)
+    expect(roadDegree(state, 124)).toBe(3)
+    expect(roadDegree(state, 185)).toBe(3)
+    expect(roadDegree(state, 184)).toBe(3)
+
+    // 2. Every multiplier decision 7 admits has already been APPLIED by this
+    //    tick — crossings 1..8 are behind the car and it is inside crossing 9.
+    //    Asserted as the ladder up to here, not as a count.
+    expect(trace.crossingTicks).toEqual([8, 23, 31, 42, 53, 74, 87, 98])
+    expect(state.carRouteCursor[0]).toBe(8)
+    expect(state.carCell[0]).toBe(204)
+
+    // 3. The car is mid-crossing at 137 units a tick, which is the averaged
+    //    sharp-turn-at-a-junction speed and nothing else. 220 was the carry off
+    //    crossing 8 and twelve ticks of 137 have been added since tick 98.
+    expect(state.carProgress[0]).toBe(1864)
+    expect(220 + 12 * 137).toBe(1864)
+    expect(laneSpeedMul(state, SW, N, 184)).toBe(416)
+    expect(speedUnits(416)).toBe(137)
+
+    // 4. Occupancy is live and names the car on the cell it stands on, in the
+    //    lane of the direction it entered by (SW = lane 1) — so the claim/release
+    //    protocol is in the digest too, over a route that TURNS at almost every
+    //    cell, which is the case Task 2's release rule exists for.
+    expect(occupantOf(state, 204, 1)).toBe(0)
+    expect(occupantOf(state, 204, 0)).toBe(FREE)
+    for (const cell of M_CELLS) {
+      if (cell === 204) continue
+      expect(occupantOf(state, cell, 0), `cell ${cell} lane 0`).toBe(FREE)
+      expect(occupantOf(state, cell, 1), `cell ${cell} lane 1`).toBe(FREE)
+    }
+
+    // 5. Nothing was refused and no ghost exists, so neither `carBlockedTicks`
+    //    nor either ghost region is contributing anything but zeros: this golden
+    //    is about the multipliers and the other M1d regions are pinned flat.
+    expect(state.carBlockedTicks[0]).toBe(0)
+    expect(state.ghostMask.every((b) => b === 0)).toBe(true)
+    expect(state.ghostCommitted.every((b) => b === 0)).toBe(true)
+
+    // ---------------------------------------------------------------------
+    // **A NEW golden, blessed for the first time in M1d Task 7. This is not a
+    // re-bless of anything** — no existing number changed to produce it, and
+    // none of the six existing goldens moves in this task. It is taken well
+    // after both of M1d's buffer changes (Tasks 2 and 5), so it never has to be
+    // re-blessed for layout.
+    //
+    // What it covers that no other golden does: a `carProgress` produced by
+    // FIVE different per-tick speeds in one trip, a `carRouteCursor` reached on
+    // multiplier-dependent ticks, and an occupancy claim made by a car whose
+    // route turns at eight of its ten cells. It moves for any change to the
+    // multiplier set, the turn classification, the intersection degree
+    // threshold, the averaging rule, or which cell each term is read from.
+    // ---------------------------------------------------------------------
+    expect(hashState(state)).toBe(3113654132)
+  })
+})
+
 describe('movement cannot re-path, by signature', () => {
   /**
    * The re-pathing mutation ("read `dir[carCell]` instead of the committed
@@ -1165,16 +1791,34 @@ describe('movement cannot re-path, by signature', () => {
     expect(runMovement.length).toBe(2) // state, world — and nothing else
   })
 
-  it('imports neither the flow field nor the scratch module, and never reads state.roads', () => {
+  it('imports neither the flow field nor the scratch module, and takes road topology only through the degree helper', () => {
     // A source assertion, in the idiom `determinism.test.ts` already uses:
     // the arity pin above can be defeated by reaching for a module-level
     // import, and this cannot. Matching on the import specifier rather than a
     // bare word keeps it immune to this file's own prose.
+    //
+    // **M1d Task 7 removed one clause of this scan and did not quietly weaken
+    // it, so the trade is written out.** Until Task 7 this also asserted that
+    // `cars.ts` never matches the region-subscript pattern for `roads`, and the
+    // module's own comment called that promise load-bearing. The intersection
+    // multiplier needs the DEGREE of the cell being entered, so it is false —
+    // and worse, the scan would have gone on PASSING, because the read lives one
+    // call away in `graph.ts` and the pattern never appears here. A guard that
+    // survives the thing it was written to forbid is decoration, so it is
+    // replaced rather than kept: the two assertions below pin the read to ONE
+    // named helper, and the behavioural test after this one pins the property
+    // the scan actually stood for — roads can change a car's speed and can never
+    // change its path.
     const source = readFileSync(fileURLToPath(new URL('../src/cars.ts', import.meta.url)), 'utf8')
     expect(source).not.toMatch(/from '\.\/flowfield'/)
     expect(source).not.toMatch(/from '\.\/scratch'/)
-    expect(source).not.toMatch(/state\s*\.\s*roads\s*\[/)
     expect(source).not.toMatch(/\bfield\w*\s*\.\s*dir\b/)
+    // One owner for the road read, and it is the read-only helper: no direct
+    // subscript of the region, and no second way in. `roadDegree` cannot express
+    // a step — it takes a cell and returns a count — so this bounds what movement
+    // can learn from `roads` to a number, by the helper's own signature.
+    expect(source).not.toMatch(/state\s*\.\s*roads\b/)
+    expect(source).toMatch(/import \{ edgeCost, roadDegree \} from '\.\/graph'/)
     // Vacuity: the scan is looking at the right file.
     expect(source).toMatch(/export function runMovement/)
 
@@ -1187,6 +1831,57 @@ describe('movement cannot re-path, by signature', () => {
     // `CAR_SPEED_UNITS_PER_TICK` that movement silently ignores while
     // `speedUnits` reports the new value.
     expect(source).toMatch(/const speed = speedUnits\(LANE_SPEED_DEFAULT\)/)
+  })
+
+  it('follows the committed route cell for cell when the ROADS underneath it change — only its timing moves', () => {
+    // **The replacement for the source scan M1d Task 7 removed**, and it is the
+    // stronger of the two: the scan could only say that a token was absent from
+    // one file, and it would have gone on saying so with the read one call away
+    // in `graph.ts`. This says the thing the scan stood for.
+    //
+    // One committed route, two road networks — the multiplier fixture's, and a
+    // board with no roads at all. The road bits reachable from the car's path
+    // differ at every cell of it, including three cells whose degree crosses the
+    // intersection threshold. If movement derived its next cell from `roads`
+    // (following a bit rather than a route nibble) the two runs would diverge in
+    // SPACE; what they are allowed to differ in is TIME, and nothing else.
+    const wired = multiplierRig('roads-change-wired')
+    const bare = rig('roads-change-bare')
+    commit(bare.state, 0, M_START, M_ROUTE)
+
+    // Vacuity, and it is the half that decides whether this test can see
+    // anything: the two boards must genuinely disagree about the road under the
+    // car, on cells the car actually stands on, and on both sides of the degree
+    // threshold the multiplier reads.
+    let cellsDisagreeing = 0
+    for (const cell of M_CELLS) {
+      expect(roadDegree(bare.state, cell)).toBe(0)
+      if (roadDegree(wired.state, cell) !== roadDegree(bare.state, cell)) cellsDisagreeing++
+    }
+    expect(cellsDisagreeing).toBe(M_CELLS.length)
+    expect(M_DEGREES.filter((d) => d >= 3).length).toBe(3)
+
+    const wiredTrace = runTicks(wired.state, wired.world, 0, 123)
+    const bareTrace = runTicks(bare.state, bare.world, 0, 123)
+
+    // SPACE: the ordered sequence of cells occupied is identical, cell for cell,
+    // and it is the committed route's own sequence rather than merely "the same
+    // in both runs" — two identically re-pathed runs would satisfy that.
+    const occupiedIn = (t: Trace): number[] => {
+      const out: number[] = []
+      for (const cell of t.cellPerTick) if (out[out.length - 1] !== cell) out.push(cell)
+      return out
+    }
+    expect(occupiedIn(wiredTrace)).toEqual([M_START, ...M_CELLS])
+    expect(occupiedIn(bareTrace)).toEqual([M_START, ...M_CELLS])
+    expect(wired.state.carRouteCursor[0]).toBe(10)
+    expect(bare.state.carRouteCursor[0]).toBe(10)
+
+    // TIME: and they do differ, or the paragraph above would be a claim about a
+    // board change nothing could observe.
+    expect(wiredTrace.crossingTicks).toEqual(M_TICKS)
+    expect(bareTrace.crossingTicks).toEqual(M_BARE_TICKS)
+    expect(wiredTrace.crossingTicks).not.toEqual(bareTrace.crossingTicks)
   })
 
   it('follows the committed route even when a live field disagrees with it at a cell it occupies', () => {
