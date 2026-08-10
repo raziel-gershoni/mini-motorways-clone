@@ -525,6 +525,164 @@ describe('destination placement validity', () => {
     })
   })
 
+  /**
+   * **A house sitting on the CANDIDATE's carpark, which is the asymmetric half
+   * of the house-overlap check and had no test.**
+   *
+   * Two tests look like they cover this and neither does: "rejects a footprint
+   * cell on an existing house" puts the house on a FOOTPRINT cell, and "rejects
+   * a cell on an existing destination's carpark" is `canPlaceHouse` asking the
+   * question in the other direction. Nothing asked whether
+   * `canPlaceDestination` looks at its own carpark for a house.
+   *
+   * Found by this task's own mutation battery: dropping
+   * `cellOverlapsAnyHouse(state, carpark)` survived all 1,661 tests, and the
+   * consequence is not a wrong reason code — the placement is **accepted**, and
+   * a destination is built with its carpark on top of a house. Same shape as
+   * the `carparkCell` defect this file already carries two tests for, and the
+   * catalogue's "a compound mutation being caught does not mean each half is":
+   * the retired implementation checked all 7 cells in one loop, so the gap is
+   * older than the rewrite and the rewrite is what exposed it.
+   */
+  it('rejects a house sitting on the candidate\'s own CARPARK cell, with reason building', () => {
+    const { map, world } = fixture('dest-vs-house-on-carpark')
+    const state = createState('s', map)
+    const cp = carparkCell(destCellFor(3, 1), ORIENTATION_N, W, H)
+    expect(cp).toBe(destCellFor(3, 0))
+    expect(placeHouse(state, world, cp, 0)).toBe(true)
+    // Vacuity: every FOOTPRINT cell is clear, so only the carpark comparison
+    // can produce this answer — without it the placement is accepted outright.
+    for (let dy = 0; dy < 3; dy++) {
+      for (let dx = 0; dx < 2; dx++) {
+        expect(canPlaceHouse(state, world, destCellFor(3 + dx, 1 + dy)), `footprint (${3 + dx},${1 + dy})`).toEqual({
+          ok: true,
+        })
+      }
+    }
+    expect(canPlaceDestination(state, world, destCellFor(3, 1), ORIENTATION_N)).toEqual({
+      ok: false,
+      reason: 'building',
+    })
+    expect(placeDestination(state, world, destCellFor(3, 1), ORIENTATION_N, 0, DEST_KIND_SQUARE)).toBe(false)
+    expect(state.header[H_DEST_COUNT]).toBe(0)
+  })
+
+  /**
+   * **The rejection ORDER, pinned where two reasons hold at once — which is the
+   * only place it is observable.**
+   *
+   * `canPlaceDestination` documents its order as out-of-bounds, terrain, tree,
+   * road, spacing, building, capacity, and Task 4's rewrite had to preserve it.
+   * Every pre-existing test arranges exactly ONE defect, so every one of them
+   * is order-blind: swapping the terrain and tree passes survived all 1,661
+   * tests, found by this task's mutation battery.
+   *
+   * Note why per-CELL reasoning is not enough here, because it is the trap:
+   * `world.passable` is 1 for LAND *and* TREE, so no single cell can be both
+   * non-passable and treed, and the two conditions look mutually exclusive.
+   * They are — per cell. The passes run over a **set** of seven cells, so water
+   * in one and a tree in another is reachable, and that is what makes the order
+   * observable at all.
+   *
+   * Each pair is asserted twice: the composite fixture, where both conditions
+   * hold and the higher-priority reason must win, and a control with only the
+   * lower one, so a composite that silently lost its lower condition cannot
+   * pass for the wrong reason.
+   */
+  it('returns the FIRST applicable reason when several apply — terrain, tree, road, spacing, building, capacity', () => {
+    const origin = destCellFor(3, 1) // N: footprint x{3,4} y{1,2,3}, carpark (3,0)
+    const rows = (edits: ReadonlyArray<readonly [number, number, string]>): string[] => {
+      const out: string[] = ROWS.map((r) => r as string)
+      for (const [x, y, ch] of edits) out[y] = (out[y] as string).slice(0, x) + ch + (out[y] as string).slice(x + 1)
+      return out
+    }
+    const at = (id: string, edits: ReadonlyArray<readonly [number, number, string]>, maxDest = 16) => {
+      const map = parseMap(id, rows(edits), 50, 40, maxDest, 5)
+      const world = createWorld(map)
+      return { map, world, state: createState('s', map) }
+    }
+
+    // terrain BEFORE tree: water at (4,3), tree at (3,2) — different cells of
+    // the same footprint, which is the only way both can hold.
+    const a = at('order-terrain-tree', [
+      [4, 3, '~'],
+      [3, 2, 'T'],
+    ])
+    expect(hasTree(a.state, a.world, destCellFor(3, 2)), 'the tree really is there').toBe(true)
+    expect(canPlaceDestination(a.state, a.world, origin, ORIENTATION_N), 'terrain must win over tree').toEqual({
+      ok: false,
+      reason: 'terrain',
+    })
+    const aCtl = at('order-tree-only', [[3, 2, 'T']])
+    expect(canPlaceDestination(aCtl.state, aCtl.world, origin, ORIENTATION_N), 'control: tree alone').toEqual({
+      ok: false,
+      reason: 'tree',
+    })
+
+    // tree BEFORE road: tree at (3,2), road on (4,1).
+    const b = at('order-tree-road', [[3, 2, 'T']])
+    expect(placeRoad(b.state, b.world, destCellFor(4, 1), destCellFor(4, 0))).toBe(true)
+    expect(canPlaceDestination(b.state, b.world, origin, ORIENTATION_N), 'tree must win over road').toEqual({
+      ok: false,
+      reason: 'tree',
+    })
+    const bCtl = at('order-road-only', [])
+    expect(placeRoad(bCtl.state, bCtl.world, destCellFor(4, 1), destCellFor(4, 0))).toBe(true)
+    expect(canPlaceDestination(bCtl.state, bCtl.world, origin, ORIENTATION_N), 'control: road alone').toEqual({
+      ok: false,
+      reason: 'road',
+    })
+
+    // road BEFORE spacing: an incumbent at (3,1) puts (5,1) at Chebyshev 1, and
+    // a road inside (5,1)'s own footprint.
+    const second = destCellFor(5, 1)
+    const c = at('order-road-spacing', [])
+    expect(placeDestination(c.state, c.world, origin, ORIENTATION_N, 0, DEST_KIND_SQUARE)).toBe(true)
+    expect(placeRoad(c.state, c.world, destCellFor(5, 3), destCellFor(6, 3))).toBe(true)
+    expect(canPlaceDestination(c.state, c.world, second, ORIENTATION_N), 'road must win over spacing').toEqual({
+      ok: false,
+      reason: 'road',
+    })
+    const cCtl = at('order-spacing-only', [])
+    expect(placeDestination(cCtl.state, cCtl.world, origin, ORIENTATION_N, 0, DEST_KIND_SQUARE)).toBe(true)
+    expect(canPlaceDestination(cCtl.state, cCtl.world, second, ORIENTATION_N), 'control: spacing alone').toEqual({
+      ok: false,
+      reason: 'spacing',
+    })
+
+    // spacing BEFORE building: the same too-close candidate, with a house
+    // inside its footprint.
+    const d = at('order-spacing-building', [])
+    expect(placeDestination(d.state, d.world, origin, ORIENTATION_N, 0, DEST_KIND_SQUARE)).toBe(true)
+    expect(placeHouse(d.state, d.world, destCellFor(5, 2), 0)).toBe(true)
+    expect(canPlaceDestination(d.state, d.world, second, ORIENTATION_N), 'spacing must win over building').toEqual({
+      ok: false,
+      reason: 'spacing',
+    })
+    const dCtl = at('order-building-only', [])
+    expect(placeHouse(dCtl.state, dCtl.world, destCellFor(5, 2), 0)).toBe(true)
+    expect(canPlaceDestination(dCtl.state, dCtl.world, second, ORIENTATION_N), 'control: building alone').toEqual({
+      ok: false,
+      reason: 'building',
+    })
+
+    // building BEFORE capacity: a full board AND a house in the footprint.
+    const e = at('order-building-capacity', [], 1)
+    expect(placeDestination(e.state, e.world, destCellFor(0, 0), ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+    expect(e.state.header[H_DEST_COUNT]).toBe(e.map.maxDestinations)
+    expect(placeHouse(e.state, e.world, destCellFor(4, 3), 0)).toBe(true)
+    expect(canPlaceDestination(e.state, e.world, destCellFor(3, 3), ORIENTATION_N), 'building beats capacity').toEqual({
+      ok: false,
+      reason: 'building',
+    })
+    const eCtl = at('order-capacity-only', [], 1)
+    expect(placeDestination(eCtl.state, eCtl.world, destCellFor(0, 0), ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+    expect(canPlaceDestination(eCtl.state, eCtl.world, destCellFor(3, 3), ORIENTATION_N), 'control: capacity').toEqual({
+      ok: false,
+      reason: 'capacity',
+    })
+  })
+
   it('rejects placement once H_DEST_COUNT === maxDestinations, and does not move the count', () => {
     const { map, world } = fixture('dest-capacity', 40, 2)
     const state = createState('s', map)
