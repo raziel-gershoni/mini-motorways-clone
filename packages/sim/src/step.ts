@@ -228,11 +228,47 @@ export interface TickInputs {
  * THE RE-MEASUREMENT, AT M1e TASK 2 — THE PHASE COUNT WENT 7 -> 8
  * ---------------------------------------------------------------------------
  *
- * PENDING: filled in by Task 2's mutation battery, in the commit that follows
- * the one introducing this phase. The prediction, stated before running so the
- * measurement can be wrong: `1 <-> 3` NON-ZERO (the discharged handoff),
- * `3 <-> 4` ZERO (still inert, same single reason), `1 <-> 2` NON-ZERO,
- * `2 <-> 3` NON-ZERO.
+ * **The phase count went from 7 to 8, and `1 <-> 3` is no longer a member of
+ * the inert set. `3 <-> 4` still is.**
+ *
+ * **The predictions were written into the task brief BEFORE the battery ran**,
+ * which is the only thing that makes the numbers evidence: a measurement with
+ * no prediction cannot be wrong. All four held.
+ *
+ * Detectors over the canonical whole-suite invocation (1,643 tests: shared 47,
+ * render 223, eslint-rules 69, sim 759, game 545), against four unmutated
+ * baselines run alongside:
+ *
+ * ```
+ *   baselines           1, 0, 0, 0   <- the 1 is allocation.test.ts's ghost
+ *                                       window; see the caution below
+ *   1<->2  adj    3   predicted non-zero   grant before the advance
+ *   2<->3  adj    1   predicted non-zero   grant after the input loop
+ *   1<->3         3   predicted NON-ZERO   THE DISCHARGED HANDOFF
+ *   3<->4         0   predicted zero       still inert, same single reason
+ * ```
+ *
+ * Every mutant collected exactly 1,643 tests, so none of these is a crash count
+ * wearing a kill count's clothes, and the crash screen matched nothing.
+ *
+ * **`1 <-> 2` and `1 <-> 3` produce the SAME detector set**, which is not a
+ * coincidence and is the reason one test covers both: both orderings put the
+ * grant in front of the advance, so the grant reads `tick - 1` either way.
+ *
+ * **The state golden is NOT a detector for either of them, and that is why
+ * `step.test.ts`'s ordering test has to exist.** Reading the un-advanced tick
+ * moves the boundaries from 4,500/9,000 to 4,501/9,001 — still exactly two
+ * grants inside the fixture's 13,499 ticks, so the digest is unmoved and the
+ * final `H_TILES` is identical. A golden that folds a whole buffer looks like it
+ * must catch an off-by-one in the clock, and here it does not.
+ *
+ * **The caution from M1d's block still applies and fired again.** One of the
+ * four baselines scored 1: `allocation.test.ts`'s ghost window, a sampling
+ * profiler charging `sim/src/roads.ts` 4.24 B/ghost-event against a bound of 4.
+ * A flaky baseline reads exactly like a kill. **Not one of the four rows above
+ * took a kill from any allocation file** — checked per row rather than assumed,
+ * because that check is the only thing that separates the two. Run the control
+ * as many times as the mutant, every time.
  *
  * Pure in the sense that matters: the result depends only on the contents of
  * `s.buffer`, `world`, `fields`/`scratch` (both re-derivable from `s.buffer`
