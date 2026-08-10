@@ -21,7 +21,7 @@ import {
 import { TerrainClass, type Camera, type RenderFrame, type TerrainClassCode } from '@laneways/render'
 import {
   createCarSnapshots,
-  lerpCar,
+  drawCar,
   snapshotCurr,
   snapshotPrev,
   type CarSnapshots,
@@ -215,7 +215,10 @@ export function buildFrame(
   let n = 0
   for (let i = 0; i < slots; i++) {
     if ((snapshots.currLive[i] as number) === 0) continue
-    lerpCar(snapshots, i, alpha, frame.carXY, n * 2)
+    // `drawCar`, not `lerpCar`: the SMOOTHED pair, not the exact one. The two
+    // agree except during the ~7 ticks after a car launches from a standstill,
+    // and `resolve.ts` owns why they are allowed to differ and by how much.
+    drawCar(snapshots, i, alpha, frame.carXY, n * 2)
     frame.carColour[n] = state.houseColour[state.carHome[i] as number] as number
     n++
   }
@@ -285,8 +288,13 @@ export function createFrameDriver(deps: FrameDriverDeps): LoopDriver {
     advance(inputs: TickInputs): void {
       step(state, world, fields, scratch, inputs)
     },
-    afterDrain(): void {
-      snapshotCurr(builder.snapshots, state, world)
+    afterDrain(ticks: number): void {
+      // `ticks` stopped being ignorable at the smoothing change: it is the
+      // drawn chase's entire clock, and passing 1 instead would make a car's
+      // acceleration depend on the display's frame rate — slower on a 120 Hz
+      // phone than on a 30 Hz one, since both run 30 ticks a second but one
+      // drains them in twice as many calls.
+      snapshotCurr(builder.snapshots, state, world, ticks)
     },
     render(alpha: number, paused: boolean): void {
       deps.draw(buildFrame(builder, state, world, deps.camera(), alpha, paused))

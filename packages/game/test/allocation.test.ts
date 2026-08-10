@@ -816,7 +816,24 @@ describe('the frame loop allocates nothing, measured', () => {
     const names = all
       .filter((a) => a.file.startsWith(GAME_SRC) && a.bytes / PROFILED_FRAMES > NOISE_FLOOR_BYTES_PER_FRAME)
       .map((a) => a.functionName)
-    for (const fn of ['buildFrame', 'resolveCar', 'lerpCar', 'snapshotPrev', 'snapshotCurr', 'enqueue']) {
+    // `advanceDraw` and `drawCar` joined the list with the car-launch
+    // smoothing: `advanceDraw` runs once per slot per drain and `drawCar` once
+    // per live car per frame, both holding per-slot state in preallocated typed
+    // arrays. `lerpCar` stays on the list even though the frame path no longer
+    // calls it: it is the exact-position oracle every smoothing assertion is
+    // measured against, so an allocation in it would turn the instrument red
+    // rather than the code, and this file's own catalogue entry is that a name
+    // drops off a list like this silently.
+    for (const fn of [
+      'buildFrame',
+      'resolveCar',
+      'lerpCar',
+      'drawCar',
+      'advanceDraw',
+      'snapshotPrev',
+      'snapshotCurr',
+      'enqueue',
+    ]) {
       expect(names, `${fn} allocated`).not.toContain(fn)
     }
   })

@@ -483,7 +483,7 @@ describe('the prev/curr snapshots', () => {
     setCar(state, 0, { phase: PHASE_NONE, cell: 0 })
     setCar(state, 1, { phase: PHASE_IDLE, cell: cellOf(11, 12) })
     setCar(state, 2, { phase: PHASE_OUTBOUND, cell: cellOf(7, 20), progress: 1250, route: [E] })
-    snapshotCurr(snap, state, world)
+    snapshotCurr(snap, state, world, 1)
     expect(snap.currLive[0]).toBe(0)
     expect(snap.currLive[1]).toBe(1)
     expect(snap.currLive[2]).toBe(1)
@@ -508,7 +508,7 @@ describe('the prev/curr snapshots', () => {
     setCar(state, 0, { phase: PHASE_OUTBOUND, cell: cellOf(11, 12), progress: 0, route: [E] })
     snapshotPrev(snap, state, world)
     state.carProgress[0] = 1250
-    snapshotCurr(snap, state, world)
+    snapshotCurr(snap, state, world, 1)
     expect(snapAt(snap, 'prev', 0)).toEqual([11, 12])
     expect(snapAt(snap, 'curr', 0)).toEqual([11.5, 12])
   })
@@ -694,7 +694,7 @@ describe('a blocked car resolves strictly inside its own cell', () => {
     for (let t = 0; t < 4; t++) {
       snapshotPrev(snap, r.state, r.world)
       runMovement(r.state, r.world)
-      snapshotCurr(snap, r.state, r.world)
+      snapshotCurr(snap, r.state, r.world, 1)
       for (const alpha of [0, 0.25, 0.5, 0.99]) {
         const out = new Float32Array(2)
         lerpCar(snap, 1, alpha, out, 0)

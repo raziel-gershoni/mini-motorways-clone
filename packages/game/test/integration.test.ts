@@ -424,16 +424,16 @@ const SCORE_TICK = 435
  * The frame this file asserts an ABSOLUTE drawn position on, and every term of
  * its derivation.
  *
- * The car is five ticks into its first edge — NW out of house 1 at (8, 13),
+ * The car is seven ticks into its first edge — NW out of house 1 at (8, 13),
  * `edgeCost(NW) = DIAG_COST = 14`, threshold `14 * COST_UNIT_SCALE = 3500` — and
  * has crossed nothing, so both snapshots resolve on the same edge:
  *
  * ```
- * tick 382 (prev)   carProgress = 5 x 330 = 1650   f = 1650/3500 = 0.4714285714...
- * tick 383 (curr)   carProgress = 6 x 330 = 1980   f = 1980/3500 = 0.5657142857...
+ * tick 384 (prev)   carProgress = 7 x 330 = 2310   f = 2310/3500 = 0.66
+ * tick 385 (curr)   carProgress = 8 x 330 = 2640   f = 2640/3500 = 0.7542857142...
  * DX[NW], DY[NW] = (-1, -1)
- * prev = (8 - 0.4714285714, 13 - 0.4714285714)     curr = (8 - 0.5657142857, 13 - ...)
- * alpha = 0.5  ->  (7.4814285714..., 12.4814285714...)
+ * prev = (8 - 0.66, 13 - 0.66)                     curr = (8 - 0.7542857142, 13 - ...)
+ * alpha = 0.5  ->  (7.2928571428..., 12.2928571428...)
  * ```
  *
  * and the camera turns that into CSS px, `originX = 0`, `originY = 86`,
@@ -441,20 +441,38 @@ const SCORE_TICK = 435
  * position:
  *
  * ```
- * x = 0  + (7.4814285714 - 5) x 29 + 29/2 - 29/4 =  71.9614285714 + 7.25 =  79.2114285714
- * y = 86 + (12.4814285714 - 9) x 29 + 29/2 - 29/4 = 100.9614285714 + 7.25 + 86 = 194.2114285714
+ * x = 0  + (7.2928571428 - 5) x 29 + 29/2 - 29/4 =  66.4928571428 + 7.25 =  73.7428571428
+ * y = 86 + (12.2928571428 - 9) x 29 + 29/2 - 29/4 = 95.4928571428 + 7.25 + 86 = 188.7428571428
  * ```
  *
  * **This is the only assertion in the file that a uniform one-tick offset cannot
  * satisfy**, which is exactly what "draw before stepping" produces: the same
- * frame would then draw the tick-382 lerp, at x = 81.9457, 2.73 CSS px away.
+ * frame would then draw the tick-384 lerp, at x = 76.4771, 2.73 CSS px away.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY 385 AND NOT 383, WHICH IS WHERE THIS SAT UNTIL THE LAUNCH SMOOTHING
+ * ---------------------------------------------------------------------------
+ *
+ * `buildFrame` draws `drawCar`, not `lerpCar`: a car that has just left a
+ * standstill is drawn behind the sim position by a bounded, decaying amount
+ * while its drawn speed ramps (`resolve.ts`). This car is dispatched on tick
+ * 378, so at tick 383 it is mid-ramp and drawn 0.56 CSS px short of the exact
+ * position — a real, intended difference, and asserting the exact figure there
+ * would be asserting that the smoothing does not exist.
+ *
+ * Tick 385 is the first frame after the chase has caught up, and the assertion
+ * is therefore STRONGER than it was: it pins the hand-derived sim arithmetic
+ * exactly as before AND pins that the drawn position converges back onto it,
+ * bit for bit, on the board that ships. If the chase's tuning changes, this
+ * fails — which is the correct outcome for a constant whose whole content is
+ * "the two agree here".
  */
-const ABS_TICK = 383
+const ABS_TICK = 385
 const ABS_ALPHA = 0.5
-const ABS_PROGRESS_PREV = 1650
-const ABS_PROGRESS_CURR = 1980
-const ABS_X = 79.21142857142857
-const ABS_Y = 194.21142857142857
+const ABS_PROGRESS_PREV = 2310
+const ABS_PROGRESS_CURR = 2640
+const ABS_X = 73.74285714285715
+const ABS_Y = 188.74285714285713
 
 interface FrameSample {
   readonly tick: number
@@ -919,7 +937,7 @@ describe('a full trip, drawn: road in, car out, score up', () => {
     expect(drift, 'exactly home would mean the trip-end step was zero').toBeGreaterThan(0)
   })
 
-  it('draws the car at a HAND-COMPUTED absolute position on tick 383 at alpha 0.5', () => {
+  it('draws the car at a HAND-COMPUTED absolute position on tick 385 at alpha 0.5', () => {
     // The one assertion a uniform one-tick offset cannot satisfy. See ABS_TICK
     // for the full derivation: prev and curr both resolve on the NW edge out of
     // (8, 13) at progress 1650 and 1980 against a 3500 threshold.

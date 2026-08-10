@@ -59,7 +59,7 @@ import {
   terrainClassOf,
   type FrameBuilder,
 } from '../src/frame'
-import { initCarSnapshots, snapshotPrev, snapshotCurr, resolveCar } from '../src/resolve'
+import { initCarSnapshots, snapshotPrev, snapshotCurr, resolveCar, lerpCar } from '../src/resolve'
 import { createInputQueue } from '../src/inputs'
 import { createLoop, type Loop } from '../src/loop'
 
@@ -138,6 +138,25 @@ function cellOf(x: number, y: number): number {
 
 function carXY(frame: RenderFrame, n: number): [number, number] {
   return [frame.carXY[n * 2] as number, frame.carXY[n * 2 + 1] as number]
+}
+
+/**
+ * The EXACT interpolated position of car slot `i` — `lerpCar` over
+ * `prevXY`/`currXY` — which is what `buildFrame` emitted until the car-launch
+ * smoothing landed and is what the smoothing is measured against.
+ *
+ * `buildFrame` now emits `drawCar`'s output, which chases this one with a
+ * bounded lag (`resolve.ts`). The three fixtures below pin the exact
+ * interpolator's convexity and its refusal to overshoot a corner — the
+ * properties Decision 2 exists for, still shipped, still the thing the drawn
+ * position converges to. The same properties AT THE SCREEN, plus the bound
+ * between the two, live in `test/carSmoothing.test.ts`, which drives a real
+ * board rather than a hand-written state.
+ */
+function exactXY(fb: FrameBuilder, i: number, alpha: number): [number, number] {
+  const out = new Float32Array(2)
+  lerpCar(fb.snapshots, i, alpha, out, 0)
+  return [out[0] as number, out[1] as number]
 }
 
 // ---------------------------------------------------------------------------
@@ -694,7 +713,7 @@ describe('interpolation', () => {
 
     snapshotPrev(fb.snapshots, r.state, r.world)
     r.state.carProgress[0] = 1130 // one tick of movement: +330
-    snapshotCurr(fb.snapshots, r.state, r.world)
+    snapshotCurr(fb.snapshots, r.state, r.world, 1)
 
     const early = carXY(build(r, fb, 0.1), 0)
     const late = carXY(build(r, fb, 0.9), 0)
@@ -714,10 +733,10 @@ describe('interpolation', () => {
     const fb = builderFor(r)
     snapshotPrev(fb.snapshots, r.state, r.world)
     r.state.carProgress[0] = 1130
-    snapshotCurr(fb.snapshots, r.state, r.world)
+    snapshotCurr(fb.snapshots, r.state, r.world, 1)
     expect(r.state.carCell[0] as number).toBe(cellOf(11, 12))
 
-    const [x, y] = carXY(build(r, fb, 0.5), 0)
+    const [x, y] = exactXY(fb, 0, 0.5)
     expect(x).toBeCloseTo(11.386, 6)
     expect(y).toBe(12)
   })
@@ -736,14 +755,14 @@ describe('interpolation', () => {
     r.state.carCell[0] = cellOf(12, 12)
     r.state.carProgress[0] = 230
     r.state.carRouteCursor[0] = 1
-    snapshotCurr(fb.snapshots, r.state, r.world)
+    snapshotCurr(fb.snapshots, r.state, r.world, 1)
 
-    expect(carXY(build(r, fb, 0), 0)[0]).toBeCloseTo(11.96, 6)
-    expect(carXY(build(r, fb, 0.999999), 0)[0]).toBeCloseTo(12.092, 5)
-    let last = carXY(build(r, fb, 0), 0)[0]
+    expect(exactXY(fb, 0, 0)[0]).toBeCloseTo(11.96, 6)
+    expect(exactXY(fb, 0, 0.999999)[0]).toBeCloseTo(12.092, 5)
+    let last = exactXY(fb, 0, 0)[0]
     const first = last
     for (let a = 1 / 64; a < 1; a += 1 / 64) {
-      const x = carXY(build(r, fb, a), 0)[0]
+      const x = exactXY(fb, 0, a)[0]
       expect(x - last, `alpha ${a}`).toBeGreaterThan(0)
       expect(x - last, `alpha ${a}`).toBeLessThan(0.132)
       last = x
@@ -785,10 +804,10 @@ describe('interpolation', () => {
     r.state.carCell[0] = cellOf(12, 12)
     r.state.carProgress[0] = 230
     r.state.carRouteCursor[0] = 1
-    snapshotCurr(fb.snapshots, r.state, r.world)
+    snapshotCurr(fb.snapshots, r.state, r.world, 1)
 
-    const at0 = carXY(build(r, fb, 0), 0)
-    const at1 = carXY(build(r, fb, 0.999999), 0)
+    const at0 = exactXY(fb, 0, 0)
+    const at1 = exactXY(fb, 0, 0.999999)
     expect(at0[0]).toBeCloseTo(11.96, 6)
     expect(at0[1]).toBe(12)
     expect(at1[0]).toBeCloseTo(12, 5)
@@ -805,7 +824,7 @@ describe('interpolation', () => {
     // which is what a convex combination guarantees and an extrapolation along
     // E (x = 12.092, y = 12) would violate on both axes.
     for (let a = 0; a <= 1; a += 1 / 32) {
-      const [x, y] = carXY(build(r, fb, Math.min(a, 0.999999)), 0)
+      const [x, y] = exactXY(fb, 0, Math.min(a, 0.999999))
       expect(x, `alpha ${a} x`).toBeGreaterThanOrEqual(11.96 - 1e-5)
       expect(x, `alpha ${a} x`).toBeLessThanOrEqual(12 + 1e-5)
       expect(y, `alpha ${a} y`).toBeLessThanOrEqual(12 + 1e-5)
@@ -833,7 +852,7 @@ describe('interpolation', () => {
         r.state.carRouteCursor[0] = (r.state.carRouteCursor[0] as number) + 1
       }
       r.state.carProgress[0] = p
-      snapshotCurr(fb.snapshots, r.state, r.world)
+      snapshotCurr(fb.snapshots, r.state, r.world, 1)
       for (let a = 0; a < 1; a += 0.25) xs.push(carXY(build(r, fb, a), 0)[0])
     }
     let crossings = 0
@@ -938,7 +957,7 @@ describe('the first frame, and cars that appear later', () => {
     // The stale prev is grid cell (0, 0) — an unwritten Float32Array.
     expect(fb.snapshots.prevXY[newSlot * 2] as number).toBe(0)
     expect(placeHouse(r.state, r.world, cellOf(15, 26), 2)).toBe(true)
-    snapshotCurr(fb.snapshots, r.state, r.world)
+    snapshotCurr(fb.snapshots, r.state, r.world, 1)
     expect(fb.snapshots.currLive[newSlot] as number).toBe(1)
 
     const frame = build(r, fb, 0.5)
@@ -960,21 +979,36 @@ describe('the first frame, and cars that appear later', () => {
    * checkable rather than a comment someone must trust. It asserts the buggy
    * output on purpose. If a future change closes the class, this test fails and
    * the reader is sent to the comment — which is the intended outcome.
+   *
+   * **The launch smoothing narrowed the numbers and did NOT close the class,
+   * which is why this test moved rather than went away.** `advanceDraw`'s
+   * `MAX_DRAW_LAG_CELLS` clamp is not a teleport guard — it bounds where the
+   * drawn position ENDS UP, not the segment the frame lerps across to get
+   * there. So the drawn car still streaks between two different houses inside
+   * the one drain, at (12.44, 18.08) instead of (12.5, 18): the clamp pulls the
+   * far end 0.2 cells short of the new position and the mid-alpha sample moves
+   * by half of that. Twelve and a half cells of streak either way.
    */
   it('does NOT catch a slot reused by a different car between the two snapshots', () => {
     const r = rig(true)
     const fb = builderFor(r)
     snapshotPrev(fb.snapshots, r.state, r.world) // slot 0 is house 0's car at (8, 24)
     expect(fb.snapshots.prevLive[0] as number).toBe(1)
+    expect(fb.snapshots.drawLive[0] as number).toBe(1) // ...and it HAS drawn history
     // A spawner that frees and immediately reuses the slot within one step.
     r.state.carCell[0] = cellOf(17, 12)
     r.state.carHome[0] = 2
-    snapshotCurr(fb.snapshots, r.state, r.world)
+    snapshotCurr(fb.snapshots, r.state, r.world, 1)
 
     const frame = build(r, fb, 0.5)
-    // (8 + 17) / 2, (24 + 12) / 2 — half way between two different houses,
-    // 12.6 cells from where it started. Nothing in this file catches it.
-    expect(carXY(frame, 0)).toEqual([12.5, 18])
+    // Half way between two different houses, 12.6 cells from where it started.
+    // Nothing in this file catches it. The exact interpolator, which the drawn
+    // one chases, still puts it at the plain midpoint (12.5, 18).
+    const [x, y] = carXY(frame, 0)
+    expect(x).toBeCloseTo(12.44, 2)
+    expect(y).toBeCloseTo(18.08, 2)
+    expect(Math.hypot(x - 8, y - 24)).toBeGreaterThan(7)
+    expect(exactXY(fb, 0, 0.5)).toEqual([12.5, 18])
   })
 
   /**

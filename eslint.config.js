@@ -2,7 +2,7 @@ import tseslint from 'typescript-eslint'
 import determinismRules from './tools/eslint-rules/index.js'
 
 export default tseslint.config(
-  { ignores: ['**/dist/**', '**/node_modules/**', 'spike/**'] },
+  { ignores: ['**/dist/**', '**/node_modules/**', 'spike/**', '.claude/**'] },
   {
     // Both packages are inside the determinism boundary: spec §4 makes
     // `shared` the sim's sole dependency, so an unseeded draw or a wall-clock

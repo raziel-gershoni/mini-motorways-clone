@@ -1,10 +1,17 @@
-import { COST_UNIT_SCALE } from '@laneways/shared'
+import {
+  COST_UNIT_SCALE,
+  DIAG_COST,
+  LANE_SPEED_DEFAULT,
+  ORTHO_COST,
+  RIGHT_ANGLE_SPEED_MUL,
+} from '@laneways/shared'
 import {
   DX,
   DY,
   OPPOSITE,
   edgeCost,
   routeStep,
+  speedUnits,
   PHASE_NONE,
   PHASE_OUTBOUND,
   PHASE_RETURNING,
@@ -189,11 +196,226 @@ export function resolveCar(
   return true
 }
 
+// ---------------------------------------------------------------------------
+// THE DRAWN POSITION, WHICH IS NOT THE SIM POSITION
+// ---------------------------------------------------------------------------
+//
+// Everything above this line resolves where the sim says a car IS. Everything
+// below decides where to DRAW it, and the two are deliberately allowed to
+// differ by a bounded amount for a bounded time. The rest of this comment is
+// why, and what the bound buys.
+//
+// ---------------------------------------------------------------------------
+// THE DEFECT: A BLOCKED CAR LAUNCHES AT FULL SPEED IN ONE FRAME
+// ---------------------------------------------------------------------------
+//
+// `advanceCar` (`sim/cars.ts`) holds `carProgress` BIT-IDENTICAL on a refused
+// tick — deliberately, and the alternatives are worse (its own comment derives
+// both). So `prevXY` and `currXY` agree for every tick of a block, `lerpCar`
+// renders the car perfectly still, and on the granting tick `carProgress`
+// advances by a whole tick's `speedUnits(LANE_SPEED_DEFAULT)`. Measured on the
+// demo board over 60 s at 60 fps, before this code existed:
+//
+//   - drawn speed is 0 or 0.066 cells/frame with **nothing in between** across
+//     a block boundary — 3.96 cells/s reached in a single 16.7 ms frame;
+//   - the per-frame speed step at such a boundary is 0.066 cells/frame, i.e.
+//     **237.6 cells/s^2** treated as an acceleration, which is another way of
+//     saying it is not one;
+//   - it happens **7.0 times a second** across 24 cars (422 stop->go events in
+//     60 s), plus 6.2 go->stop events a second.
+//
+// A human called it robotic, on hardware, and they were right.
+//
+// ---------------------------------------------------------------------------
+// WHAT CANNOT BE FIXED HERE, PROVED RATHER THAN ASSERTED
+// ---------------------------------------------------------------------------
+//
+// **The launch is fixable. The stop is not.** Write `s(t)` for the sim's
+// along-path distance and `d(t)` for the drawn one, and take the three
+// properties this renderer must not give up:
+//
+//   (i)   `d <= s` always — a drawn car must never be further along its route
+//         than the sim car, or a car refused entry is drawn INSIDE the cell it
+//         was refused, on top of the car it is waiting for. That is a lie about
+//         the one thing M1d exists to show.
+//   (ii)  `d = s` once the car has held a steady speed — no permanent offset,
+//         so the drawn position is the sim position except during a transient.
+//   (iii) `|d''| <= A` — bounded acceleration, which is the whole request.
+//
+// The sim can go from a constant `v` to a dead stop between two ticks. Let
+// `t0` be that instant. By (ii), `d(t0) = s(t0)` and `d'(t0) = v`. For
+// `t > t0`, `s` is the constant `s(t0)`, so (i) requires `d(t) <= s(t0)`. But
+// (iii) gives `d(t) >= s(t0) + v(t - t0) - A(t - t0)^2 / 2`, which is strictly
+// greater than `s(t0)` for small positive `t - t0`. Contradiction. **The three
+// are jointly unsatisfiable, so smoothing a deceleration requires either
+// drawing the car ahead of itself or lagging it permanently.**
+//
+// Nothing about that proof is specific to this code: it is why braking has to
+// be anticipated, and a renderer that only learns a car stopped after it
+// stopped cannot anticipate. The two escapes were both considered and both
+// rejected:
+//
+//   - **A permanent speed-proportional lag** (`d = s - v * delta`) smooths both
+//     ends and gives up (ii). It also moves a car BACKWARDS relative to its
+//     neighbours exactly when it accelerates, which is the one direction that
+//     can inverse two cars' drawn order.
+//   - **Reading `state.occupancy` to brake early** keeps (i) and (ii) and gives
+//     up causality-honesty instead: in a moving platoon the next cell is
+//     occupied almost all the time, so every car would brake for a leader that
+//     is not stopping. Distinguishing "occupied" from "occupied by a car that
+//     is itself blocked" means re-deriving `canEnter` in the renderer, which is
+//     the reconstruction `queueProbe.ts` already got wrong once.
+//
+// So this module smooths the LAUNCH and leaves the STOP alone, and that is a
+// designed limit rather than an oversight. It is also the half the player named.
+//
+// ---------------------------------------------------------------------------
+// THE MECHANISM: A SPEED-LIMITED CHASE, ADVANCED ONCE PER TICK
+// ---------------------------------------------------------------------------
+//
+// `drawCurrXY` chases `currXY`. Per tick the drawn speed may change by at most
+// `DRAW_SPEED_STEP_CELLS_PER_TICK` and may exceed the sim's own current speed
+// by at most the same amount, and the step is clamped so the drawn position can
+// neither pass `currXY` nor fall further behind it than `MAX_DRAW_LAG_CELLS`.
+//
+// **It is advanced in `snapshotCurr`, once per drain, by the drain's tick
+// count — never per frame.** Three consequences, all of them the reason:
+//
+//   - The drawn motion is **frame-rate independent**. 30 Hz, 60 Hz and 120 Hz
+//     produce the identical sequence of tick-boundary positions, because the
+//     chase's clock is the sim's clock. A per-frame chase would make the car's
+//     acceleration a property of the display.
+//   - `buildFrame` stays a pure function of `(snapshots, alpha)` — it lerps
+//     `drawPrevXY -> drawCurrXY` exactly as it used to lerp
+//     `prevXY -> currXY`, with no new parameter and no per-frame state.
+//   - Advancing it is not a call a caller can forget: it is inside the function
+//     that writes `currXY`, in `blocking.ts`'s idiom of putting both halves of
+//     a protocol behind one call.
+//
+// **`prevXY`/`currXY` keep resolving the exact sim position and are not
+// touched.** They are what the drawn position is measured AGAINST — the
+// divergence bound below is a test, not an argument, and it needs both numbers.
+//
+// ---------------------------------------------------------------------------
+// WHAT THE BOUND BUYS, AND WHY 0.2 CELLS
+// ---------------------------------------------------------------------------
+//
+// `MAX_DRAW_LAG_CELLS` is enforced by a clamp on every tick, so the maximum
+// divergence between the drawn and the sim position is a property of the code
+// rather than of the tuning: **no car is ever drawn more than 0.2 cells from
+// where the sim says it is, on any board, at any frame rate, through any
+// discontinuity.** The free ramp only ever needs 0.135 of that (see
+// `MAX_DRAW_LAG_CELLS`), so the clamp is a floor under the proof and not part
+// of the normal path.
+//
+// Three things the bound is what makes safe:
+//
+//   - **The drawn car never leaves the road.** It is within 0.2 cells of a
+//     point on the route's centreline, and a cell's half-width is 0.5. At a
+//     corner the chase cuts the chord rather than following the elbow, and the
+//     cut is bounded by the same 0.2.
+//   - **Two cars cannot be drawn in the wrong order** unless the sim itself is
+//     already drawing them within `2 * MAX_DRAW_LAG_CELLS` = 0.4 cells of each
+//     other. Writing `u` for the exact separation of a pair and `v` for the
+//     drawn one, `v = u + (lag_B - lag_A)` and each lag is at most 0.2, so
+//     `dot(u, v) >= |u|^2 - 0.4|u| > 0` whenever `|u| > 0.4`. Measured on the
+//     demo board, no pair ever inverts (`test/carSmoothing.test.ts`), and the
+//     pairs that get inside 0.4 cells at all are the opposite-lane ones the sim
+//     ALREADY draws on top of each other — a known M1e gap that this code
+//     neither creates nor widens.
+//   - **A discontinuity self-heals in one tick.** A route change, an erase
+//     under an in-flight car or a restored snapshot moves `currXY` by an
+//     unbounded distance; the clamp puts `drawCurrXY` within 0.2 cells of the
+//     new position on the very next drain, with no special case and nothing to
+//     forget. There is no separate teleport guard because the clamp IS one.
+//
+// **Nothing here allocates.** Three more caller-owned typed arrays, sized at
+// boot, written in place forever after.
+
+/**
+ * The largest distance, in cells, any car can cover in one tick.
+ *
+ * Derived from the sim rather than copied: a car gains at most
+ * `speedUnits(LANE_SPEED_DEFAULT)` = 330 progress units per tick against a
+ * threshold of `edgeCost(dir) * COST_UNIT_SCALE`, and the DIAGONAL edge is the
+ * faster of the two in Euclidean terms — 330/3500 of a `(1, 1)` step is
+ * 0.13333 cells against 330/2500 = 0.132 orthogonally. Both appear below and
+ * the maximum is the one the bound has to survive.
+ */
+export const MAX_SIM_CELLS_PER_TICK = Math.max(
+  speedUnits(LANE_SPEED_DEFAULT) / (ORTHO_COST * COST_UNIT_SCALE),
+  (speedUnits(LANE_SPEED_DEFAULT) * Math.SQRT2) / (DIAG_COST * COST_UNIT_SCALE),
+)
+
+/**
+ * How much the DRAWN speed may change in one tick, in cells per tick.
+ *
+ * **Derived from a speed step the board already shows, which is the whole
+ * calibration argument.** `laneSpeedMul` drops a car from
+ * `speedUnits(LANE_SPEED_DEFAULT)` = 330 to `speedUnits(RIGHT_ANGLE_SPEED_MUL)`
+ * = 220 units the moment it enters a plain right-angle cell, and that 110-unit
+ * step — 0.044 cells/tick, 1.32 cells/s — lands on the demo board's dogleg
+ * several times a second today with nobody remarking on it. Smoothing that
+ * produces velocity changes no larger than one the sim already produces cannot
+ * introduce a new kind of jerk; it can only remove one.
+ *
+ * It is used for both halves of the chase — the acceleration limit and the
+ * catch-up overspeed allowance — deliberately, and not to save a constant. The
+ * catch-up ENDS with the drawn speed dropping back to the sim's, and that drop
+ * is a velocity step like any other: allowing an overspeed larger than the
+ * acceleration limit would smooth the launch and then re-introduce the jerk at
+ * the far end of the same transient.
+ */
+export const DRAW_SPEED_STEP_CELLS_PER_TICK =
+  (speedUnits(LANE_SPEED_DEFAULT) - speedUnits(RIGHT_ANGLE_SPEED_MUL)) / (ORTHO_COST * COST_UNIT_SCALE)
+
+/**
+ * The hard ceiling on how far behind the sim position a car may be drawn, in
+ * cells. Clamped every tick, so it bounds the divergence unconditionally.
+ *
+ * **One and a half ticks of travel at the game's top speed — 0.2000 cells — and
+ * the factor is chosen against the free ramp's own peak.** Accelerating from
+ * rest at `DRAW_SPEED_STEP` per tick against `v = MAX_SIM_CELLS_PER_TICK`, the
+ * drawn speed goes 0.044, 0.088, 0.132, 0.177 and the shortfall accumulates to
+ * **0.13602 cells** on the third tick before the catch-up allowance turns it
+ * around. (The continuous estimate `v^2 / 2a` gives 0.198 and the "discrete
+ * saves v/2" correction gives 0.135; neither is the number, because the cap is
+ * `v + step` rather than `v`. `test/carSmoothing.test.ts` replays the rule
+ * itself rather than any of the three closed forms.) A ceiling BELOW the peak
+ * would truncate every launch — the car would ramp for two ticks and then jump,
+ * which is the defect again with extra steps. A ceiling far above it would make
+ * the clamp unfalsifiable, since nothing on the manifold would ever reach it.
+ * 1.5 ticks is 1.47x the ramp's own peak: the clamp fires only on a
+ * discontinuity, and it fires there on the first tick.
+ *
+ * It is also 0.4x a car sprite (`CAR_SIZE_FRACTION` = 0.5) and 0.23x the
+ * smallest gap two queued cars can have (a refused car holds `carProgress` in
+ * `[threshold - speed, threshold)`, so two cars stopped nose to tail are at
+ * least `1 - 330/2500 = 0.868` cells apart).
+ */
+export const MAX_DRAW_LAG_CELLS = 1.5 * MAX_SIM_CELLS_PER_TICK
+
 /**
  * The two resolved snapshots the frame lerps between, indexed by CAR SLOT.
  *
- * `prevXY`/`currXY` hold 2 floats per slot; `prevLive`/`currLive` hold one byte
- * per slot. `prevLive` is the whole of the snap rule — see the module comment.
+ * `prevXY`/`currXY` hold the EXACT sim position, 2 floats per slot;
+ * `prevLive`/`currLive` hold one byte per slot. `prevLive` is the whole of the
+ * snap rule — see the module comment.
+ *
+ * `drawPrevXY`/`drawCurrXY`/`drawSpeed` are the smoothed position the frame
+ * actually draws and the drawn speed that produced it, in cells per tick. They
+ * are advanced by `snapshotCurr` and read by `drawCar`; nothing else writes
+ * them.
+ *
+ * **`drawLive` is not a duplicate of `currLive`, and the difference is one
+ * drain wide.** `prevLive`/`currLive` are resolved from `state` on every
+ * `snapshotPrev`/`snapshotCurr`; `drawLive` records whether the slot had a
+ * drawn position at the END of the previous drain, which is the only history
+ * the chase can start from. A house placed BETWEEN two frames is live in both
+ * of the next drain's snapshots — `prevLive` reads 1 — while its drawn slot has
+ * never been written, and chasing from an unwritten `Float32Array` streaks the
+ * new car in from grid cell (0, 0). That is `initCarSnapshots`'s defect
+ * reappearing for every car placed after boot, and it is what this byte is for.
  */
 export interface CarSnapshots {
   readonly slots: number
@@ -201,6 +423,10 @@ export interface CarSnapshots {
   readonly currXY: Float32Array
   readonly prevLive: Uint8Array
   readonly currLive: Uint8Array
+  readonly drawPrevXY: Float32Array
+  readonly drawCurrXY: Float32Array
+  readonly drawSpeed: Float32Array
+  readonly drawLive: Uint8Array
 }
 
 /** Allocates the snapshot buffers once, at boot. `slots` is `state.carPhase.length`. */
@@ -211,6 +437,10 @@ export function createCarSnapshots(slots: number): CarSnapshots {
     currXY: new Float32Array(slots * 2),
     prevLive: new Uint8Array(slots),
     currLive: new Uint8Array(slots),
+    drawPrevXY: new Float32Array(slots * 2),
+    drawCurrXY: new Float32Array(slots * 2),
+    drawSpeed: new Float32Array(slots),
+    drawLive: new Uint8Array(slots),
   }
 }
 
@@ -231,9 +461,115 @@ export function snapshotPrev(snap: CarSnapshots, state: GameState, world: WorldD
   snapshotInto(state, world, snap.slots, snap.prevXY, snap.prevLive)
 }
 
-/** Resolves the post-step snapshot. Called once after a drain that ran at least one tick. */
-export function snapshotCurr(snap: CarSnapshots, state: GameState, world: WorldData): void {
+/**
+ * Advances every live slot's DRAWN position one drain's worth toward its
+ * freshly-resolved sim position. `ticks` is how many ticks the drain ran, which
+ * is this function's whole clock — see the module comment for why it is the
+ * sim's and not the display's.
+ *
+ * Four rules, in the order the code applies them:
+ *
+ *   1. **A slot with no drawn history, or no exact prev, snaps.** Both arms are
+ *      needed and each has a case the other misses. `drawLive === 0` is the
+ *      reachable one — a house placed between two frames (`frame.test.ts` drives
+ *      it), where `prevLive` reads 1 and the drawn slot has never been written.
+ *      `prevLive === 0` is the slot that became live INSIDE a `step`, which
+ *      `step`'s seven phases cannot produce today and M1e's in-`step` spawner
+ *      will; it is exercised by a direct call in `resolve.test.ts`, which is
+ *      this codebase's `assertSingleCrossing` idiom for a branch production
+ *      cannot yet reach. The rule lives HERE rather than in `drawCar` so there
+ *      is exactly one copy of it with exactly one mutation target.
+ *   2. **The drawn speed moves by at most one step per tick, and may exceed the
+ *      sim's own speed by at most one step.** `vs` is read as the length of the
+ *      last tick's sim displacement rather than recomputed from `carProgress`
+ *      and a lane multiplier: the snapshots already hold it, and re-deriving it
+ *      would be a second copy of `advanceCar`'s arithmetic in the renderer.
+ *   3. **The step never passes the sim position.** This is what makes the lag
+ *      one-sided, and it is also what makes the convergence exact rather than
+ *      asymptotic: the moment the drawn car can reach `currXY` within the tick,
+ *      it lands on it and the divergence is 0, not 1e-6.
+ *   4. **The step never leaves more than `MAX_DRAW_LAG_CELLS` behind.** The
+ *      unconditional bound, and the only thing standing between a teleport and
+ *      a car sliding across the board.
+ */
+function advanceDraw(snap: CarSnapshots, ticks: number): void {
+  const slots = snap.slots
+  const step = DRAW_SPEED_STEP_CELLS_PER_TICK * ticks
+  for (let i = 0; i < slots; i++) {
+    if ((snap.currLive[i] as number) === 0) {
+      snap.drawLive[i] = 0
+      continue
+    }
+    const j = i * 2
+    const sx = snap.currXY[j] as number
+    const sy = snap.currXY[j + 1] as number
+    const hadHistory = (snap.drawLive[i] as number) === 1
+    snap.drawLive[i] = 1
+
+    if (!hadHistory || (snap.prevLive[i] as number) === 0) {
+      snap.drawPrevXY[j] = sx
+      snap.drawPrevXY[j + 1] = sy
+      snap.drawCurrXY[j] = sx
+      snap.drawCurrXY[j + 1] = sy
+      snap.drawSpeed[i] = 0
+      continue
+    }
+
+    const dx = snap.drawCurrXY[j] as number
+    const dy = snap.drawCurrXY[j + 1] as number
+    snap.drawPrevXY[j] = dx
+    snap.drawPrevXY[j + 1] = dy
+
+    const px = snap.prevXY[j] as number
+    const py = snap.prevXY[j + 1] as number
+    const simDx = sx - px
+    const simDy = sy - py
+    const simSpeed = Math.sqrt(simDx * simDx + simDy * simDy)
+
+    const ex = sx - dx
+    const ey = sy - dy
+    const gap = Math.sqrt(ex * ex + ey * ey)
+
+    // `step` is the allowance for the WHOLE drain and `cap` is a speed, so only
+    // the first scales with `ticks`. Dropping the `* ticks` from `step` makes a
+    // seven-tick catch-up burst accelerate as gently as a one-tick frame and
+    // leaves every car trailing on resume; scaling `cap` instead would let the
+    // drawn car outrun the sim by seven steps.
+    const cap = simSpeed + DRAW_SPEED_STEP_CELLS_PER_TICK
+    let speed = (snap.drawSpeed[i] as number) + step
+    if (speed > cap) speed = cap
+    let travel = speed * ticks
+    if (travel > gap) travel = gap
+    else if (gap - travel > MAX_DRAW_LAG_CELLS) travel = gap - MAX_DRAW_LAG_CELLS
+    snap.drawSpeed[i] = travel / ticks
+
+    if (gap > 0) {
+      const k = travel / gap
+      snap.drawCurrXY[j] = dx + ex * k
+      snap.drawCurrXY[j + 1] = dy + ey * k
+    }
+  }
+}
+
+/**
+ * Resolves the post-step snapshot and advances the drawn position with it.
+ * Called once after a drain that ran `ticks >= 1` ticks.
+ *
+ * **The two halves are one call on purpose.** The drawn position must advance
+ * exactly once per drain, by exactly the drain's tick count, against exactly
+ * the `currXY` this call just wrote; a separate `advanceCarDraw(snap, ticks)`
+ * would be three ways for a caller to get that wrong and no compile error for
+ * any of them. `blocking.ts`'s `noteEntryRefused`/`noteEntryGranted` pair is
+ * this codebase's precedent for the shape.
+ */
+export function snapshotCurr(
+  snap: CarSnapshots,
+  state: GameState,
+  world: WorldData,
+  ticks: number,
+): void {
   snapshotInto(state, world, snap.slots, snap.currXY, snap.currLive)
+  advanceDraw(snap, ticks)
 }
 
 /**
@@ -247,14 +583,32 @@ export function snapshotCurr(snap: CarSnapshots, state: GameState, world: WorldD
  */
 export function initCarSnapshots(snap: CarSnapshots, state: GameState, world: WorldData): void {
   snapshotPrev(snap, state, world)
-  snapshotCurr(snap, state, world)
+  snapshotCurr(snap, state, world, 1)
+  // **The drawn state needs no seeding of its own, and the first draft's
+  // seeding loop was a measured 0-detector.** `createCarSnapshots` leaves
+  // `drawLive` all zero, so the `advanceDraw` inside the `snapshotCurr` above
+  // takes its no-history arm for every live slot and writes exactly what a
+  // seeding loop would: both drawn snapshots at the resolved position, drawn
+  // speed 0. Adding a second copy on top made the two INDEPENDENTLY SUFFICIENT,
+  // and neither could then have a detector — `for (let i = 0; i < 0; i++)`
+  // applied to the loop passed all 544 tests. One rule, one place.
 }
 
 /**
- * Writes car slot `i`'s frame position into `out[offset]`, `out[offset + 1]`.
+ * Writes car slot `i`'s EXACT interpolated sim position into `out[offset]`,
+ * `out[offset + 1]`.
  *
  * The caller has already established that the slot is live in `curr`; a slot
  * that is not live in `prev` snaps, everything else lerps.
+ *
+ * **This stopped being the frame path when the launch smoothing landed, and it
+ * is deliberately still here.** `buildFrame` draws `drawCar`; what this
+ * function returns is where the sim says the car is, which is the thing the
+ * drawn position is bounded against, converges to, and is compared with in
+ * every assertion in `test/carSmoothing.test.ts`. An oracle with no production
+ * caller is worth keeping when the production code's whole contract is stated
+ * relative to it — and it is a handful of arithmetic that Vite tree-shakes out
+ * of the bundle.
  */
 export function lerpCar(
   snap: CarSnapshots,
@@ -275,4 +629,34 @@ export function lerpCar(
   const py = snap.prevXY[j + 1] as number
   out[offset] = px + (cx - px) * alpha
   out[offset + 1] = py + (cy - py) * alpha
+}
+
+/**
+ * Writes car slot `i`'s DRAWN frame position into `out[offset]`,
+ * `out[offset + 1]` — the position `buildFrame` puts in `RenderFrame.carXY`.
+ *
+ * The same lerp as `lerpCar`, over the smoothed pair instead of the exact one,
+ * so that everything Decision 2 established about interpolating between two
+ * resolved samples — convexity, no overshoot, a corner cut rather than a
+ * corner miss — still holds of the thing on screen.
+ *
+ * **There is deliberately no `prevLive` branch here, and it is not an
+ * omission.** `advanceDraw` writes `drawPrevXY = drawCurrXY` for exactly the
+ * slots `lerpCar` would snap, so the branch would be a second, independently
+ * sufficient copy of a rule that already has a home — and by this repo's own
+ * catalogue, two independently sufficient structures leave NEITHER with a
+ * detector. One rule, one place, one mutation target.
+ */
+export function drawCar(
+  snap: CarSnapshots,
+  i: number,
+  alpha: number,
+  out: Float32Array,
+  offset: number,
+): void {
+  const j = i * 2
+  const px = snap.drawPrevXY[j] as number
+  const py = snap.drawPrevXY[j + 1] as number
+  out[offset] = px + ((snap.drawCurrXY[j] as number) - px) * alpha
+  out[offset + 1] = py + ((snap.drawCurrXY[j + 1] as number) - py) * alpha
 }
