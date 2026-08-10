@@ -1,11 +1,4 @@
-import {
-  FIRST_PIN_DELAY_TICKS,
-  REVEALED_H,
-  REVEALED_W,
-  REVEALED_X0,
-  REVEALED_Y0,
-  firstCity,
-} from '@laneways/shared'
+import { REVEALED_H, REVEALED_W, REVEALED_X0, REVEALED_Y0 } from '@laneways/shared'
 import {
   createFieldInputRanges,
   createFlowFields,
@@ -42,7 +35,19 @@ import {
   type SizableCanvas,
 } from './shell'
 import { createEraseControl, type EraseControl, type FallbackElementFactory } from './eraseControl'
-import { seedStartingCity } from './startingCity'
+import { layoutFor } from './layouts'
+import { startParam } from './telegram'
+
+/**
+ * The city layout's three run constants live in `startingCity.ts` and are
+ * re-exported here, unchanged, so every existing importer keeps working.
+ *
+ * They moved when the layout registry landed: `layouts.ts` binds them into the
+ * `city` entry at module scope, and leaving them here would have made
+ * `layouts.ts` import `main.ts` back. See the note above them in
+ * `startingCity.ts` for why that cycle fails in production and passes in tests.
+ */
+export { RUN_SEED, SEED_FIRST_PIN_TICK, WARM_START_TICKS } from './startingCity'
 
 /**
  * The wiring — plan Task 9. Everything the previous eight tasks built, assembled
@@ -70,8 +75,9 @@ import { seedStartingCity } from './startingCity'
  * ---------------------------------------------------------------------------
  *
  * ```
+ * 0  layoutFor(deps.layoutId)               which board — see `layouts.ts`
  * 1  world, state, scratch, fields          nothing can be seeded before state exists
- * 2  seedStartingCity                       BEFORE the shell: the frame builder sizes
+ * 2  layout.seed                            BEFORE the shell: the frame builder sizes
  *                                           its arrays off state, and M2 has no spawner
  * 3  bootShell                              calls boot() ITSELF — see the note below —
  *                                           then measures, sizes, and builds the atlas
@@ -113,75 +119,6 @@ import { seedStartingCity } from './startingCity'
  */
 
 /**
- * The tick on which Task 2's seeded city produces its first pin, **measured**.
- *
- * The one literal the warm start rests on, and `test/integration.test.ts`
- * re-measures it by stepping the real seeded city until a pin appears — so a
- * change to the city, to `PIN_PERIOD_TICKS` or to `FIRST_PIN_DELAY_TICKS` fails
- * loudly here instead of silently making `WARM_START_TICKS` the wrong number.
- * `packages/game/test/startingCity.test.ts` holds the same 378 as its own
- * hand-derived `FIRST_PIN_TICK`.
- *
- * How many ticks to run before the first frame is drawn.
- *
- * **Derived, not tuned.** Task 2's hand-authored city produces its first pin at
- * tick **378**, which is 12.6 s at 30 Hz — so a fresh launch shows a live board
- * with no pin, no dispatch and no moving car for twelve seconds. That is
- * spec-correct pacing and Task 2 was right not to change it, but it is a bad
- * instrument for a first playtest and an unexplained dead board gets diagnosed
- * as a rendering bug.
- *
- * 378 decomposes exactly, and only one of the two parts is a design decision:
- *
- * ```
- * 378 = FIRST_PIN_DELAY_TICKS (120)          a destination waits 4 s for its first
- *                                            customer — spec-correct, and KEPT
- *     + ceil(PIN_PERIOD_TICKS / slotCount)   the colour accumulator climbing 518 at
- *       - 1  =  ceil(518 / 2) - 1 = 258      2 slots a tick (two square colour-0
- *                                            destinations) from an EMPTY start
- * ```
- *
- * The second term is not pacing, it is the cost of the accumulator starting at
- * zero on a board that is handed three destinations at once. Running those 258
- * ticks before the first frame removes exactly that term and keeps exactly the
- * designed delay: **the first pin then lands 120 ticks — 4.00 s — after launch.**
- *
- * **It moves no golden**, and that is why it is the lever this task took. The
- * plan's own suggestion — make destination 0 a circle, `slotCount` 3, first pin
- * at tick 292 — was measured and **rejected**: it changes `destMeta[0]`, so
- * `hashState` after seeding moves from the seeded-state golden to a different
- * number, and the task's constraints say to stop and report rather than
- * re-bless. It is also the weaker lever: 292 ticks is still **9.7 s** of dead
- * board, against 4.0 s here.
- *
- * The two figures, restated at M1d Task 5 because the state buffer grew from
- * 11,908 to 13,828 bytes there (`ghostMask` + `ghostCommitted`) and both moved
- * for layout: the seeded golden is **`1178110182`** (was `3576722662` at M1d
- * Task 2, `2505371110` at M2) and the rejected circle variant is
- * **`996383454`** (was `947517150`, `4171132894`). Nothing greps this comment,
- * so it is re-derived rather than trusted whenever the buffer changes shape —
- * both numbers were re-measured here, and splicing the inserted bytes back out
- * reproduced the two Task 2 values (`3576722662` and `947517150`) exactly,
- * which is what confirms the pair still describes the same two states. That the
- * REJECTED figure reproduces as well as the accepted one is a second,
- * independent check on the splice method itself. **M1d changes the buffer shape
- * twice and no more; this is the second, so these two numbers are final for the
- * milestone.**
- *
- * **What it costs, measured:** 258 `step` calls at boot, 6.8 ms on the
- * development machine, once. Nothing visible changes across those ticks — no
- * pin, no car moves, no road, no score, and `weekOfTick(258)`/`dayOfWeek(258)`
- * are still 0/0, so the HUD reads exactly as it does at tick 0. The only state
- * that moves is `pinAccum`, which is what the wait was for. `test/integration.test.ts`
- * re-derives 258 from `FIRST_PIN_DELAY_TICKS` and a live measurement of the
- * seed's first-pin tick, so if either the city or the constants move, this
- * number fails rather than silently becoming wrong.
- *
- * **What it is not:** a substitute for M1e's authored spawn schedule. A run that
- * begins at tick 258 is still the out-of-band, non-replayable seed
- * `startingCity.ts` documents; M2 submits nothing to a leaderboard either way.
- */
-/**
  * The build id `vite.config.ts` mints, or `'dev'` where there is no bundler.
  *
  * **This is what the deploy check greps the live bundle for**, and it is only
@@ -197,20 +134,6 @@ export const BUILD_ID: string =
   typeof __LANEWAYS_BUILD_ID__ === 'string' ? __LANEWAYS_BUILD_ID__ : 'dev'
 ;(globalThis as Record<string, unknown>).lanewaysBuild = BUILD_ID
 
-export const SEED_FIRST_PIN_TICK = 378
-
-/** See `SEED_FIRST_PIN_TICK`. 378 - 120 = 258. */
-export const WARM_START_TICKS = SEED_FIRST_PIN_TICK - FIRST_PIN_DELAY_TICKS
-
-/**
- * The RNG seed every M2 run uses.
- *
- * Fixed rather than random, deliberately: M2 submits nothing to a leaderboard
- * (`startingCity.ts` explains why), and a playtest build where every launch is
- * the same board is a better instrument than one where it is not. M3's
- * persistence is what gives a run its own seed.
- */
-export const RUN_SEED = 'laneways-m2'
 
 /** The canvas members this file needs: the shell's, plus a pointer-event target. */
 export type GameCanvas = SizableCanvas
@@ -237,8 +160,17 @@ export interface GameDeps {
   /** Production: `rafSettle`. */
   readonly settle: (run: () => void) => void
   readonly seed?: string
-  /** Defaults to `WARM_START_TICKS`. 0 disables the warm start entirely. */
+  /** Defaults to the layout's own `warmStartTicks`. 0 disables the warm start entirely. */
   readonly warmStartTicks?: number
+  /**
+   * Which board to open on — a key of `LAYOUTS` (`layouts.ts`).
+   *
+   * `undefined` (and `''`) mean the shipped starting city, which is what every
+   * launch that names nothing gets. An id that is not in the table THROWS; see
+   * `layoutFor`. `startGame` reads it from `layoutToken(location.hash,
+   * location.search, startParam())`.
+   */
+  readonly layoutId?: string
   /**
    * Force the erase control's DOM fallback even where a `MainButton` exists.
    * `startGame` reads it from `?fallback=1`; see `EraseControlDeps.preferFallback`
@@ -271,16 +203,25 @@ export interface Game {
    * `render`'s `Atlases` and `assertAtlases` exist for.
    */
   readonly atlases: Atlases
-  /** How many ticks ran before the first frame. See `WARM_START_TICKS`. */
+  /** How many ticks ran before the first frame. See the layout's own constant. */
   readonly warmStartTicks: number
+  /** The layout this game opened on — `'city'` unless a link named another. */
+  readonly layoutId: string
   /** One frame. `now` is `requestAnimationFrame`'s own timestamp — there is no second clock. */
   readonly frame: (now: number) => void
 }
 
 export function createGame(deps: GameDeps): Game {
-  const map = firstCity()
+  // The ONE line that decides which board this run opens on. With no token
+  // `layoutFor` returns the `city` entry, whose four fields are exactly the
+  // four values this function used to name inline — so the default path is
+  // instruction-for-instruction what it was and no golden can move through it.
+  // An unknown token throws by name rather than falling back; `layouts.ts`
+  // says why that matters more than it looks.
+  const layout = layoutFor(deps.layoutId)
+  const map = layout.map()
   const world = createWorld(map)
-  const state = createState(deps.seed ?? RUN_SEED, map)
+  const state = createState(deps.seed ?? layout.runSeed, map)
   const scratch = createScratch(
     world.cells,
     map.groupCount,
@@ -291,8 +232,10 @@ export function createGame(deps: GameDeps): Game {
 
   // Before anything else that reads state: `placeHouse`/`placeDestination` have
   // no other production caller and `step`'s seven phases contain no spawner, so
-  // without this the build renders terrain and roads and nothing else.
-  seedStartingCity(state, world)
+  // without this the build renders terrain and roads and nothing else. The
+  // seeder throws by name on any rejected placement rather than shipping half a
+  // city — both layouts, same rule.
+  layout.seed(state, world)
 
   // `let`, and read through the `draw` closure below rather than captured by
   // value: the shell calls `rebuildAtlas` at boot AND on every device-tile
@@ -332,32 +275,32 @@ export function createGame(deps: GameDeps): Game {
   // The warm start (see `WARM_START_TICKS`), through `sim`'s own `step` with an
   // empty batch — byte-identical to the player having had the app open for 8.6
   // seconds longer, which is exactly what it is standing in for.
-  const warmStartTicks = deps.warmStartTicks ?? WARM_START_TICKS
+  const warmStartTicks = deps.warmStartTicks ?? layout.warmStartTicks
   for (let t = 0; t < warmStartTicks; t++) step(state, world, fields, scratch, queue.inputs)
 
   // Before the first frame, always: an unwritten `Float32Array` is all-zero,
   // which is grid cell (0, 0), so without this call the whole city streaks in
   // from the board's top-left corner on frame 1.
   //
-  // **Placed after the warm start, and TODAY that ordering is an equivalence
-  // rather than a requirement — the reason matters more than the fact.** Moving
-  // this call above the warm-start loop survives every test, and the honest
-  // reason is not "the snapshots are refreshed each frame" (they are, but only
-  // for slots the driver resolves) — it is that **no car moves during the warm
-  // start at all**. `seedStartingCity` lays no roads, so no route exists, so
-  // `runDispatch` never leaves any car in `PHASE_IDLE`; the resolver returns
-  // each car's own house cell on every tick of the ramp. Measured to 9,000
-  // warm-start ticks: the two orderings produce byte-identical snapshots.
+  // **Placed after the warm start, and that ordering is now a REQUIREMENT
+  // rather than an equivalence. The demo layout is the change that ended it,
+  // exactly as the paragraph below predicted.** On the shipped city the two
+  // orderings are byte-identical to 9,000 warm-start ticks, because
+  // `seedStartingCity` lays no roads, so no route exists, so no car ever leaves
+  // `PHASE_IDLE` and the resolver returns each car's own house cell on every
+  // tick of the ramp. **The demo layout seeds 70 road segments**, so its cars
+  // are dispatched, routed and moving from tick 178 of a 1,200-tick ramp:
+  // snapshotting before the ramp would lerp 24 cars across a thousand ticks of
+  // motion on frame 1 — the streak this call exists to prevent, at the worst
+  // possible scale. No code moves; the reason it may not move is now a live
+  // one. `layouts.test.ts` and `demoLayout.test.ts` are the observers.
   //
-  // **What makes it stop being equivalent, so nobody reorders it on the strength
-  // of that survival.** The equivalence is a property of the STATE this function
-  // is handed, not of the code: it holds exactly while every car is parked when
-  // the snapshot is taken. Two things in flight break it. **M3's restore** hands
-  // `createGame` a state with cars mid-route, and a snapshot taken before the
-  // ramp would then lerp every one of them across up to 258 ticks of motion on
-  // frame 1 — the streak this call exists to prevent, reintroduced at a
-  // different scale. **M1e's in-`step` spawner** breaks it the same way, by
-  // making a car appear during the ramp with no prev entry. Keep the call last.
+  // **The general rule, which the demo layout is only the first instance of.**
+  // The equivalence was a property of the STATE this function is handed, not of
+  // the code: it holds exactly while every car is parked when the snapshot is
+  // taken. Two more things in flight break it the same way. **M3's restore**
+  // hands `createGame` a state with cars mid-route. **M1e's in-`step` spawner**
+  // makes a car appear during the ramp with no prev entry. Keep the call last.
   initCarSnapshots(builder.snapshots, state, world)
 
   const loop = createLoop(
@@ -411,6 +354,7 @@ export function createGame(deps: GameDeps): Game {
     queue,
     erase,
     warmStartTicks,
+    layoutId: layout.id,
     get atlases(): Atlases {
       return atlases as Atlases
     },
@@ -621,6 +565,121 @@ export function prefersFallback(search: string): boolean {
 }
 
 /**
+ * Telegram's launch parameters, parsed out of `location.hash`.
+ *
+ * **The fragment, never the query, and this is a fact about the SDK this build
+ * loads rather than a preference.** `index.html` ships
+ * `https://telegram.org/js/telegram-web-app.js`; that file reads
+ * `location.hash` on its seventh line, hands it to `urlParseHashParams`, and
+ * never mentions `location.search` anywhere. Every launch parameter —
+ * `tgWebAppData`, `tgWebAppVersion`, `tgWebAppPlatform`, `tgWebAppStartParam`
+ * — arrives there. The two are disjoint: Telegram only ever APPENDS a
+ * fragment, so a query string baked into a Web App URL survives, and a
+ * fragment parameter is invisible to `prefersFallback` above.
+ *
+ * The `_path`-before-`?` strip mirrors the SDK's own `urlParseHashParams`: a
+ * fragment may be `#_path=%2F%3Fa%3Db&tgWebAppData=...` or plain
+ * `#tgWebAppData=...`, so everything before the first `?` is dropped when there
+ * is one.
+ *
+ * A parameter rather than a read of `location`, in the same idiom
+ * `prefersFallback` already uses, so both branches have a detector.
+ */
+export function hashParams(hash: string): URLSearchParams {
+  const body = hash.replace(/^#/, '')
+  const query = body.indexOf('?')
+  return new URLSearchParams(query >= 0 ? body.slice(query + 1) : body)
+}
+
+/**
+ * Telegram's own `startapp` charset: `[A-Za-z0-9_-]`, at most 512 characters.
+ *
+ * A value outside it did not come from a Telegram link, so it is refused rather
+ * than passed to a layout lookup — which keeps a hostile or corrupted fragment
+ * from reaching `layoutFor`'s error path with arbitrary text in it, and keeps
+ * the prototype-key question (`layouts.ts`) to one guard instead of two.
+ */
+const LAYOUT_TOKEN = /^[\w-]{1,512}$/
+
+/**
+ * Which layout this launch asked for, or `''` for "the shipped starting city".
+ *
+ * **Three sources, one per reachable launch path, and all three are needed.**
+ *
+ * ```
+ * tgWebAppStartParam (hash)   t.me/<bot>/<app>?startapp=demo — inside Telegram,
+ *                             readable with no SDK at all, so it still works if
+ *                             the SDK script failed to load (silent on iOS)
+ * initDataUnsafe.start_param  the SAME value, SDK-parsed out of the signed
+ *                             payload — the hedge for a client that signs it in
+ *                             without mirroring it into the fragment
+ * ?layout= (query)            the raw https URL in mobile Safari, and the only
+ *                             one that works under `pnpm dev`
+ * ```
+ *
+ * **A phone cannot type any of them, and that is the whole reason the first two
+ * exist.** A Telegram webview has no address bar. `?fallback=1` — this
+ * milestone's documented recovery hatch for "MainButton reported but never
+ * rendered" — is therefore unreachable inside Telegram today unless somebody
+ * edits the BotFather URL by hand. A `startapp` link is a message the player
+ * sends themselves and taps, one line per layout, and `?startapp=fallback`
+ * would revive that hatch for free if a future task wires it.
+ *
+ * **`''` means the default and an unknown-but-well-formed token means a
+ * THROW**, and the difference is deliberate: a value outside the charset is
+ * noise, but `demoo` is a person who meant something. `layoutFor` owns that
+ * distinction; this function only decides whether a token was supplied at all.
+ */
+export function layoutToken(hash: string, search: string, fromInitData: string | null): string {
+  const raw =
+    hashParams(hash).get('tgWebAppStartParam') ??
+    fromInitData ??
+    new URLSearchParams(search).get('layout') ??
+    ''
+  return LAYOUT_TOKEN.test(raw) ? raw : ''
+}
+
+/** The two `location` members the launch options are derived from. */
+export interface LaunchUrl {
+  readonly hash: string
+  readonly search: string
+}
+
+/** What a launch URL plus Telegram's `start_param` decide about a run. */
+export interface LaunchOptions {
+  readonly preferFallback: boolean
+  readonly layoutId: string
+}
+
+/**
+ * Everything `startGame` reads off the URL, in one function, **so that it has a
+ * detector**.
+ *
+ * `startGame` touches `document` and `location` and therefore cannot run under
+ * vitest's Node environment at all — which is exactly the shape `wireGame` was
+ * extracted for, after deleting a call from `startGame` scored 0 detectors
+ * across the whole suite. The same measurement was taken here: with the two
+ * properties written inline, removing the `layoutId` line from `startGame`
+ * scored **0 detectors**, so the one line wiring the entire layout mechanism to
+ * production had nothing watching it.
+ *
+ * Both properties travel together on purpose. They read the same two strings,
+ * they are both "what did the link ask for", and a future third — `?startapp=`
+ * reviving the `fallback` hatch, which §1 of this file's research showed is
+ * unreachable inside Telegram today — belongs here rather than as a fourth
+ * argument at the call site.
+ *
+ * Takes the URL as a structural parameter rather than reading `location`, in
+ * the idiom `prefersFallback` and `layoutToken` already use.
+ */
+export function launchOptions(url: LaunchUrl, startParamValue: string | null): LaunchOptions {
+  return {
+    preferFallback: prefersFallback(url.search),
+    layoutId: layoutToken(url.hash, url.search, startParamValue),
+  }
+}
+
+/**
  * Whether this module should start the game on import.
  *
  * A predicate rather than an inline `typeof document !== 'undefined'`, so the
@@ -665,7 +724,7 @@ export function startGame(): Game {
     createFallback: createFallbackButton,
     measure: measureViewport,
     settle: rafSettle,
-    preferFallback: prefersFallback(location.search),
+    ...launchOptions(location, startParam()),
   })
 
   wireGame(game, canvas, document, requestAnimationFrame, window, rafSettle)

@@ -334,6 +334,11 @@ describe('sim source obeys the determinism rules', () => {
       'shared/src/constants.ts',
       'shared/src/index.ts',
       'shared/src/mapFormat.ts',
+      // Added with the demo layout: a second hand-authored map, so that the
+      // shipped `firstCity` is not edited and the four whole-buffer goldens
+      // that fold its bytes cannot move. It is a `parseMap` call over frozen
+      // row strings and is subject to every rule this scan enforces.
+      'shared/src/maps/demoCity.ts',
       'shared/src/maps/firstCity.ts',
       'sim/src/blocking.ts',
       'sim/src/buildings.ts',

@@ -44,8 +44,10 @@ import { TICK_MS } from '../src/loop'
 import { PointerOutcome } from '../src/pointer'
 import { EraseControlSurface } from '../src/eraseControl'
 import { SizingOutcome } from '../src/shell'
+import { DEMO_WARM_START_TICKS } from '../src/demoLayout'
 import {
   CANVAS_ELEMENT_ID,
+  RUN_SEED,
   SEED_FIRST_PIN_TICK,
   WARM_START_TICKS,
   attachPointerEvents,
@@ -240,7 +242,13 @@ interface Rig {
 }
 
 function buildRig(
-  options: { warmStartTicks?: number; fallback?: boolean; preferFallback?: boolean } = {},
+  options: {
+    warmStartTicks?: number
+    fallback?: boolean
+    preferFallback?: boolean
+    layoutId?: string
+    seed?: string
+  } = {},
 ): Rig {
   const ctx = new RecordingContext()
   let view: (typeof M0_VIEW) | (typeof NARROW_VIEW) = M0_VIEW
@@ -269,6 +277,8 @@ function buildRig(
     },
     warmStartTicks: options.warmStartTicks,
     preferFallback: options.preferFallback,
+    layoutId: options.layoutId,
+    seed: options.seed,
   })
 
   const camera = (): ReturnType<typeof game.shell.resize> extends never ? never : Game['shell']['camera'] =>
@@ -1859,5 +1869,145 @@ describe('20,000 ticks on a deliberately bad network', () => {
     // state of the same shape, or `toBe` would pass on a run that never ran.
     const fresh = buildJamRig('long-run', JAM_STARVED_FIRST_HOUSE_Y, JAM_STARVED_HOUSE_COUNT)
     expect(hashState(rig.state)).not.toBe(hashState(fresh.state))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The layout switch, through the real boot path
+// ---------------------------------------------------------------------------
+
+/**
+ * `layouts.test.ts` tests the registry and `layoutSelect.test.ts` tests the
+ * token; this is the only place the two meet `createGame` and a real frame.
+ *
+ * The important half is the NEGATIVE one: a build that can open a second board
+ * must not have changed the first, and "the goldens still hold" is a claim
+ * about `hashState`, not about the assembled game.
+ */
+describe('createGame opens the layout it was asked for', () => {
+  it('defaults to the shipped starting city, with today’s warm start and seed', () => {
+    const rig = buildRig()
+    expect(rig.game.layoutId).toBe('city')
+    expect(rig.game.world.map.id).toBe('firstCity')
+    expect(rig.game.warmStartTicks).toBe(WARM_START_TICKS)
+    expect(rig.game.state.header[H_TICK] as number).toBe(WARM_START_TICKS)
+    // Three houses, three destinations, six cars — the board the player called
+    // "the same demo", unchanged by everything in this task.
+    expect(rig.game.state.header[H_HOUSE_COUNT] as number).toBe(3)
+    expect(rig.game.state.header[H_DEST_COUNT] as number).toBe(3)
+    // `carPhase` is sized by the MAP (`CARS_PER_HOUSE * maxHouses`), not by the
+    // seed: `firstCity` allows 40 houses, so 80 slots of which 6 are live.
+    expect(rig.game.state.carPhase.length).toBe(80)
+  })
+
+  it('opens the demo board on layoutId "demo", already busy on the first frame', () => {
+    const rig = buildRig({ layoutId: 'demo' })
+    expect(rig.game.layoutId).toBe('demo')
+    expect(rig.game.world.map.id).toBe('demoCity')
+    expect(rig.game.warmStartTicks).toBe(DEMO_WARM_START_TICKS)
+    expect(rig.game.state.header[H_TICK] as number).toBe(DEMO_WARM_START_TICKS)
+    expect(rig.game.state.header[H_HOUSE_COUNT] as number).toBe(12)
+    expect(rig.game.state.header[H_DEST_COUNT] as number).toBe(18)
+    expect(rig.game.state.carPhase.length).toBe(24)
+
+    // The claim the whole task rests on, asserted on the FRAME rather than on
+    // the state: the first thing drawn already has most of the fleet moving.
+    let inFlight = 0
+    for (let c = 0; c < rig.game.state.carPhase.length; c++) {
+      const phase = rig.game.state.carPhase[c] as number
+      if (phase === PHASE_OUTBOUND || phase === PHASE_RETURNING) inFlight++
+    }
+    expect(inFlight).toBeGreaterThanOrEqual(15)
+    rig.oneTick(0)
+    const frame = rig.game.builder.frame
+    expect(frame.carCount).toBeGreaterThanOrEqual(15)
+    expect(frame.destCount).toBe(18)
+  })
+
+  it('draws the demo board — the real draw path, not just the state', () => {
+    // The catalogue's "a green harness is a claim about the inputs it was
+    // given": every render test in the repo runs on `firstCity`, and a
+    // 24-car / 18-destination board is the first thing to exceed both of that
+    // map's limits. A throw or a silent truncation here is a shipped blank
+    // screen on the demo link.
+    const rig = buildRig({ layoutId: 'demo' })
+    rig.oneTick(0)
+    expect(rig.ctx.log.length).toBeGreaterThan(0)
+    // Roads are blitted from the atlas; cars, houses and destinations are
+    // filled in their group colour. Both are asserted by name, because the
+    // terrain fold alone would leave the log non-empty and every one of these
+    // could be missing behind it.
+    expect(rig.ctx.log.some((c) => c.op === 'blit'), 'roads blitted').toBe(true)
+    const groupFills = new Set(
+      rig.ctx.log
+        .filter((c): c is Extract<Command, { op: 'fill' }> => c.op === 'fill')
+        .map((c) => c.style)
+        .filter((style) => (PALETTE.groups as readonly string[]).includes(style)),
+    )
+    expect(groupFills.size, 'all three colour groups drawn').toBe(3)
+  })
+
+  it('seeds the RNG from the LAYOUT’s own seed, not the shipped city’s', () => {
+    // `createState` mixes the seed string into `rngState`, which is inside the
+    // hashed buffer, so this is observable even though nothing in a warm start
+    // draws a random number. Without it, `layout.runSeed` has no detector at
+    // all: measured at 0 across the whole suite, because the two layouts differ
+    // in map and seeder as well and every other assertion is satisfied by those.
+    const own = buildRig({ layoutId: 'demo' })
+    const forced = buildRig({ layoutId: 'demo', seed: RUN_SEED })
+    expect(own.game.state.header[H_TICK]).toBe(forced.game.state.header[H_TICK])
+    expect(hashState(own.game.state)).not.toBe(hashState(forced.game.state))
+  })
+
+  it('snapshots the cars AFTER the warm start, not before it', () => {
+    // **`main.ts` says this ordering stopped being an equivalence when the demo
+    // layout landed, and that sentence needed a detector or it was the
+    // catalogue's "overstated comment that discharges an obligation".** Moving
+    // `initCarSnapshots` above the warm-start loop was measured at 0 detectors
+    // before this test existed.
+    //
+    // On the shipped city the two orderings really are identical — no road, so
+    // no car moves during the ramp. On the demo board 24 cars are dispatched,
+    // routed and moving from tick 178 of a 1,200-tick ramp, so a snapshot taken
+    // first holds every car at its house and frame 1 lerps the whole fleet
+    // across a thousand ticks of motion.
+    const rig = buildRig({ layoutId: 'demo' })
+    const snap = rig.game.builder.snapshots
+    const state = rig.game.state
+    const w = rig.game.world.w
+    let live = 0
+    let awayFromHome = 0
+    for (let i = 0; i < snap.slots; i++) {
+      if ((snap.currLive[i] as number) === 0) continue
+      live++
+      const cell = state.carCell[i] as number
+      // The snapshot is a fractional grid position; a car mid-crossing is up to
+      // one cell from its `carCell`, and no further.
+      expect(Math.abs((snap.currXY[i * 2] as number) - (cell % w)), `car ${i} x`).toBeLessThanOrEqual(1)
+      expect(
+        Math.abs((snap.currXY[i * 2 + 1] as number) - ((cell / w) | 0)),
+        `car ${i} y`,
+      ).toBeLessThanOrEqual(1)
+      // `prev` and `curr` are written from the same state, so frame 1 does not
+      // lerp at all.
+      expect(snap.prevXY[i * 2]).toBe(snap.currXY[i * 2])
+      expect(snap.prevXY[i * 2 + 1]).toBe(snap.currXY[i * 2 + 1])
+      if (cell !== (state.houseCell[state.carHome[i] as number] as number)) awayFromHome++
+    }
+    // Non-vacuity, and it is the whole test: the bound above is satisfied
+    // trivially by a car that never left home, which is exactly the state the
+    // wrong ordering would snapshot.
+    expect(live).toBeGreaterThanOrEqual(20)
+    expect(awayFromHome).toBeGreaterThanOrEqual(15)
+  })
+
+  it('REFUSES an unknown layoutId at boot rather than opening the default board', () => {
+    // A silently-defaulting typo is indistinguishable from "the demo link does
+    // not work", which is the report this whole task exists to answer.
+    expect(() => buildRig({ layoutId: 'demoo' })).toThrow(/unknown layout "demoo"/)
+  })
+
+  it('treats an empty layoutId as absent, so a half-copied link still boots', () => {
+    expect(buildRig({ layoutId: '' }).game.layoutId).toBe('city')
   })
 })

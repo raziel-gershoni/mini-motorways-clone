@@ -97,6 +97,13 @@ interface WebAppLike {
   contentSafeAreaInset?: SafeAreaInset
   safeAreaInset?: SafeAreaInset
   MainButton?: MainButtonLike
+  /**
+   * The SDK's generic parse of the signed `tgWebAppData` payload. `unknown`
+   * rather than `string`, because this is a claim about a remote client: the
+   * key exists iff Telegram put it there, and a client is free to publish
+   * anything at all under it.
+   */
+  initDataUnsafe?: { start_param?: unknown }
 }
 
 function webApp(): WebAppLike | null {
@@ -152,6 +159,40 @@ export function isTelegram(): boolean {
 
 export function platformName(): string {
   return webApp()?.platform ?? 'browser'
+}
+
+/**
+ * `start_param` — the value a `t.me/<bot>/<app>?startapp=VALUE` link carries —
+ * or `null`.
+ *
+ * **This is how a player picks a layout on a phone, and it is the only way that
+ * needs no BotFather edit.** A Telegram webview has no address bar, so nothing
+ * can be typed into the URL; `?fallback=1` and `?layout=` therefore only work
+ * in a browser, or if the query is baked into the Web App URL by hand. A
+ * `startapp` link is a message the player sends themselves in Saved Messages
+ * and taps — one line per layout, switchable in one tap, no redeploy.
+ *
+ * **No version gate, deliberately.** Every other Telegram surface in this file
+ * is gated (`MainButton` at 6.0, `disableVerticalSwipes` at 7.7,
+ * `requestFullscreen` at 8.0). `start_param` predates all of them, and there is
+ * nothing to call — this is a property read, so the worst a client can do is
+ * not publish it, which is the `null` branch.
+ *
+ * **The same value also arrives as the `tgWebAppStartParam` launch parameter in
+ * `location.hash`, and `main.ts` reads BOTH.** They are two views of one value
+ * and either can be missing: the hash form needs no SDK at all (so it survives
+ * the SDK script failing to load, which spec §8.5 says is silent on iOS), and
+ * this form survives a client that signs the value into `tgWebAppData` without
+ * mirroring it into the fragment. Reading one and not the other is a silent
+ * "the link did nothing".
+ *
+ * Never throws, and returns `null` for a non-string: `initDataUnsafe` is
+ * whatever the client parsed out of a query string, so a caller must not be
+ * handed a number or an object to concatenate into a lookup key.
+ */
+export function startParam(): string | null {
+  const value = webApp()?.initDataUnsafe?.start_param
+  return typeof value === 'string' ? value : null
 }
 
 export function clientVersion(): string {

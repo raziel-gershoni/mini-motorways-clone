@@ -7,17 +7,15 @@ import {
   createWorld,
   placeDestination,
   placeHouse,
-  routeStep,
   step,
   DEST_KIND_SQUARE,
-  DX,
-  DY,
   ORIENTATION_S,
   PHASE_OUTBOUND,
   PHASE_RETURNING,
   H_SCORE,
   type TickAction,
 } from '@laneways/sim'
+import { longestQueue } from '../src/queueProbe'
 
 /**
  * **The jam fixture — M1d Task 9.** A bottleneck that genuinely jams, with its
@@ -324,63 +322,23 @@ export function buildJamRig(
 }
 
 /**
- * The longest chain of in-flight cars in which each is standing on the cell the
- * one behind it is trying to enter — **the queue length**, read off production
- * state with no queue structure anywhere in `sim` (there is none; queueing
- * emerges).
+ * The longest queue standing on this rig, delegated to the production probe.
  *
- * The "car in front of me" relation is **functional** — a car has exactly one
- * next cell, so at most one car ahead — which is why this is a forward walk
- * rather than a tree search. The visited set is not decoration: a cycle of
- * length >= 3 is precisely the deadlock the valve exists for, and without the
- * set this walk would not terminate on one. (A 2-cycle cannot occur: Decision 1
- * puts opposite directions in different lanes.)
+ * **It used to be a copy of the algorithm and is now a one-line adapter**, and
+ * the reason is a measured coverage hole rather than tidiness: when
+ * `src/queueProbe.ts` was added for the demo layout, two mutations of it —
+ * dropping the return leg's direction reversal, and counting parked cars —
+ * scored **0 detectors**, because the only readers were inequality thresholds
+ * loose enough to survive a wrong answer. This file's callers
+ * (`integration.test.ts`, `allocation.test.ts`) assert bounds on the figure
+ * against a corridor whose queue length is hand-derivable, so pointing them at
+ * the same implementation is what gives it observers.
  *
- * Allocates, so it is called outside profiled windows.
+ * `longestQueue` allocates two `Map`s and a `Set` per call, so this is called
+ * outside profiled windows — unchanged from when the code lived here.
  */
 export function jamQueueLength(rig: JamRig): number {
-  const { state, world } = rig
-  const carAt = new Map<number, number>()
-  for (let c = 0; c < state.carPhase.length; c++) {
-    const p = state.carPhase[c] as number
-    if (p === PHASE_OUTBOUND || p === PHASE_RETURNING) carAt.set(state.carCell[c] as number, c)
-  }
-  const ahead = new Map<number, number>()
-  for (let c = 0; c < state.carPhase.length; c++) {
-    const p = state.carPhase[c] as number
-    if (p !== PHASE_OUTBOUND && p !== PHASE_RETURNING) continue
-    const cur = state.carCell[c] as number
-    const cursor = state.carRouteCursor[c] as number
-    const len = state.carRouteLen[c] as number
-    let dir: number
-    if (p === PHASE_OUTBOUND) {
-      if (cursor >= len) continue
-      dir = routeStep(state, c, cursor)
-    } else {
-      if (cursor <= 0) continue
-      dir = (routeStep(state, c, cursor - 1) + 4) % 8
-    }
-    const nx = (cur % world.w) + (DX[dir] as number)
-    const ny = ((cur / world.w) | 0) + (DY[dir] as number)
-    if (nx < 0 || nx >= world.w || ny < 0 || ny >= world.h) continue
-    const front = carAt.get(ny * world.w + nx)
-    if (front !== undefined) ahead.set(c, front)
-  }
-  let longest = 0
-  for (const c of carAt.values()) {
-    const seen = new Set<number>([c])
-    let cur = c
-    let len = 1
-    for (;;) {
-      const next = ahead.get(cur)
-      if (next === undefined || seen.has(next)) break
-      seen.add(next)
-      cur = next
-      len++
-    }
-    if (len > longest) longest = len
-  }
-  return longest
+  return longestQueue(rig.state, rig.world)
 }
 
 /** Cells whose `ghostMask` is non-zero. */

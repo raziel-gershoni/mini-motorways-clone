@@ -30,6 +30,21 @@ each, for layout only) and two blessed new.
 | `252514232` | **field** (`foldedFieldsHash` over `dist`/`dir`) | `packages/sim/test/rollback.test.ts:753` | **never moved, in any milestone** |
 | `294084758` | queue fixture | `packages/sim/test/loop.test.ts:2010` | new in Task 6 |
 | `3113654132` | multiplier fixture | `packages/sim/test/cars.test.ts:1777` | new in Task 7 |
+| `1039862014` | **demo layout** seed | `packages/game/test/demoLayout.test.ts` | new with the demo layout (post-M1d) |
+
+**An EIGHTH golden was blessed after M1d closed, and it moved none of the seven.**
+`1039862014` is `hashState` immediately after `seedDemoLayout` on a fresh
+`createState('laneways-demo', demoCity())` — a **second map**, `demoCity`, with
+its own `id`, so `mapIdHash` cannot collide with `firstCity` and none of the four
+whole-buffer digests can see it. `firstCity.ts` and `startingCity.ts` were not
+edited. All seven were re-run green by digest in the same suite run that blessed
+the eighth, and `demoLayout.test.ts` asserts `1178110182` **in its own file** so
+the two live side by side.
+
+**There is deliberately no post-warm-start golden for the demo layout.** A demo
+board gets tuned, and a golden that is re-blessed on every tune stops being a
+tripwire; its behaviour is pinned as inequalities over a measured 3,000-tick run
+instead, with the shipped city as the zero-scoring contrast in the same file.
 
 **Both re-bless licences are spent.** The four whole-buffer digests moved exactly
 twice, in the two tasks that changed buffer shape (Task 2: `occupancy`,
@@ -221,8 +236,10 @@ M2's only device evidence is qualitative, from a near-empty board: a human
 reports it feels smooth, on one phone, with a handful of cars.
 
 **A hundred queued cars is the first workload whose cost scales with traffic**,
-and M1d is the first milestone to make such a workload constructible. Nothing has
-been measured against one:
+and M1d is the first milestone to make such a workload constructible. The demo
+layout now CONSTRUCTS one — 24 cars, 20+ in flight, a car refused entry on 53 %
+of ticks — and it is measured for *allocation* (§8) but still not for *frame
+time* on a device. Nothing has been measured against one:
 
 - no Android, no `performanceClass: LOW`, no frame timings, at any density;
 - the draw path now blits a **second** atlas for ghost cells;
@@ -235,12 +252,41 @@ been measured against one:
 
 ## 8. The allocation harnesses, and what they now cover
 
-There are **two**, and confusing them has been a recurring defect:
+There are **three**, and confusing them has been a recurring defect:
 
 - `packages/game/test/allocation.test.ts` profiles `packages/game/src` **and**
   `packages/sim/src`. It measures **the tick**.
 - `packages/game/test/drawAllocation.test.ts` profiles `packages/render/src`,
   with its own budget and rig. It measures **the frame**.
+- `packages/game/test/demoAllocation.test.ts` profiles all three scopes on the
+  **demo board** — 24 cars, 18 destinations, 71 road cells. It measures the
+  existing frame loop under a **load no other rig produces**, and it is a
+  separate file for the same reason `drawAllocation` is: one context shape, one
+  profiled rig, because a profiler cannot tell the code under test from the
+  harness around it.
+
+**It found something on its first run, and the finding is exactly the shape the
+catalogue predicts.** `packages/sim/src/flowfield.ts` charges **16.8-21.8
+B/frame** on the demo board across four draws — present in every draw, so a
+signal and not a stray — against **1.5-1.8 B/frame** on the shipped starting
+city under the identical rig, which is below the 4 B noise floor and is why
+every existing harness is green. The difference is field-rebuild frequency: 18
+destinations move `destPins` almost every tick, so `syncFields` re-runs
+`computeFlowField`, where the starting city (no roads, one pin per 129 ticks)
+almost never does.
+
+**It is pre-existing, not introduced.** No `sim` file was touched by the demo
+layout; the code is M1b's and only the input is new. Likely mechanism, stated as
+a hypothesis because function-level profiler attribution is documented unstable
+in this repo: `computeFlowField`'s `push` helper is a closure over the mutable
+`top` and `pending`, which V8 boxes into a `Context` — the same shape `loop.ts`'s
+known residual has, one level up.
+
+**Owner: M1e, and the evidence lives in `demoAllocation.test.ts`'s
+`FLOWFIELD_ALLOWANCE_BYTES_PER_FRAME`.** That allowance asserts the violation is
+STILL PRESENT as well as bounded, so fixing it turns the test red and forces the
+exemption to be deleted rather than outliving the problem it documents. This is
+a named recipient, not "whoever owns the perf budget".
 
 At the close of M1d the tick side has four windows: a clean per-crossing window,
 a `completeTrip` window, a ghost treatment/control window, and Task 9's jam
@@ -387,3 +433,31 @@ elegant fade or as a rendering glitch, and **only a person looking at a phone ca
 tell those apart.** Fold it into the next hardware check alongside §7's frame
 cost — one session on a device answers both, and neither has any other route to
 an answer.
+
+---
+
+## 13. How to open the demo layout, and why it is not a query parameter
+
+**`t.me/<bot>/<app>?startapp=demo`.** Send yourself that line in Saved Messages
+and tap it; send a second message with no `?startapp=` for the shipped city.
+Switching board is then tapping a different line in one chat, with no BotFather
+edit and no redeploy.
+
+**Why not `?layout=demo`.** A Telegram webview has no address bar, so nothing can
+be typed into the URL. Telegram's SDK reads `location.hash` and never
+`location.search` — every launch parameter arrives in the fragment — so a query
+parameter inside Telegram exists only if it was baked into the Web App URL by
+hand. That is also why **`?fallback=1`, this project's documented recovery hatch
+for "MainButton reported but never rendered", is unreachable on a phone today.**
+`layoutToken` (`packages/game/src/main.ts`) already reads three sources; wiring
+`?startapp=fallback` into `preferFallback` would revive that hatch for the cost
+of one line, and it is the obvious next thing to do here.
+
+`?layout=demo` on the plain Worker URL still works in mobile Safari, and is the
+only path that works under `pnpm dev`.
+
+**A mistyped token throws by name.** `layoutFor` refuses an unknown id rather
+than falling back to the shipped city, because a silent fallback is
+indistinguishable from "the link did nothing" — which is the exact report this
+layout exists to answer.
+
