@@ -1,4 +1,14 @@
-import { DX, DY, PHASE_OUTBOUND, PHASE_RETURNING, routeStep, type GameState, type WorldData } from '@laneways/sim'
+import {
+  FREE,
+  LANE_OF_DIR,
+  PHASE_OUTBOUND,
+  PHASE_RETURNING,
+  occupantOf,
+  routeStep,
+  stepCell,
+  type GameState,
+  type WorldData,
+} from '@laneways/sim'
 
 /**
  * **A queue length read off production state, with no queue structure
@@ -11,59 +21,159 @@ import { DX, DY, PHASE_OUTBOUND, PHASE_RETURNING, routeStep, type GameState, typ
  * because a `src` module may not import a test fixture — the dependency would
  * point the wrong way and would not survive a build.
  *
- * **The "car in front of me" relation is FUNCTIONAL.** A car has exactly one
- * next cell — the next step of its own committed route — so it has at most one
- * car ahead, which is why this is a forward walk rather than a tree search.
+ * ---------------------------------------------------------------------------
+ * THE OCCUPANCY ARRAY IS READ, NOT RECONSTRUCTED — AND THE FIRST VERSION
+ * RECONSTRUCTED IT WRONG
+ * ---------------------------------------------------------------------------
  *
- * **The visited set is not decoration.** A cycle of length >= 3 is precisely
- * the deadlock `MAX_BLOCKED_TICKS` exists for, and without the set this walk
- * would not terminate on one. A 2-cycle cannot occur: opposite directions land
- * in different lanes (`LANE_OF_DIR`), so two cars cannot each be waiting for
- * the other's cell in the same lane.
+ * "The car in front of me" is not a geometric question. It is exactly the
+ * question `canEnter` (`blocking.ts`) answers: car `i` is held up by whoever
+ * occupies **`(next, LANE_OF_DIR[dir])`**, the slot `claimCell` writes and
+ * `canEnter` reads. So that slot is what `carAheadOf` reads, through
+ * `occupantOf`, and nothing here rebuilds it.
  *
- * **It allocates** — two `Map`s and a `Set` per call — so it must never be
+ * **The version this replaced built its own `Map<cell, car>` keyed by the cell
+ * ALONE, and was wrong on 5.7-15.2 % of the questions it asked.** M1d's whole
+ * premise is that one cell carries two lanes: two in-flight cars legitimately
+ * share a `carCell` in opposite directions, and the demo layout advertises that
+ * as a visible feature. A one-car-per-cell map silently discarded the second and
+ * linked the follower to whichever was written last — sometimes a car travelling
+ * the *opposite* way, which is not in front of it and is not blocking it.
+ * Measured on the demo board after its warm start: some cell held 2+ in-flight
+ * cars on **85 %** of ticks, and the cell-keyed probe both over-reported (by up
+ * to 5) and under-reported (by up to 4) against this one.
+ *
+ * **Deriving the lane from the car's own direction of TRAVEL is also wrong, and
+ * that is the subtler half.** A car occupies the lane of the direction it
+ * ENTERED by, not the one it is about to leave by, and those differ at every
+ * turn and at every outbound->return flip — a car that has just turned around on
+ * a carpark stands in the northbound lane while facing south. Keying the
+ * occupant by its next step disagrees with `canEnter` on **5.9-10.0 %** of
+ * questions, and worst exactly where it matters most: on a starved corridor,
+ * where the queue stands *behind the car that has just flipped*, it disagreed on
+ * 96.8 % of ticks and read a longest queue of 11 against a true 16. Reading the
+ * array sidesteps the derivation entirely — it already accounts for turns, for
+ * the flip, for a car that has not crossed on its current leg and therefore
+ * holds no slot at all, and for a car displaced by the anti-deadlock valve.
+ *
+ * Measured over 90,533 car-questions on three fixtures — the demo board, the jam
+ * corridor and the starved corridor — this agrees with `canEnter` on **every
+ * one**. `queueProbe.test.ts` and `demoLayout.test.ts` assert that as a property
+ * rather than quoting the number.
+ *
+ * ---------------------------------------------------------------------------
+ * THREE FUNCTIONS RATHER THAN ONE, SO EACH CLAIM HAS ITS OWN OBSERVER
+ * ---------------------------------------------------------------------------
+ *
+ * `longestQueue` returns a single integer, which is a poor thing to test a
+ * relation with — the whole reason this module's first version shipped two
+ * 0-detector mutations. `travelDir` (which way is this car going) and
+ * `carAheadOf` (who is in the slot it is asking for) are the two claims inside
+ * it, and both are exported and asserted directly.
+ */
+
+/** `travelDir`'s answer for a car that is not about to cross anything. */
+export const NO_CROSSING = -1
+
+/**
+ * The direction car `i` is travelling, or `NO_CROSSING`.
+ *
+ * **The return leg is the committed route read BACKWARDS**, so a returning car
+ * retraces step `cursor - 1` in the opposite direction; `+ 4 % 8` is `OPPOSITE`,
+ * spelled out rather than imported so this module depends on nothing that could
+ * change meaning under it.
+ *
+ * Three cars answer `NO_CROSSING`, and each is a real state rather than a
+ * defensive default: a parked car (any phase but the two), an outbound car whose
+ * cursor has reached its route length (arrived, waiting for `runArrivals`), and
+ * a returning car at cursor 0 (home, same). None of the three has a next cell,
+ * so none of them can be queueing behind anything — though all three can still
+ * be queued *behind*, which is why this says nothing about their occupancy slot.
+ */
+export function travelDir(state: GameState, i: number): number {
+  const phase = state.carPhase[i] as number
+  const cursor = state.carRouteCursor[i] as number
+  if (phase === PHASE_OUTBOUND) {
+    if (cursor >= (state.carRouteLen[i] as number)) return NO_CROSSING
+    return routeStep(state, i, cursor)
+  }
+  if (phase === PHASE_RETURNING) {
+    if (cursor <= 0) return NO_CROSSING
+    return (routeStep(state, i, cursor - 1) + 4) % 8
+  }
+  return NO_CROSSING
+}
+
+/**
+ * The car standing in the slot car `i` is trying to cross into, or `FREE`.
+ *
+ * **The one line this module is about**, and it is deliberately the same three
+ * terms `advanceCar` uses: `stepCell` for the next cell (which is where the
+ * board-edge check lives — a car on column 0 heading west would otherwise wrap
+ * into the last cell of the previous row, a real cell with a real car on it),
+ * and `occupantOf(next, LANE_OF_DIR[dir])` for the slot.
+ *
+ * No `!== i` guard, deliberately: `canEnter` has none either, and occupancy
+ * SOUNDNESS (`assertOccupancySound`) says a slot names a car standing on that
+ * cell, which `i` is not.
+ */
+export function carAheadOf(state: GameState, world: WorldData, i: number): number {
+  const dir = travelDir(state, i)
+  if (dir === NO_CROSSING) return FREE
+  const next = stepCell(state.carCell[i] as number, dir, world.w, world.h)
+  if (next < 0) return FREE
+  return occupantOf(state, next, LANE_OF_DIR[dir] as number)
+}
+
+/**
+ * The longest chain of cars each waiting on the next.
+ *
+ * **The relation is FUNCTIONAL.** A car has exactly one next cell — the next
+ * step of its own committed route — so it has at most one car ahead, which is
+ * why this is a forward walk rather than a tree search.
+ *
+ * **The visited set is not decoration, and its justification CHANGED with the
+ * key.** A cycle of length >= 3 is precisely the deadlock `MAX_BLOCKED_TICKS`
+ * exists for, and without the set this walk would not terminate on one. The
+ * cell-keyed version also argued that a 2-cycle was impossible, because opposite
+ * directions land in different lanes. **That argument does not survive reading
+ * the real slots**: two cars that have each just turned around on adjacent cells
+ * both stand in the lane opposite to the way they now face, so each really is
+ * the occupant of the slot the other is asking about. It is a 2-cycle, it is
+ * reachable, and the set is what stops the walk spinning on it.
+ *
+ * **The phase filter here is the one that changes the answer.** A parked car is
+ * not a queue of one — three idle cars on consecutive corridor cells are houses.
+ * Deleting it is killed by two tests.
+ *
+ * **`travelDir`'s phase filter is a different thing and is LABELLED INERT**, so
+ * that nobody reads its survival as a coverage hole and nobody writes a test
+ * that cannot fail to close it. Deleting it (letting every phase fall through
+ * to the returning branch) scores **0 detectors**, and that is a derivation
+ * rather than a gap: a parked car can only ever become a KEY in `ahead`, never
+ * a value, because occupancy soundness says a slot names an in-flight car — and
+ * the walk above never starts from a parked car, so no key belonging to one is
+ * ever read. It is kept because reading route bytes off a car that has no route
+ * is meaningless work, not because a test can tell.
+ *
+ * **It allocates** — one `Map` and one `Set` per call — so it must never be
  * called from inside a tick or a frame. Both callers today are test rigs, and
  * both call it outside a profiled window. A debug HUD wanting this figure has
  * to either amortise it or accept the allocation with the profiler gated off;
  * `packages/game/test/allocation.test.ts` is what will say so.
  */
 export function longestQueue(state: GameState, world: WorldData): number {
-  const carAt = new Map<number, number>()
+  const ahead = new Map<number, number>()
   const carCount = state.carPhase.length
   for (let c = 0; c < carCount; c++) {
-    const phase = state.carPhase[c] as number
-    if (phase === PHASE_OUTBOUND || phase === PHASE_RETURNING) {
-      carAt.set(state.carCell[c] as number, c)
-    }
-  }
-
-  const ahead = new Map<number, number>()
-  for (let c = 0; c < carCount; c++) {
-    const phase = state.carPhase[c] as number
-    if (phase !== PHASE_OUTBOUND && phase !== PHASE_RETURNING) continue
-    const cur = state.carCell[c] as number
-    const cursor = state.carRouteCursor[c] as number
-    const len = state.carRouteLen[c] as number
-    let dir: number
-    if (phase === PHASE_OUTBOUND) {
-      if (cursor >= len) continue
-      dir = routeStep(state, c, cursor)
-    } else {
-      // The return leg retraces step `cursor - 1` backwards. `+ 4 % 8` is
-      // `OPPOSITE`, spelled out rather than imported so this module depends on
-      // nothing that could change meaning under it.
-      if (cursor <= 0) continue
-      dir = (routeStep(state, c, cursor - 1) + 4) % 8
-    }
-    const nx = (cur % world.w) + (DX[dir] as number)
-    const ny = ((cur / world.w) | 0) + (DY[dir] as number)
-    if (nx < 0 || nx >= world.w || ny < 0 || ny >= world.h) continue
-    const front = carAt.get(ny * world.w + nx)
-    if (front !== undefined) ahead.set(c, front)
+    const front = carAheadOf(state, world, c)
+    if (front !== FREE) ahead.set(c, front)
   }
 
   let longest = 0
-  for (const c of carAt.values()) {
+  for (let c = 0; c < carCount; c++) {
+    const phase = state.carPhase[c] as number
+    if (phase !== PHASE_OUTBOUND && phase !== PHASE_RETURNING) continue
     const seen = new Set<number>([c])
     let cur = c
     let len = 1

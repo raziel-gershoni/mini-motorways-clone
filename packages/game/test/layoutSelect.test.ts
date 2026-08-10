@@ -146,8 +146,26 @@ describe('layoutToken', () => {
   })
 
   it('refuses a value outside Telegram’s startapp charset', () => {
-    // `/^[\w-]{0,512}$/` is Telegram's own rule for `startapp`. A value outside
-    // it did not come from a Telegram link, so it never reaches `layoutFor`.
+    // **`/^[\w-]{1,512}$/` — the regex `main.ts` actually holds, and this
+    // comment said `{0,512}` until the review caught it.** The `{0,` form is
+    // not a typo either: it is what Telegram documents for `startapp` and what
+    // this repo's own research dossier quotes, so it is exactly the string a
+    // reader would copy. `main.ts` narrows the minimum to 1 because an empty
+    // parameter is an absent token, which is the next test.
+    //
+    // **The correction comes with a derivation, because the obvious reading of
+    // the discrepancy is wrong.** `{0,512}` looks like it would invert that
+    // next test by accepting `''`. It would not: it is a **provably equivalent
+    // mutant** of `layoutToken`, because the only string the two bounds
+    // disagree about is `''`, and `''` is both the value the `??` chain falls
+    // back to *and* the value the charset test's else branch returns.
+    // `LAYOUT_TOKEN.test('') ? '' : ''` is `''` either way, and `LAYOUT_TOKEN`
+    // has no other reader.
+    //
+    // So `{1,512}` is kept because it says what the code means, **not** because
+    // a test can tell. Measured: the swap scores 0 detectors across the whole
+    // suite. Do not manufacture one — the catalogue's rule for an equivalent
+    // mutant is to label it, so nobody reads its survival as a coverage hole.
     expect(layoutToken('', '?layout=demo city', null)).toBe('')
     expect(layoutToken('', '?layout=../../etc', null)).toBe('')
     expect(layoutToken('', '?layout=' + encodeURIComponent('a'.repeat(513)), null)).toBe('')

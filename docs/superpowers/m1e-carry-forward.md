@@ -367,13 +367,28 @@ the served document actually names** must contain it too. A fresh document
 pointing at a stale bundle is a blank board and the first check cannot see it.
 
 **`.build-id` is shared mutable state, and a build-without-deploy produces a
-false negative.** Task 9 hit this: another worker ran `pnpm build` in the shared
-checkout without deploying, and `verify-deploy.js` then reported *"the deployment
+false negative.** Task 9 hit this: `verify-deploy.js` reported *"the deployment
 did not activate"* for 40 attempts while the live artefact was correct and
 current. The script already warns that crying "did not activate" too early is as
 corrosive as reporting success on a stale asset; **a third case belongs beside
-those two — the artefact is fine and the EXPECTATION is stale.** The fix is to
-record the last *deployed* id rather than only the last *built* one.
+those two — the artefact is fine and the EXPECTATION is stale.**
+
+**The cause was found and fixed, and it was not the one recorded here.** Task 9
+attributed it to another worker running `pnpm build` without deploying. The real
+mechanism is much cheaper and fires constantly: **vitest loads
+`packages/game/vite.config.ts` as its own config**, so the build-id plugin was
+instantiated on every `vitest run` in that package and Rollup's `closeBundle`
+hook wrote a fresh id at the end of the test run. Every `pnpm test` left
+`.build-id` ahead of anything that had ever been deployed — including, always,
+the test run you do immediately before deploying. Measured by diffing the file
+across a single-file test run. The fix is `apply: 'build'` on the plugin, pinned
+by `test/toolchain.test.ts`; after it, a full suite run leaves the file
+untouched. Recording the last *deployed* id rather than the last *built* one is
+still a good idea and is still not implemented.
+
+**Sequencing still matters for anything that writes the file.** Run the suite,
+then `pnpm build`, then deploy, then verify — and re-verify rather than
+re-building if it reports a mismatch.
 
 **The Telegram Mini App URL is set in @BotFather and is NOT settable through the
 Bot API.** `setChatMenuButton` returns `ok: true` and changes nothing. If the URL
@@ -461,3 +476,95 @@ than falling back to the shipped city, because a silent fallback is
 indistinguishable from "the link did nothing" — which is the exact report this
 layout exists to answer.
 
+**And the throw is now caught at the entry point, because it used to take the
+whole bundle down.** `main.ts`'s last line was `if (shouldAutoStart())
+startGame()` at module scope, so that throw propagated out of the module's own
+evaluation: no canvas sizing, no pointer wiring, no erase control, no visibility
+handler and no message — a blank page, reachable by a link anyone can send
+(`https://<app>/#tgWebAppStartParam=x`), on a device with no console and no
+address bar. `startOrReport` wraps the call site and renders a readable panel
+carrying the failure, the token and `LAYOUT_IDS`; the throw itself is unchanged
+and still loud. `integration.test.ts`'s "a boot that throws puts the reason on
+the screen" is the detector, and the irreducible gap is the same two `document`
+calls `createFallbackButton` has.
+
+
+---
+
+## 14. The queue probe was lane-blind, and every figure it produced is corrected
+
+`packages/game/src/queueProbe.ts` — the only instrument in the repo that answers
+"how long is the queue" — built its own `Map<cell, car>` keyed by the **cell
+alone**, in the milestone whose premise is that a cell carries **two lanes**.
+Two in-flight cars legitimately share a `carCell` in opposite directions; the map
+kept whichever was written last and linked the follower to it, sometimes to a car
+travelling the other way, and dropped the other car entirely so that real chains
+broke as well as false ones forming.
+
+It now reads `occupantOf(next, LANE_OF_DIR[dir])` — **the slot `canEnter` itself
+consults** — through two exported helpers, `travelDir` and `carAheadOf`, so the
+direction derivation and the occupancy lookup each have their own detector.
+
+**Do not "simplify" it back to deriving the lane from the car's own direction of
+travel.** That looks equivalent and is not: a car occupies the lane of the
+direction it ENTERED by, which differs at every turn and at every
+outbound→return flip. Measured, that variant disagrees with `canEnter` on
+5.9–10.0 % of questions, and worst where it matters most — on a starved corridor,
+where the queue stands behind the car that has just flipped, it read a longest
+queue of **11 against a true 16**.
+
+**The evidence is a property, not a number.** `queueProbe.test.ts` and
+`demoLayout.test.ts` each drive a real board and assert, for every in-flight car
+on every tick, that the probe's answer and `canEnter`'s agree — 90,533
+car-questions across the demo board, the jam corridor and the starved corridor,
+zero disagreements. The old key disagreed on 5.7–15.2 %.
+
+**Corrected figures. Nothing about the layouts or the sim moved; only the
+instrument did.**
+
+| window | figure | was | is |
+|---|---|---|---|
+| demo, 3,000 ticks from the seed | longest queue | 7 (comment said 8) | **7** |
+| demo, 3,000 ticks from the seed | ticks with queue ≥ 3 | 56.6 % | **46.5 %** |
+| demo, 900 ticks after the warm start | longest queue | 7 | **7** |
+| demo, 900 ticks after the warm start | ticks with queue ≥ 3 | 68.9 % ("69 %") | **55.8 %** |
+| demo, 20,000 ticks after the warm start | longest queue | 10 | **8** |
+| demo, 20,000 ticks after the warm start | ticks with queue ≥ 3 | 69.3 % ("69 %") | **58.8 %** |
+| demo, at the first frame (tick 1,200) | queue standing | 7 | **7** |
+| jam corridor, 900 ticks | longest queue | 10 | **13** |
+| starved corridor, 900 ticks | longest queue | 12 | **16** |
+
+Note the direction: on the demo board the old probe **over**-reported, and on the
+two corridors it **under**-reported. A cell-keyed map does both, because
+discarding a car can break a chain as easily as inventing one.
+
+**Everything not read through the probe is unchanged** — trips, dispatches,
+refusals, blocked ticks, cars in flight, the valve count, and all eight goldens.
+`refusals` and `blockedTicks` are deltas of `carBlockedTicks`, which no probe
+touches, so the *other* two figures `demoLayout.test.ts` used to quote (3,483
+refusals and 1,563 blocked ticks, against a measured 3,125 and 1,350) were never
+this fixture's and were not caused by the probe. Re-measured and re-stated with
+their window.
+
+## 15. The demo layout's ghost claim was a guarantee and the behaviour is conditional
+
+`demoLayout.ts`'s fourth headline told a playtester to drag-erase three corridor
+cells and watch them fade. Two things were wrong. A drag samples adjacent pairs,
+so a stroke over N cells clears both bits off only the **N − 2 in the middle** —
+three fading cells wants a five-cell stroke. And *whether* a cleared cell fades
+at all depends on the traffic at that instant: `settleErasedCell` ghosts a cell
+only if a car's committed route still runs through it, and deletes it outright
+otherwise.
+
+Measured on the real boot path over `(8,15)..(8,19)`: **at the first frame a
+player sees, all three middle cells are uncommitted**, so the stroke deletes them
+and refunds +3 immediately with no ghost at all. Eighteen ticks later all three
+are committed, and the identical stroke pays nothing, ghosts all three at
+`ghostCommitted = 1`, and the tiles arrive 120 ticks later. Across the 3,000
+ticks after the warm start the three cells are committed on 69.8 %, 69.8 % and
+89.4 % of ticks, all three at once on 68.2 %, and none of them on 10.6 %.
+
+The prose now states the conditional, and `demoLayout.test.ts` §6 is the
+detector — **the first test in the repo that erases anything on the demo board**,
+covering both branches and asserting the tile-ledger identity (§9's `tiles +
+roadCells + ghostCells`) across the deferral.

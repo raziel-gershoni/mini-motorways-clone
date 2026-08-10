@@ -35,7 +35,7 @@ import {
   type SizableCanvas,
 } from './shell'
 import { createEraseControl, type EraseControl, type FallbackElementFactory } from './eraseControl'
-import { layoutFor } from './layouts'
+import { LAYOUT_IDS, layoutFor } from './layouts'
 import { startParam } from './telegram'
 
 /**
@@ -518,7 +518,7 @@ export function attachVisibility(target: VisibilityTarget, pointer: PointerInput
 }
 
 // ---------------------------------------------------------------------------
-// The production factories — the only three `document` references in `game`
+// The production factories — the only `document` references in `game`
 // ---------------------------------------------------------------------------
 
 /** `buildAtlases`'s surface factory. Three lines, and `atlas.ts` prescribes them. */
@@ -538,6 +538,179 @@ export function createFallbackButton(): HTMLButtonElement {
   const button = document.createElement('button')
   document.body.appendChild(button)
   return button
+}
+
+/**
+ * Creates the boot-failure surface **and attaches it to the document**, in
+ * `createFallbackButton`'s idiom and for the same reason: the two DOM calls are
+ * the part that cannot run under vitest, so they are the only part that lives
+ * outside a structural interface.
+ */
+export function createBootFailureSurface(): HTMLElement {
+  const panel = document.createElement('div')
+  document.body.appendChild(panel)
+  return panel
+}
+
+// ---------------------------------------------------------------------------
+// The boot-failure surface — a phone has no console and no address bar
+// ---------------------------------------------------------------------------
+
+/**
+ * **Why a DOM surface exists at all, rather than a thrown error and a log.**
+ *
+ * `layoutFor` throws by name on an unknown layout id, deliberately — a silent
+ * fallback to the shipped city is indistinguishable from "the link did nothing",
+ * which is the exact report the demo layout exists to answer. That throw
+ * propagates out of `createGame` -> `startGame` -> **this module's own
+ * evaluation**, and the consequence is much larger than the game not starting:
+ * nothing below the entry point runs, so there is no canvas sizing, no pointer
+ * wiring, no erase control, no visibility handler and no error surface. A blank
+ * page.
+ *
+ * **It is reachable by a link any third party can send.** `layoutToken` reads
+ * `tgWebAppStartParam` out of `location.hash`, which is where Telegram writes
+ * every launch parameter, so `https://<app>/#tgWebAppStartParam=x` is one line
+ * of text that produces an unrecoverable black screen — and inside a Telegram
+ * webview there is no console to read and no address bar to correct the URL
+ * with.
+ *
+ * So the throw stays exactly as loud as it was and the CALL SITE catches it.
+ * What the player gets is the failure written on the screen in words: what
+ * broke, which token the link asked for, and which ids exist.
+ */
+export interface BootFailureElement {
+  textContent: string | null
+  setAttribute(name: string, value: string): void
+}
+
+/**
+ * Creates the surface element and attaches it. `null` means "this environment
+ * has no DOM", which is a real answer rather than an error — the same contract
+ * as `FallbackElementFactory`.
+ */
+export type BootFailureElementFactory = () => BootFailureElement | null
+
+/** The surface's element id, so a test and a human can both name it. */
+export const BOOT_FAILURE_ELEMENT_ID = 'laneways-boot-error'
+
+/**
+ * The surface's inline style. Six properties are load-bearing and the rest is
+ * padding:
+ *
+ *   - **`position:fixed;inset:0`** with a `z-index` at the maximum, because the
+ *     canvas is already in the document and a message underneath it is a
+ *     message nobody sees.
+ *   - **`background` and `color` INVERT the page.** `index.html` paints the body
+ *     `#d9d3c7` with `#2e2b28` text; this is the same two colours the other way
+ *     round, so the panel cannot be mistaken for part of the board and the text
+ *     cannot be mistaken for the background — 11.5:1 against WCAG's 4.5:1.
+ *   - **16px**, which is the smallest size iOS does not offer to zoom, over a
+ *     1.5 line height.
+ *   - **`white-space:pre-wrap`**, because `bootFailureText` is four short
+ *     paragraphs and without it they collapse into one unreadable run.
+ *   - **`overflow:auto` plus `overflow-wrap:break-word`**, because the token
+ *     came off a URL and can be 512 characters with no space in it. Without the
+ *     wrap it pushes the panel sideways and the message off the screen.
+ *   - **the safe-area insets**, since `index.html` ships `viewport-fit=cover`:
+ *     without them the first line sits under the notch on the devices this
+ *     failure is most likely to be seen on.
+ */
+export const BOOT_FAILURE_STYLE =
+  'position:fixed;inset:0;z-index:2147483647;box-sizing:border-box;margin:0;' +
+  'padding:calc(24px + env(safe-area-inset-top)) calc(20px + env(safe-area-inset-right)) ' +
+  'calc(24px + env(safe-area-inset-bottom)) calc(20px + env(safe-area-inset-left));' +
+  'overflow:auto;background:#2e2b28;color:#f6f2ea;' +
+  'font:16px/1.5 -apple-system,system-ui,Roboto,sans-serif;' +
+  'white-space:pre-wrap;overflow-wrap:break-word'
+
+/**
+ * What the surface says. A pure function of the failure and the token, so it
+ * has a detector that does not need a DOM.
+ *
+ * **Three things, in the order a reader needs them**: that the app failed, what
+ * the link asked for, and what it could have asked for instead. The thrown
+ * message goes last because `layoutFor`'s is three sentences long and the two
+ * facts above it are what a person can act on.
+ *
+ * `LAYOUT_IDS` is read from the registry rather than written out, for the reason
+ * `layouts.ts` derives it there: an error message listing the layouts is exactly
+ * the copy of the list nobody remembers to update.
+ */
+export function bootFailureText(error: unknown, token: string): string {
+  // Not `(error as Error).message`: a `throw 'string'` is legal and reading
+  // `.message` off it yields `undefined`, which would print the word undefined
+  // where the reason belongs.
+  const reason = error instanceof Error ? error.message : String(error)
+  return (
+    'Laneways could not start.\n\n' +
+    `The link asked for the layout: ${token === '' ? '(none)' : token}\n` +
+    `Layouts that exist: ${LAYOUT_IDS.join(', ')}\n\n` +
+    'Open the app again with one of those ids after ?startapp=, or with no ' +
+    '?startapp= at all for the board that ships.\n\n' +
+    reason
+  )
+}
+
+/**
+ * Writes the failure onto the screen. Returns whether a surface was rendered —
+ * `false` means the factory reported no DOM, which is the only way this can
+ * decline.
+ */
+export function reportBootFailure(
+  create: BootFailureElementFactory,
+  error: unknown,
+  token: string,
+): boolean {
+  const surface = create()
+  if (surface === null) return false
+  surface.setAttribute('id', BOOT_FAILURE_ELEMENT_ID)
+  surface.setAttribute('style', BOOT_FAILURE_STYLE)
+  // `textContent`, never `innerHTML`: the token comes off a URL a third party
+  // can send, and it is being printed back onto the page.
+  surface.textContent = bootFailureText(error, token)
+  return true
+}
+
+/**
+ * Starts the game, or puts the reason on the screen. Returns `null` where it
+ * could not start.
+ *
+ * **The try/catch is a function rather than four lines at the call site, so
+ * that it has a detector.** The call site is `if (shouldAutoStart())` at module
+ * scope, which vitest's Node environment never reaches — the same reason
+ * `wireGame` and `launchOptions` were extracted, both of which measured 0
+ * detectors while they were inline.
+ *
+ * **The token is a thunk, not a string.** Reading it eagerly at the call site
+ * would put a `location` read back outside the guard, and the whole point of
+ * this function is that nothing on the boot path can throw past it.
+ *
+ * **It does not re-throw, and that is a decision.** Re-throwing would leave the
+ * module's evaluation in exactly the failed state this exists to end, so any
+ * line a later task adds below the guard would silently not run — and the
+ * player has already been told, in words, on the screen. `console.error` keeps
+ * the stack on the developer channel, which is the half the DOM surface cannot
+ * carry.
+ */
+export function startOrReport(
+  start: () => Game,
+  create: BootFailureElementFactory,
+  token: () => string,
+): Game | null {
+  try {
+    return start()
+  } catch (error) {
+    console.error(error)
+    try {
+      reportBootFailure(create, error, token())
+    } catch (secondary) {
+      // The surface itself failed. Nothing is left but the log above, and
+      // throwing from here would reinstate the blank page this file is about.
+      console.error(secondary)
+    }
+    return null
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -768,7 +941,11 @@ export function wireGame(
   raf(onFrame)
 }
 
-if (shouldAutoStart()) startGame()
+if (shouldAutoStart()) {
+  startOrReport(startGame, createBootFailureSurface, () =>
+    layoutToken(location.hash, location.search, startParam()),
+  )
+}
 
 /**
  * Compile-time pins for the three DOM-touching wirings above, in the idiom
@@ -788,6 +965,9 @@ export type _RealContextIsAGameContext = Assert<
   CanvasRenderingContext2D extends GameContext ? true : false
 >
 export type _RealDocumentIsAVisibilityTarget = Assert<Document extends VisibilityTarget ? true : false>
+export type _RealElementIsABootFailureElement = Assert<
+  HTMLElement extends BootFailureElement ? true : false
+>
 export type _RealPointerEventIsPointerEventLike = Assert<
   PointerEvent extends PointerEventLike ? true : false
 >

@@ -135,8 +135,18 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  * ---------------------------------------------------------------------------
  *
  * Measured over the 900 ticks (30 s) that follow the warm start: **18.7 cars in
- * flight on average**, at least one car refused entry on **53 %** of ticks, and
- * a queue of three or more cars standing on **69 %** of ticks.
+ * flight on average**, at least one car refused entry on **52.6 %** of ticks,
+ * and a queue of three or more cars standing on **55.8 %** of ticks, longest 7.
+ *
+ * **The queue figures are lower than this file first claimed (69 %, longest 10
+ * over 20,000 ticks) and the layout did not change — the instrument did.**
+ * `queueProbe.ts` keyed occupancy by the cell alone, on a board whose second
+ * headline below is that one cell carries two lanes; it disagreed with
+ * `canEnter` on 15.2 % of the questions it asked here. Re-measured against the
+ * slot the sim actually reads: **55.8 % over the 30 s window, 58.8 % and a
+ * longest queue of 8 over 20,000 ticks.** The refusal and in-flight figures come
+ * off `carBlockedTicks` and `carPhase` and never went through the probe, so they
+ * are unchanged.
  *
  *   1. **Cars stopping dead behind each other** — at the three corridor mouths,
  *      and behind any car parked at a mid-corridor carpark.
@@ -146,13 +156,35 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  *      `LANE_OF_DIR[d] !== LANE_OF_DIR[OPPOSITE[d]]`, and it is the single best
  *      picture of it.
  *   3. **Speed steps** — 8 / 12 / 14 / 16 ticks per cell, see the dogleg above.
- *   4. **Ghost roads** — drag-erase three cells in the middle of any corridor.
- *      A drag samples adjacent pairs, so it takes BOTH bits off each interior
- *      cell (`mask -> 0`), which is what `eraseRoad`/`settleErasedCell` require;
- *      the two end cells keep their other bit and correctly do not ghost. Every
- *      car of that colour is committed to all three, so they fade and stay
- *      driveable until the committed set drains. Redrawing pays the deferred
- *      refund, so the tile counter goes -3 then +3 and nets exactly zero.
+ *   4. **Ghost roads — a conditional, and the conditional is the interesting
+ *      part.** Drag-erase along a corridor. A drag samples adjacent pairs, so a
+ *      stroke over N cells takes BOTH bits off the **N - 2 cells in the middle**
+ *      (`mask -> 0`), which is what `eraseRoad`/`settleErasedCell` require; the
+ *      two end cells keep their other bit and correctly do not ghost. Three
+ *      fading cells therefore wants a FIVE-cell stroke, not a three-cell one.
+ *
+ *      **Whether a cleared cell fades or simply vanishes depends on the traffic
+ *      at that instant.** `settleErasedCell` asks `countCommittedCars`: a cell
+ *      still on some car's committed route becomes a ghost — driveable, and
+ *      unrefunded until the last of those cars leaves it — and a cell on
+ *      nobody's route is deleted outright with its tile refunded on the spot.
+ *      Measured on the real boot path, over `(8,15)..(8,19)`:
+ *
+ *        - **at the first frame a player sees, all three middle cells are
+ *          uncommitted**, so the stroke deletes them, pays +3 tiles at once,
+ *          and nothing fades at all;
+ *        - eighteen ticks later all three are committed, and the identical
+ *          stroke pays nothing, ghosts all three at `ghostCommitted = 1`, and
+ *          the three tiles arrive 120 ticks later as those cars clear;
+ *        - across the 3,000 ticks after the warm start the three are committed
+ *          on 69.8 %, 69.8 % and 89.4 % of ticks, all three at once on 68.2 %,
+ *          and none of them on 10.6 %.
+ *
+ *      So: try it a few seconds in, and try it more than once. It is usually
+ *      **one** car's commitment holding a cell rather than "every car of that
+ *      colour", and on an idle corridor there is no ghost to see. Either way
+ *      redrawing pays whatever the erase deferred, so the tile counter nets
+ *      exactly zero. `demoLayout.test.ts` §6 is the detector for both branches.
  *   5. **Two cars crossing inside one junction cell.** It happens at the three
  *      corridor mouths, and it is a KNOWN GAP, not a feature: `roads.ts:160-167`
  *      states in source that two lanes do not model an intersection crossing and

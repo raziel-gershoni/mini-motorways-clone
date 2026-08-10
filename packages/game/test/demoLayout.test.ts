@@ -16,12 +16,19 @@ import {
   createScratch,
   createState,
   createWorld,
+  canEnter,
+  countCommittedCars,
+  ghostCommittedOf,
+  ghostMaskOf,
   hashState,
   placeRoad,
   roadMask,
   step,
+  stepCell,
   tilesLeft,
   carparkCell,
+  EnterOutcome,
+  FREE,
   destMetaColour,
   destMetaKind,
   destMetaOrientation,
@@ -45,7 +52,7 @@ import {
   seedDemoLayout,
 } from '../src/demoLayout'
 import { seedStartingCity } from '../src/startingCity'
-import { longestQueue } from '../src/queueProbe'
+import { NO_CROSSING, carAheadOf, longestQueue, travelDir } from '../src/queueProbe'
 
 /**
  * The demo layout — the board `?startapp=demo` opens.
@@ -78,6 +85,8 @@ interface Rig {
   readonly state: GameState
   readonly world: WorldData
   drive(ticks: number): Measured
+  /** One tick carrying player actions — the erase path in §6. */
+  tick(actions: readonly TickAction[]): void
 }
 
 interface Measured {
@@ -119,6 +128,14 @@ function rigFor(seed: (state: GameState, world: WorldData) => void, map = demoCi
   return {
     state,
     world,
+    // One tick with a caller-supplied action list, so the erase tests below go
+    // through `step`'s own action dispatch rather than calling `eraseRoad`
+    // beside it. Same idiom as `jamFixture`'s `tick`.
+    tick(actions: readonly TickAction[]): void {
+      oneTick.actions = actions
+      step(state, world, fields, scratch, oneTick)
+      oneTick.actions = NO_ACTIONS
+    },
     drive(ticks: number): Measured {
       const out: Measured = {
         refusals: 0,
@@ -484,9 +501,19 @@ describe('the demo layout is visibly congested, measured over 3,000 ticks', () =
   it('queues continuously: thousands of refusals, over half of all ticks blocked', () => {
     const measured = seededRig().drive(TICKS)
     // The shipped city scores 0 on every one of these — see the contrast test
-    // below. The thresholds are set an order of magnitude below the measured
-    // figures (3,483 refusals / 1,563 blocked ticks / queue 8) so that ordinary
-    // drift does not fail them and a collapse back to the shipped city does.
+    // below. The thresholds sit at roughly half the measured figures so that
+    // ordinary drift does not fail them and a collapse back to the shipped city
+    // does.
+    //
+    // **Measured on this rig, this window and this seed: 3,125 refusals, 1,350
+    // blocked ticks, longest queue 7, 171 trips.** The three figures this
+    // comment used to quote — 3,483 / 1,563 / 8 — are none of them reproducible
+    // from it, and only the last is explained by the queue probe having been
+    // lane-blind (it reads 7 here under either probe; the figure that moved is
+    // the 20,000-tick one, 10 -> 8). The other two cannot have come from this
+    // fixture at all: `refusals` and `blockedTicks` are read off
+    // `carBlockedTicks`, which no probe touches. Re-measured rather than
+    // re-derived, and quoted with the window they were taken over.
     expect(measured.refusals).toBeGreaterThan(1500)
     expect(measured.blockedTicks).toBeGreaterThan(750)
     expect(measured.longestQueue).toBeGreaterThanOrEqual(4)
@@ -529,6 +556,46 @@ describe('the demo layout is visibly congested, measured over 3,000 ticks', () =
     expect(shipped.longestQueue).toBeLessThanOrEqual(1)
     expect(shipped.maxInFlight).toBeLessThanOrEqual(1)
   })
+
+  it('the queue figures above are the SIM’s answer: the probe agrees with canEnter', () => {
+    // **Every threshold in this section is a number the probe produced, so the
+    // probe is part of the claim.** The first one shipped keyed occupancy by the
+    // cell alone, on a board whose headline feature is two lanes per cell, and
+    // was wrong on 15.2 % of the questions it asked here.
+    //
+    // The corridor version of this check lives in `queueProbe.test.ts`; this one
+    // is on the demo board specifically, because a straight corridor has no
+    // TURNS — and a turn is where the lane a car occupies stops being the lane
+    // of the direction it is facing. Three corridor mouths and a dogleg are the
+    // reason this board exists.
+    const rig = seededRig()
+    let asked = 0
+    let blocked = 0
+    let free = 0
+    for (let t = 0; t < 600; t++) {
+      rig.drive(1)
+      for (let c = 0; c < rig.state.carPhase.length; c++) {
+        const dir = travelDir(rig.state, c)
+        if (dir === NO_CROSSING) continue
+        const next = stepCell(rig.state.carCell[c] as number, dir, rig.world.w, rig.world.h)
+        if (next < 0) continue
+        const outcome = canEnter(rig.state, rig.world, c, next, dir)
+        const simSaysBlocked =
+          outcome === EnterOutcome.REFUSED_OCCUPIED || outcome === EnterOutcome.ENTER_VALVE
+        expect(carAheadOf(rig.state, rig.world, c) !== FREE, `tick ${t}, car ${c}`).toBe(
+          simSaysBlocked,
+        )
+        asked++
+        if (simSaysBlocked) blocked++
+        else free++
+      }
+    }
+    // Non-vacuity in both directions — a window where nothing was asked, or
+    // where every answer was the same, proves nothing.
+    expect(asked).toBeGreaterThan(5000)
+    expect(blocked).toBeGreaterThan(500)
+    expect(free).toBeGreaterThan(500)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -551,5 +618,168 @@ describe('DEMO_WARM_START_TICKS', () => {
     expect(inFlight, 'cars moving on the first frame').toBeGreaterThanOrEqual(15)
     expect(longestQueue(rig.state, rig.world), 'cars queued on the first frame').toBeGreaterThanOrEqual(3)
     expect(rig.state.header[H_SCORE] as number, 'trips already scored').toBeGreaterThan(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 6. The erase / ghost path, which the headline claims and nothing measured
+// ---------------------------------------------------------------------------
+
+/**
+ * **`demoLayout.ts`'s fourth headline is about erasing a corridor, and until
+ * this section existed no test on this board ever erased anything.**
+ *
+ * The sentence it replaced read as a guarantee — *"every car of that colour is
+ * committed to all three, so they fade and stay driveable"* — and the behaviour
+ * is conditional: `settleErasedCell` ghosts a cell only if some car's committed
+ * route still runs through it, and deletes it outright otherwise. At the first
+ * frame a player sees, the honest answer for this exact stroke is "no ghost at
+ * all". Both branches are below, on the demo board, through `step`'s own action
+ * dispatch.
+ *
+ * The stroke is `(8, 15)..(8, 19)` on corridor A: five cells, four segments, so
+ * the three in the middle lose both bits and the two ends keep one each. That
+ * geometry is asserted rather than assumed — a stroke that cleared no cell's
+ * last bit would make every other assertion here vacuous.
+ */
+const ERASE_TOP_Y = 15
+const ERASE_BOTTOM_Y = 19
+const ERASE_X = 8
+/** The three cells the stroke takes both bits off. */
+const ERASED_CELLS = [cellAt(ERASE_X, 16), cellAt(ERASE_X, 17), cellAt(ERASE_X, 18)]
+
+/** The stroke, as the four `erase` actions a drag over five cells produces. */
+const ERASE_STROKE: readonly TickAction[] = Object.freeze(
+  Array.from({ length: ERASE_BOTTOM_Y - ERASE_TOP_Y }, (_unused, i) =>
+    Object.freeze({
+      kind: 'erase' as const,
+      a: cellAt(ERASE_X, ERASE_TOP_Y + i),
+      b: cellAt(ERASE_X, ERASE_TOP_Y + i + 1),
+    }),
+  ),
+)
+
+function ghostCells(state: GameState): number {
+  let n = 0
+  for (let c = 0; c < state.ghostMask.length; c++) if ((state.ghostMask[c] as number) !== 0) n++
+  return n
+}
+
+function roadCells(state: GameState, world: WorldData): number {
+  let n = 0
+  for (let c = 0; c < world.cells; c++) if ((state.roads[c] as number) !== 0) n++
+  return n
+}
+
+/**
+ * The tile ledger. M1d's whole-milestone review found `tiles + roadCells +
+ * ghostCells` constant across 25,000 ticks of erase/re-place, and the
+ * carry-forward names it as the invariant to assert if anyone touches
+ * `settleErasedCell`, `payGhostRefund` or `noteGhostDeparture`. This is the
+ * first test on the demo board that can see it.
+ */
+function ledger(state: GameState, world: WorldData): number {
+  return tilesLeft(state) + roadCells(state, world) + ghostCells(state)
+}
+
+describe('erasing three corridor cells on the demo board', () => {
+  it('deletes them outright at the first frame, because nothing is committed there yet', () => {
+    const rig = seededRig()
+    rig.drive(DEMO_WARM_START_TICKS)
+    const total = ledger(rig.state, rig.world)
+
+    // The branch under test is "no committed car", so that is asserted first —
+    // otherwise this passes as the ghost case and nobody notices.
+    for (const cell of ERASED_CELLS) {
+      expect(countCommittedCars(rig.state, rig.world, cell), `cell ${cell} at the first frame`).toBe(0)
+    }
+
+    const tilesBefore = tilesLeft(rig.state)
+    rig.tick(ERASE_STROKE)
+
+    // Three cells cleared, refunded on the spot, and no ghost anywhere on the
+    // board — not merely none on these three.
+    expect(tilesLeft(rig.state)).toBe(tilesBefore + 3)
+    expect(ghostCells(rig.state)).toBe(0)
+    for (const cell of ERASED_CELLS) {
+      expect(roadMask(rig.state, cell), `cell ${cell} road bits`).toBe(0)
+      expect(ghostMaskOf(rig.state, cell), `cell ${cell} ghost bits`).toBe(0)
+    }
+    // The stroke's geometry: the two END cells keep exactly one bit each, which
+    // is why a three-cell drag fades one cell and not three.
+    expect(roadMask(rig.state, cellAt(ERASE_X, ERASE_TOP_Y))).not.toBe(0)
+    expect(roadMask(rig.state, cellAt(ERASE_X, ERASE_BOTTOM_Y))).not.toBe(0)
+    expect(ledger(rig.state, rig.world)).toBe(total)
+  })
+
+  it('ghosts them a moment later, stays driveable, and pays the refund when they clear', () => {
+    const rig = seededRig()
+    rig.drive(DEMO_WARM_START_TICKS)
+    const total = ledger(rig.state, rig.world)
+
+    // Wait for the traffic the first case does not have. Bounded, and the bound
+    // is asserted: measured at 18 ticks, and a rig that never gets there would
+    // otherwise silently skip the whole test.
+    let waited = 0
+    while (waited < 600) {
+      let committed = 0
+      for (const cell of ERASED_CELLS) {
+        if (countCommittedCars(rig.state, rig.world, cell) > 0) committed++
+      }
+      if (committed === ERASED_CELLS.length) break
+      rig.drive(1)
+      waited++
+    }
+    expect(waited, 'no tick in 600 had all three cells committed').toBeLessThan(600)
+
+    const tilesBefore = tilesLeft(rig.state)
+    // Read BEFORE the erase: the count the ghost must record is the number of
+    // cars committed at that instant. Without this the only observer of
+    // `ghostCommitted` is how long the drain takes, and the drain is generous
+    // enough to absorb an off-by-one — a car crosses each cell TWICE, outbound
+    // and again on the way home, so a count one too high still reaches zero.
+    // Measured: `ghostCommitted + 1` survives every other assertion here.
+    const committedAtErase = ERASED_CELLS.map((cell) =>
+      countCommittedCars(rig.state, rig.world, cell),
+    )
+    rig.tick(ERASE_STROKE)
+
+    // Nothing refunded, all three fading, each holding the cars it counted.
+    expect(tilesLeft(rig.state), 'a deferred refund must pay nothing yet').toBe(tilesBefore)
+    expect(ghostCells(rig.state)).toBe(3)
+    for (let i = 0; i < ERASED_CELLS.length; i++) {
+      const cell = ERASED_CELLS[i] as number
+      expect(roadMask(rig.state, cell), `cell ${cell} road bits`).toBe(0)
+      expect(ghostMaskOf(rig.state, cell), `cell ${cell} ghost bits`).not.toBe(0)
+      expect(committedAtErase[i], `cell ${cell} had no committed car`).toBeGreaterThan(0)
+      expect(ghostCommittedOf(rig.state, cell), `cell ${cell} committed count`).toBe(
+        committedAtErase[i],
+      )
+    }
+    expect(ledger(rig.state, rig.world), 'the ledger must hold across the deferral').toBe(total)
+
+    // **Driveable, observed rather than inferred**: a car stands on one of the
+    // erased cells at some tick AFTER the road bits went. Without this the test
+    // would be satisfied by three cells that ghosted and were never crossed.
+    let seenOnAGhost = false
+    let drained = 0
+    while (drained < 2000 && ghostCells(rig.state) > 0) {
+      rig.drive(1)
+      drained++
+      for (let c = 0; c < rig.state.carPhase.length; c++) {
+        const phase = rig.state.carPhase[c] as number
+        if (phase !== PHASE_OUTBOUND && phase !== PHASE_RETURNING) continue
+        const cell = rig.state.carCell[c] as number
+        if (ERASED_CELLS.includes(cell) && ghostMaskOf(rig.state, cell) !== 0) seenOnAGhost = true
+      }
+    }
+    expect(seenOnAGhost, 'no car ever drove on a ghost cell — it was not driveable').toBe(true)
+
+    // The refund arrives late rather than never, and it is exactly the three
+    // tiles the erase withheld. Measured: 120 ticks.
+    expect(ghostCells(rig.state), 'the ghosts never drained').toBe(0)
+    expect(drained).toBeGreaterThan(0)
+    expect(tilesLeft(rig.state)).toBe(tilesBefore + 3)
+    expect(ledger(rig.state, rig.world)).toBe(total)
   })
 })

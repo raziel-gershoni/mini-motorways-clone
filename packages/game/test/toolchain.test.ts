@@ -3,6 +3,7 @@ import { ESLint } from 'eslint'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
+import { buildIdPlugin } from '../vite.config'
 
 /**
  * `eslint.config.js` had exactly one `files:` block, scoped to
@@ -333,6 +334,31 @@ describe('the workspace resolves every package distinctly, and the root scripts 
     expect(ours, 'a static-asset deploy must declare no `main`').not.toMatch(/"main"\s*:/)
     expect(ours, 'M2 stores nothing; D1 is M3').not.toContain('d1_databases')
     expect(spike, 'the spike is the one with the D1 binding, and must keep it').toContain('d1_databases')
+  })
+
+  it('the build-id plugin runs on a BUILD and never under vitest', () => {
+    // **`.build-id` is what `scripts/verify-deploy.js` believes is deployed, and
+    // running this very suite used to change it.** Vitest loads
+    // `vite.config.ts` as its own config, so the plugin was instantiated for
+    // every `vitest run` in this package and Rollup's `closeBundle` hook wrote
+    // a fresh id at the end of it — leaving the file permanently ahead of the
+    // live artefact and the verify script reporting "the deployment did not
+    // activate" against a healthy deploy. The carry-forward recorded that
+    // incident with a different, more forgiving cause.
+    //
+    // `apply: 'build'` is the whole fix; this is its detector. The two hooks
+    // are asserted alongside it so that "make it apply to nothing" is not a way
+    // to pass.
+    const plugin = buildIdPlugin()
+    expect(plugin.apply, 'the plugin would run under vitest and rewrite .build-id').toBe('build')
+    expect(plugin.name).toBe('laneways-build-id')
+    expect(plugin.closeBundle, 'nothing would write .build-id on a real build').toBeDefined()
+    expect(plugin.transformIndexHtml, 'the served document would carry no build id').toBeDefined()
+    // ...and the id itself must NOT be inside the plugin: `define` has to keep
+    // resolving `__LANEWAYS_BUILD_ID__` under vitest, where `main.ts`'s `typeof`
+    // guard turns it into 'dev'.
+    const config = readFileSync(join(REPO_ROOT, 'packages', 'game', 'vite.config.ts'), 'utf8')
+    expect(config).toContain('__LANEWAYS_BUILD_ID__: JSON.stringify(BUILD_ID)')
   })
 
   it('the no-store rule ships, on both URLs for the one document', () => {

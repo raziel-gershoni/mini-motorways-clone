@@ -45,7 +45,10 @@ import { PointerOutcome } from '../src/pointer'
 import { EraseControlSurface } from '../src/eraseControl'
 import { SizingOutcome } from '../src/shell'
 import { DEMO_WARM_START_TICKS } from '../src/demoLayout'
+import { LAYOUT_IDS } from '../src/layouts'
 import {
+  BOOT_FAILURE_ELEMENT_ID,
+  BOOT_FAILURE_STYLE,
   CANVAS_ELEMENT_ID,
   RUN_SEED,
   SEED_FIRST_PIN_TICK,
@@ -53,10 +56,14 @@ import {
   attachPointerEvents,
   attachVisibility,
   attachViewport,
+  bootFailureText,
+  reportBootFailure,
+  startOrReport,
   wireGame,
   createGame,
   prefersFallback,
   shouldAutoStart,
+  type BootFailureElement,
   type Game,
   type PointerEventLike,
   type PointerEventTarget,
@@ -1561,7 +1568,7 @@ describe('a queued car is drawn inside its own cell, not on top of the car it wa
  * rather than by perturbing a field.** `LIGHT` is the same corridor, the same
  * code and the same guards with the load taken off — one house instead of eight
  * — and it genuinely does not jam: 8 refusals against 6,852, a longest blocked
- * run of 8 ticks against 131, a longest queue of 2 against 10, and **57 trips
+ * run of 8 ticks against 131, a longest queue of 2 against 13, and **57 trips
  * against its own hand-computed unblocked figure of 56**, i.e. it achieves full
  * unblocked throughput and the collapse guard fires on it. A perturbed field
  * proves the predicate reads that field; a second fixture proves the guard
@@ -1693,7 +1700,15 @@ describe('a bottleneck jams: throughput collapses below the hand-computed unbloc
     expect(jam.dispatched).toBe(122)
     expect(jam.refusals).toBe(6852)
     expect(jam.longestBlockedRun).toBe(131)
-    expect(jam.longestQueue).toBe(10)
+    // **13, and it was 10 while the probe was lane-blind.** `longestQueue` used
+    // to key occupancy by the cell alone, which keeps one car per cell on a
+    // board where a cell carries two lanes; on this corridor that both invented
+    // chains between cars passing in opposite directions and BROKE real ones,
+    // whichever car happened to be written last. Reading `(cell, lane)` — the
+    // slot `canEnter` reads — moves this figure and nothing else in the run:
+    // trips, dispatches, refusals and the blocked run above are all untouched,
+    // because none of them goes through the probe.
+    expect(jam.longestQueue).toBe(13)
   })
 
   it('is not vacuous: the SAME corridor with the load off fires three of the five guards', () => {
@@ -2009,5 +2024,234 @@ describe('createGame opens the layout it was asked for', () => {
 
   it('treats an empty layoutId as absent, so a half-copied link still boots', () => {
     expect(buildRig({ layoutId: '' }).game.layoutId).toBe('city')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The boot failure surface — the throw above, seen from the phone
+// ---------------------------------------------------------------------------
+
+/**
+ * **The test above asserts that boot THROWS. This file's other 41 tests then
+ * say nothing whatsoever about what a player sees when it does** — and the
+ * answer, before this section existed, was a black screen with no way back.
+ *
+ * `if (shouldAutoStart()) startGame()` sits at module scope, so the throw
+ * propagates out of the module's own evaluation: no canvas sizing, no pointer
+ * wiring, no erase control, no visibility handler, no message. Reachable by a
+ * link a third party can send, because `layoutToken` reads `location.hash` and
+ * `https://<app>/#tgWebAppStartParam=x` is a well-formed unknown token. Inside a
+ * Telegram webview there is no console and no address bar.
+ *
+ * So every case below asserts **the surface appears and says something usable**,
+ * never merely that the function threw. The one thing that still has no Node-side
+ * detector is `createBootFailureSurface`'s two `document` calls, which is the
+ * same irreducible gap as `createCanvasSurface` and `createFallbackButton`:
+ * there is no `document` here to create anything in.
+ */
+interface BootSurface extends BootFailureElement {
+  readonly attributes: Map<string, string>
+}
+
+function bootSurface(): BootSurface {
+  const attributes = new Map<string, string>()
+  return {
+    textContent: null,
+    attributes,
+    setAttribute(name: string, value: string): void {
+      attributes.set(name, value)
+    },
+  }
+}
+
+/**
+ * Swallows `console.error` for one call and hands back what it was given.
+ *
+ * Not decoration: `startOrReport` logging the stack is the developer half of the
+ * contract, so the capture is asserted rather than discarded — and without it
+ * every run of this file prints a real-looking stack trace into a green suite.
+ */
+function captureErrors<T>(run: () => T): { result: T; logged: unknown[] } {
+  const original = console.error
+  const logged: unknown[] = []
+  console.error = (...args: unknown[]): void => {
+    logged.push(...args)
+  }
+  try {
+    return { result: run(), logged }
+  } finally {
+    console.error = original
+  }
+}
+
+describe('a boot that throws puts the reason on the screen', () => {
+  it('renders a surface carrying the failure, the bad token and every layout id', () => {
+    // The REAL failure, not a synthetic one: the same `createGame` call the
+    // phone makes, with the same unknown id, throwing the same error out of
+    // `layoutFor`.
+    const made: BootSurface[] = []
+    const { result, logged } = captureErrors(() =>
+      startOrReport(
+        () => buildRig({ layoutId: 'demoo' }).game,
+        () => {
+          const surface = bootSurface()
+          made.push(surface)
+          return surface
+        },
+        () => 'demoo',
+      ),
+    )
+
+    expect(result, 'a failed boot must not hand back a half-built game').toBe(null)
+    expect(made.length, 'no surface was created — this is the blank page').toBe(1)
+    const surface = made[0] as BootSurface
+    const text = surface.textContent ?? ''
+
+    // 1. That it failed at all, in words a player can read.
+    expect(text).toContain('Laneways could not start')
+    // 2. The bad token, quoted back. Without it the message is generic and the
+    //    player cannot tell which of their two saved links is the broken one.
+    //    The whole line, for the reason spelled out in 3: `layoutFor`'s message
+    //    also contains the token, so a bare `toContain('demoo')` is satisfied
+    //    whether or not this surface names it.
+    expect(text).toContain('The link asked for the layout: demoo')
+    // 3. Every layout that DOES exist — **asserted as the whole line, and the
+    //    per-id form was measured at 0 detectors here.** `layoutFor`'s own
+    //    message already ends "the layouts that exist are city, demo", so
+    //    `toContain('city')` over this text is satisfied whether or not
+    //    `bootFailureText` lists anything at all. The isolated case is the
+    //    canvas failure below, whose message names no layout.
+    expect(LAYOUT_IDS.length).toBeGreaterThanOrEqual(2)
+    expect(text).toContain(`Layouts that exist: ${LAYOUT_IDS.join(', ')}`)
+    // 4. The thrown reason itself, last.
+    expect(text).toContain('unknown layout "demoo"')
+    // ...and the developer channel keeps the stack the DOM surface cannot carry.
+    expect(logged.length).toBe(1)
+    expect(logged[0]).toBeInstanceOf(Error)
+
+    // The element is identifiable and styled for a phone.
+    expect(surface.attributes.get('id')).toBe(BOOT_FAILURE_ELEMENT_ID)
+    expect(surface.attributes.get('style')).toBe(BOOT_FAILURE_STYLE)
+  })
+
+  it('styles the surface so it is on top, readable, and not the page colour', () => {
+    // Every property here is one a person would notice the absence of on a
+    // phone, and each is asserted separately so a mutation that drops one is
+    // named by the failure rather than lost in a string comparison.
+    //
+    // The canvas is already in the document, so a message underneath it is a
+    // message nobody sees.
+    expect(BOOT_FAILURE_STYLE).toContain('position:fixed')
+    expect(BOOT_FAILURE_STYLE).toContain('inset:0')
+    expect(BOOT_FAILURE_STYLE).toContain('z-index:2147483647')
+    // `index.html` paints the body #d9d3c7 with #2e2b28 text. The panel is that
+    // pair inverted: the text is not the page's text colour and the panel is not
+    // the page's background, so neither can vanish into the other.
+    expect(BOOT_FAILURE_STYLE).toContain('background:#2e2b28')
+    expect(BOOT_FAILURE_STYLE).toContain('color:#f6f2ea')
+    expect(BOOT_FAILURE_STYLE).not.toContain('background:#d9d3c7')
+    // 16px is the smallest size iOS does not offer to zoom.
+    expect(BOOT_FAILURE_STYLE).toContain('font:16px/1.5')
+    // Four paragraphs collapse into one unreadable run without this.
+    expect(BOOT_FAILURE_STYLE).toContain('white-space:pre-wrap')
+    // A 512-character token off a URL has no space in it, so it needs both a
+    // break rule and somewhere to scroll.
+    expect(BOOT_FAILURE_STYLE).toContain('overflow-wrap:break-word')
+    expect(BOOT_FAILURE_STYLE).toContain('overflow:auto')
+    // `index.html` ships `viewport-fit=cover`, so the insets are real and a
+    // panel without them starts under the notch.
+    expect(BOOT_FAILURE_STYLE).toContain('env(safe-area-inset-top)')
+    expect(BOOT_FAILURE_STYLE).toContain('env(safe-area-inset-bottom)')
+  })
+
+  it('says "(none)" rather than nothing when the failure carried no token', () => {
+    // The other reachable failure: a missing canvas or a refused 2D context,
+    // where the launch named no layout at all. An empty string printed after
+    // "asked for the layout:" reads as a rendering fault in the error message.
+    const text = bootFailureText(new Error('startGame: no <canvas id="board">'), '')
+    expect(text).toContain('The link asked for the layout: (none)')
+    expect(text).toContain('startGame: no <canvas id="board">')
+    expect(text).not.toContain('layout: \n')
+    // **The registry list, isolated.** This failure's message names no layout,
+    // so unlike the end-to-end case above these assertions can only be
+    // satisfied by `bootFailureText`'s own line. Both forms are here on
+    // purpose: the per-id loop is what catches a THIRD layout going unlisted,
+    // and the whole-line assertion is what catches the line being dropped.
+    for (const id of LAYOUT_IDS) expect(text, `layout id ${id}`).toContain(id)
+    expect(text).toContain(`Layouts that exist: ${LAYOUT_IDS.join(', ')}`)
+  })
+
+  it('prints a non-Error throw rather than the word undefined', () => {
+    // `throw 'a string'` is legal JS and `.message` off it is `undefined`.
+    expect(bootFailureText('the SDK exploded', 'demo')).toContain('the SDK exploded')
+    expect(bootFailureText('the SDK exploded', 'demo')).not.toContain('undefined')
+  })
+
+  it('creates NO surface when the game starts, and hands the game back', () => {
+    // Non-vacuity for the whole section: a reporter that renders unconditionally
+    // would satisfy every assertion above and put an error panel over a working
+    // board on every launch.
+    const made: BootSurface[] = []
+    const { result, logged } = captureErrors(() =>
+      startOrReport(
+        () => buildRig().game,
+        () => {
+          const surface = bootSurface()
+          made.push(surface)
+          return surface
+        },
+        () => '',
+      ),
+    )
+    expect(made.length).toBe(0)
+    expect(logged.length).toBe(0)
+    expect(result?.layoutId).toBe('city')
+  })
+
+  it('declines quietly where there is no DOM, and survives a reporter that itself throws', () => {
+    // Two failures of the failure path. Both must return rather than propagate:
+    // an exception escaping here reinstates the blank page this whole section
+    // exists to end.
+    expect(reportBootFailure(() => null, new Error('boom'), 'demoo')).toBe(false)
+
+    const fromFactory = captureErrors(() =>
+      startOrReport(
+        () => buildRig({ layoutId: 'demoo' }).game,
+        () => {
+          throw new Error('the document refused')
+        },
+        () => 'demoo',
+      ),
+    )
+    expect(fromFactory.result).toBe(null)
+    // Both errors reach the log: the boot failure and the reporter's own.
+    expect(fromFactory.logged.length).toBe(2)
+
+    const fromToken = captureErrors(() =>
+      startOrReport(
+        () => buildRig({ layoutId: 'demoo' }).game,
+        bootSurface,
+        () => {
+          throw new Error('location is not readable')
+        },
+      ),
+    )
+    expect(fromToken.result).toBe(null)
+    expect(fromToken.logged.length).toBe(2)
+  })
+
+  it('is actually WIRED at the module-scope entry point — the source says so', () => {
+    // **A source scan, and it is the only instrument that reaches this line.**
+    // `if (shouldAutoStart()) startGame()` runs at import time in a browser and
+    // never under vitest, which is precisely why the bug existed: the whole
+    // try/catch could be deleted and every test above would still pass, because
+    // they all call `startOrReport` directly. Same shape, and same labelling, as
+    // the `...launchOptions(location, startParam())` scan in `layoutSelect.test.ts`.
+    const source = readFileSync(fileURLToPath(new URL('../src/main.ts', import.meta.url)), 'utf8')
+    expect(source).toContain('startOrReport(startGame, createBootFailureSurface, () =>')
+    expect(source.split('startOrReport(startGame, createBootFailureSurface, () =>').length - 1).toBe(1)
+    // ...and the unguarded form it replaced is gone. Anchored on the whole
+    // statement, because `startGame()` alone appears in this file's prose.
+    expect(source).not.toContain('if (shouldAutoStart()) startGame()')
   })
 })
