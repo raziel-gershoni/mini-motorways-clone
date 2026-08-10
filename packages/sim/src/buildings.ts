@@ -110,11 +110,16 @@ function validateOrientation(orientation: number): void {
  * its right or left). Read off the orientation directly rather than a
  * lookup table of two entries — there are only two distinct shapes and the
  * condition IS the fact being encoded.
+ *
+ * **Exported since M1e Task 4** so Task 5's zone-fit check can ask for the
+ * footprint's extent rather than re-deriving it. A second copy of "N and S are
+ * 2x3" is the copied-constant defect this project has already paid for once in
+ * `render`; there is no architectural boundary forcing one here.
  */
-function footprintWidth(orientation: number): number {
+export function footprintWidth(orientation: number): number {
   return orientation === ORIENTATION_N || orientation === ORIENTATION_S ? 2 : 3
 }
-function footprintHeight(orientation: number): number {
+export function footprintHeight(orientation: number): number {
   return orientation === ORIENTATION_N || orientation === ORIENTATION_S ? 3 : 2
 }
 
@@ -179,21 +184,36 @@ export function destMetaOrientation(meta: number): number {
  */
 export function carparkCell(destCell: number, orientation: number, w: number, h: number): number {
   validateOrientation(orientation)
-  const x0 = destCell % w
-  const y0 = (destCell / w) | 0
-  let cx = x0
-  let cy = y0
-  if (orientation === ORIENTATION_N) {
-    cy = y0 - 1
-  } else if (orientation === ORIENTATION_S) {
-    cy = y0 + 3
-  } else if (orientation === ORIENTATION_E) {
-    cx = x0 + 3
-  } else {
-    cx = x0 - 1 // ORIENTATION_W
-  }
+  const cx = carparkX(destCell, orientation, w)
+  const cy = carparkY(destCell, orientation, w)
   if (cx < 0 || cx >= w || cy < 0 || cy >= h) return -1
   return cy * w + cx
+}
+
+/**
+ * `carparkCell`'s arithmetic, split into its two axes — the same expression it
+ * has always evaluated, hoisted so `spacingViolated` below can compare carpark
+ * COORDINATES without first packing them into a cell index and unpacking them
+ * again.
+ *
+ * **Deliberately without a bounds check and without `validateOrientation`**,
+ * which is why they are private. `carparkCell` keeps both, so its contract is
+ * unchanged; the one other caller is `spacingViolated`, whose two orientations
+ * come from an already-validated candidate and from a stored destination that
+ * was validated when it was placed. The `else` arm is W, exactly as it was, and
+ * is only reachable for a validated orientation.
+ */
+function carparkX(destCell: number, orientation: number, w: number): number {
+  const x0 = destCell % w
+  if (orientation === ORIENTATION_E) return x0 + 3
+  if (orientation === ORIENTATION_W) return x0 - 1
+  return x0
+}
+function carparkY(destCell: number, orientation: number, w: number): number {
+  const y0 = (destCell / w) | 0
+  if (orientation === ORIENTATION_N) return y0 - 1
+  if (orientation === ORIENTATION_S) return y0 + 3
+  return y0
 }
 
 /**
@@ -218,41 +238,84 @@ export function isFootprintCell(destCell: number, orientation: number, w: number
 }
 
 /**
- * All 7 cells of a destination (6 footprint + 1 carpark), or `null` if the
- * footprint's bounding box or the carpark itself does not fit on the `world`
- * grid. Allocates one 7-element array — never call this from a per-tick
- * path; it exists only for placement validity (below), which runs once per
- * placement action, not once per tick.
+ * The minimum Chebyshev (king-move) distance between two axis-aligned boxes,
+ * given as inclusive `[x0, x1] x [y0, y1]`.
+ *
+ * `min over cells of max(|dx|, |dy|)` is `max(gapX, gapY)`, where each gap is
+ * the separation along that axis or 0 if the projections overlap. Derived
+ * rather than sampled, and pinned against the retired pairwise implementation
+ * exhaustively in `buildings.test.ts` — a rewrite of a heavily-tested
+ * predicate owes a proof, and "it passes the existing tests" is not one when
+ * the existing tests were written against the other algorithm.
+ *
+ * No `Math` calls — plain comparisons, matching this codebase's existing style
+ * (roads.ts, graph.ts), and allocation-free like everything else on this path.
  */
-function allSevenCells(destCell: number, orientation: number, world: WorldData): number[] | null {
-  const width = footprintWidth(orientation)
-  const height = footprintHeight(orientation)
-  const x0 = destCell % world.w
-  const y0 = (destCell / world.w) | 0
-  if (x0 < 0 || x0 + width > world.w || y0 < 0 || y0 + height > world.h) return null
-
-  const carpark = carparkCell(destCell, orientation, world.w, world.h)
-  if (carpark === -1) return null
-
-  const out: number[] = []
-  for (let dy = 0; dy < height; dy++) {
-    for (let dx = 0; dx < width; dx++) {
-      out.push((y0 + dy) * world.w + (x0 + dx))
-    }
-  }
-  out.push(carpark)
-  return out
+function boxChebyshev(
+  ax0: number,
+  ay0: number,
+  ax1: number,
+  ay1: number,
+  bx0: number,
+  by0: number,
+  bx1: number,
+  by1: number,
+): number {
+  let gx = 0
+  if (bx0 > ax1) gx = bx0 - ax1
+  else if (ax0 > bx1) gx = ax0 - bx1
+  let gy = 0
+  if (by0 > ay1) gy = by0 - ay1
+  else if (ay0 > by1) gy = ay0 - by1
+  return gx > gy ? gx : gy
 }
 
-/** Chebyshev (king-move) distance between two cells on a `w`-wide grid. No `Math` calls — plain comparisons, matching this codebase's existing style (roads.ts, graph.ts). */
-function chebyshevDistance(aCell: number, bCell: number, w: number): number {
-  const ax = aCell % w
-  const ay = (aCell / w) | 0
-  const bx = bCell % w
-  const by = (bCell / w) | 0
-  const dx = ax > bx ? ax - bx : bx - ax
-  const dy = ay > by ? ay - by : by - ay
-  return dx > dy ? dx : dy
+/**
+ * True iff a destination at `(aCell, aOrientation)` sits closer than
+ * Chebyshev 2 to one at `(bCell, bOrientation)` — the §5.9 spacing rule, over
+ * four box pairs instead of 49 cell pairs and **with no array**.
+ *
+ * This replaced `allSevenCells` plus a 49-pair loop in M1e Task 4. The old form
+ * built a fresh 7-element `number[]` for the candidate and **one more per
+ * existing destination** — measured at 1,888 B per `canPlaceDestination` call
+ * on the demo board's 18 destinations — and its own doc comment said "never
+ * call this from a per-tick path". Task 5 puts it on one, at up to
+ * `SPAWN_CANDIDATE_LIMIT * ORIENTATION_COUNT` = 96 calls per attempt.
+ *
+ * A carpark is a 1x1 box, so all four comparisons are the same call. Both
+ * directions of the footprint-vs-carpark pair are present and they are NOT
+ * symmetric inputs: an earlier defect in this file survived all 366 tests
+ * because a compound mutation was applied to one side of a symmetric
+ * comparison only.
+ *
+ * @internal Exported for the exhaustive equivalence proof in `buildings.test.ts`
+ * only — this is not part of the module's public surface, on the precedent of
+ * `assertPlaceCost` (roads.ts).
+ */
+export function spacingViolated(
+  aCell: number,
+  aOrientation: number,
+  bCell: number,
+  bOrientation: number,
+  w: number,
+): boolean {
+  const ax0 = aCell % w
+  const ay0 = (aCell / w) | 0
+  const ax1 = ax0 + footprintWidth(aOrientation) - 1
+  const ay1 = ay0 + footprintHeight(aOrientation) - 1
+  const bx0 = bCell % w
+  const by0 = (bCell / w) | 0
+  const bx1 = bx0 + footprintWidth(bOrientation) - 1
+  const by1 = by0 + footprintHeight(bOrientation) - 1
+  const acx = carparkX(aCell, aOrientation, w)
+  const acy = carparkY(aCell, aOrientation, w)
+  const bcx = carparkX(bCell, bOrientation, w)
+  const bcy = carparkY(bCell, bOrientation, w)
+  if (boxChebyshev(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1) < 2) return true
+  if (boxChebyshev(ax0, ay0, ax1, ay1, bcx, bcy, bcx, bcy) < 2) return true
+  if (boxChebyshev(acx, acy, acx, acy, bx0, by0, bx1, by1) < 2) return true
+  if (boxChebyshev(acx, acy, acx, acy, bcx, bcy, bcx, bcy) < 2) return true
+  return false
 }
 
 export type BuildingPlaceFailure =
@@ -265,6 +328,46 @@ export type BuildingPlaceFailure =
   | 'capacity'
 
 export type PlaceCheck = { readonly ok: true } | { readonly ok: false; readonly reason: BuildingPlaceFailure }
+
+/**
+ * Every `canPlaceDestination`/`canPlaceHouse` outcome is a module-scope frozen
+ * singleton, exactly as `canPlaceRoad`'s are (`roads.ts:303-319`) and for the
+ * same measured reason: the object literal these functions used to return
+ * ESCAPES — both are far too large for V8 to inline, so scalar replacement
+ * cannot delete it — and M1d measured the identical literal in `canPlaceRoad`
+ * at 40.6-44.3 B per call, which is why that function carried a `'roads.ts':
+ * 128` known-violation budget until it was fixed this way. **Measured here
+ * before the fix: `canPlaceHouse` 40.0 B/call**, the same literal at the same
+ * price, on the demo board.
+ *
+ * M1e Task 5 puts BOTH of these on a per-tick path at up to
+ * `SPAWN_CANDIDATE_LIMIT * ORIENTATION_COUNT` = 96 calls per destination
+ * attempt. Removing the cell arrays (`spacingViolated`, above) does not remove
+ * this; it is a separate allocation with a separate fix, and reporting the
+ * first as "Task 4 made placement allocation-free" without the second is how a
+ * green harness comes to be a claim about the wrong thing.
+ *
+ * **What pins this, since the obvious answer is wrong.** No test compares a
+ * `PlaceCheck` by identity by accident, and the allocation harness on the demo
+ * FRAME loop cannot see either function at all — neither has a per-frame caller
+ * until Task 5, measured as `buildings.ts` absent from 9 of 9 profile windows
+ * with an escaping allocation injected at the top of both. The detectors are
+ * `buildings.test.ts`'s frozen/identity block (deterministic, all eight
+ * outcomes) and `placementAllocation.test.ts`'s per-CALL rig. Reverting any one
+ * `return` below to a literal turns exactly one identity assertion red.
+ *
+ * `Object.freeze` does not recurse — there is one object per outcome and each
+ * is frozen at its own level, which is what the `roads.ts` note means by
+ * "every level".
+ */
+const B_OK = Object.freeze({ ok: true } as const)
+const B_OOB = Object.freeze({ ok: false, reason: 'out-of-bounds' } as const)
+const B_TERRAIN = Object.freeze({ ok: false, reason: 'terrain' } as const)
+const B_TREE = Object.freeze({ ok: false, reason: 'tree' } as const)
+const B_ROAD = Object.freeze({ ok: false, reason: 'road' } as const)
+const B_SPACING = Object.freeze({ ok: false, reason: 'spacing' } as const)
+const B_BUILDING = Object.freeze({ ok: false, reason: 'building' } as const)
+const B_CAPACITY = Object.freeze({ ok: false, reason: 'capacity' } as const)
 
 /**
  * Whether `cell` coincides with any existing house cell or lies within any
@@ -302,16 +405,16 @@ function cellOverlapsAnyDestination(state: GameState, world: WorldData, cell: nu
  * from this one).
  */
 export function canPlaceHouse(state: GameState, world: WorldData, cell: number): PlaceCheck {
-  if (!inBounds(cell, world.cells)) return { ok: false, reason: 'out-of-bounds' }
-  if (world.passable[cell] !== 1) return { ok: false, reason: 'terrain' }
-  if (hasTree(state, world, cell)) return { ok: false, reason: 'tree' }
-  if ((state.roads[cell] as number) !== 0) return { ok: false, reason: 'road' }
+  if (!inBounds(cell, world.cells)) return B_OOB
+  if (world.passable[cell] !== 1) return B_TERRAIN
+  if (hasTree(state, world, cell)) return B_TREE
+  if ((state.roads[cell] as number) !== 0) return B_ROAD
   if (cellOverlapsAnyDestination(state, world, cell) || cellOverlapsAnyHouse(state, cell)) {
-    return { ok: false, reason: 'building' }
+    return B_BUILDING
   }
   const houseCount = state.header[H_HOUSE_COUNT] as number
-  if (houseCount >= world.map.maxHouses) return { ok: false, reason: 'capacity' }
-  return { ok: true }
+  if (houseCount >= world.map.maxHouses) return B_CAPACITY
+  return B_OK
 }
 
 /**
@@ -369,45 +472,70 @@ export function canPlaceDestination(
   destCell: number,
   orientation: number,
 ): PlaceCheck {
+  // **The prologue, in this order, and it is load-bearing.**
+  // `validateOrientation` first: a bad orientation is a programming error and
+  // must throw rather than be reported as a placement rejection, including when
+  // the cell is ALSO bad — which is the only case that can tell the two orders
+  // apart, and is what `buildings.test.ts`'s prologue test asserts.
+  // `inBounds` second: it is the only `Number.isInteger` check on `destCell` in
+  // the codebase, and everything below indexes typed arrays with it.
   validateOrientation(orientation)
-  if (!inBounds(destCell, world.cells)) return { ok: false, reason: 'out-of-bounds' }
+  if (!inBounds(destCell, world.cells)) return B_OOB
 
-  const cells = allSevenCells(destCell, orientation, world)
-  if (cells === null) return { ok: false, reason: 'out-of-bounds' }
+  const width = footprintWidth(orientation)
+  const height = footprintHeight(orientation)
+  const x0 = destCell % world.w
+  const y0 = (destCell / world.w) | 0
+  if (x0 < 0 || x0 + width > world.w || y0 < 0 || y0 + height > world.h) return B_OOB
+  const carpark = carparkCell(destCell, orientation, world.w, world.h)
+  if (carpark === -1) return B_OOB
 
-  for (let i = 0; i < cells.length; i++) {
-    if (world.passable[cells[i] as number] !== 1) return { ok: false, reason: 'terrain' }
+  // Three passes over the same 7 cells, in the same order as the retired
+  // `allSevenCells` walk (footprint row-major, then the carpark) — though the
+  // order inside a pass cannot be observed, since every cell in one pass
+  // yields the same reason. The PASSES' order is what is observable, and it is
+  // unchanged: terrain, then tree, then road.
+  for (let dy = 0; dy < height; dy++) {
+    for (let dx = 0; dx < width; dx++) {
+      if (world.passable[(y0 + dy) * world.w + (x0 + dx)] !== 1) return B_TERRAIN
+    }
   }
-  for (let i = 0; i < cells.length; i++) {
-    if (hasTree(state, world, cells[i] as number)) return { ok: false, reason: 'tree' }
+  if (world.passable[carpark] !== 1) return B_TERRAIN
+
+  for (let dy = 0; dy < height; dy++) {
+    for (let dx = 0; dx < width; dx++) {
+      if (hasTree(state, world, (y0 + dy) * world.w + (x0 + dx))) return B_TREE
+    }
   }
-  for (let i = 0; i < cells.length; i++) {
-    if ((state.roads[cells[i] as number] as number) !== 0) return { ok: false, reason: 'road' }
+  if (hasTree(state, world, carpark)) return B_TREE
+
+  for (let dy = 0; dy < height; dy++) {
+    for (let dx = 0; dx < width; dx++) {
+      if ((state.roads[(y0 + dy) * world.w + (x0 + dx)] as number) !== 0) return B_ROAD
+    }
   }
+  if ((state.roads[carpark] as number) !== 0) return B_ROAD
 
   const destCount = state.header[H_DEST_COUNT] as number
   for (let d = 0; d < destCount; d++) {
     const otherCell = state.destCell[d] as number
     const otherOrientation = destMetaOrientation(state.destMeta[d] as number)
-    // `allSevenCells` cannot return null here: every stored destination was
-    // itself validated against this exact grid before it was placed.
-    const otherCells = allSevenCells(otherCell, otherOrientation, world) as number[]
-    for (let i = 0; i < cells.length; i++) {
-      for (let j = 0; j < otherCells.length; j++) {
-        if (chebyshevDistance(cells[i] as number, otherCells[j] as number, world.w) < 2) {
-          return { ok: false, reason: 'spacing' }
-        }
-      }
+    // No bounds check on the incumbent: every stored destination was itself
+    // validated against this exact grid before it was placed, which is the same
+    // invariant the retired `allSevenCells(...) as number[]` cast relied on.
+    if (spacingViolated(destCell, orientation, otherCell, otherOrientation, world.w)) return B_SPACING
+  }
+
+  for (let dy = 0; dy < height; dy++) {
+    for (let dx = 0; dx < width; dx++) {
+      if (cellOverlapsAnyHouse(state, (y0 + dy) * world.w + (x0 + dx))) return B_BUILDING
     }
   }
+  if (cellOverlapsAnyHouse(state, carpark)) return B_BUILDING
 
-  for (let i = 0; i < cells.length; i++) {
-    if (cellOverlapsAnyHouse(state, cells[i] as number)) return { ok: false, reason: 'building' }
-  }
+  if (destCount >= world.map.maxDestinations) return B_CAPACITY
 
-  if (destCount >= world.map.maxDestinations) return { ok: false, reason: 'capacity' }
-
-  return { ok: true }
+  return B_OK
 }
 
 /**

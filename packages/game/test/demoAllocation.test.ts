@@ -63,6 +63,28 @@ import { repoRelative } from './allocationPaths'
  *
  * What is profiled here is therefore the EXISTING frame loop under a load it
  * has never seen, which is the only new thing there is to measure.
+ *
+ * **AND IT CANNOT SEE BUILDING PLACEMENT — measured, because a later brief
+ * assumed the opposite.** M1e Task 4's brief named this file as "the harness
+ * that sees" `canPlaceDestination`/`canPlaceHouse` losing their per-call
+ * allocations. It does not, and the reason is this section's own rule one level
+ * on: **neither predicate has a per-FRAME caller until Task 5.** They are
+ * reached once each per building, from `demoLayout.ts` and `startingCity.ts`,
+ * before the first tick — `step()` imports neither. With an escaping
+ * `(globalThis as ...).__sink = {...}` planted at the TOP of both predicates,
+ * so it fires on every call whatever the branch, `packages/sim/src/buildings.ts`
+ * was **absent from the profile in 9 of 9 windows across 3 draws**. A green
+ * figure from this file about `buildings.ts` is not evidence; it is the
+ * denominator being zero.
+ *
+ * The per-CALL rig that can see it is
+ * `packages/game/test/placementAllocation.test.ts`. **Do not move it here.**
+ * This file's one-rig discipline above is the reason it stays separate, and the
+ * frame loop is the wrong driver for a predicate the frame loop does not call.
+ * When Task 5 does put both on the tick, the arm to add here is a per-CALL rate
+ * off a spawn-attempt counter, never a per-frame budget: spawn attempts fire
+ * about once every 2,250 ticks, which is the rare-event case the carry-forward
+ * shows no choice of denominator can rescue.
  */
 
 interface CallFrame {

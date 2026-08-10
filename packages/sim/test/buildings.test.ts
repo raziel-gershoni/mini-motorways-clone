@@ -22,10 +22,14 @@ import {
   destMetaOrientation,
   carparkCell,
   isFootprintCell,
+  footprintWidth,
+  footprintHeight,
+  spacingViolated,
   canPlaceHouse,
   placeHouse,
   canPlaceDestination,
   placeDestination,
+  type PlaceCheck,
 } from '../src/buildings'
 
 /**
@@ -632,6 +636,376 @@ describe('grid-edge bounds guards (review finding I2)', () => {
       ok: false,
       reason: 'out-of-bounds',
     })
+  })
+
+  /**
+   * **`validateOrientation` is the FIRST statement of `canPlaceDestination`,
+   * before the `destCell` bounds check, and the second half of this test is the
+   * only thing that says so.**
+   *
+   * Nothing exercised an invalid orientation through `canPlaceDestination` at
+   * all before M1e Task 4 (only `packDestMeta` had one). And the obvious test —
+   * a valid cell with a bad orientation — cannot pin the prologue, because
+   * `carparkCell` validates too and throws the *same message* a few lines
+   * later: deleting the prologue leaves it green. The discriminator is an
+   * out-of-bounds `destCell` with a bad orientation, where the two orders give
+   * different answers — a throw if the orientation is checked first, a returned
+   * `out-of-bounds` if the cell is. Same shape as the catalogue's "a negative
+   * assertion satisfied by the wrong mechanism", applied to a throw.
+   */
+  it('checks the orientation BEFORE the cell, so a bad orientation throws even for an out-of-bounds cell', () => {
+    const { map, world } = fixture('bounds-orientation-prologue')
+    const state = createState('s', map)
+    // A valid cell: caught by the prologue, and also by `carparkCell` if the
+    // prologue were removed — so this half alone proves nothing about order.
+    expect(() => canPlaceDestination(state, world, destCellFor(3, 1), ORIENTATION_COUNT)).toThrow(
+      /orientation must be an integer in \[0, 4\)/,
+    )
+    expect(() => canPlaceDestination(state, world, destCellFor(3, 1), -1)).toThrow(/orientation must be an integer/)
+    expect(() => canPlaceDestination(state, world, destCellFor(3, 1), 1.5)).toThrow(/orientation must be an integer/)
+    // The discriminator: the cell is out of bounds AND the orientation is
+    // invalid. With the prologue this throws; without it, `inBounds` returns
+    // first and the caller gets a plausible `out-of-bounds` for a call that is
+    // a programming error.
+    expect(() => canPlaceDestination(state, world, world.cells, ORIENTATION_COUNT)).toThrow(
+      /orientation must be an integer/,
+    )
+    expect(() => canPlaceDestination(state, world, -1, 7)).toThrow(/orientation must be an integer/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M1e Task 4: the §5.9 spacing rule became box arithmetic, and this is its proof
+// ---------------------------------------------------------------------------
+
+/**
+ * The pre-M1e implementation, kept HERE and only here, as a one-off migration
+ * proof for Task 4's box-arithmetic rewrite. **It is not coverage** — a test
+ * that reimplements the thing it checks is a listed defect, and the real
+ * coverage is every other `canPlaceDestination` test in this file, all of
+ * which are unchanged. Delete this and its one test when the rewrite has been
+ * on main for a milestone.
+ *
+ * **What it deliberately SHARES with the code under test, and why.** It calls
+ * the real `footprintWidth`/`footprintHeight`/`carparkCell`, because those are
+ * not what Task 4 changed: the rewrite replaced *the comparison* (49 cell pairs
+ * against 4 box pairs), not the geometry. Sharing the geometry is what isolates
+ * the algorithm change — and it is also why swapping `footprintWidth`'s two
+ * shapes is **invisible to this test** (both sides move together) and is killed
+ * instead by the four orientation tests above. Measured, not assumed; see the
+ * task report's mutation table.
+ */
+function referenceSevenCells(destCell: number, orientation: number, world: WorldData): number[] | null {
+  const width = footprintWidth(orientation)
+  const height = footprintHeight(orientation)
+  const x0 = destCell % world.w
+  const y0 = (destCell / world.w) | 0
+  if (x0 < 0 || x0 + width > world.w || y0 < 0 || y0 + height > world.h) return null
+
+  const carpark = carparkCell(destCell, orientation, world.w, world.h)
+  if (carpark === -1) return null
+
+  const out: number[] = []
+  for (let dy = 0; dy < height; dy++) {
+    for (let dx = 0; dx < width; dx++) {
+      out.push((y0 + dy) * world.w + (x0 + dx))
+    }
+  }
+  out.push(carpark)
+  return out
+}
+
+/** The retired pairwise rule: 49 cell pairs, Chebyshev, reject below 2. */
+function referenceSpacingViolated(a: readonly number[], b: readonly number[], w: number): boolean {
+  for (let i = 0; i < a.length; i++) {
+    for (let j = 0; j < b.length; j++) {
+      const ax = (a[i] as number) % w
+      const ay = ((a[i] as number) / w) | 0
+      const bx = (b[j] as number) % w
+      const by = ((b[j] as number) / w) | 0
+      const dx = ax > bx ? ax - bx : bx - ax
+      const dy = ay > by ? ay - by : by - ay
+      if ((dx > dy ? dx : dy) < 2) return true
+    }
+  }
+  return false
+}
+
+describe('the box-arithmetic spacing rule is equivalent to the retired pairwise one', () => {
+  it('agrees with the retired pairwise implementation, exhaustively, on a non-square grid', () => {
+    // Every (origin, orientation) pair on a small non-square grid against every
+    // (origin, orientation) incumbent — 4 orientations both sides, which is what
+    // an earlier `carparkCell` defect showed a non-square fixture alone does not
+    // cover: for E the carpark is `cell + 3` and for W it is `cell - 1`, so `w`
+    // vanishes entirely and only N and S read it.
+    //
+    // 9x7 rather than this file's 9x6: a different height from the rest of the
+    // file, so a rewrite that accidentally reads a captured `H` cannot ride on
+    // the fixture agreeing with it.
+    const map = parseMap(
+      'spacing-equivalence',
+      ['.........', '.........', '.........', '.........', '.........', '.........', '.........'],
+      50,
+      40,
+      16,
+      5,
+    )
+    const world = createWorld(map)
+    expect([world.w, world.h]).toEqual([9, 7])
+
+    let compared = 0
+    let violated = 0
+    for (let ac = 0; ac < world.cells; ac++) {
+      for (let ao = 0; ao < ORIENTATION_COUNT; ao++) {
+        const a = referenceSevenCells(ac, ao, world)
+        if (a === null) continue
+        for (let bc = 0; bc < world.cells; bc++) {
+          for (let bo = 0; bo < ORIENTATION_COUNT; bo++) {
+            const b = referenceSevenCells(bc, bo, world)
+            if (b === null) continue
+            compared++
+            const expected = referenceSpacingViolated(a, b, world.w)
+            if (expected) violated++
+            expect(
+              spacingViolated(ac, ao, bc, bo, world.w),
+              `origins ${ac}/${ao} vs ${bc}/${bo}`,
+            ).toBe(expected)
+          }
+        }
+      }
+    }
+    // Vacuity: the loops must actually have compared something, and both answers
+    // must occur — an enumeration where every pair is "violated" proves nothing.
+    expect(compared).toBeGreaterThan(1000)
+    expect(violated).toBeGreaterThan(0)
+    expect(violated).toBeLessThan(compared)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M1e Task 4: both predicates return module-scope frozen singletons
+// ---------------------------------------------------------------------------
+
+interface PlaceCase {
+  readonly name: string
+  readonly expected: PlaceCheck
+  readonly call: () => PlaceCheck
+}
+
+/**
+ * Every outcome BOTH predicates can produce, as a zero-argument call: eight
+ * from `canPlaceDestination` and seven from `canPlaceHouse`, over the eight
+ * distinct singletons between them.
+ *
+ * Each case owns its fixture. `roads.test.ts` builds most of its eight from one
+ * board; that is not available here, because `capacity` needs a full board and
+ * `ok` needs a board with room, and the two cannot be the same state.
+ */
+function everyPlaceOutcome(): PlaceCase[] {
+  const cases: PlaceCase[] = []
+  const add = (name: string, expected: PlaceCheck, call: () => PlaceCheck): void => {
+    cases.push({ name, expected, call })
+  }
+  const holed = (id: string, ch: string, row: number, col: number) => {
+    const rows = ROWS.map((r, y) => (y === row ? r.slice(0, col) + ch + r.slice(col + 1) : r))
+    const map = parseMap(id, rows as string[], 50, 40, 16, 5)
+    return { map, world: createWorld(map) }
+  }
+
+  // --- canPlaceDestination, all eight ---
+  {
+    const { map, world } = fixture('sgl-dest-ok')
+    const state = createState('s', map)
+    add('dest ok', { ok: true }, () => canPlaceDestination(state, world, destCellFor(3, 1), ORIENTATION_N))
+    add('dest out-of-bounds', { ok: false, reason: 'out-of-bounds' }, () =>
+      canPlaceDestination(state, world, world.cells, ORIENTATION_N),
+    )
+  }
+  {
+    const { map, world } = holed('sgl-dest-terrain', '~', 2, 4)
+    const state = createState('s', map)
+    add('dest terrain', { ok: false, reason: 'terrain' }, () =>
+      canPlaceDestination(state, world, destCellFor(3, 1), ORIENTATION_N),
+    )
+  }
+  {
+    const { map, world } = holed('sgl-dest-tree', 'T', 2, 4)
+    const state = createState('s', map)
+    add('dest tree', { ok: false, reason: 'tree' }, () =>
+      canPlaceDestination(state, world, destCellFor(3, 1), ORIENTATION_N),
+    )
+  }
+  {
+    const { map, world } = fixture('sgl-dest-road')
+    const state = createState('s', map)
+    expect(placeRoad(state, world, destCellFor(4, 2), destCellFor(4, 1))).toBe(true)
+    add('dest road', { ok: false, reason: 'road' }, () =>
+      canPlaceDestination(state, world, destCellFor(3, 1), ORIENTATION_N),
+    )
+  }
+  {
+    const { map, world } = fixture('sgl-dest-spacing')
+    const state = createState('s', map)
+    expect(placeDestination(state, world, destCellFor(3, 1), ORIENTATION_N, 0, DEST_KIND_SQUARE)).toBe(true)
+    add('dest spacing', { ok: false, reason: 'spacing' }, () =>
+      canPlaceDestination(state, world, destCellFor(5, 1), ORIENTATION_N),
+    )
+  }
+  {
+    const { map, world } = fixture('sgl-dest-building')
+    const state = createState('s', map)
+    expect(placeHouse(state, world, destCellFor(4, 2), 0)).toBe(true)
+    add('dest building', { ok: false, reason: 'building' }, () =>
+      canPlaceDestination(state, world, destCellFor(3, 1), ORIENTATION_N),
+    )
+  }
+  {
+    const { map, world } = fixture('sgl-dest-capacity', 40, 2)
+    const state = createState('s', map)
+    expect(placeDestination(state, world, destCellFor(0, 0), ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+    expect(placeDestination(state, world, destCellFor(6, 0), ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+    add('dest capacity', { ok: false, reason: 'capacity' }, () =>
+      canPlaceDestination(state, world, destCellFor(3, 3), ORIENTATION_N),
+    )
+  }
+
+  // --- canPlaceHouse, all seven (it has no spacing rule of its own) ---
+  {
+    const { map, world } = fixture('sgl-house-ok')
+    const state = createState('s', map)
+    add('house ok', { ok: true }, () => canPlaceHouse(state, world, 10))
+    add('house out-of-bounds', { ok: false, reason: 'out-of-bounds' }, () =>
+      canPlaceHouse(state, world, world.cells),
+    )
+  }
+  {
+    const { map, world } = holed('sgl-house-terrain', '~', 0, 1)
+    const state = createState('s', map)
+    add('house terrain', { ok: false, reason: 'terrain' }, () => canPlaceHouse(state, world, 1))
+  }
+  {
+    const { map, world } = holed('sgl-house-tree', 'T', 0, 1)
+    const state = createState('s', map)
+    add('house tree', { ok: false, reason: 'tree' }, () => canPlaceHouse(state, world, 1))
+  }
+  {
+    const { map, world } = fixture('sgl-house-road')
+    const state = createState('s', map)
+    expect(placeRoad(state, world, 10, 11)).toBe(true)
+    add('house road', { ok: false, reason: 'road' }, () => canPlaceHouse(state, world, 10))
+  }
+  {
+    const { map, world } = fixture('sgl-house-building')
+    const state = createState('s', map)
+    expect(placeHouse(state, world, 10, 0)).toBe(true)
+    add('house building', { ok: false, reason: 'building' }, () => canPlaceHouse(state, world, 10))
+  }
+  {
+    const { map, world } = fixture('sgl-house-capacity', 2, 16)
+    const state = createState('s', map)
+    expect(placeHouse(state, world, 0, 0)).toBe(true)
+    expect(placeHouse(state, world, 1, 0)).toBe(true)
+    add('house capacity', { ok: false, reason: 'capacity' }, () => canPlaceHouse(state, world, 2))
+  }
+  return cases
+}
+
+/**
+ * **`canPlaceDestination` and `canPlaceHouse` return module-scope frozen
+ * singletons, and THIS is what pins them — not the allocation profiler.**
+ *
+ * The task brief said the singleton half of Task 4 has
+ * `packages/game/test/demoAllocation.test.ts` as its only detector, "because no
+ * existing test compares a `PlaceCheck` by identity". The first clause was
+ * true and the conclusion did not follow: the in-repo precedent the brief cites
+ * for the *fix* (`roads.ts:303-319`) also has a precedent for the *test*
+ * (`roads.test.ts`, "canPlaceRoad allocates nothing per call"), and it is
+ * strictly better than a profiler for this property. Identity is deterministic,
+ * it is checkable in the package that owns the code, and it covers all eight
+ * outcomes rather than the ones some driver happens to reach. Reverting any
+ * single `return` to an object literal turns exactly one of these red.
+ *
+ * It is also the only detector that WORKS. Measured on this tree: with an
+ * escaping allocation injected at the top of both predicates, `buildings.ts` is
+ * **absent from the demo frame profile in 9 of 9 windows** — neither function
+ * has a per-frame caller until Task 5, so the harness the brief named cannot
+ * see this change at all. See the task report, and
+ * `packages/game/test/placementAllocation.test.ts` for the per-call rig that
+ * can.
+ *
+ * Frozen-ness is the other half and it is not decoration: a shared instance a
+ * caller can scribble on is a worse defect than the allocation was, because the
+ * next caller sees the scribble. `PlaceCheck` is `readonly` in the type system,
+ * which stops nothing at run time.
+ */
+describe('placement validity allocates nothing per call — frozen singletons', () => {
+  it('the case list really does reach all eight outcomes, or every assertion below is about a subset', () => {
+    // Vacuity first: a `cases` list whose entries silently produced the same
+    // refusal would satisfy "frozen" and "stable" while proving nothing.
+    const cases = everyPlaceOutcome()
+    for (const { name, expected, call } of cases) {
+      expect(call(), name).toEqual(expected)
+    }
+    expect(cases.length).toBe(15)
+    expect(new Set(cases.map((c) => (c.expected.ok ? 'ok' : c.expected.reason))).size).toBe(8)
+  })
+
+  it('returns a FROZEN value for every outcome, so one caller cannot scribble on the next caller’s answer', () => {
+    for (const { name, call } of everyPlaceOutcome()) {
+      expect(Object.isFrozen(call()), `${name} is not frozen`).toBe(true)
+    }
+  })
+
+  it('returns the SAME instance for a repeated outcome — the deterministic form of "allocates nothing"', () => {
+    for (const { name, call } of everyPlaceOutcome()) {
+      expect(call(), `${name} allocated a fresh object`).toBe(call())
+    }
+  })
+
+  it('gives DIFFERENT outcomes different instances, and the two predicates SHARE them', () => {
+    const cases = everyPlaceOutcome()
+    const seen = new Set<PlaceCheck>()
+    for (const { call } of cases) seen.add(call())
+    // Exactly 8 distinct instances across 15 calls: the singletons are neither
+    // one collapsed object (which would be 1) nor per-call literals (15), and
+    // `canPlaceHouse` and `canPlaceDestination` return the same instance for
+    // the same reason rather than keeping two parallel tables that can drift.
+    expect(seen.size).toBe(8)
+    const byName = new Map(cases.map((c) => [c.name, c.call]))
+    for (const reason of ['ok', 'out-of-bounds', 'terrain', 'tree', 'road', 'building', 'capacity']) {
+      expect(byName.get(`dest ${reason}`)!(), `dest/house ${reason} are different instances`).toBe(
+        byName.get(`house ${reason}`)!(),
+      )
+    }
+  })
+
+  it('a caller cannot corrupt the shared instance, and a later independent call is unaffected', () => {
+    const { map, world } = fixture('sgl-no-scribble')
+    const state = createState('s', map)
+    const first = canPlaceDestination(state, world, world.cells, ORIENTATION_N)
+    expect(first).toEqual({ ok: false, reason: 'out-of-bounds' })
+
+    /**
+     * **This test repairs its own damage, and that is not tidiness.** The thing
+     * it attempts is a write to a MODULE-SCOPE singleton. Under the mutation it
+     * exists to catch — a missing `Object.freeze` — the write succeeds, and a
+     * corrupted value then leaks into every later test in this file, inflating
+     * the detector count with unrelated failures. `roads.test.ts` measured that
+     * exact effect at 9 failures of which only 2 were detectors.
+     */
+    const before = (first as { reason: string }).reason
+    let threw: unknown = null
+    try {
+      ;(first as { reason: string }).reason = 'terrain'
+    } catch (e) {
+      threw = e
+    }
+    if ((first as { reason: string }).reason !== before) (first as { reason: string }).reason = before
+
+    // ESM is strict mode, so a write to a frozen property throws rather than
+    // failing silently. Both halves matter: the throw, and the value after it.
+    expect(threw, 'the shared result accepted a write — the singleton is not frozen').toBeInstanceOf(TypeError)
+    expect(canPlaceHouse(state, world, world.cells)).toEqual({ ok: false, reason: 'out-of-bounds' })
   })
 })
 
