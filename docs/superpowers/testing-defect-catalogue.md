@@ -218,3 +218,36 @@ proves nothing about whether the shipped configuration can reach it.
 Related: [tested and looked-at are different claims]. That entry is this one at feature scale; this
 is the milestone-scale version, and it is worse, because here the tests were not merely silent about
 the player — they were passing *on inputs the player cannot produce*.
+
+## A mutation harness's restore step is untested code, and it can eat the work it was testing
+
+M1e Task 1's implementer ran a mutation battery whose cleanup was `git checkout -- packages`. That is
+correct only when the work is committed. In the fix round it was not, and one mutant's cleanup
+**silently discarded all four uncommitted fixes.** It surfaced two mutants later, as
+`TypeError: m1eRangesFromLayout is not a function` — i.e. as a confusing failure in an unrelated
+place, not as "your work is gone."
+
+The second implementation was wrong in a different way: `rm -rf packages` deletes pnpm's per-package
+`node_modules` symlinks, so every subsequent run failed to resolve `@laneways/shared` and needed a
+full `pnpm install` to recover. **Two restore implementations, two distinct silent failures.**
+
+The harness is the instrument. When the instrument's own cleanup is broken, every measurement after
+the breakage is against a tree you did not intend, and the symptom appears somewhere else entirely.
+So: **commit before the battery, always, regardless of whether you think you need to** — a commit is
+the only restore point that cannot be eaten by the thing doing the restoring. And make the harness
+**print the tree state it restored to** after each mutant, so a bad restore is visible on the run
+that caused it rather than two runs later.
+
+Related: [my own probes were the broken thing repeatedly]. This is that entry's harness-level twin —
+there the injected mutation was inert; here the mutation was fine and the cleanup was the defect.
+
+## "Run twice, identical" is the expected outcome of a one-in-ten flake, not evidence against it
+
+Task 1's report offered *"run twice, identical"* as evidence the suite is stable. The reviewer made
+~25 canonical whole-suite runs across both rounds and saw the allocation harnesses fire spuriously
+twice — once inflating a mutation row from 10 detectors to 11.
+
+At a 1-in-10 flake rate, two clean runs in a row happen 81% of the time. **The observation is almost
+perfectly uninformative and reads as reassurance.** If a flake matters to a claim, either run enough
+times to bound it or state the known rate beside the result; do not offer a small number of clean
+runs as stability.
