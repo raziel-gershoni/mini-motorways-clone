@@ -23,8 +23,23 @@ import {
   claimCell,
   occupantOf,
   packRouteStep,
+  assertOccupancySound,
+  hashState,
+  roadMask,
 } from '@laneways/sim'
+import { MAX_BLOCKED_TICKS } from '@laneways/shared'
 import { PALETTE, type AtlasContext, type AtlasSurface } from '@laneways/render'
+import {
+  buildJamRig,
+  jamGhostCells,
+  jamQueueLength,
+  JAM_CARPARK_CAPACITY_TRIPS,
+  JAM_FIRST_HOUSE_Y,
+  JAM_STARVED_FIRST_HOUSE_Y,
+  JAM_STARVED_HOUSE_COUNT,
+  JAM_TICKS,
+  JAM_UNBLOCKED_TRIPS,
+} from './jamFixture'
 import { TICK_MS } from '../src/loop'
 import { PointerOutcome } from '../src/pointer'
 import { EraseControlSurface } from '../src/eraseControl'
@@ -1490,5 +1505,359 @@ describe('a queued car is drawn inside its own cell, not on top of the car it wa
     // crossed, so nothing but the refusal can be what stopped the trip car.
     expect(state.carCell[BLOCKER_SLOT]).toBe(blockerCell)
     expect(state.header[H_SCORE]).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The bottleneck jams — M1d Task 9
+// ---------------------------------------------------------------------------
+
+/**
+ * **The end-to-end jam: throughput collapses against a HAND-COMPUTED unblocked
+ * figure, not against a recorded run.**
+ *
+ * The plan's requirement is that this test show a *jam*, not merely that cars
+ * still arrive — and that the comparison be "against the hand-computed unblocked
+ * figure named in the same clause, not against a recorded run of a fixture that
+ * does not exist". So the two numbers this rests on are both derived from the
+ * geometry and the crossing arithmetic, in `jamFixture.ts`'s module comment, and
+ * both are module constants here:
+ *
+ *   - **`JAM_UNBLOCKED_TRIPS = 204`** — what the corridor would deliver in 900
+ *     ticks if nothing ever blocked, summed over eight route lengths from
+ *     `rel_k = ceil(k * 2500 / 330)`. Deliberately a LOWER bound: the same
+ *     fixture with `canEnter`'s occupancy branch neutralised measures **206**, so
+ *     204 under-states the unblocked world and `measured < 204` therefore
+ *     strictly implies `measured < unblocked`.
+ *   - **`JAM_CARPARK_CAPACITY_TRIPS = 112`** — `floor(900 / 8)`, what the
+ *     one-lane carpark can physically pass, because every trip must claim
+ *     `(carpark, LANE_OF_DIR[N] = 1)` and cannot release it for `rel_1 = 8`
+ *     ticks.
+ *
+ * Measured: **106**. The fixture is not merely slower with blocking on — it is
+ * pinned at 95 % of its bottleneck's capacity, 48 % below the unblocked figure.
+ *
+ * ---------------------------------------------------------------------------
+ * SHAPED AS A RECORD PLUS A PREDICATE, FOR THE REASON THE TRIP TEST IS
+ * ---------------------------------------------------------------------------
+ *
+ * Same idiom as `a full trip, drawn` above: the run is recorded once and every
+ * anti-degeneracy guard is a pure predicate over that record, so the guards can
+ * be run against a record that SHOULD fail them. This project nearly shipped a
+ * hash of nothing in M1b, and an "it still jams" test that cannot fail is the
+ * same object.
+ *
+ * **Three of the five guards are proved able to fail by a REAL alternative run
+ * rather than by perturbing a field.** `LIGHT` is the same corridor, the same
+ * code and the same guards with the load taken off — one house instead of eight
+ * — and it genuinely does not jam: 8 refusals against 6,852, a longest blocked
+ * run of 8 ticks against 131, a longest queue of 2 against 10, and **57 trips
+ * against its own hand-computed unblocked figure of 56**, i.e. it achieves full
+ * unblocked throughput and the collapse guard fires on it. A perturbed field
+ * proves the predicate reads that field; a second fixture proves the guard
+ * discriminates a jammed world from an unjammed one.
+ */
+interface JamRecord {
+  readonly trips: number
+  readonly dispatched: number
+  readonly crossings: number
+  readonly refusals: number
+  /** `carBlockedTicks` IS the consecutive-blocked-tick counter — it resets on any granted entry. */
+  readonly longestBlockedRun: number
+  readonly longestQueue: number
+  readonly maxCorridorDegree: number
+  readonly ghostCells: number
+  /** The hand-computed unblocked figure for THIS fixture's load. */
+  readonly unblocked: number
+}
+
+const JAM_MIN_BLOCKED_RUN = 10
+const JAM_MIN_QUEUE = 3
+/** One house at (8, 6): route length 2, `rel_2 = 16`, `P = 32`, so `2 * (1 + floor(867/32)) = 56`. */
+const LIGHT_UNBLOCKED_TRIPS = 56
+
+function runJam(rig: ReturnType<typeof buildJamRig>, unblocked: number): JamRecord {
+  let trips = 0
+  let dispatched = 0
+  let crossings = 0
+  let refusals = 0
+  let longestBlockedRun = 0
+  let longestQueue = 0
+  for (let t = 0; t < JAM_TICKS; t++) {
+    const o = rig.drive(1)
+    trips += o.trips
+    dispatched += o.dispatched
+    crossings += o.crossings
+    refusals += o.refusals
+    const q = jamQueueLength(rig)
+    if (q > longestQueue) longestQueue = q
+    for (let c = 0; c < rig.state.carBlockedTicks.length; c++) {
+      const b = rig.state.carBlockedTicks[c] as number
+      if (b > longestBlockedRun) longestBlockedRun = b
+    }
+  }
+  let maxCorridorDegree = 0
+  for (const cell of rig.corridor) {
+    const mask = roadMask(rig.state, cell)
+    let degree = 0
+    for (let bit = 0; bit < 8; bit++) if (mask & (1 << bit)) degree++
+    if (degree > maxCorridorDegree) maxCorridorDegree = degree
+  }
+  return {
+    trips,
+    dispatched,
+    crossings,
+    refusals,
+    longestBlockedRun,
+    longestQueue,
+    maxCorridorDegree,
+    ghostCells: jamGhostCells(rig),
+    unblocked,
+  }
+}
+
+/**
+ * The five anti-degeneracy guards, as one predicate.
+ *
+ * Four are the plan's; **the fifth is not, and it was added because the first
+ * fixture failed it.** A T-shaped funnel of sixteen cars jams so completely that
+ * ZERO trips finish in 900 ticks, with a car blocked for 893 consecutive ticks —
+ * which satisfies every one of the plan's four guards and is still the wrong
+ * demonstration, because Decision 6's claim is that a gridlocked city **grinds
+ * rather than stops**. A jam test that passes on a stopped city is measuring the
+ * opposite of what shipped.
+ */
+function jamGuardFailures(r: JamRecord): string[] {
+  const out: string[] = []
+  if (r.dispatched <= 0) out.push('no car was dispatched')
+  if (r.trips <= 0) out.push('no trip completed: the city stopped rather than ground')
+  if (r.longestBlockedRun < JAM_MIN_BLOCKED_RUN) {
+    out.push(`longest blocked run was ${r.longestBlockedRun}, need ${JAM_MIN_BLOCKED_RUN}`)
+  }
+  if (r.longestQueue < JAM_MIN_QUEUE) {
+    out.push(`longest queue was ${r.longestQueue}, need ${JAM_MIN_QUEUE}`)
+  }
+  if (r.trips >= r.unblocked) {
+    out.push(`${r.trips} trips did not fall below the hand-computed unblocked ${r.unblocked}`)
+  }
+  return out
+}
+
+describe('a bottleneck jams: throughput collapses below the hand-computed unblocked figure', () => {
+  const jam = runJam(buildJamRig('jam-integration'), JAM_UNBLOCKED_TRIPS)
+
+  it('completes 106 trips against a hand-computed 204 unblocked, and 112 of carpark capacity', () => {
+    // The headline, stated as the two hand-computed figures rather than as a
+    // ratio, so a change to either is a visible edit.
+    expect(jam.trips).toBe(106)
+    expect(jam.trips, 'throughput did not collapse').toBeLessThan(JAM_UNBLOCKED_TRIPS)
+    // ...and MEASURABLY below, not by one trip: under three fifths of the
+    // unblocked figure. Written as integer arithmetic rather than a ratio so
+    // the bound is exact — 106 x 5 = 530 against 204 x 3 = 612. The actual
+    // shortfall is 98 trips, 48 %.
+    expect(jam.trips * 5).toBeLessThan(JAM_UNBLOCKED_TRIPS * 3)
+    expect(JAM_UNBLOCKED_TRIPS - jam.trips).toBe(98)
+    // The mechanism, not just the outcome: every trip claims the carpark's
+    // northbound lane for at least `rel_1 = 8` ticks, so 900 ticks cannot pass
+    // more than `floor(900 / 8)` cars however much demand there is.
+    expect(jam.trips).toBeLessThanOrEqual(JAM_CARPARK_CAPACITY_TRIPS)
+    expect(JAM_CARPARK_CAPACITY_TRIPS).toBe(Math.floor(JAM_TICKS / 8))
+    // And the fixture really is running AT that bound rather than merely under
+    // it — which is what makes "the bottleneck is the cause" a measurement
+    // rather than a story.
+    expect(jam.trips / JAM_CARPARK_CAPACITY_TRIPS).toBeGreaterThan(0.9)
+  })
+
+  it('is a straight degree-<=2 corridor, so no lane-speed multiplier is in the arithmetic', () => {
+    // The hand computation above uses the plain `speedUnits(1000) = 330` for
+    // every crossing. That is only true because no cell of this corridor is an
+    // intersection and no step of any route is a turn — asserted, not assumed,
+    // because Task 7's multipliers would silently move every figure in the table.
+    expect(jam.maxCorridorDegree).toBe(2)
+    expect(jam.ghostCells, 'a ghost would add a REFUSED_GHOST the refusal count does not model').toBe(0)
+  })
+
+  it('passes every anti-degeneracy jam guard', () => {
+    expect(jamGuardFailures(jam)).toEqual([])
+    // The figures the guards are about, pinned so a silent drift is visible.
+    expect(jam.dispatched).toBe(122)
+    expect(jam.refusals).toBe(6852)
+    expect(jam.longestBlockedRun).toBe(131)
+    expect(jam.longestQueue).toBe(10)
+  })
+
+  it('is not vacuous: the SAME corridor with the load off fires three of the five guards', () => {
+    // A real second fixture, not a perturbed field: one house instead of eight,
+    // everything else identical. It does not jam, and the guards say so.
+    const light = runJam(buildJamRig('jam-light', JAM_FIRST_HOUSE_Y, 1), LIGHT_UNBLOCKED_TRIPS)
+    expect(light.trips).toBe(57)
+    expect(light.refusals).toBe(8)
+    expect(jamGuardFailures(light)).toEqual([
+      `longest blocked run was 8, need ${JAM_MIN_BLOCKED_RUN}`,
+      `longest queue was 2, need ${JAM_MIN_QUEUE}`,
+      `57 trips did not fall below the hand-computed unblocked ${LIGHT_UNBLOCKED_TRIPS}`,
+    ])
+    // **The light fixture reaching its own unblocked figure is the whole point**:
+    // 57 >= 56 says the corridor delivers full unblocked throughput once the
+    // contention is removed, so the 106-against-204 collapse is attributable to
+    // contention and not to the geometry, the pin supply or the dispatch rate.
+    expect(light.trips).toBeGreaterThanOrEqual(LIGHT_UNBLOCKED_TRIPS)
+  })
+
+  it('is not vacuous: the two guards the light run cannot fire, fire on a perturbed record', () => {
+    // `dispatched > 0` and `trips > 0` hold in both worlds by construction, so
+    // the light fixture cannot exercise them. They are perturbed one at a time
+    // from the REAL record, so each must be the only thing that fires.
+    expect(jamGuardFailures({ ...jam, dispatched: 0 })).toEqual(['no car was dispatched'])
+    // Note which guard does NOT fire here, because it is the interesting one:
+    // a city that has stopped dead trivially satisfies "throughput fell below
+    // the unblocked figure". That is exactly why the stopped-city guard had to
+    // be added separately — the collapse guard cannot distinguish a grinding
+    // city from a dead one, and the T-funnel fixture that produced 0 trips
+    // passed the plan's four guards on the strength of it.
+    expect(jamGuardFailures({ ...jam, trips: 0 })).toEqual([
+      'no trip completed: the city stopped rather than ground',
+    ])
+    // The collapse guard, on its own: one trip above the hand-computed figure.
+    expect(jamGuardFailures({ ...jam, trips: JAM_UNBLOCKED_TRIPS })).toEqual([
+      `204 trips did not fall below the hand-computed unblocked ${JAM_UNBLOCKED_TRIPS}`,
+    ])
+    expect(jamGuardFailures({ ...jam, longestBlockedRun: JAM_MIN_BLOCKED_RUN - 1 })).toEqual([
+      `longest blocked run was 9, need ${JAM_MIN_BLOCKED_RUN}`,
+    ])
+    expect(jamGuardFailures({ ...jam, longestQueue: JAM_MIN_QUEUE - 1 })).toEqual([
+      `longest queue was 2, need ${JAM_MIN_QUEUE}`,
+    ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The long run — M1d Task 9
+// ---------------------------------------------------------------------------
+
+/** The plan's floor is 20,000 ticks. Measured cost of the whole block: ~1.0 s. */
+const LONG_RUN_TICKS = 20000
+
+/**
+ * **20,000 ticks on a deliberately bad network, with every invariant checked on
+ * every tick — and two identical runs agreeing on `hashState`.**
+ *
+ * The network is deliberately bad in a specific, named way rather than merely
+ * busy: `JAM_STARVED_*` puts **twelve** houses on the corridor with the first
+ * one hard against the carpark at (8, 5), so its cars are starved by through
+ * traffic and `carBlockedTicks` actually saturates. **That is the only place in
+ * the repo where the valve fires through `runMovement`** — `blocking.test.ts`
+ * reaches `ENTER_VALVE` on a hand-built ring, and every profiled window in
+ * `allocation.test.ts` measures zero valve firings. Here it fires **98 times**.
+ *
+ * What each assertion is for, since four of the five are checked 20,000 times
+ * and a reader should not have to infer which failure each would catch:
+ *
+ *   - **`assertOccupancySound` every tick** — a slot naming a car that is not
+ *     standing there. It is the half with no exception set, so it can be
+ *     asserted unconditionally; completeness cannot, because the valve fires
+ *     here and Decision 6's transient gap is a legitimate consequence of that.
+ *   - **`sum(destReserved) === count(PHASE_OUTBOUND)` every tick** — M1c's
+ *     reservation invariant, and the observer for "a blocked car consumes its
+ *     pin", which the plan records as holding by construction.
+ *   - **no counter wraps** — `carBlockedTicks` is `Int16` and saturates at
+ *     `MAX_BLOCKED_TICKS`; `destReserved`/`destPins` are `Uint8`. A wrap on the
+ *     first is a permanently disarmed valve, on the second a destination
+ *     excluded from dispatch forever.
+ *   - **no car starves** — every live car completes at least one trip. This is
+ *     the assertion the valve exists to make true, and it is measured against
+ *     the LIVE cars only: `maxCars` is 32 and twelve houses fill 24 slots, so
+ *     the eight `PHASE_NONE` slots would otherwise make "some car never
+ *     completed a trip" true by construction. (It did, on the first draft of
+ *     this test — `minCompletions` read 0 until the dead slots were excluded.)
+ *   - **two runs agree on `hashState`** — the property the whole product rests
+ *     on, over a run in which cars block, queue, starve and valve.
+ */
+describe('20,000 ticks on a deliberately bad network', () => {
+  it('starves nobody, wraps nothing, holds both invariants every tick, and replays identically', () => {
+    const rig = buildJamRig('long-run', JAM_STARVED_FIRST_HOUSE_Y, JAM_STARVED_HOUSE_COUNT)
+    const carCount = rig.state.carPhase.length
+    const completions = new Int32Array(carCount)
+    const prevPhase = new Int32Array(carCount)
+    const live: number[] = []
+    for (let c = 0; c < carCount; c++) {
+      prevPhase[c] = rig.state.carPhase[c] as number
+      if (prevPhase[c] !== PHASE_NONE) live.push(c)
+    }
+    expect(live.length).toBe(JAM_STARVED_HOUSE_COUNT * 2)
+    expect(live.length).toBeLessThan(carCount) // ...so the dead-slot exclusion is load-bearing
+
+    let valves = 0
+    let maxBlocked = 0
+    let maxReserved = 0
+    let reservationMismatches = 0
+    for (let t = 0; t < LONG_RUN_TICKS; t++) {
+      valves += rig.drive(1).valves
+      // Soundness, unconditionally, on every one of the 20,000 ticks. Throws by
+      // name rather than returning, so a failure names the cell and the car.
+      assertOccupancySound(rig.state, rig.world)
+      let outbound = 0
+      for (let c = 0; c < carCount; c++) {
+        const phase = rig.state.carPhase[c] as number
+        if (phase === PHASE_OUTBOUND) outbound++
+        if ((prevPhase[c] as number) === PHASE_RETURNING && phase === PHASE_IDLE) {
+          completions[c] = (completions[c] as number) + 1
+        }
+        prevPhase[c] = phase
+        const blocked = rig.state.carBlockedTicks[c] as number
+        // A wrap on an Int16 counter shows up as a negative, which is the only
+        // way saturation can fail silently.
+        if (blocked < 0) throw new Error(`carBlockedTicks[${c}] wrapped to ${blocked} on tick ${t}`)
+        if (blocked > maxBlocked) maxBlocked = blocked
+      }
+      let reserved = 0
+      for (let d = 0; d < rig.state.destReserved.length; d++) {
+        const r = rig.state.destReserved[d] as number
+        reserved += r
+        if (r > maxReserved) maxReserved = r
+      }
+      if (reserved !== outbound) reservationMismatches++
+    }
+
+    expect(reservationMismatches, 'sum(destReserved) !== count(PHASE_OUTBOUND)').toBe(0)
+
+    // No car starves. Asserted over the live set, and the minimum is reported
+    // rather than a bare `every`, so a near-miss is legible.
+    let minCompletions = Infinity
+    let worst = -1
+    for (const c of live) {
+      const n = completions[c] as number
+      if (n < minCompletions) {
+        minCompletions = n
+        worst = c
+      }
+    }
+    expect(minCompletions, `car ${worst} completed the fewest trips`).toBeGreaterThan(0)
+    expect(minCompletions).toBe(2)
+
+    // No counter wraps. `carBlockedTicks` saturates at exactly the threshold —
+    // never above it, which is what makes the width question unaskable at any
+    // run length — and both Uint8 counters stay well inside 255.
+    expect(maxBlocked).toBe(MAX_BLOCKED_TICKS)
+    expect(maxReserved).toBeLessThan(255)
+    expect(maxReserved).toBe(24)
+
+    // The valve genuinely fired, so the run exercised the branch it is here for
+    // rather than merely surviving 20,000 quiet ticks.
+    expect(valves, 'the valve never fired, so this is not the bad network it claims to be').toBe(98)
+
+    // Two identical runs agree, byte for byte, over the whole buffer.
+    const second = buildJamRig('long-run', JAM_STARVED_FIRST_HOUSE_Y, JAM_STARVED_HOUSE_COUNT)
+    second.drive(LONG_RUN_TICKS)
+    expect(hashState(second.state)).toBe(hashState(rig.state))
+    // **Deliberately NOT pinned to a literal.** The requirement is that two
+    // runs agree, and pinning the absolute digest would mint an eighth
+    // golden-shaped number that this milestone's "seven goldens, none of which
+    // may move" bookkeeping does not account for — a re-bless licence nobody
+    // authorised. What the equality needs instead is a guard against comparing
+    // two copies of nothing: the digest must differ from a fresh, untouched
+    // state of the same shape, or `toBe` would pass on a run that never ran.
+    const fresh = buildJamRig('long-run', JAM_STARVED_FIRST_HOUSE_Y, JAM_STARVED_HOUSE_COUNT)
+    expect(hashState(rig.state)).not.toBe(hashState(fresh.state))
   })
 })

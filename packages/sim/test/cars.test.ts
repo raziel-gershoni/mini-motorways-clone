@@ -206,11 +206,24 @@ const START = 42
 describe('speedUnits', () => {
   /**
    * A hand-written literal table, deliberately NOT `(330 * mul / 1000) | 0`.
-   * M1c applies no lane-speed multiplier: the only live call is the identity,
-   * so under the movement tests alone the rounding rule and the clamp are
-   * dead code and both "round instead of truncate" and "drop the clamp"
-   * survive everything. This table is their only observer until M1d/M1e give
-   * them a caller.
+   *
+   * **M1d Task 7 gave the multipliers a caller, and this comment used to say
+   * "until M1d/M1e" do — corrected at the close of M1d rather than ticked.**
+   * `laneSpeedMul` (cars.ts) now selects 667 / 333 / 500 per crossing and
+   * `advanceCar` scales its per-tick progress by the result, so multiplier
+   * SELECTION has behavioural observers of its own in the multiplier fixture at
+   * the foot of this file.
+   *
+   * What has NOT changed is why this table is here, and it is worth keeping
+   * straight because the two are easy to conflate. **`speedUnits`'s own
+   * truncation is still observed by this table and by nothing else that could
+   * separate it from rounding**: the reachable averages are 583/584 and 416/417,
+   * and `speedUnits` maps each PAIR to the same value (192 and 137), so no
+   * movement fixture at this constant set can tell truncate from round-half-up.
+   * The clamp is in the same position. So the caller made SELECTION observable
+   * and left this table as the only observer of the ARITHMETIC — which is
+   * exactly why Task 7 was told not to re-test the truncation and call it new
+   * coverage.
    */
   it('matches a hand-written literal table at every lane-speed multiplier the spec names', () => {
     // 330 * 333 = 109_890 -> 109.89 -> 109 (truncated, NOT 110)

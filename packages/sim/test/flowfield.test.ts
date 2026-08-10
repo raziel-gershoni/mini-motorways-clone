@@ -529,7 +529,8 @@ describe('computeFlowField: structural properties over a randomised graph', () =
     // caught here even if the pool was grown to accommodate it.
     //
     // The `2` is deliberately a literal and NOT `DISTINCT_EDGE_COSTS`: a
-    // third edge cost tier (M1d/M1e) would grow both that constant and
+    // third edge cost tier (M1e — M1d shipped none, see `scratch.ts`'s
+    // `DISTINCT_EDGE_COSTS`) would grow both that constant and
     // `entryPoolCapacity` together and leave a constant-derived bound just
     // as inert as the capacity one. Pinning the literal makes that change
     // fail here, which is where it should be reconsidered.

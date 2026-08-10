@@ -660,19 +660,35 @@ function dispatchColour(
  * makes "no phase between the sync and a field read may mutate the source
  * set" hold.
  *
- * **Colour iteration order is a checked no-op today, and it is disclosed here
- * rather than left silent** — the idiom `runMovement` (cars.ts) and
- * `demand.ts`'s overflow-walk bound already use. `for (c = groupCount - 1; c >=
- * 0; c--)` survives the whole suite, and it is provably a no-op by reading:
- * colours partition destinations, houses and cars; `dispatchColour` reads and
- * writes only its own colour's slots plus `H_ROUTES_REFUSED` (a commutative
- * counter); and every region it writes is FIELD_IRRELEVANT, so no colour's
- * dispatch can perturb another colour's field staleness.
+ * **Colour iteration order is a checked no-op, and it is disclosed here rather
+ * than left silent** — the idiom `runMovement` (cars.ts) and `demand.ts`'s
+ * overflow-walk bound already use. `for (c = groupCount - 1; c >= 0; c--)`
+ * survives the whole suite, and it is provably a no-op by reading: colours
+ * partition destinations, houses and cars; `dispatchColour` reads and writes
+ * only its own colour's slots plus `H_ROUTES_REFUSED` (a commutative counter);
+ * and every region it writes is FIELD_IRRELEVANT, so no colour's dispatch can
+ * perturb another colour's field staleness.
  *
- * Ascending is kept because M1d's blocking gives cars a shared resource, at
- * which point colour order becomes outcome-visible. The finding this paragraph
- * closes was the SILENCE, not the order: without it the next reader has no
- * record that anyone checked.
+ * **This paragraph used to end "ascending is kept because M1d's blocking gives
+ * cars a shared resource, at which point colour order BECOMES outcome-visible".
+ * M1d shipped and it did not.** Re-measured at the close of the milestone
+ * against the finished code: descending is killed by **0** tests across `sim`
+ * and `game` (1,161 passing either way). The prediction was wrong about where
+ * the shared resource is read, and the correction is worth more than the
+ * repoint would have been: **blocking lives in MOVEMENT, not in dispatch.**
+ * `runMovement` iterates by car index and `canEnter` is asked there; dispatch
+ * claims no occupancy slot at all (`blocking.ts` lifecycle event 5 — "nothing
+ * else claims. Not dispatch"). So colour order still decides only the order in
+ * which the same set of cars is committed to the same set of routes, and the
+ * cell contention that M1d made outcome-visible is resolved later, in an order
+ * this loop does not influence.
+ *
+ * **What WOULD end it**, stated so the next reader has a real trigger rather
+ * than a milestone name: a dispatch-time read of a shared, non-commutative
+ * resource — M1e's destination removal, or any rule that lets one colour's
+ * dispatch refuse another's. Ascending is kept anyway, because it is the
+ * specified order and free. The finding this paragraph closes was the SILENCE,
+ * not the order: without it the next reader has no record that anyone checked.
  */
 export function runDispatch(
   state: GameState,

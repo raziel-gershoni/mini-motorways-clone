@@ -18,7 +18,7 @@ export type TerrainCode = 0 | 1 | 2 | 3
 
 export interface MapData {
   readonly id: string
-  /** Maximum extent. Expansion (§5.1, M1d) reveals cells; it never resizes the buffer. */
+  /** Maximum extent. Expansion (§5.1, M1e) reveals cells; it never resizes the buffer. */
   readonly w: number
   readonly h: number
   readonly terrain: readonly TerrainCode[] // index = y * w + x

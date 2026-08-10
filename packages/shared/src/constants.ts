@@ -139,13 +139,17 @@ export const MOTORWAY_CAP = 9
  * *"portrait-native, ~24×40 grid revealed from 14×22"*, centred in the 24×40
  * board (`(24 - 14) / 2 = 5`, `(40 - 22) / 2 = 9`).
  *
- * **Frozen constants, and M1d owns making them dynamic.** Expansion (§5.1) is
- * a per-map, per-week schedule that does not exist yet: `MapData` carries `w`
- * and `h` only, and every "reveal" mention in `packages/` before this was a
- * comment deferring it. When M1d lands, the camera reads state instead of
- * these four numbers and nothing else moves — `render/camera.ts` already takes
- * the rect as a parameter (`RevealedRect`) rather than importing it, because
- * `render` imports nothing from `shared` (spec §4).
+ * **Frozen constants, and M1e owns making them dynamic — repointed from M1d at
+ * the close of M1d, which DECLINED the work.** Expansion (§5.1) is a per-map,
+ * per-week schedule that still does not exist: `MapData` carries `w` and `h`
+ * only, and every "reveal" mention in `packages/` is still a comment deferring
+ * it. M1d's Out table declines it by name, for two stated reasons — no M1d task
+ * needed it, and a revealed region in state would have been a THIRD change to
+ * buffer shape in a milestone that budgeted exactly two. When M1e lands it, the
+ * camera reads state instead of these four numbers and nothing else moves —
+ * `render/camera.ts` already takes the rect as a parameter (`RevealedRect`)
+ * rather than importing it, because `render` imports nothing from `shared`
+ * (spec §4).
  *
  * **These are drawn from, not simulated on.** The sim's board is the full
  * `GRID_W × GRID_H`; nothing in `sim` reads these, and a building or road

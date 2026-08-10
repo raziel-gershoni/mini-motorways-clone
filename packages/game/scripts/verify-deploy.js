@@ -52,8 +52,21 @@ const BUILD_ID_FILE = new URL('.build-id', PACKAGE_ROOT)
  * defect as one that reports success on a stale asset, pointed the other way:
  * both make the operator stop trusting it. 40 x 3 s is two minutes, which is
  * longer than any propagation observed and still bounded.
+ *
+ * **`LANEWAYS_VERIFY_ATTEMPTS` overrides the count, and it exists so that THIS
+ * CHECK CAN BE PROVED ABLE TO FAIL** (M1d Task 9). Both halves below are
+ * negative assertions, and a negative assertion nobody has watched fail is the
+ * most-repeated defect in this project's catalogue. Proving them means pointing
+ * this script at a server serving a deliberately stale artefact — and with a
+ * fixed 40 x 3 s budget, the half-1 counterfactual takes two minutes to reach
+ * its own failure, which is long enough that nobody runs it. Overriding the
+ * budget is *not* the same as editing the script for the demonstration: a
+ * check you have to modify in order to test is a check whose tested form is not
+ * the shipped form. The retry interval is deliberately NOT overridable — that
+ * would let a caller turn the bounded wait into no wait at all against the real
+ * deployment, which is the failure this whole file exists to prevent.
  */
-const ATTEMPTS = 40
+const ATTEMPTS = Number(process.env.LANEWAYS_VERIFY_ATTEMPTS ?? 40)
 const RETRY_MS = 3000
 
 function fail(message) {

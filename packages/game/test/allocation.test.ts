@@ -27,6 +27,13 @@ import { initCarSnapshots } from '../src/resolve'
 import { createInputQueue, type InputQueue } from '../src/inputs'
 import { createLoop } from '../src/loop'
 import { CHECKOUT_ROOT, repoRelative } from './allocationPaths'
+import {
+  buildJamRig,
+  jamGhostCells,
+  jamQueueLength,
+  JAM_STARVED_FIRST_HOUSE_Y,
+  JAM_STARVED_HOUSE_COUNT,
+} from './jamFixture'
 import { PointerOutcome, createPointerInput, type PointerInput } from '../src/pointer'
 import { SizingOutcome, bootShell, type ScalableContext, type Shell, type SizableCanvas } from '../src/shell'
 import { EraseControlSurface, createEraseControl, type EraseControl } from '../src/eraseControl'
@@ -2039,5 +2046,215 @@ describe('the tick allocates nothing on the blocking path, measured', () => {
     expect(crossings).toBeGreaterThan(1000)
     const bad = offenders(all, PROFILED_TICKS, SIM_SRC, BUDGETS)
     expect(bad.join('\n')).toMatch(/packages\/sim\/src\/state\.ts at \d/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The tick-side profile over the JAM fixture — M1d Task 9
+// ---------------------------------------------------------------------------
+
+/**
+ * **What was actually missing here, stated first, because the plan's
+ * description of it is out of date and reading it as written would produce the
+ * wrong work.**
+ *
+ * The plan (and Task 9's brief) say the tick-side allocation profile "is the
+ * last unowned item" and that *"the shipped rig in `allocation.test.ts` never
+ * moves a car — measured over 1,752 ticks, all six live cars stay
+ * `PHASE_IDLE`"*. **That was true when the plan was written and is false at
+ * HEAD.** It describes the FRAME-loop rig above, which drives pointer strokes;
+ * the TICK side has been profiled since Task 2 by `buildTickRig` (32 cars on an
+ * 88-step snake) and extended by Tasks 3 and 5. Measured on the shipped clean
+ * window at HEAD — 400 ticks after an 80-tick warm-up — it produces **1,265
+ * crossings and 3,051 refusals**, with a longest blocked run of 188 ticks. So
+ * `canEnter` and `REFUSED_OCCUPIED` are not at zero executions at all.
+ *
+ * **The real gap is that none of it is ASSERTED**, which is the half of the
+ * plan's requirement that still bites: *"a fixture that stops jamming must turn
+ * the harness RED, not quietly measure less."* The clean window counts crossings
+ * and asserts them; it counts no refusals, no dispatches, no queue depth, and no
+ * valve firings, so every one of those could fall to zero tomorrow and the
+ * window would go on reporting a clean floor over a rig that had stopped
+ * exercising the branch. That is the same shape as the four scope failures this
+ * harness has already had, one level in: the instrument is live, the driver is
+ * live, and the CLAIM about which branches the driver enters is unchecked.
+ *
+ * And one branch genuinely is at zero executions everywhere: **`ENTER_VALVE`.**
+ * Measured across every profiled window in this file, the valve fires **0**
+ * times. `blocking.test.ts` reaches it on a hand-built ring; nothing profiles it
+ * on the production path. This window does.
+ *
+ * ---------------------------------------------------------------------------
+ * THE SIX COUNTERS, AND THE ONE THIS WINDOW DELEGATES
+ * ---------------------------------------------------------------------------
+ *
+ * The plan names six branch counters. Five are asserted below —
+ * `carsDispatched`, `canEnterCalls`, `REFUSED_OCCUPIED`, `ENTER_VALVE`, and a
+ * queue of >= 3. The sixth, **ghost cells present, is deliberately delegated**
+ * to the ghost window above rather than duplicated: that window already asserts
+ * `open > 50` ghost cells with a matched treatment/control delta, and this rig
+ * has no erase in it at all (asserted zero here, because a ghost would add a
+ * `REFUSED_GHOST` that the refusal counter's derivation below does not model).
+ * Saying so is the point — an omission that is not written down is
+ * indistinguishable from an oversight.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY A MINIMUM AND NOT A DELTA, WHICH IS THE OPPOSITE OF THE GHOST WINDOW
+ * ---------------------------------------------------------------------------
+ *
+ * The ghost window above uses a treatment/control delta and says a minimum
+ * cannot work there, because its artefact is ~58 B/tick **correlated on one file
+ * per process** — a constant per-event charge no window count dilutes. That
+ * reasoning is about that rig, and it does not transfer: measured here over
+ * three rounds of three windows, the floor is **0.0000 B/refusal on all three
+ * files in 9 of 9 windows**, with a single independent excursion of 5.543
+ * B/refusal on `blocking.ts` in one window that the minimum dropped. That is the
+ * INDEPENDENT case, so the minimum is the right instrument, and the catalogue's
+ * rule — know which kind of noise you have before reaching for either — is what
+ * decides it rather than which sibling window was read last.
+ *
+ * The denominator helps too, and it is worth saying why this window can afford a
+ * minimum where the ghost window could not: there are ~10,000 refusals per
+ * 500-tick window here against ~1,336 ghost events, so a per-process blob is
+ * divided by 7.5x more events before it reaches the rate.
+ *
+ * **This window cannot use `offenders` over the whole `SIM_SRC` scope**, for the
+ * reason the completion window cannot: the starved corridor completes ~30 trips
+ * per window, every arrival consumes a pin, and `flowfield.ts` is therefore
+ * legitimately charged for real rebuild work. The bound is per file, on the
+ * three files the blocking path lives in.
+ */
+const JAM_WINDOWS = 3
+const JAM_WINDOW_TICKS = 500
+/** Long enough for `carBlockedTicks` to approach `MAX_BLOCKED_TICKS = 1,350` before window 0 opens. */
+const JAM_VALVE_WARMUP = 1200
+
+/**
+ * Per-refusal allocation a blocking-path file may be charged, in **bytes per
+ * `REFUSED_OCCUPIED`** — a rate, for the reason every other bound in this file
+ * is one.
+ *
+ * **Both ends measured on the instrument and the window size that ship.**
+ *
+ *   - **above the noise.** Three rounds of three 250-tick windows and six
+ *     further 500-tick windows: the min-over-three floor was **0.0000 on all
+ *     three files in every round**. The largest single-window excursion seen at
+ *     all was 5.543 B/refusal (`blocking.ts`, one window of nine), and the
+ *     minimum dropped it to zero — which is the statistic doing exactly the job
+ *     it is here for.
+ *   - **below the signal.** One escaping object per refusal, injected into
+ *     `noteEntryRefused` as `(globalThis as any).__sink = {...}` so it genuinely
+ *     ESCAPES — a non-escaping local is deleted by V8's scalar replacement and
+ *     reads exactly like a blind harness — gives draws of **40.3618 / 42.3551 /
+ *     41.3675**, so a floor of **40.3618 B/refusal**.
+ *
+ * So 4 is above a floor that has never been non-zero and **10.1x below the
+ * signal**, with the gap between them empty.
+ *
+ * **One thing the positive control showed that is worth recording, because this
+ * file makes a claim about it.** The injection went into `noteEntryRefused`,
+ * which lives in `blocking.ts` — and the charge appeared on **`cars.ts`**, the
+ * caller's file, because V8 inlines the one-line counter bump into `advanceCar`.
+ * This file's header says per-FUNCTION attribution is unstable and per-FILE
+ * attribution is stable; that is true of a function big enough not to be
+ * inlined, and it is not true across an inline boundary. The bound below is
+ * therefore applied to each of the three files SEPARATELY and the guard fires
+ * whichever one the charge lands on — which is what makes it robust to the
+ * question rather than dependent on the answer.
+ */
+const JAM_BUDGET_BYTES_PER_REFUSAL = 4
+
+/** The files the blocking path lives in. Same three as the clean window. */
+const JAM_TICK_FILES = TASK2_TICK_FILES
+
+interface JamBranchCounters {
+  crossings: number
+  refusals: number
+  carsDispatched: number
+  valves: number
+  longestQueue: number
+  ghostCells: number
+}
+
+describe('the tick allocates nothing on the JAM path, with every branch counted (Task 9)', () => {
+  it('enters all five counted branches and floors at 0 B per refusal over three windows', () => {
+    buildJamRig('jam-alloc-jit').drive(JIT_WARMUP_TICKS)
+
+    const rig = buildJamRig('jam-alloc', JAM_STARVED_FIRST_HOUSE_Y, JAM_STARVED_HOUSE_COUNT)
+    rig.drive(JAM_VALVE_WARMUP)
+
+    const counts: JamBranchCounters = {
+      crossings: 0,
+      refusals: 0,
+      carsDispatched: 0,
+      valves: 0,
+      longestQueue: 0,
+      ghostCells: 0,
+    }
+    const perRefusal: number[][] = []
+    const refusalsPerWindow: number[] = []
+
+    for (let w = 0; w < JAM_WINDOWS; w++) {
+      const window = { crossings: 0, refusals: 0, valves: 0, dispatched: 0, trips: 0, pinMoves: 0 }
+      const all = profileAllocations(() => {
+        const o = rig.drive(JAM_WINDOW_TICKS)
+        // Copied field by field rather than spread: a spread inside the profiled
+        // window allocates an object per window, in the harness rather than in
+        // the code under test, and this file has already been bitten once by a
+        // driver charging its own bookkeeping to `sim`.
+        window.crossings = o.crossings
+        window.refusals = o.refusals
+        window.valves = o.valves
+        window.dispatched = o.dispatched
+        window.pinMoves = o.pinMoves
+      })
+      counts.crossings += window.crossings
+      counts.refusals += window.refusals
+      counts.carsDispatched += window.dispatched
+      counts.valves += window.valves
+      refusalsPerWindow.push(window.refusals)
+      perRefusal.push(JAM_TICK_FILES.map((f) => bytesIn(all, f) / window.refusals))
+      // Outside the profiled window on purpose: `jamQueueLength` builds two Maps
+      // and a Set per call.
+      const q = jamQueueLength(rig)
+      if (q > counts.longestQueue) counts.longestQueue = q
+      counts.ghostCells += jamGhostCells(rig)
+      expect(window.refusals, `window ${w}: the corridor stopped refusing entries`).toBeGreaterThan(5000)
+    }
+
+    // ---- The five branch counters, asserted before any zero is read ----
+    // A driver that stops entering one of these must turn this test RED rather
+    // than quietly measure less, which is the whole reason they are here.
+    expect(counts.crossings, 'no crossing: claimCell/releaseCell never ran').toBeGreaterThan(300)
+    expect(counts.refusals, 'no refusal: canEnter never returned REFUSED_OCCUPIED').toBeGreaterThan(20000)
+    // `advanceCar` asks `canEnter` exactly once per car per tick whose progress
+    // reached the threshold, and the answer is either a grant (a crossing) or a
+    // refusal (a counter rise) — so the call count is their sum, derived from
+    // production behaviour rather than by re-asking the oracle.
+    expect(counts.crossings + counts.refusals, 'canEnter was never called').toBeGreaterThan(20000)
+    expect(counts.carsDispatched, 'no car was dispatched inside the windows').toBeGreaterThan(100)
+    // The one branch that is at zero executions in EVERY other profiled window
+    // in this file.
+    expect(counts.valves, 'ENTER_VALVE never fired, so the valve branch is unprofiled').toBeGreaterThan(0)
+    expect(counts.longestQueue, 'no queue of 3 formed').toBeGreaterThanOrEqual(3)
+    // ...and the one this window delegates rather than covers.
+    expect(counts.ghostCells, 'this rig must have no ghost — see the block comment').toBe(0)
+
+    // ---- The bound: per refusal, floored over three windows ----
+    for (let f = 0; f < JAM_TICK_FILES.length; f++) {
+      const draws = perRefusal.map((w) => w[f] as number)
+      const floor = Math.min(...draws)
+      expect(
+        floor,
+        `sim/src/${JAM_TICK_FILES[f]} floors at ${floor.toFixed(4)} B/refusal over ${JAM_WINDOWS} ` +
+          `windows (draws ${draws.map((d) => d.toFixed(4)).join(', ')}; refusals ` +
+          `${refusalsPerWindow.join(', ')})`,
+      ).toBeLessThanOrEqual(JAM_BUDGET_BYTES_PER_REFUSAL)
+    }
+    // The bound must stay far below the signal it watches for, or it is an
+    // allowance rather than a floor. 40.36 is the MEASURED floor under one
+    // escaping object per refusal in `noteEntryRefused`; the assertion is
+    // written against 40 so it does not depend on the last decimal place.
+    expect(JAM_BUDGET_BYTES_PER_REFUSAL * 8).toBeLessThan(40)
   })
 })

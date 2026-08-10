@@ -121,7 +121,8 @@ export interface ViewportMetrics {
  * "Revealed grid" has no representation in any code — `MapData` has `w`/`h`
  * only — so Task 3 freezes it as four integer constants in `shared`
  * (`REVEALED_X0` = 5, `REVEALED_Y0` = 9, `REVEALED_W` = 14, `REVEALED_H` = 22),
- * which `game` reads and passes in here. **M1d owns making it dynamic**; when
+ * which `game` reads and passes in here. **M1e owns making it dynamic** —
+ * repointed at the close of M1d, which declined the work in its Out table; when
  * it does, `game` reads state instead of the constants and nothing in `render`
  * moves.
  */

@@ -24,11 +24,21 @@ export const INF = 0x40000000
 /**
  * Dial's cyclic bucket count. Correct only while NB > every edge cost; §5.4
  * promises intersection and traffic-light penalties "as extra integer edge
- * weight" — M1c adds none, so 14 is not exceeded here, but M1d (chunk/
- * intersection penalties) or M1e (upgrades) will exceed it, and an
- * over-large weight lands in a bucket drained at the wrong d and is
- * discarded — wrong answers, no crash. `createScratch` asserts NB >
- * edgeCost(k) for every k.
+ * weight" — M1c adds none, so 14 is not exceeded here, and an over-large weight
+ * would land in a bucket drained at the wrong d and be discarded — wrong
+ * answers, no crash. `createScratch` asserts NB > edgeCost(k) for every k.
+ *
+ * **This comment predicted M1d would exceed it, and M1d did not — corrected
+ * rather than repointed, because the prediction was wrong about the MECHANISM
+ * and not merely about the milestone.** It read "M1d (chunk/intersection
+ * penalties) or M1e (upgrades) will exceed it". M1d Task 7 shipped the
+ * intersection penalty and it is **not an edge weight**: `laneSpeedMul`
+ * (cars.ts) scales a car's per-tick movement progress and `edgeCost` is
+ * untouched, so the value set is still `{10, 14}` and NB was never approached.
+ * That was a deliberate choice with its reasons written out in `cars.ts` — a
+ * turn penalty is a property of a DIRECTION PAIR, which `edgeCost(dir)` is
+ * structurally unable to price. **M1e's upgrade cards remain the live threat**,
+ * and a motorway tier is the one that would actually change the value set.
  *
  * **Penalty-routing note, for whoever adds the first penalty.** `NB =
  * DIAG_COST + 1 = 15` is the exact minimum — the instrumented maximum spread
@@ -44,8 +54,12 @@ export const INF = 0x40000000
 export const NB = DIAG_COST + 1
 
 /**
- * Distinct values `edgeCost` can return. Sets the entry-pool bound; M1d's
- * motorway tier makes it 3. `graph.test.ts` and `scratch.test.ts` both pin
+ * Distinct values `edgeCost` can return. Sets the entry-pool bound; **M1e's
+ * motorway tier makes it 3 — this said M1d's, and M1d shipped without one.**
+ * M1d's Out table defers motorways to M1e (they are upgrade CARDS and there is
+ * no card mechanism yet), and M1d Task 7's lane-speed multipliers went into
+ * movement rather than into `edgeCost`, so this constant is still 2 and the
+ * value set is still `{10, 14}`. `graph.test.ts` and `scratch.test.ts` both pin
  * this against `edgeCost`'s real output (see the linkage test in
  * `scratch.test.ts`, added M1c), so adding a cost tier without updating this
  * constant fails a test rather than silently under-sizing the pool.
@@ -119,10 +133,12 @@ const COUNTERS_LENGTH = 2
  * per distinct edge-cost value a cell can be improved by, plus one source
  * insertion. Conservative by construction — a source cell can never also be
  * improvement-pushed, since its distance (0) can never improve — and it is
- * the formulation that survives M1d's motorway ÷3 tier and flags M1d/M1e's
- * intersection and traffic-light penalties as requiring a revisit (both
- * change `DISTINCT_EDGE_COSTS`, which this derives from rather than a
- * literal). M1c adds neither.
+ * the formulation that survives M1e's motorway ÷3 tier and flags M1e's
+ * traffic-light penalties as requiring a revisit (both change
+ * `DISTINCT_EDGE_COSTS`, which this derives from rather than a literal). M1c
+ * adds neither, and **M1d added neither either** — its intersection penalty is a
+ * movement multiplier rather than an edge weight, so the value set never moved.
+ * See `NB` above, where the same prediction was made and is now refuted.
  *
  * The reviewed draft's `cells * 9` bound ("8 relaxations per cell plus one
  * source insertion") was wrong in both directions: expansions occur in

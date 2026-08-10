@@ -32,8 +32,23 @@ import { ROUTE_BYTES } from './dispatch'
  * sync and a field read may mutate the source set" is the one ordering rule
  * that produces a throw rather than a wrong number. Moving arrivals before
  * movement is a cyclic rotation of the same order — it produces identical trip
- * lengths on paper but costs a real tick per leg, and in M1d it would leave a
- * logically-finished car occupying a chunk for a tick.
+ * lengths on paper but costs a real tick per leg.
+ *
+ * **The second half of that prediction has come true, and it is stated in the
+ * present tense now rather than the conditional.** This used to read "in M1d it
+ * WOULD leave a logically-finished car occupying a chunk for a tick". M1d
+ * shipped, and a "chunk" is now a concrete thing with a name: an `occupancy`
+ * slot, `(cell, LANE_OF_DIR[dir])`. `completeTrip` below is release event 4 of
+ * `blocking.ts`'s five-event lifecycle, so with arrivals moved before movement a
+ * car that finished its trip on tick T holds its own house cell's slot for the
+ * whole of T's movement phase — and its sibling, which is the most common thing
+ * in the game to be standing behind it, is refused there. Measured at the close
+ * of M1d rather than argued: transposing phases 6 and 7 is killed by **27**
+ * tests across `sim` and `game`. (That transposition was caught before M1d too
+ * — M1c recorded 11 of its 13 reorderings as pinned and this was one of them —
+ * so 27 is a detector count at the close of M1d and NOT evidence that blocking
+ * is what made it visible. The mechanism above is a reading of the code; the
+ * number is not its proof.) See `step.ts` for the full re-measurement.
  *
  * **Score credits on RETURN HOME, not on pickup** — [OURS], per the dossier's
  * "Unknown - we choose" on §1.11. It matches the wiki's definition of a trip
@@ -89,7 +104,20 @@ import { ROUTE_BYTES } from './dispatch'
  * set of `Uint8Array` decrement paths in `packages/sim/src` at the start of the
  * milestone is the two lines below, `destPins` and `destReserved`, both guarded
  * here and both directly unit-tested in `trips.test.ts` — each arm separately
- * and the compound as well, so neither hides inside the other. The other six
+ * and the compound as well, so neither hides inside the other.
+ *
+ * **Task 9 discharged the standing obligation at the close of the milestone: the
+ * set is THREE and there is no fourth.** Verified by enumerating every write to
+ * every one of the ten `Uint8` regions in `packages/sim/src` — `roads`,
+ * `cleared`, `houseColour`, `destMeta`, `destPins`, `destReserved`, `carPhase`,
+ * `carRoute`, `ghostMask`, `ghostCommitted` — rather than by grepping for `--`,
+ * which would have missed the one path M1d actually added: `noteGhostDeparture`
+ * (roads.ts) spells it `const left = committed - 1` across two statements and no
+ * `--`-shaped pattern matches it. The three are `destPins` and `destReserved`
+ * here, and `ghostCommitted` there, guarded by `assertGhostCommittedPositive`.
+ * Of the remaining writes none can lower a slot except `eraseRoad`'s
+ * `roads[a] = newMaskA`, and that is a BITMASK cleared with `& ~bit`, which
+ * cannot underflow — it is not a counter and the wrap class does not apply. The other six
  * `Uint8` regions take no decrement at all: `roads` clears bits with `& ~bit`,
  * `cleared` is only ever set to 1, `houseColour`/`destMeta` are written once at
  * placement, `carPhase` is assigned named constants, and `carRoute` is written

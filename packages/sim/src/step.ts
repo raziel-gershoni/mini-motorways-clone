@@ -134,8 +134,63 @@ export interface TickInputs {
  *   - **The 0-detector claim itself is NOT re-measured here, and must not be
  *     read as re-measured.** Task 1 runs before any of M1d's branches exist, and
  *     measuring 0-detector-ness before the new code lands says nothing about
- *     after. **Task 9 re-runs all 13 reorderings against the finished
- *     milestone.**
+ *     after. **Task 9 re-ran the reorderings against the finished milestone —
+ *     see the table below.**
+ *
+ * ---------------------------------------------------------------------------
+ * THE RE-MEASUREMENT, AT THE CLOSE OF M1d — TASK 9
+ * ---------------------------------------------------------------------------
+ *
+ * **The result is that nothing changed: `1 <-> 2` and `2 <-> 3` are still the
+ * only 0-detector transpositions, and still for the same single reason.**
+ *
+ * **What was actually run, because the historical figure could not be
+ * reproduced from its own description.** Every prior record says "all 13
+ * reorderings", and the enumeration behind 13 is written down nowhere in this
+ * repo — 7 phases admit 6 adjacent transpositions and 21 pairwise ones, and
+ * neither is 13. Rather than guess, Task 9 ran the **complete pairwise set,
+ * C(7,2) = 21**, which is unambiguous, reproducible from this sentence, and a
+ * superset of whatever 13 meant. Phase 1 is the `H_TICK`/`H_WEEK` advance only:
+ * the poison check, `const tick`, the `H_EPOCH` write and the `H_EPOCH` clear
+ * are prologue and epilogue, because `H_EPOCH` is the atomicity marker and is
+ * excluded from the ordering question by construction.
+ *
+ * Detectors, over `packages/sim` + `packages/game` (1,161 tests):
+ *
+ * ```
+ *   1<->2  adj    0      2<->3  adj    0      <- the two no-ops, unchanged
+ *   3<->4  adj   19      4<->5  adj   75
+ *   5<->6  adj   47      6<->7  adj   27
+ *   1<->3        14      1<->4        24      1<->5        69
+ *   1<->6        51      1<->7        35      2<->4        23
+ *   2<->5        69      2<->6        51      2<->7        32
+ *   3<->5        74      3<->6        48      3<->7        31
+ *   4<->6        75      4<->7        75      5<->7        54
+ * ```
+ *
+ * **A caution on ten of those nineteen non-zero rows, recorded because the
+ * complement check is the only thing that caught it.** The runs for `1<->4`,
+ * `1<->5`, `2<->4`, `2<->5`, `3<->4`, `3<->5`, `4<->5`, `4<->6`, `4<->7` and
+ * `5<->7` collected **1,126** tests rather than 1,161: those reorderings make
+ * `step` throw during test COLLECTION, so `integration.test.ts`'s 35 tests never
+ * ran at all. Their detector counts are therefore lower bounds on a partly-
+ * unrun suite, not clean kill counts. They are all comfortably non-zero and
+ * nothing here turns on their exact size, but a reader comparing 75 against 19
+ * should know the two were not measured over the same suite. The two rows this
+ * comment is actually about both collected the full 1,161.
+ *
+ * **And the first pass got the answer wrong, in the direction that matters.** It
+ * reported **1** detector for each of `1<->2` and `2<->3`, which read as "the
+ * milestone ended the inertness". It had no paired control. Re-run four times
+ * each alongside four unmutated baselines: both transpositions scored 0 in 4 of
+ * 4, and the **BASELINE** scored 1 in one round — the flake being
+ * `allocation.test.ts`'s sampling profiler, which that file documents at length.
+ * A flaky baseline reads exactly like a kill, which is the catalogue's flaky-
+ * mutant entry with the flake on the other side. **Run the control as many times
+ * as the mutant.**
+ *
+ * So the trigger still has not fired, the two swaps are still inert for the one
+ * reason above, and M1e still inherits them.
  *
  * Pure in the sense that matters: the result depends only on the contents of
  * `s.buffer`, `world`, `fields`/`scratch` (both re-derivable from `s.buffer`

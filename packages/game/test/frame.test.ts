@@ -206,10 +206,10 @@ describe('the terrain fold', () => {
     expect(frame.terrainClass[cellOf(10, 16)] as number).toBe(TerrainClass.LAND)
   })
 
-  it('folds cells OUTSIDE the revealed rect too, so M1d’s expansion needs no change here', () => {
+  it('folds cells OUTSIDE the revealed rect too, so M1e’s expansion needs no change here', () => {
     // The mountain cluster (rows 5-7, columns 3-4) is entirely outside the
     // revealed rect. Folding only the drawn rect would pass every visible
-    // assertion and break the day M1d reveals more board.
+    // assertion and break the day M1e reveals more board.
     const r = rig()
     const frame = build(r, builderFor(r))
     expect(cellOf(3, 5) % GRID_W).toBeLessThan(REVEALED_X0)
@@ -236,12 +236,12 @@ describe('the terrain fold', () => {
    * back out makes the WRITE the observable rather than the value, and it works
    * at both ends regardless of what the terrain there happens to be.
    *
-   * **A trap this sets for M1d, recorded now while the reason is fresh.** The
+   * **A trap this sets for M1e, recorded now while the reason is fresh.** The
    * two markers are cells (0, 0) and (23, 39) — **diagonal corners**, which is
    * exactly the placement that produced Task 5's seven surviving mutants. It is
    * sufficient here only because the fold is a flat 1-D `for c < cells` loop,
    * where "past one bound" is not a distinct case: shrinking either end of a
-   * single range reaches a corner immediately. **The moment M1d makes this fold
+   * single range reaches a corner immediately. **The moment M1e makes this fold
    * 2-D over a dynamic revealed rect, these two markers stop being sufficient**
    * — a corner sits past two bounds at once, so extending any single bound by
    * one cell reaches nothing — and each of the four half-plane bounds will need

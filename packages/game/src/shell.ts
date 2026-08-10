@@ -170,7 +170,7 @@ export function measureViewport(): ViewportMetrics {
 export interface ShellDeps {
   readonly canvas: SizableCanvas
   readonly context: ScalableContext
-  /** The revealed rect to fit. M2 freezes it in `shared`; M1d makes it dynamic. */
+  /** The revealed rect to fit. M2 freezes it in `shared`; M1e makes it dynamic (M1d declined it). */
   readonly reveal: RevealedRect
   /** Injected so the whole shell is testable with no DOM. Production: `measureViewport`. */
   readonly measure: () => ViewportMetrics
