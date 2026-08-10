@@ -1,5 +1,5 @@
 import type { MapData } from '@laneways/shared'
-import { computeLayout, type LayoutEntry } from '../src/layout'
+import { computeLayout, type Layout, type LayoutEntry } from '../src/layout'
 import { regionsFor } from '../src/regions'
 import { HEADER_LENGTH, type GameState } from '../src/state'
 
@@ -63,16 +63,42 @@ export interface M1eInsertion {
 }
 
 /**
- * The two inserted ranges for `map`, with every structural assumption the
- * splice rests on checked rather than assumed. Throws — loudly, named — if any
- * of them stops holding, because a splice that quietly removes the wrong bytes
- * would "prove" a digest that means nothing.
+ * The two inserted ranges for `map` — `m1eRangesFromLayout` over this map's
+ * own real layout.
  */
 export function m1eInsertedRanges(map: MapData): M1eInsertion {
-  const { entries, totalBytes } = computeLayout(regionsFor(map))
+  return m1eRangesFromLayout(computeLayout(regionsFor(map)))
+}
+
+/**
+ * The two inserted ranges for an arbitrary layout, with every structural
+ * assumption the splice rests on checked rather than assumed. Throws — loudly,
+ * named — if any of them stops holding, because a splice that quietly removes
+ * the wrong bytes would "prove" a digest that means nothing.
+ *
+ * **Split out from `m1eInsertedRanges` so the guards are reachable from a
+ * SYNTHETIC layout**, which is the only way to test them: on the real region
+ * table every guard is satisfied by construction, so deleting all four scores
+ * zero detectors and reads exactly like a guard that was never needed. Same
+ * construction `packages/game/test/allocationPaths.test.ts` uses to pin its
+ * path arithmetic against synthetic checkout roots rather than only against
+ * the one it happens to run in. `m1eSplice.test.ts` feeds each violation and
+ * asserts the named throw.
+ *
+ * The scenario the guards exist for, spelled out because it is the one a
+ * future shape task will actually reach: a later task declares a region
+ * BETWEEN `destOvercrowd` and `destOverTicks`. Block B is derived as
+ * `destOverTicks.end - houseSpawnTimer.start`, so it would silently grow to
+ * cover the interloper's bytes too, and the splice would then reproduce a
+ * prior digest for a state that genuinely changed. The contiguity guard is
+ * what turns that into a stop rather than a false proof — and the correct
+ * response to it firing is to re-derive `bEnd`, never to relax the guard.
+ */
+export function m1eRangesFromLayout(layout: Layout): M1eInsertion {
+  const { entries, totalBytes } = layout
   const at = (name: string): LayoutEntry => {
     const e = entries.find((x) => x.name === name)
-    if (e === undefined) throw new Error(`m1eInsertedRanges: no region "${name}"`)
+    if (e === undefined) throw new Error(`m1eRangesFromLayout: no region "${name}"`)
     return e
   }
   const bytesOf = (e: LayoutEntry): number => e.len * e.ctor.BYTES_PER_ELEMENT
@@ -80,7 +106,7 @@ export function m1eInsertedRanges(map: MapData): M1eInsertion {
   // Block A: the four header slots appended to `header`, which is mid-tier.
   const header = at('header')
   if (header.len !== HEADER_LENGTH) {
-    throw new Error(`m1eInsertedRanges: header is ${header.len} slots, expected ${HEADER_LENGTH}`)
+    throw new Error(`m1eRangesFromLayout: header is ${header.len} slots, expected ${HEADER_LENGTH}`)
   }
   const aStart = header.offset + M1D_HEADER_LENGTH * 4
   const aEnd = header.offset + HEADER_LENGTH * 4
@@ -92,10 +118,10 @@ export function m1eInsertedRanges(map: MapData): M1eInsertion {
   const meter = at('destOvercrowd')
   const over = at('destOverTicks')
   if (meter.offset !== timer.offset + bytesOf(timer)) {
-    throw new Error('m1eInsertedRanges: destOvercrowd does not immediately follow houseSpawnTimer')
+    throw new Error('m1eRangesFromLayout: destOvercrowd does not immediately follow houseSpawnTimer')
   }
   if (over.offset !== meter.offset + bytesOf(meter)) {
-    throw new Error('m1eInsertedRanges: destOverTicks does not immediately follow destOvercrowd')
+    throw new Error('m1eRangesFromLayout: destOverTicks does not immediately follow destOvercrowd')
   }
   const bStart = timer.offset
   const bEnd = over.offset + bytesOf(over)
@@ -104,7 +130,7 @@ export function m1eInsertedRanges(map: MapData): M1eInsertion {
   // overlapping splice would reproduce a digest for the wrong reason.
   if (!(aStart < aEnd && aEnd <= bStart && bStart < bEnd && bEnd <= totalBytes)) {
     throw new Error(
-      `m1eInsertedRanges: degenerate ranges A=[${aStart},${aEnd}) B=[${bStart},${bEnd}) of ${totalBytes}`,
+      `m1eRangesFromLayout: degenerate ranges A=[${aStart},${aEnd}) B=[${bStart},${bEnd}) of ${totalBytes}`,
     )
   }
   return { aStart, aEnd, bStart, bEnd, totalBytes }

@@ -29,6 +29,7 @@ import {
   HEADER_LENGTH,
   isGameOver,
   failedDestination,
+  type GameState,
   MI_MAP,
   MI_MAP_W,
   MI_MAP_H,
@@ -458,43 +459,75 @@ describe('a building-free fresh state is all-zero outside rng/mapIdentity/header
   // `HOUSE_SPAWN_PERIOD_TICKS` (a zero countdown means "fire on tick 1"). Both
   // exceptions are named in the title and asserted separately below rather
   // than being quietly dropped from the list.
-  //
-  // The list below is deliberately EVERY region that must be zero, checked by
-  // name against `REGION_FIELD_NAMES` in the last test of this block — a
-  // silently short list is how a new region gets no coverage at all.
+
+  /**
+   * Every region `createState` deliberately does NOT leave zero. Five, and the
+   * count is in the describe title above so a sixth cannot be added silently.
+   */
+  const ARMED_REGIONS = Object.freeze([
+    'rng',
+    'mapIdentity',
+    'header',
+    'occupancy',
+    'houseSpawnTimer',
+  ] as const)
+
+  /**
+   * Every region that must read back all zero. Hand-written **by name**, so
+   * the completeness test at the end of this block can check the LIST rather
+   * than only the property: a list is the thing that rots, and
+   * `ARMED_REGIONS union MUST_BE_ZERO === every declared region` is what stops
+   * it. The first version of this block derived the partition from the layout
+   * table instead, which checked the property perfectly and left the list
+   * unpinned — deleting an entry kept the file green while the title claimed
+   * otherwise.
+   */
+  const MUST_BE_ZERO = Object.freeze([
+    'pinAccum',
+    'rotationCursor',
+    'houseCell',
+    'destCell',
+    'destSpawnTick',
+    'carHome',
+    'carCell',
+    'carProgress',
+    'carTargetDest',
+    // M1e Task 1: the two meters start at zero. `houseSpawnTimer` is the third
+    // new region and is deliberately ARMED, not here.
+    'destOvercrowd',
+    'destOverTicks',
+    'carRouteLen',
+    'carRouteCursor',
+    'carBlockedTicks',
+    'roads',
+    'cleared',
+    'houseColour',
+    'destMeta',
+    'destPins',
+    'destReserved',
+    'carPhase',
+    'carRoute',
+    'ghostMask',
+    'ghostCommitted',
+  ] as const)
+
+  /** The live views, by region name, so both tests below index the same way. */
+  function viewsByName(
+    s: GameState,
+  ): Record<string, Int32Array | Int16Array | Uint8Array | Uint32Array> {
+    return s as unknown as Record<string, Int32Array | Int16Array | Uint8Array | Uint32Array>
+  }
+
   it('every car/house/destination region reads back as all zero on a fresh state', () => {
     const s = createState('all-zero-fresh', MAP)
-    const regions: readonly (Int32Array | Int16Array | Uint8Array)[] = [
-      s.pinAccum,
-      s.rotationCursor,
-      s.houseCell,
-      s.destCell,
-      s.destSpawnTick,
-      s.carHome,
-      s.carCell,
-      s.carProgress,
-      s.carTargetDest,
-      s.carRouteLen,
-      s.carRouteCursor,
-      s.carBlockedTicks,
-      s.roads,
-      s.cleared,
-      s.houseColour,
-      s.destMeta,
-      s.destPins,
-      s.destReserved,
-      s.carPhase,
-      s.carRoute,
-      s.ghostMask,
-      s.ghostCommitted,
-      // M1e Task 1: the two meters start at zero. `houseSpawnTimer` is the
-      // third new region and is deliberately NOT here — it is armed, and the
-      // exception is asserted by name below.
-      s.destOvercrowd,
-      s.destOverTicks,
-    ]
-    for (const region of regions) {
-      expect(Array.from(region).every((v) => v === 0)).toBe(true)
+    const views = viewsByName(s)
+    for (const name of MUST_BE_ZERO) {
+      const region = views[name]
+      expect(region, `no view for region "${name}"`).toBeDefined()
+      expect(Array.from(region!).every((v) => v === 0), `region "${name}" is not zero`).toBe(true)
+      // Vacuity per region: a zero-LENGTH view satisfies `.every` trivially, so
+      // an empty or mis-wired view would otherwise pass this loop silently.
+      expect(region!.length, `region "${name}" has no elements to check`).toBeGreaterThan(0)
     }
   })
 
@@ -519,22 +552,20 @@ describe('a building-free fresh state is all-zero outside rng/mapIdentity/header
     expect(Array.from(s.houseSpawnTimer).some((v) => v === 0)).toBe(false)
   })
 
-  it('the zero list above covers every region that is not one of the five named exceptions', () => {
+  it('the two lists above partition every declared region — exhaustive, and non-overlapping', () => {
     // The catalogue's "a hand-maintained registry only checks what somebody
-    // remembered to add". The two lists above are hand-written; this derives
-    // the same partition from the layout table and fails if a future region is
-    // declared and then left out of both.
-    const s = createState('zero-list-complete', MAP)
-    const ARMED = new Set(['rng', 'mapIdentity', 'header', 'occupancy', 'houseSpawnTimer'])
-    const views = s as unknown as Record<string, Int32Array | Int16Array | Uint8Array | Uint32Array>
-    for (const e of computeLayout(regionsFor(MAP)).entries) {
-      if (ARMED.has(e.name)) continue
-      const view = views[e.name]
-      expect(view, `no view for region "${e.name}"`).toBeDefined()
-      expect(
-        Array.from(view!).every((v) => v === 0),
-        `region "${e.name}" is not zero on a fresh state and is not a declared exception`,
-      ).toBe(true)
+    // remembered to add". Both lists above are hand-written; this is what pins
+    // them. Compared as SETS against the real region table, so a harmless
+    // reorder passes and a genuine omission — a new region declared and left
+    // out of both, or moved to the wrong list — does not.
+    const declared = new Set(regionsFor(MAP).map((r) => r.name))
+    const armed = new Set<string>(ARMED_REGIONS)
+    const zero = new Set<string>(MUST_BE_ZERO)
+    for (const n of armed) {
+      expect(zero.has(n), `"${n}" is in BOTH lists`).toBe(false)
     }
+    expect(new Set<string>([...armed, ...zero])).toEqual(declared)
+    expect(armed.size + zero.size, 'the two lists must not double-count').toBe(declared.size)
   })
+
 })

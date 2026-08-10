@@ -195,6 +195,41 @@ describe('FIELD_INPUT / FIELD_IRRELEVANT partition', () => {
     )
   })
 
+  it('all three M1e Task 1 regions are FIELD_IRRELEVANT, by name', () => {
+    // Same idiom, and the same reason, as the two M1d tests below: the
+    // exact-set pin above fires if any of these is misclassified, but it fires
+    // with a message about a SET DIFFERENCE, which reads as "the pin is stale,
+    // update it". This one names the region and the reason, so the failure
+    // points at the cost instead.
+    //
+    // The failure it exists to prevent is concrete and is a task away. Task 5
+    // starts writing `houseSpawnTimer`, reasons "the spawner changes the board,
+    // so its timer is a field input", sees one red test about a set, updates
+    // the pinned set, and ships **five whole-board Dijkstras per tick, forever,
+    // producing byte-identical output** — the `H_TICK` failure a fourth time,
+    // after `occupancy` and `ghostCommitted`. What the spawner eventually
+    // PLACES does reach the field, through `destCell`/`destMeta`/`roads`, all
+    // three already FIELD_INPUT. The cadence is not the placement.
+    //
+    // `destOvercrowd` and `destOverTicks` are the same argument and stronger:
+    // they move on nearly every tick any destination is over capacity, and no
+    // edge cost, source set or `dir` read depends on either.
+    //
+    // **This test is the ONLY named detector for the three.** The
+    // parameterised staleness test below cannot substitute for it: it derives
+    // both its expectation and its title from `isFieldInputRegion(e.name)` —
+    // the exact predicate a misclassification changes — so it adapts to the
+    // mutation instead of failing. What those three parameterised cases DO buy
+    // is narrower and real: that the FIELD_INPUT range arithmetic does not
+    // accidentally cover these regions' bytes.
+    expect(isFieldIrrelevantRegion('houseSpawnTimer')).toBe(true)
+    expect(isFieldInputRegion('houseSpawnTimer')).toBe(false)
+    expect(isFieldIrrelevantRegion('destOvercrowd')).toBe(true)
+    expect(isFieldInputRegion('destOvercrowd')).toBe(false)
+    expect(isFieldIrrelevantRegion('destOverTicks')).toBe(true)
+    expect(isFieldInputRegion('destOverTicks')).toBe(false)
+  })
+
   it('both M1d Task 5 ghost regions are FIELD_IRRELEVANT, by name', () => {
     // The exact-set pin above fires if either is misclassified, but with a
     // message about a set. This one names the region and the reason, so a

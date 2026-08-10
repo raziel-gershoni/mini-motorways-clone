@@ -1125,10 +1125,16 @@ describe('golden replay: the whole trip loop', () => {
     // empty strings that trivially fail to contain anything else either.
     expect(determinism.length).toBeGreaterThan(1000)
     expect(rollback.length).toBeGreaterThan(1000)
-    // The two files own different numbers. Asserted on the bare digest, not on
-    // the expression: this arm wants to catch the state golden being COPIED
-    // into the wrong file in any form, comment included.
-    expect(determinism).not.toContain('2312109239')
+    // The two files own different numbers, and the direction matters:
+    // `determinism.test.ts` must not contain the ROAD-NETWORK golden, which is
+    // `rollback.test.ts`'s. Asserted on the bare digest rather than on the
+    // whole expression, because this arm wants to catch that number being
+    // COPIED into the wrong file in any form, comment included — which is the
+    // opposite requirement from the three assertions above, and the reason it
+    // is spelled differently.
+    expect(determinism, "the road-network golden turned up in the state golden's file").not.toContain(
+      '2312109239',
+    )
     // And the M1e re-bless PROOF must survive alongside the number it
     // licenses. Deleting the splice assertion is the cheapest way to make a
     // future layout re-bless unfalsifiable again, and it leaves every other
