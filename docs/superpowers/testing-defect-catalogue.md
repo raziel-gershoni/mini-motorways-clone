@@ -338,12 +338,24 @@ So for gated work the per-event budget is necessary but not sufficient. The miss
 sampled.** Without it, a per-event budget on a rare event is a guaranteed pass that reads as rigour —
 this document's own worst-named defect, an instrument that reports clean while measuring nothing.
 
-**The same trap exists one file over, in the opposite direction.** The guard that replaced the
-flow-field allowance is a per-*frame* budget on a **0.127-calls/frame** event. Its sensitivity to the
-smallest realistic regression — one escaping object per rebuild — is 4.29-6.61 B/frame against a 4 B
-floor: **1.07-1.65x**, 7% over the floor on one draw. That does not fail cleanly; it flakes
-red-then-green, and the natural response to a flaky red is to widen the budget. A per-**call** rate
-off the rebuild counter separates the same injection at 36-52 B/call against a ~1.3 B/call stray.
+**The same trap exists one file over, in the opposite direction — and it is worse than first
+measured.** The guard that replaced the flow-field allowance is a per-*frame* budget on a
+**0.127-calls/frame** event. Sensitivity to the smallest realistic regression — one escaping object
+per rebuild — was first reported as 4.29-6.61 B/frame against a 4 B floor, i.e. 1.07-1.65x, and
+characterised as "flakes red-then-green". Re-measured over **eight draws** taking the same
+minimum-over-three-windows the arm actually uses: `4.96 / 4.79 / 2.67 / 4.44 / 3.37 / 4.61 / 4.44 /
+4.61`. **Two of the eight are below the floor: it is not a flaky red, it is a 25% false NEGATIVE**,
+and the six it catches it catches by 1.11-1.24x. A per-**call** rate off the rebuild counter fires
+8 of 8 on the same draws, at `39.06 / 37.69 / 20.83 / 34.96 / 26.35 / 36.33 / 34.96 / 36.33`, against
+a clean 0.00 on 18 of 18 windows.
+
+Note the second-order lesson, because it repeats this entry's own mistake at one tenth the scale: the
+per-call separation was *estimated* at "36-52 B/call in every window", and a 20 B/call budget was
+proposed from it. The measured minimum is **20.83** — the proposed budget would have cleared the
+weakest real signal by 4%, reproducing the flake-red disease it was introduced to cure. The shipped
+budget is **8**, chosen from the measured band (6x above a single stray at 512/381 = 1.34 B/call, 2.6x
+below the weakest signal). **Even when the diagnosis is right and the prescription is right, the
+NUMBER still has to be measured rather than sketched.**
 
 **Why this entry was rewritten rather than deleted: I relayed a proposal into this document as a
 closed finding without measuring it.** Third time in one milestone that a claim gained confidence at
