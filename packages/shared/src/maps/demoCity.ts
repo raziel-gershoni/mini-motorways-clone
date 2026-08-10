@@ -13,16 +13,25 @@ import { parseMap, type MapData } from '../mapFormat'
  * `mapIdHash` (`packages/sim/src/world.ts`) folds `id`, `w`, `h`,
  * `startingTiles`, `maxHouses`, `maxDestinations`, `groupCount` and every
  * terrain byte into `mapIdentity[MI_MAP]`, which lives in the state buffer. So
- * changing ONE integer on `firstCity` moves the state golden `3507307907`, the
- * road-network golden `2312109239`, the loop golden `3806414869` and the seed
- * golden `968680755` at once — the trap
- * `docs/superpowers/plans/2026-08-04-m2-playable-renderer.md:20` records. A new
- * file, a new `id`, and `firstCity` untouched byte-for-byte is the only shape
- * that leaves all seven goldens where they are.
+ * changing ONE integer on `firstCity` moves every golden folded over a state
+ * built on it — the seed golden `968680755` and the demo golden `3152640907` —
+ * the trap `docs/superpowers/plans/2026-08-04-m2-playable-renderer.md:20`
+ * records. A new file, a new `id`, and `firstCity` untouched byte-for-byte is
+ * the only shape that leaves all eight goldens where they are.
  *
- * (Those four were `340556353`, `2076760277`, `2942219448` and `1178110182`
- * until M1e Task 1 re-blessed every whole-buffer golden for pure layout. The
- * numbers move; the trap does not.)
+ * (**Corrected in M1e Task 2, which had to touch this sentence for a stale
+ * digest and found the claim over-broad while doing it.** It previously listed
+ * the state golden, the road-network golden and the loop golden here as well.
+ * Those three run on hand-authored fixture maps of their own —
+ * `golden-fixture-v1` in `determinism.test.ts`, and the `parseMap` calls at
+ * `rollback.test.ts:637` and `loop.test.ts:282` — so `firstCity` cannot reach
+ * them at all. The trap is real; its blast radius was two goldens, not five.
+ * Do not re-add them without checking which map each fixture builds on.)
+ *
+ * (The numbers move: they were `340556353`, `2076760277`, `2942219448` and
+ * `1178110182` until M1e Task 1 re-blessed every whole-buffer golden for pure
+ * layout, and the state golden moved again in Task 2 for the weekly tile
+ * grant. The trap does not.)
  *
  * `maxDestinations` is the field that forced the issue rather than a
  * preference: the demo needs **18** circle destinations to generate enough

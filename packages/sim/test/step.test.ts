@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { createState, hashState, snapshot, restore, H_TICK, H_WEEK, H_EPOCH } from '../src/state'
+import { createState, hashState, snapshot, restore, H_TICK, H_WEEK, H_TILES, H_EPOCH } from '../src/state'
 import { createWorld } from '../src/world'
 import { step, type TickInputs, type TickAction } from '../src/step'
 import { createFlowFields, createScratch, CT_SYNCS, CT_REBUILDS, type FlowField, type Scratch } from '../src/scratch'
@@ -14,7 +14,7 @@ import {
   ORIENTATION_S,
   PHASE_OUTBOUND,
 } from '../src/buildings'
-import { TICKS_PER_WEEK, parseMap } from '@laneways/shared'
+import { TICKS_PER_WEEK, WEEKLY_TILE_GRANT, parseMap } from '@laneways/shared'
 
 const NO_INPUT: TickInputs = { actions: [] }
 const MAP = parseMap('step-test-map', ['....', '....', '....', '....'], 20, 8, 4, 2)
@@ -51,6 +51,25 @@ describe('step', () => {
     expect(s.header[H_WEEK]).toBe(0)
     step(s, WORLD, fields, scratch, NO_INPUT)
     expect(s.header[H_WEEK]).toBe(1)
+  })
+
+  it('the week grant runs after the clock advance — moving it earlier grants against last tick', () => {
+    // The detector for transposing phases 1 and 2, AND the detector for
+    // transposing 1 and 3, because both orderings put the grant in front of
+    // the advance. `1 <-> 3` is the transposition M1c opened and M1d carried
+    // as *undetectable*; this is the test that ends that, so do not weaken it
+    // to "tiles went up at some point".
+    const s = createState('phase-1-2', MAP)
+    const fields = freshFields()
+    const scratch = freshScratch()
+    const before = s.header[H_TILES] as number
+    s.header[H_TICK] = TICKS_PER_WEEK - 2
+    step(s, WORLD, fields, scratch, NO_INPUT) // -> 4499, no grant
+    expect(s.header[H_TICK]).toBe(TICKS_PER_WEEK - 1)
+    expect(s.header[H_TILES], 'a non-boundary tick granted').toBe(before)
+    step(s, WORLD, fields, scratch, NO_INPUT) // -> 4500, one grant
+    expect(s.header[H_TICK]).toBe(TICKS_PER_WEEK)
+    expect(s.header[H_TILES], 'the boundary tick did not grant').toBe(before + WEEKLY_TILE_GRANT)
   })
 
   it('is deterministic — two states from one seed stay identical', () => {

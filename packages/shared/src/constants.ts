@@ -243,6 +243,27 @@ export const DEST_SPAWN_PERIOD_TICKS = TICKS_PER_WEEK / DESTINATIONS_PER_WEEK
 /** §5.9's "10 s between same-group house spawns", converted here and nowhere else. */
 export const HOUSE_SPAWN_PERIOD_TICKS = 10 * TICKS_PER_SECOND
 
+// --- The weekly grant (spec §5.10) ---
+/**
+ * Spec §5.10's Road Tiles card, per-map constant "30 or 40" — 30 here.
+ *
+ * **This is the load-bearing half of §5.10 and M1e ships only this half.** The
+ * other half is the two-card CHOICE, and every card in the table but this one
+ * grants an ITEM — bridge, tunnel, roundabout, traffic lights, motorway — none
+ * of which has a placement mechanism yet. A pool with one offerable entry is a
+ * menu with one item, so the modal is M1f's, along with the first item that
+ * makes it a choice. What §5.10 says about THIS number is honoured exactly:
+ * "Tile income is flat, not week-indexed — difficulty ramps on the demand side
+ * only." It is not multiplied by the week and it must not become so.
+ *
+ * **Known and recorded rather than tuned here:** 30 starting plus 30 a week is
+ * ~270 tiles by week 8 against roughly 280 placeable cells in the 308-cell
+ * revealed rect, so tiles stop being the binding constraint somewhere around
+ * week 3. Task 10's greedy-connect arm measures where, and the plan's "What
+ * this plan does not settle" carries it.
+ */
+export const WEEKLY_TILE_GRANT = 30
+
 // --- Movement (M1c decision 3, "Movement accumulates progress in the pathfinder's own cost units") ---
 /**
  * Progress units per unit of pathfinder edge weight. A car's threshold to

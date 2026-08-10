@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { weekOfTick, dayOfWeek, tickWithinWeek } from '../src/clock'
+import { weekOfTick, dayOfWeek, tickWithinWeek, isWeekBoundary } from '../src/clock'
 import { TICKS_PER_WEEK, DAYS_PER_WEEK } from '@laneways/shared'
 
 describe('weekOfTick', () => {
@@ -11,6 +11,18 @@ describe('weekOfTick', () => {
   it('rolls over exactly on the boundary', () => {
     expect(weekOfTick(TICKS_PER_WEEK)).toBe(1)
     expect(weekOfTick(TICKS_PER_WEEK * 5)).toBe(5)
+  })
+})
+
+describe('isWeekBoundary', () => {
+  it('marks exactly the first tick of each week, and never tick 0', () => {
+    expect(isWeekBoundary(0), 'tick 0 is never stepped and never grants').toBe(false)
+    expect(isWeekBoundary(1)).toBe(false)
+    expect(isWeekBoundary(TICKS_PER_WEEK - 1)).toBe(false)
+    expect(isWeekBoundary(TICKS_PER_WEEK)).toBe(true)
+    expect(isWeekBoundary(TICKS_PER_WEEK + 1)).toBe(false)
+    expect(isWeekBoundary(TICKS_PER_WEEK * 2)).toBe(true)
+    expect(isWeekBoundary(TICKS_PER_WEEK * 3)).toBe(true)
   })
 })
 

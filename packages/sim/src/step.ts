@@ -1,6 +1,7 @@
 import type { GameState } from './state'
 import { H_EPOCH, H_TICK, H_WEEK } from './state'
 import { weekOfTick } from './clock'
+import { runWeekBoundary } from './week'
 import type { WorldData } from './world'
 import type { FlowField, Scratch } from './scratch'
 import { syncFields } from './flowfield'
@@ -45,104 +46,135 @@ export interface TickInputs {
  * replaying 2*(N/2) ticks run this exact function the same number of times
  * either way.
  *
- * **The seven phases. Most positions are forced by a constraint; TWO ADJACENT
- * SWAPS ARE NOT, and this comment says which** (M1c, "The tick order,
+ * **The eight phases — seven until M1e Task 2 inserted the week boundary at
+ * position 2. Most positions are forced by a constraint; ONE ADJACENT SWAP
+ * STILL IS NOT, and this comment says which** (M1c, "The tick order,
  * derived"). An earlier version opened "each justified by the constraint that
  * forces its position rather than by preference — the order is derived; do not
  * reorder it for tidiness", and that was an overstatement in the one comment
- * that presents the whole order as derived. All 13 reorderings were run: 11 are
- * caught by tests, **`1 <-> 2` and `2 <-> 3` are 0-detector no-ops today.** See
- * the disclosure below the table; do not read it as licence to reorder.
+ * that presents the whole order as derived. Under seven phases all 13
+ * reorderings were run: 11 were caught by tests and **`1 <-> 2` and `2 <-> 3`
+ * were 0-detector no-ops**, re-measured at the close of M1d over the complete
+ * pairwise set C(7,2) = 21 with the same answer. In the eight-phase numbering
+ * those two pairs are **`1 <-> 3` and `3 <-> 4`, and only the second is still
+ * inert** — see the disclosure below the table. Do not read it as licence to
+ * reorder.
  *
- *   1. `H_EPOCH <- tick`; advance `H_TICK`, `H_WEEK`. **The real constraint is
- *      "the advance must precede phase 3", not "it must be first".** Demand's
- *      4 s eligibility gate compares `H_TICK - destSpawnTick[d]` against
- *      `FIRST_PIN_DELAY_TICKS`, and it is the ONLY thing inside a tick that
- *      reads `H_TICK` at all — phase 2 calls only `roads.ts`, which reads
- *      neither `H_TICK` nor `H_WEEK`. An earlier version of this bullet said
- *      "moving this one slot later delays every first pin by exactly one
- *      tick"; that is measurably false — one slot later does nothing, and it
- *      takes moving past demand, two slots, before anything changes. Moving it
- *      past demand IS caught, by three tests: `loop.test.ts`'s 120-tick
- *      boundary test, its same-tick dispatch test, and the loop golden (which
- *      does see it, through `pinAccum` — the older parenthetical "no golden can
- *      see this, they are building-free" was written before this milestone had
- *      a golden with buildings in it). `H_EPOCH` is the atomicity marker and
- *      genuinely must be written first — see state.ts's "Atomicity" note. A
- *      throw in a later phase leaves it non-zero, and both the next `step` and
- *      `restore` throw a named error rather than proceed from a buffer a
- *      throwing tick may have partly mutated.
- *   2. Apply inputs — the only phase that changes `roads`. Must precede the
+ *   1. `H_EPOCH <- tick`; advance `H_TICK`, `H_WEEK`. **The constraint is "the
+ *      advance must precede every clock reader below", and as of M1e Task 2 the
+ *      nearest of those is phase 2 rather than phase 4.** Until then the only
+ *      in-tick `H_TICK` reader was demand's 4 s eligibility gate, which
+ *      compares `H_TICK - destSpawnTick[d]` against `FIRST_PIN_DELAY_TICKS`, and
+ *      this bullet recorded the slack that produced honestly: an earlier version
+ *      claimed "moving this one slot later delays every first pin by exactly one
+ *      tick", which was measurably false — one slot later did nothing, and it
+ *      took moving past demand, two slots, before anything changed. **That slack
+ *      is gone.** Phase 2 reads `H_TICK` directly, so moving the advance one
+ *      slot later now misses the week boundary and pays the grant a tick late;
+ *      `step.test.ts`'s "the week grant runs after the clock advance" is the
+ *      detector and `week.test.ts`'s stepped three-week test is the second.
+ *      Moving it past demand is still caught, by three tests: `loop.test.ts`'s
+ *      120-tick boundary test, its same-tick dispatch test, and the loop golden
+ *      (which does see it, through `pinAccum` — the older parenthetical "no
+ *      golden can see this, they are building-free" was written before this
+ *      milestone had a golden with buildings in it). `H_EPOCH` is the atomicity
+ *      marker and genuinely must be written first — see state.ts's "Atomicity"
+ *      note. A throw in a later phase leaves it non-zero, and both the next
+ *      `step` and `restore` throw a named error rather than proceed from a
+ *      buffer a throwing tick may have partly mutated.
+ *   2. The week boundary — grant `WEEKLY_TILE_GRANT` road tiles (`week.ts`,
+ *      spec §5.10). Reads `H_TICK`, so it must FOLLOW phase 1; and it must
+ *      PRECEDE phase 3, so an action queued on the boundary tick can spend the
+ *      tiles it just received — the alternative makes the boundary tick the one
+ *      tick of the week a player's road is refused for budget, which is
+ *      unexplainable at the screen. **This is the first phase in the game to
+ *      read the clock**, and the disclosure below is about what that changes.
+ *   3. Apply inputs — the only phase that changes `roads`. Must precede the
  *      field sync, or a road drawn on tick T is invisible to this tick's
  *      field.
- *   3. Demand — accumulators, pins, overflow, drops. Mutates `destPins`,
+ *   4. Demand — accumulators, pins, overflow, drops. Mutates `destPins`,
  *      which decides the source set, so it must precede the sync.
- *   4. Assemble sources, then EXACTLY ONE `syncFields`. Every source-mutating
+ *   5. Assemble sources, then EXACTLY ONE `syncFields`. Every source-mutating
  *      phase is now behind it, and `fieldFor` throws unless the sync ran
  *      against exactly the current sources.
- *   5. Dispatch — the whole tick's only field reader. Mutates `destReserved`
+ *   6. Dispatch — the whole tick's only field reader. Mutates `destReserved`
  *      and car state, never the source set: that is what decision 4 buys, and
  *      it is what makes "no phase between the sync and a field read may mutate
  *      the source set" hold with no in-tick reasoning required.
- *   6. Movement — advances committed routes and reads no field at all
+ *   7. Movement — advances committed routes and reads no field at all
  *      (decision 2). AFTER dispatch, so a car dispatched on tick T also moves
  *      on tick T; the alternative costs every trip one tick and every
  *      exact-tick assertion inherits it.
- *   7. Arrivals — consume the pin, release the reservation, credit the score,
+ *   8. Arrivals — consume the pin, release the reservation, credit the score,
  *      free the car. Mutates `destPins` AFTER the sync, so it must be last.
  *      **Stated residual: the fields are stale from here until the next
  *      tick's sync.** Nothing may call `fieldFor` in that window — not a
  *      renderer, not a debug hash, not a test helper. Under decision 2 the
- *      only in-tick reader is phase 5, so this binds external callers only,
+ *      only in-tick reader is phase 6, so this binds external callers only,
  *      and `loop.test.ts` asserts the throw rather than assuming it.
  *   — `H_EPOCH <- 0` on successful exit.
  *
- * **The two checked no-ops, disclosed in `cars.ts`'s idiom for exactly this
- * shape, and the reason they are kept anyway.** `1 <-> 2` (the clock advance
- * after input application) and `2 <-> 3` (inputs after demand) are each
- * 0-detector across the whole suite. Both are no-ops for one reason: **no
- * `TickAction` currently reads `H_TICK`.** `roads.ts` is the only module phase
- * 2 calls, and it reads neither the clock nor the week.
+ * **The one remaining checked no-op, disclosed in `cars.ts`'s idiom for exactly
+ * this shape, and the reason it is kept anyway.** `3 <-> 4` (inputs after
+ * demand — M1c's `2 <-> 3`) is 0-detector across the whole suite, for one
+ * reason: **no `TickAction` reads `H_TICK`.** `roads.ts` is the only module
+ * phase 3 calls, and it reads neither the clock nor the week.
  *
- * That is a property of today's action set, not of the design — and the change
- * that ends it is already written and already scheduled. `placeDestination`
- * (`buildings.ts`) stamps `destSpawnTick[d]` from `H_TICK`, and M1e's job is to
- * make building placement a `TickAction`. **The day it does, both swaps become
- * real off-by-ones in every destination's first-pin delay at once, and nothing
- * in the suite catches either.** Anyone adding an action that reads the clock
- * owns re-deriving these two positions and pinning them.
+ * That is a property of today's action set, not of the design. `placeDestination`
+ * (`buildings.ts`) stamps `destSpawnTick[d]` from `H_TICK`, so an action that
+ * placed a building would end it — and anyone adding an action that reads the
+ * clock owns re-deriving this position and pinning it. **M1e does NOT add one:
+ * spawning is a `step` PHASE, not a `TickAction`**, and the action set is still
+ * exactly `'place' | 'erase'`.
  *
- * **M1d checked the trigger and it did not fire** (Task 1c). Re-confirmed by
- * reading, at the start of the milestone: `TickActionKind` is still exactly
- * `'place' | 'erase'`, phase 2 still calls nothing but `placeRoad`/`eraseRoad`,
- * and `roads.ts` still reads neither `H_TICK` nor `H_WEEK` (it imports
- * `H_TILES` and `H_DEST_COUNT` from `state.ts` and nothing else from it; the
- * only other module it calls into, `buildings.ts`, is reached through
- * `isFootprintCell`/`destMetaOrientation`, both of which take plain numbers and
- * no `GameState`). So the two transpositions are still 0-detector for the same
- * single reason, and **no test that could fail exists to be written for them
- * yet** — demanding one here would be demanding a test that cannot exist.
+ * **`1 <-> 3` (the clock advance after input application — M1c's `1 <-> 2`) WAS
+ * a 0-detector no-op for that same single reason, and M1e Task 2 ended it.**
+ * M1c opened the handoff and M1d carried it, both predicting it would be
+ * discharged the day building placement became an action. It was discharged by
+ * a different and better route: **insertion.** Phase 2 puts a clock READER
+ * between the advance and the input loop, so transposing them yields `inputs,
+ * grant, advance` — the grant reads the un-advanced tick, misses the boundary
+ * at 4,500 and pays a tick late. Two tests name it: `step.test.ts`'s "the week
+ * grant runs after the clock advance" and `week.test.ts`'s stepped three-week
+ * test. The handoff is closed, and it is closed by a test that can fail rather
+ * than by a test that could not exist.
+ *
+ * **What was re-confirmed by reading, at M1e Task 2**: `TickActionKind` is still
+ * exactly `'place' | 'erase'`, phase 3 still calls nothing but
+ * `placeRoad`/`eraseRoad`, and `roads.ts` still reads neither `H_TICK` nor
+ * `H_WEEK` (it imports `H_TILES` and `H_DEST_COUNT` from `state.ts` and nothing
+ * else from it; the only other module it calls into, `buildings.ts`, is reached
+ * through `isFootprintCell`/`destMetaOrientation`, both of which take plain
+ * numbers and no `GameState`). So `3 <-> 4` is still 0-detector for the same
+ * single reason, and **no test that could fail exists to be written for it** —
+ * demanding one would be demanding a test that cannot exist.
  *
  * Two things follow, and they are deliberately different in kind:
  *
- *   - **The trigger now has a tripwire rather than only this paragraph.**
+ *   - **The trigger has a tripwire rather than only this paragraph.**
  *     `step.test.ts` reads this file and `roads.ts` off disk and pins both
- *     halves of the condition above. It is NOT a detector for the two
- *     transpositions — nothing can be, while the condition holds — it is a
- *     mechanism that makes the person who ends the condition read this comment.
- *     A handoff whose only carrier is a comment is a handoff with no recipient.
- *   - **The 0-detector claim itself is NOT re-measured here, and must not be
- *     read as re-measured.** Task 1 runs before any of M1d's branches exist, and
- *     measuring 0-detector-ness before the new code lands says nothing about
- *     after. **Task 9 re-ran the reorderings against the finished milestone —
- *     see the table below.**
+ *     halves of the condition above. It is NOT a detector for `3 <-> 4` —
+ *     nothing can be, while the condition holds — it is a mechanism that makes
+ *     the person who ends the condition read this comment. A handoff whose only
+ *     carrier is a comment is a handoff with no recipient.
+ *   - **A 0-detector claim is only ever true of the suite that measured it.**
+ *     M1d's Task 9 re-ran the reorderings against the finished milestone (table
+ *     below), and M1e Task 2 re-ran the four pairs its own change can reach
+ *     (table below that). Measuring before the new code lands says nothing
+ *     about after.
  *
  * ---------------------------------------------------------------------------
  * THE RE-MEASUREMENT, AT THE CLOSE OF M1d — TASK 9
  * ---------------------------------------------------------------------------
  *
- * **The result is that nothing changed: `1 <-> 2` and `2 <-> 3` are still the
- * only 0-detector transpositions, and still for the same single reason.**
+ * **Historical, and its numbering is M1d's SEVEN-phase one.** Every `n <-> m`
+ * in this block counts phases without the week boundary: M1d's `1 <-> 2` is
+ * today's `1 <-> 3` and M1d's `2 <-> 3` is today's `3 <-> 4`. Read it with the
+ * M1e block below, which supersedes its conclusion for the first of those.
+ *
+ * **The result at the time was that nothing changed: `1 <-> 2` and `2 <-> 3`
+ * were still the only 0-detector transpositions, and still for the same single
+ * reason.**
  *
  * **What was actually run, because the historical figure could not be
  * reproduced from its own description.** Every prior record says "all 13
@@ -189,8 +221,18 @@ export interface TickInputs {
  * mutant entry with the flake on the other side. **Run the control as many times
  * as the mutant.**
  *
- * So the trigger still has not fired, the two swaps are still inert for the one
- * reason above, and M1e still inherits them.
+ * So at the close of M1d the trigger still had not fired, and M1e inherited
+ * both swaps.
+ *
+ * ---------------------------------------------------------------------------
+ * THE RE-MEASUREMENT, AT M1e TASK 2 — THE PHASE COUNT WENT 7 -> 8
+ * ---------------------------------------------------------------------------
+ *
+ * PENDING: filled in by Task 2's mutation battery, in the commit that follows
+ * the one introducing this phase. The prediction, stated before running so the
+ * measurement can be wrong: `1 <-> 3` NON-ZERO (the discharged handoff),
+ * `3 <-> 4` ZERO (still inert, same single reason), `1 <-> 2` NON-ZERO,
+ * `2 <-> 3` NON-ZERO.
  *
  * Pure in the sense that matters: the result depends only on the contents of
  * `s.buffer`, `world`, `fields`/`scratch` (both re-derivable from `s.buffer`
@@ -217,6 +259,8 @@ export function step(
   s.header[H_EPOCH] = tick
   s.header[H_TICK] = tick
   s.header[H_WEEK] = weekOfTick(tick)
+
+  runWeekBoundary(s)
 
   for (let i = 0; i < inputs.actions.length; i++) {
     const action = inputs.actions[i] as TickAction

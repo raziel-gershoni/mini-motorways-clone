@@ -15,6 +15,7 @@ import {
   MAX_GROUP_COUNT, MAX_PATH_LEN,
   COST_UNIT_SCALE, CAR_SPEED_UNITS_PER_TICK,
   MS_PER_SECOND, DESTINATIONS_PER_WEEK, DEST_SPAWN_PERIOD_TICKS, HOUSE_SPAWN_PERIOD_TICKS,
+  WEEKLY_TILE_GRANT,
 } from '../src/index'
 import * as C from '../src/index'
 
@@ -275,6 +276,24 @@ describe('rule constants', () => {
     expect(src).not.toMatch(/export const DEST_SPAWN_PERIOD_TICKS = 2250/)
     // Vacuity: the scan is reading the real file, not an empty string.
     expect(src).toMatch(/export const TICKS_PER_WEEK = TICKS_PER_SECOND \* SECONDS_PER_WEEK/)
+  })
+
+  it('grants a FLAT weekly tile income that is never week-indexed', () => {
+    // M1e Task 2, spec §5.10's Road Tiles card: the per-map constant "30 or
+    // 40", 30 here. The flatness is the load-bearing half — §5.10 states "tile
+    // income is flat, not week-indexed — difficulty ramps on the demand side
+    // only" — and the way it is enforced is that the grant takes NO week
+    // argument (`runWeekBoundary(state)`, `packages/sim/src/week.ts`), so
+    // `WEEKLY_TILE_GRANT * week` is a change to production code and not a
+    // configuration mistake. `sim/test/week.test.ts`'s three-week run is the
+    // behavioural detector for it (60 + 90 != 90).
+    //
+    // One assertion, and that is the honest size of it: a bare literal has
+    // exactly one property worth pinning. The integer/finite/non-negative
+    // checks above already cover it automatically from the derived registry,
+    // and adding `toBeGreaterThan(0)` here would be a decorative assertion
+    // that reads as a load-bearing one.
+    expect(WEEKLY_TILE_GRANT).toBe(30)
   })
 
   it('names the millisecond conversion so a /1000 cannot be misread as DENOM', () => {

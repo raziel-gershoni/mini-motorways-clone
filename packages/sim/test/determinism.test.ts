@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { TICKS_PER_WEEK, parseMap } from '@laneways/shared'
-import { createState, hashState } from '../src/state'
+import { TICKS_PER_WEEK, WEEKLY_TILE_GRANT, parseMap } from '@laneways/shared'
+import { createState, hashState, H_TILES } from '../src/state'
 import { createWorld } from '../src/world'
 import { createFlowFields, createScratch } from '../src/scratch'
 import { createFieldInputRanges } from '../src/regions'
@@ -360,6 +360,11 @@ describe('sim source obeys the determinism rules', () => {
       'sim/src/state.ts',
       'sim/src/step.ts',
       'sim/src/trips.ts',
+      // M1e Task 2: the weekly tile grant, `step` phase 2 and the first phase
+      // in the game to read the clock. Named here for the same reason every
+      // other entry is — a new source file must be added deliberately, and a
+      // module that skips this scan skips every determinism rule below it.
+      'sim/src/week.ts',
       'sim/src/world.ts',
     ])
   })
@@ -554,43 +559,69 @@ describe('golden replay', () => {
       step(s, GOLDEN_WORLD, fields, scratch, NO_INPUT)
       if (i % 1000 === 0) nextRandom(s.rng, 0)
     }
-    // **Re-blessed in M1e Task 1 (was 340556353 at M1d Task 5; 1729791425 at
-    // M1d Task 2; 2413319809 at M1c; 1073292924 at M1b). This is the ONLY
-    // shape change in M1e** — the plan's "Which goldens move, exactly" fixes
-    // the buffer at 29 regions and 13,992 B for `firstCity`, and every later
-    // task appends behaviour, never shape.
+    // **Re-blessed in M1e Task 2 (was 3507307907 at M1e Task 1; 340556353 at
+    // M1d Task 5; 1729791425 at M1d Task 2; 2413319809 at M1c; 1073292924 at
+    // M1b).** Task 1 was the milestone's only SHAPE change; this one is the
+    // milestone's first BEHAVIOURAL change to this fixture, and the two are
+    // deliberately proved in different ways.
     //
-    // **PURE LAYOUT, proved by an exact byte splice** (see `m1eSplice.ts`):
-    // removing the two inserted ranges — 16 B of new header slots at offset 52
-    // and 40 B of new regions at offset 404, both MID-BUFFER — reproduces
-    // 340556353 bit-for-bit with no slot zeroed. `createState`'s two initial
-    // timer writes land inside those ranges, so there is no behavioural term in
-    // this re-bless at all. Offsets are FOR THIS FIXTURE: GOLDEN_MAP is 4x4
-    // with groupCount 2 and maxDestinations 4, so block B is 40 B and the whole
-    // buffer goes 1,416 -> 1,472, not `firstCity`'s 148 B and 13,828 -> 13,992.
-    // The assertions below are the derivation; this paragraph only reads them
-    // out.
+    // **What moved it: the weekly tile grant (`step` phase 2, M1e Task 2).**
+    // This fixture runs `TICKS_PER_WEEK * 3 - 1` = 13,499 ticks, which crosses
+    // the boundaries at 4,500 and 9,000 and stops short of 13,500 — so it takes
+    // exactly two grants. **Asserted directly, so the digest is not the only
+    // evidence**: a re-bless whose sole proof is "the digest moved" absorbs any
+    // regression that lands in the same commit.
     //
-    // This number moves TWICE MORE in this milestone and in no other task:
-    // Task 2 (the weekly tile grant, which this 13,499-tick fixture crosses
-    // twice) and Task 5 (the spawn timers cycling). Both carry a direct
-    // assertion on the changed slots beside the digest.
+    // **The layout proof survives, and Task 2 makes it say something stronger.**
+    // Task 1's splice (see `m1eSplice.ts`) removes the two inserted ranges —
+    // 16 B of new header slots at offset 52 and 40 B of new regions at offset
+    // 404, both MID-BUFFER — and had to reproduce 340556353 bit-for-bit. The
+    // grant writes `H_TILES`, which is header slot 3 and therefore OUTSIDE both
+    // ranges, so the splice alone can no longer reproduce that digest and this
+    // assertion went red on the first run of Task 2's implementation. Backing
+    // the grant out before splicing restores it, and the restored proof is a
+    // sharper claim than the original: across 13,499 ticks, **`H_TILES` is the
+    // only byte in this buffer that Task 2 changed.** A grant that also nudged
+    // the rng stream, or wrote the wrong slot, or shifted a timer, fails here
+    // and not merely in the digest.
     //
-    // This fixture places no building and therefore has no car, so it cannot
-    // move for a behavioural reason in this milestone at all — and both ghost
-    // regions are all-zero in it, asserted below, which is what makes "the
-    // digest moved for layout" checkable rather than merely stated.
+    // Offsets are FOR THIS FIXTURE: GOLDEN_MAP is 4x4 with groupCount 2 and
+    // maxDestinations 4, so block B is 40 B and the whole buffer goes
+    // 1,416 -> 1,472, not `firstCity`'s 148 B and 13,828 -> 13,992. The
+    // assertions below are the derivation; this paragraph only reads them out.
+    //
+    // This number moves ONCE MORE in this milestone and in no other task:
+    // Task 5 (the spawn timers cycling), which carries a direct assertion on
+    // the changed slots beside the digest exactly as this one does.
+    //
+    // This fixture still places no building and therefore has no car, so the
+    // grant is the ONLY behaviour it can exhibit — and both ghost regions are
+    // all-zero in it, asserted below, which is what keeps "the digest moved for
+    // one named reason" checkable rather than merely stated.
     expect(s.ghostMask.every((b) => b === 0), 'no fixture cell is a ghost').toBe(true)
     expect(s.ghostCommitted.every((b) => b === 0), 'no fixture cell has a committed count').toBe(true)
+    expect(s.header[H_TILES]).toBe(GOLDEN_MAP.startingTiles + 2 * WEEKLY_TILE_GRANT)
     const m1e = m1eInsertedRanges(GOLDEN_MAP)
     expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 404, 444])
+    // Back the grant out for the splice, then put it back. `H_TILES` sits at
+    // header slot 3, in front of block A, so it is NOT one of the bytes the
+    // splice removes — see the paragraph above for why this step exists and
+    // what its presence proves. Vacuity: the back-out must actually change
+    // something, or the splice below reproduces the old digest by doing
+    // nothing, which is the failure mode this whole proof exists to prevent.
+    const granted = s.header[H_TILES] as number
+    expect(granted, 'nothing to back out — the fixture took no grant').not.toBe(
+      GOLDEN_MAP.startingTiles,
+    )
+    s.header[H_TILES] = GOLDEN_MAP.startingTiles
     const spliced = spliceM1eInsertions(s, GOLDEN_MAP)
-    // Vacuity first: the splice must have removed exactly the 56 bytes this
-    // task inserted, landing on M1d's own total for this map. A no-op splice
-    // would otherwise "prove" a digest that never moved.
+    s.header[H_TILES] = granted
+    // Vacuity: the splice must have removed exactly the 56 bytes Task 1
+    // inserted, landing on M1d's own total for this map. A no-op splice would
+    // otherwise "prove" a digest that never moved.
     expect(spliced.length, "the splice must land on M1d's buffer size").toBe(1416)
     expect(m1e.totalBytes).toBe(1472)
     expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(340556353)
-    expect(hashState(s)).toBe(3507307907)
+    expect(hashState(s)).toBe(883875991)
   })
 })

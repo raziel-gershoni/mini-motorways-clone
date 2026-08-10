@@ -1114,7 +1114,12 @@ describe('golden replay: the whole trip loop', () => {
     // needle is now the whole golden expression, `hashState(...)` included,
     // which the prior-digest line cannot satisfy. Do not simplify these back
     // to bare numbers.
-    expect(determinism, 'the state golden moved').toContain('expect(hashState(s)).toBe(3507307907)')
+    // **M1e Task 2 moved the state golden a second time — 3507307907 ->
+    // 883875991 — and this needle is the cross-file half of that re-bless.**
+    // Task 1's move was pure layout; Task 2's is the weekly tile grant, which
+    // this 13,499-tick fixture takes twice. It is the LAST licensed move of
+    // this number before Task 5; a third one from an unlisted task is a defect.
+    expect(determinism, 'the state golden moved').toContain('expect(hashState(s)).toBe(883875991)')
     expect(rollback, 'the road-network golden moved').toContain(
       'expect(hashState(state)).toBe(2312109239)',
     )
