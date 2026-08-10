@@ -334,3 +334,56 @@ Bot API.** `setChatMenuButton` returns `ok: true` and changes nothing. If the UR
 must change, **that is a human action** — say so rather than attempting it.
 
 Live at **https://laneways.laneways-spike.workers.dev**.
+
+---
+
+## 11. Routing and movement now disagree, and the fix has a trap waiting in it
+
+**`flowfield.ts` contains zero references to `occupancy`, `carBlockedTicks` or
+blocking of any kind.** Verified by grep at the close of M1d. Cars are routed as
+if every road were empty, and since M1d they no longer move as if it were.
+
+So a jam does not repel traffic — it attracts it. The field keeps handing every
+car the shortest *distance*, which is still the jammed corridor, and each new
+arrival lengthens the queue that made it slow. **Nothing in the sim can currently
+express "this way is slower because other cars are on it."** That is not a bug
+in M1d: routing cost was never in its scope, and it is invisible on the shipped
+board, where §6 measured `maxActive = 1`. **It becomes visible the day M1e's
+demand ramp lands** — which is the same trigger §6 records for head-on. Expect
+both to arrive together.
+
+**When you add the first congestion penalty, read `scratch.ts:43-49` before
+writing a line of it.** The bucket queue's `NB = DIAG_COST + 1` is the *exact*
+minimum with **zero slack** — an earlier version of that comment read the spread
+as 4 and called it headroom, and instrumenting 200 seeded random graphs measured
+the true maximum at 14, the full interval. A 3.5× overestimate of room that does
+not exist. The specific trap: a penalty applied **inside** `computeFlowField`
+rather than through the cost function merges two distances into one bucket, and
+the result is **wrong paths and no crash**. A silent failure in the component
+whose golden (`252514232`, §0) is a tripwire rather than a golden.
+
+Note also that M1d's intersection penalty is **not** an edge weight — it is a
+`laneSpeedMul` applied at movement time — so it set no precedent here and left
+`NB` untouched. Yours will be the first thing to actually change edge cost.
+
+## 12. The ghost art is tested but has never been LOOKED AT
+
+`ghostMask` renders through its own atlas pass, and it is not thinly tested:
+182 assertions across `atlas.test.ts`, `canvas.test.ts` and `interface.test.ts`.
+The automated side is in good shape.
+
+**What is missing is a human.** The last time anyone saw this game on a real
+phone was the close of M2 — *before ghost roads existed*. Every visual judgement
+in the ghost pass has been made by agents reading the spec:
+
+- the ghost stroke is **half the live road's width** (`atlas.ts:112`), and
+- **spec §6's 55–65 % width band was deliberately ruled not to apply**
+  (`atlas.ts:120`) on the reasoning that the band is a rule about roads and *"a
+  ghost is the absence of one."*
+
+That reasoning is sound and it is still an unvalidated aesthetic call, of the
+kind this project has no test for. A half-width dashed ghost may read as an
+elegant fade or as a rendering glitch, and **only a person looking at a phone can
+tell those apart.** Fold it into the next hardware check alongside §7's frame
+cost — one session on a device answers both, and neither has any other route to
+an answer.
