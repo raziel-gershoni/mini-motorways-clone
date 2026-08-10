@@ -272,3 +272,23 @@ say "changing X moves goldens {A, B}", change X and run the suite. Tracing impor
 Related: [I relayed a finding that was wrong], and [a handoff document can be complete in structure
 and still drop items]. The common thread is that secondhand claims about code acquire confidence at
 each hop while acquiring no evidence.
+
+### Sharpening, from hitting it a third time
+
+M1e Task 2's implementer hit the restore defect **while proving a fix had teeth**, and its two
+corrections to the entry above are the useful part:
+
+**"Commit before the battery" is too narrow.** It reads as advice about mutation *batteries*. The
+failure has nothing to do with scale — a **one-line teeth-check probe** has the same cleanup step and
+the same failure mode. The rule is: before any edit you intend to revert, commit; the size of the
+experiment is irrelevant.
+
+**A deleted guard is invisible in the test count.** M1d's version of this ate eleven tests and the
+collection count moved, which is what surfaced it. Here the restore took a widened guard and a
+rewritten tripwire that live *inside an existing `it`* — so **the suite stayed green at exactly 1,643
+and the count was unchanged.** Nothing about the run looked wrong. It was caught only because the
+file was missing from `git status` during a pre-commit sweep.
+
+So the check that actually works is not "did the count hold" but: **diff your expected file list
+against `git status` before quoting a green suite.** A test count detects deleted tests; it cannot
+detect deleted assertions inside surviving tests, and a restore step deletes whatever it reverts.
