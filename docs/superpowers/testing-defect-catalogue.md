@@ -312,18 +312,40 @@ The fix used here was to repoint the guard at a scope that is structurally alway
 the file's own tick-rig control had already concluded independently, meaning the right answer was
 sitting in the same file.
 
-## Bytes-per-frame is the wrong denominator for gated work, and there is a free right one
+## Bytes-per-frame cannot see gated work — and changing the DENOMINATOR does not fix it
 
 Task 2's reviewer found the allocation harness **structurally cannot see week-gated work**: an
 escaping object inside a boundary-gated branch leaves the suite green, because a handful of events
-across thousands of driven frames lands under the 4 B/frame floor *by construction*. Not a tuning
-problem — an arithmetic one.
+across thousands of driven frames lands under the 4 B/frame floor *by construction*.
 
-Task 3 closed it. **Divide by the event count, not the frame count.** `scratch.counters` is already a
-cumulative, allocation-free event counter; reading it either side of a profiled window converted
-18 B/frame into **142 B/call** on the flow field. A week boundary firing 8 times in 3,000 frames is
-0.1 B/frame — invisible — but ~40 B/boundary, which is a 10× signal against any sane budget.
+Task 3 proposed dividing by the **event count** instead, using `scratch.counters`. I wrote that up
+here as closed. **It is wrong, and Task 3's reviewer measured it wrong:** injecting an escaping
+object at 8 events per 3,000-frame window, at the shipped 512 B sampling interval, gives windows
+`0 / 1056 / 0` and `528 / 0 / 0` — **min-over-windows 0 on 2 of 2 runs.** Invisible per frame *and*
+per event.
 
-So: for anything that does not run every frame, **one counter per gated branch and a per-event
-budget**, with the per-event floor measured under the real event rate before it is trusted. A
-per-frame budget on gated work is not a weak test; it is a guaranteed pass.
+**The arithmetic says why: dividing by the event count divides the signal and the stray-sample noise
+by the same denominator, so the signal-to-noise ratio is unchanged. It is a change of units.** What
+made the flow field measurable was never the denominator — it was that the event fires **381 times
+per window**, which is enough draws to be sampled at all.
+
+The real variable is **the sampling interval against the event's total bytes.** Measured: drop
+`samplingInterval` from 512 to 32 or 64 and the same 8-event injection appears in **6/6 windows at
+30-66 B/event**, against a true ~40 B/event.
+
+So for gated work the per-event budget is necessary but not sufficient. The missing condition is
+**a sampling interval sized to the gated event's total bytes, or enough events per window to be
+sampled.** Without it, a per-event budget on a rare event is a guaranteed pass that reads as rigour —
+this document's own worst-named defect, an instrument that reports clean while measuring nothing.
+
+**The same trap exists one file over, in the opposite direction.** The guard that replaced the
+flow-field allowance is a per-*frame* budget on a **0.127-calls/frame** event. Its sensitivity to the
+smallest realistic regression — one escaping object per rebuild — is 4.29-6.61 B/frame against a 4 B
+floor: **1.07-1.65x**, 7% over the floor on one draw. That does not fail cleanly; it flakes
+red-then-green, and the natural response to a flaky red is to widen the budget. A per-**call** rate
+off the rebuild counter separates the same injection at 36-52 B/call against a ~1.3 B/call stray.
+
+**Why this entry was rewritten rather than deleted: I relayed a proposal into this document as a
+closed finding without measuring it.** Third time in one milestone that a claim gained confidence at
+each hop while gaining no evidence — see [a correction can repeat the exact error it is correcting].
+**A proposed fix is not a closed finding until someone has run the failing case and watched it fail.**
