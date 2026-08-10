@@ -2,14 +2,19 @@ import { describe, it, expect } from 'vitest'
 import {
   ATLAS_COLS,
   ATLAS_MASK_COUNT,
+  AtlasVariant,
+  GHOST_STROKE_ALPHA,
+  GHOST_STROKE_FRACTION,
   MAX_ATLAS_DIMENSION_PX,
   ROAD_DIR_COUNT,
   ROAD_DIR_DX,
   ROAD_DIR_DY,
+  ROAD_STROKE_ALPHA,
   ROAD_STROKE_FRACTION,
   atlasSourceX,
   atlasSourceY,
   buildAtlas,
+  buildAtlases,
   type AtlasContext,
   type AtlasSurface,
   type AtlasSurfaceFactory,
@@ -88,6 +93,16 @@ class RecordingContext implements AtlasContext {
   #lineCap: CanvasLineCap = 'butt'
   #lineJoin: CanvasLineJoin = 'miter'
   #strokeStyle: string | CanvasGradient | CanvasPattern = '#000000'
+  /** A real 2D context starts fully opaque; so does this, so an omitted assignment shows. */
+  #globalAlpha = 1
+
+  get globalAlpha(): number {
+    return this.#globalAlpha
+  }
+  set globalAlpha(value: number) {
+    this.#globalAlpha = value
+    this.log.push({ op: 'set', prop: 'globalAlpha', value })
+  }
 
   get lineWidth(): number {
     return this.#lineWidth
@@ -419,6 +434,22 @@ function buildAt(tileDevicePx: number, palette?: Palette): { rec: Recorder; log:
   return { rec, log: onlySurface(rec).ctx.log }
 }
 
+/** The same recorder, pointed at a GHOST build (M1d Task 8). */
+function buildGhostAt(
+  tileDevicePx: number,
+  palette: Palette = PALETTE,
+): { rec: Recorder; log: Command[] } {
+  const rec = recorder()
+  buildAtlas(rec.create, tileDevicePx, palette, AtlasVariant.GHOST)
+  return { rec, log: onlySurface(rec).ctx.log }
+}
+
+/** The value a build assigned to one context property, or `undefined` if it never did. */
+function setValue(log: readonly Command[], prop: string): string | number | undefined {
+  const command = log.find((c) => c.op === 'set' && c.prop === prop)
+  return command?.op === 'set' ? command.value : undefined
+}
+
 // ---------------------------------------------------------------------------
 
 describe('buildAtlas: the surface', () => {
@@ -453,25 +484,35 @@ describe('buildAtlas: the surface', () => {
 })
 
 describe('buildAtlas: the stroke state', () => {
-  it('sets lineWidth, lineCap, lineJoin and strokeStyle ONCE, before any drawing', () => {
+  it('sets lineWidth, lineCap, lineJoin, strokeStyle and globalAlpha ONCE, before any drawing', () => {
     const { log } = buildAt(T)
 
     const sets = log.filter((c) => c.op === 'set')
     const firstDraw = log.findIndex((c) => c.op !== 'set')
 
-    // Four assignments, and every one of them ahead of the first drawing
+    // Five assignments, and every one of them ahead of the first drawing
     // command: a builder that sets its state after stroking draws 256 tiles
     // with the default 1 px butt-capped hairline and the recording says so.
     // Once, not per tile — `save`/`restore` around each tile restores exactly
     // this state, so re-setting it 1,024 times would be 1,024 chances to
     // invalidate a real context's state cache at boot.
-    expect(sets.length).toBe(4)
-    expect(firstDraw).toBe(4)
+    expect(sets.length).toBe(5)
+    expect(firstDraw).toBe(5)
 
     const byProp = new Map(sets.map((c) => [c.prop, c.value]))
     expect(byProp.get('lineWidth')).toBe(24) // 0.6 * 40
     expect(byProp.get('lineCap')).toBe('round')
     expect(byProp.get('strokeStyle')).toBe(PALETTE.road)
+
+    // `globalAlpha` on a ROAD build is INERT in exactly the sense `lineJoin` is
+    // — 1 is a fresh context's own default and every build gets a fresh surface
+    // — so deleting the assignment on this path rasterises identical pixels and
+    // only this assertion kills it. It is written unconditionally rather than
+    // behind `if (variant === GHOST)` so that no build can inherit an alpha it
+    // did not choose, and it is the same line the GHOST build uses, where the
+    // value is 0.35 and very much not inert. Labelled, so a reader does not take
+    // this line as coverage of something the road layer depends on.
+    expect(byProp.get('globalAlpha')).toBe(1)
 
     // `lineJoin` is asserted, and it is INERT — review m1. Every spoke is its
     // own two-point subpath, and a two-point subpath has no join, so nothing
@@ -546,6 +587,199 @@ describe('buildAtlas: the stroke state', () => {
     const rec2 = recorder()
     expect(buildAtlas(rec2.create, T).palette).toBe(PALETTE)
     expect(custom).not.toBe(PALETTE)
+  })
+})
+
+describe('the GHOST variant: thinner and fainter, as two independent properties', () => {
+  /**
+   * M1d Task 8, spec §5.11: a road whose refund is deferred *"renders as a
+   * thinner, lower-opacity ghost"*. Two properties, and the tests below are
+   * split so that **each has a detector the other does not**.
+   *
+   * That split is the whole point and it cost this project a finding once
+   * already: a single assertion that "the ghost differs from the road" is one
+   * detector standing in for two behaviours, and it reports the same green
+   * whether the width mutation or the opacity mutation is the one that survived.
+   * So: `lineWidth` is asserted in its own `it()`, `globalAlpha` in its own, and
+   * the third `it()` asserts only what must NOT change — colour, cap and join —
+   * which fires on neither of them.
+   */
+
+  it('strokes the ghost layer THINNER: lineWidth is GHOST_STROKE_FRACTION of the tile', () => {
+    // Width only. This assertion is blind to `globalAlpha` by construction.
+    for (const size of [T, 58]) {
+      const road = setValue(buildAt(size).log, 'lineWidth')
+      const ghost = setValue(buildGhostAt(size).log, 'lineWidth')
+      expect(ghost).toBe(GHOST_STROKE_FRACTION * size)
+      expect(road).toBe(ROAD_STROKE_FRACTION * size)
+      // The RELATION, not just the literal: an art pass may retune both numbers
+      // and must not be able to make a ghost as fat as a road.
+      expect(Number(ghost)).toBeLessThan(Number(road))
+    }
+    // Both sizes, so a builder that ignores its tile argument for the ghost — a
+    // fixed 12 px hairline, say — cannot pass on one of them.
+    expect(GHOST_STROKE_FRACTION).toBeLessThan(ROAD_STROKE_FRACTION)
+  })
+
+  it('reports that thinner width on the Atlas as well as assigning it', () => {
+    const rec = recorder()
+    const ghost = buildAtlas(rec.create, T, PALETTE, AtlasVariant.GHOST)
+    expect(ghost.strokeWidthPx).toBe(12) // 0.3 * 40
+    expect(setValue(onlySurface(rec).ctx.log, 'lineWidth')).toBe(ghost.strokeWidthPx)
+    // `strokeWidthPx` is what a caller lining anything up with a ghost reads,
+    // and half of it is the cap reach the clip assertions below are stated in.
+    const roadRec = recorder()
+    expect(buildAtlas(roadRec.create, T).strokeWidthPx).toBe(24)
+  })
+
+  it('strokes the ghost layer FAINTER: globalAlpha is GHOST_STROKE_ALPHA', () => {
+    // Opacity only. This assertion is blind to `lineWidth` by construction.
+    const road = setValue(buildAt(T).log, 'globalAlpha')
+    const ghost = setValue(buildGhostAt(T).log, 'globalAlpha')
+    expect(ghost).toBe(GHOST_STROKE_ALPHA)
+    expect(road).toBe(ROAD_STROKE_ALPHA)
+    expect(Number(ghost)).toBeLessThan(Number(road))
+    // An alpha of 0 is not "fainter", it is "absent", and it would render the
+    // whole feature invisible while satisfying every `<` above.
+    expect(Number(ghost)).toBeGreaterThan(0)
+  })
+
+  it('reports that alpha on the Atlas as well as assigning it', () => {
+    const rec = recorder()
+    const ghost = buildAtlas(rec.create, T, PALETTE, AtlasVariant.GHOST)
+    expect(ghost.strokeAlpha).toBe(GHOST_STROKE_ALPHA)
+    expect(setValue(onlySurface(rec).ctx.log, 'globalAlpha')).toBe(ghost.strokeAlpha)
+
+    const roadRec = recorder()
+    const road = buildAtlas(roadRec.create, T)
+    expect(road.strokeAlpha).toBe(ROAD_STROKE_ALPHA)
+    expect(road.strokeAlpha).toBeGreaterThan(ghost.strokeAlpha)
+  })
+
+  it('changes NOTHING else about the stroke state — same colour, same cap, same join', () => {
+    // The independence claim, made positively. Opacity is `globalAlpha` and not
+    // an `#rrggbbaa` colour precisely so that this holds: bake the fade into the
+    // colour instead and "full opacity" and "the road colour" become one edit.
+    // Fires on neither the width nor the alpha mutation, which is why it is here
+    // rather than folded into either of them.
+    const road = buildAt(T).log
+    const ghost = buildGhostAt(T).log
+    for (const prop of ['strokeStyle', 'lineCap', 'lineJoin']) {
+      expect(setValue(ghost, prop), prop).toBe(setValue(road, prop))
+    }
+    expect(setValue(ghost, 'strokeStyle')).toBe(PALETTE.road)
+    // ...and it changes exactly the two that it must, so "nothing else" is a
+    // statement about a complete list rather than about three sampled entries.
+    expect(ghost.filter((c) => c.op === 'set').length).toBe(5)
+    expect(setValue(ghost, 'lineWidth')).not.toBe(setValue(road, 'lineWidth'))
+    expect(setValue(ghost, 'globalAlpha')).not.toBe(setValue(road, 'globalAlpha'))
+  })
+
+  it('bakes the palette it is handed, so a ghost atlas goes stale exactly as a road one does', () => {
+    const custom: Palette = { ...PALETTE, road: '#ff00ff' }
+    const rec = recorder()
+    const ghost = buildAtlas(rec.create, T, custom, AtlasVariant.GHOST)
+    expect(ghost.palette).toBe(custom)
+    expect(setValue(onlySurface(rec).ctx.log, 'strokeStyle')).toBe('#ff00ff')
+    // The consequence `canvas.ts`'s `assertAtlases` exists for: the ghost layer
+    // carries the SAME baked-palette hazard as the road layer, so a rebuild that
+    // refreshes one and not the other draws a board in two themes.
+    expect(custom).not.toBe(PALETTE)
+  })
+
+  it('carries its variant, so a swapped pair is detectable at all', () => {
+    const rec = recorder()
+    const rec2 = recorder()
+    expect(buildAtlas(rec.create, T, PALETTE, AtlasVariant.GHOST).variant).toBe(AtlasVariant.GHOST)
+    expect(buildAtlas(rec2.create, T).variant).toBe(AtlasVariant.ROAD)
+    // Defaulted, so every M2-era caller keeps building the road layer.
+    expect(AtlasVariant.ROAD).not.toBe(AtlasVariant.GHOST)
+  })
+
+  it('draws the SAME 256 tiles, spoke for spoke — only the stroke differs', () => {
+    // "The ghost stroke is derived from the mask" at the atlas end: a ghost tile
+    // is the same geometry as the road tile of the same mask, which is what
+    // makes a ghosted DIAGONAL segment draw diagonally rather than as whatever a
+    // single hand-written ghost sprite happened to be.
+    const road = tiles(buildAt(T).log)
+    const ghost = tiles(buildGhostAt(T).log)
+    expect(ghost.length).toBe(ATLAS_MASK_COUNT)
+    for (let mask = 0; mask < ATLAS_MASK_COUNT; mask++) {
+      expect(ghost[mask]?.segments, `mask ${mask}`).toEqual(road[mask]?.segments)
+      expect(ghost[mask]?.clip, `mask ${mask}`).toEqual(road[mask]?.clip)
+    }
+    // Non-vacuous, and specifically about the diagonals: mask 8 is SE alone, and
+    // its one spoke runs to the tile CORNER. A permutation of the diagonal bits
+    // or a ghost builder that only emitted orthogonals would move this literal.
+    // Mask 8 is tile (8, 0): origin (320, 0), centre (340, 20), SE to the
+    // bottom-right corner (360, 40).
+    expect(segmentsFor(buildGhostAt(T).log, MASK_SE)).toEqual([
+      { x1: 340, y1: 20, x2: 360, y2: 40 },
+    ])
+    expect(segmentsFor(buildGhostAt(T).log, MASK_NE)).toEqual([
+      { x1: 100, y1: 20, x2: 120, y2: 0 },
+    ])
+  })
+
+  it('keeps every ghost spoke inside its own tile rect, at the ghost’s own cap radius', () => {
+    // The C1 clip argument, re-derived for the thinner stroke rather than
+    // assumed from the road atlas. A ghost cap is a half-disc of radius
+    // `0.15 * tile` = 6 px at T = 40, so it reaches LESS far — but "less far
+    // than a road" is not "inside the tile", and without the clip a ghost still
+    // contaminates its neighbour. Same lesson-not-carried-to-its-sibling shape
+    // the catalogue names; checked rather than inherited.
+    const ghostR = (GHOST_STROKE_FRACTION * T) / 2
+    expect(ghostR).toBe(6)
+    let checked = 0
+    for (const [mask, tile] of tiles(buildGhostAt(T).log).entries()) {
+      const clip = tile.clip
+      expect(clip, `mask ${mask} was not clipped at all`).not.toBeNull()
+      if (clip === null) continue
+      for (const s of tile.segments) {
+        const length = Math.hypot(s.x2 - s.x1, s.y2 - s.y1)
+        const px = s.x2 + ((s.x2 - s.x1) / length) * (ghostR / 2)
+        const py = s.y2 + ((s.y2 - s.y1) / length) * (ghostR / 2)
+        expect(inkedUnclipped(px, py, tile.segments, 2 * ghostR), `mask ${mask}`).toBe(true)
+        expect(insideRect(clip, px, py), `mask ${mask} ghost spoke leaves its own rect`).toBe(false)
+        checked++
+      }
+    }
+    expect(checked).toBe(1024)
+  })
+})
+
+describe('buildAtlases: the pair, built together so it cannot go half-stale', () => {
+  it('returns a ROAD atlas and a GHOST atlas at one tile size and one palette', () => {
+    const rec = recorder()
+    const atlases = buildAtlases(rec.create, T)
+
+    expect(atlases.road.variant).toBe(AtlasVariant.ROAD)
+    expect(atlases.ghost.variant).toBe(AtlasVariant.GHOST)
+    expect(atlases.road.tileDevicePx).toBe(T)
+    expect(atlases.ghost.tileDevicePx).toBe(T)
+    expect(atlases.road.palette).toBe(PALETTE)
+    expect(atlases.ghost.palette).toBe(PALETTE)
+    // TWO surfaces, in this order. One surface shared between them would mean
+    // the second build stroked over the first and every road tile carried a
+    // ghost on top of it.
+    expect(rec.calls).toEqual([
+      { widthPx: SURFACE, heightPx: SURFACE },
+      { widthPx: SURFACE, heightPx: SURFACE },
+    ])
+    expect(atlases.road.surface).not.toBe(atlases.ghost.surface)
+  })
+
+  it('hands the SAME palette to both, so the pair can never be half-rethemed', () => {
+    const custom: Palette = { ...PALETTE, road: '#ff00ff' }
+    const rec = recorder()
+    const atlases = buildAtlases(rec.create, 58, custom)
+    expect(atlases.road.palette).toBe(custom)
+    expect(atlases.ghost.palette).toBe(custom)
+    expect(atlases.road.tileDevicePx).toBe(atlases.ghost.tileDevicePx)
+    // And the two really are different surfaces with different stroke state, so
+    // "same palette" is not passing because they are the same object.
+    expect(atlases.road.strokeWidthPx).not.toBe(atlases.ghost.strokeWidthPx)
+    expect(atlases.road.strokeAlpha).not.toBe(atlases.ghost.strokeAlpha)
   })
 })
 

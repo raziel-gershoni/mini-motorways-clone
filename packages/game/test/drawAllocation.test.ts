@@ -42,14 +42,37 @@ import { repoRelative } from './allocationPaths'
  * INPUTS
  * ---------------------------------------------------------------------------
  *
- * A **road on the board** (so `drawRoads` blits rather than short-circuiting on
- * every cell and `atlasSourceX`/`atlasSourceY` actually run), a **car in
- * motion** (so `drawCars` iterates a non-empty prefix and the group-colour
- * lookup runs), **three destinations with pins**, **three houses**, and a HUD
- * whose clock crosses at least one day boundary inside the profiled window (so
- * the text cache is exercised on both the hit and the miss path). The counts
- * below are asserted, so a rig that stopped driving one of them turns this red
- * rather than quietly measuring less.
+ * A **road on the board** (so the road pass blits rather than short-circuiting
+ * on every cell and `atlasSourceX`/`atlasSourceY` actually run), **six ghost
+ * cells** (so the M1d Task 8 ghost pass does the same, from the other atlas), a
+ * **car in motion** (so `drawCars` iterates a non-empty prefix and the
+ * group-colour lookup runs), **three destinations with pins**, **three
+ * houses**, and a HUD whose clock crosses at least one day boundary inside the
+ * profiled window (so the text cache is exercised on both the hit and the miss
+ * path). The counts below are asserted, so a rig that stopped driving one of
+ * them turns this red rather than quietly measuring less.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE GHOSTS ARE WRITTEN INTO STATE RATHER THAN ERASED INTO EXISTENCE
+ * ---------------------------------------------------------------------------
+ *
+ * A ghost is **transient by design**: `sim` clears it the moment the last
+ * committed car crosses off the cell, which on this rig's 4-cell road is a few
+ * dozen ticks. The profiled window is 3,000 frames — about 1,500 ticks — and
+ * the requirement is a ghost present *for the profiled frames*, not for some of
+ * them. Driving a fresh erase every N frames would exercise the pointer and
+ * tick paths rather than the draw path and would perturb the very budget being
+ * measured; a durable ghost is what this file needs and `sim` has no
+ * production event that produces one.
+ *
+ * So `seedGhosts` below writes the two regions an erase writes — `ghostMask`
+ * (the bit `render` blits) and `ghostCommitted` (the count that keeps the
+ * refund owed) — on six cells inside the revealed rect that carry no road and
+ * that no car can reach, since the only road on the board is the 4-cell drag.
+ * The resulting state is one `sim` can genuinely be in: six deferred refunds
+ * whose committed cars have not arrived. The vacuity block asserts the bytes are
+ * **still there after the whole window**, so "the sim quietly cleared them" is a
+ * red test rather than a silent loss of coverage.
  *
  * What it does NOT drive, and deliberately: a viewport change. `fitCamera`
  * allocates one `Camera` per measurement by design (Task 3: *"it runs at boot,
@@ -149,11 +172,36 @@ function profileBytesByFile(body: () => void): Map<string, number> {
 }
 
 /**
- * The ONE context shape this file ever creates: a plain object literal that
- * records nothing. See the module comment for what happens when a second shape
- * reaches the same call sites.
+ * What the rig proves it actually drew. **Two counters, both written and both
+ * read** — the object this replaces had four fields, none of which was ever
+ * assigned and none of which any test read, which is the same defect class as an
+ * assertion that cannot fail wearing the costume of instrumentation.
+ *
+ * `cars`, `pins` and `clockTexts` are gone rather than wired: the vacuity block
+ * already asserts all three from `game.state` and `builder.frame`, and counting
+ * them here would mean classifying `fillRect` calls by geometry inside the
+ * profiled loop — real work per call, in the hot path, duplicating
+ * `render/test/canvas.test.ts`'s classifier to learn something already known.
  */
-function silentContext(): GameContext {
+interface DrawCounts {
+  /** Blits from the ROAD atlas. */
+  blits: number
+  /** Blits from the GHOST atlas — the M1d Task 8 pass. */
+  ghostBlits: number
+}
+
+/**
+ * The ONE context shape this file ever creates. See the module comment for what
+ * happens when a second shape reaches the same call sites.
+ *
+ * `drawImage` separates the two layers by **source surface identity**, which is
+ * the only thing that distinguishes them: the two atlases have the same size,
+ * the same grid and the same tile rects, so a ghost blit and a road blit are
+ * identical in every recorded number. `surfaces.ghost` is a holder rather than a
+ * captured value because the atlases do not exist until `createGame` returns and
+ * this object is one of its arguments; nothing draws in between.
+ */
+function countingContext(counts: DrawCounts, surfaces: { ghost: unknown }): GameContext {
   return {
     fillStyle: '',
     font: '',
@@ -162,7 +210,10 @@ function silentContext(): GameContext {
     setTransform: () => undefined,
     fillRect: () => undefined,
     fillText: () => undefined,
-    drawImage: () => undefined,
+    drawImage: (image) => {
+      if (image === surfaces.ghost) counts.ghostBlits++
+      else counts.blits++
+    },
   }
 }
 
@@ -171,6 +222,7 @@ function stubSurface(widthPx: number, heightPx: number): AtlasSurface {
     lineWidth: 0,
     lineCap: 'round',
     lineJoin: 'round',
+    globalAlpha: 1,
     strokeStyle: '',
     save: () => undefined,
     restore: () => undefined,
@@ -192,14 +244,49 @@ const PATH: readonly (readonly [number, number])[] = [
   [8, 10],
 ]
 
+const BOARD_W = 24
+
+/**
+ * Six cells at row 27, columns 8-13 — a straight run whose refund is owed.
+ *
+ * Inside the M0 revealed rect (`x in [5, 19)`, `y in [9, 31)`) so the ghost pass
+ * is not culled, and **unreachable by any car**: the only road on this board is
+ * the 4-cell drag above, so no route can contain row 27 and nothing will ever
+ * call `noteGhostDeparture` on these cells. Six rather than one so the pass is a
+ * measurable workload and the positive control below has a signal to move.
+ *
+ * Six DIFFERENT single-bit masks, which is the shape a real erase leaves — the
+ * bit that went — and which makes the pass read six different atlas tiles across
+ * two different rows of the grid rather than one tile six times.
+ */
+const GHOST_CELLS: readonly (readonly [number, number])[] = [
+  [8, 27, 1], // N
+  [9, 27, 2], // NE — a diagonal tile
+  [10, 27, 4], // E
+  [11, 27, 8], // SE
+  [12, 27, 16], // S
+  [13, 27, 64], // W
+].map(([x, y, mask]) => [(y as number) * BOARD_W + (x as number), mask as number] as const)
+
+/** Writes the two regions a deferred refund writes. See the module comment. */
+function seedGhosts(game: ReturnType<typeof createGame>): void {
+  for (const [cell, mask] of GHOST_CELLS) {
+    game.state.ghostMask[cell] = mask
+    // Non-zero, so the state is one `sim` can genuinely be in: a refund still
+    // owed to a committed car that has not arrived. Zero here would be a ghost
+    // with nothing to wait for, which no erase produces.
+    game.state.ghostCommitted[cell] = 1
+  }
+}
+
 interface Driven {
   readonly game: ReturnType<typeof createGame>
   readonly drive: (count: number) => void
-  readonly counts: { blits: number; cars: number; pins: number; clockTexts: number }
+  readonly counts: DrawCounts
 }
 
 /**
- * Builds the real game, draws the road, and returns a driver.
+ * Builds the real game, draws the road, seeds the ghosts, and returns a driver.
  *
  * `now` lives in the returned closure's own frame rather than being captured
  * from the caller, for the same context-slot reason `loop.ts` keeps its
@@ -207,7 +294,8 @@ interface Driven {
  * frame and charges the harness's own noise to the profile it is taking.
  */
 function drivenGame(): Driven {
-  const counts = { blits: 0, cars: 0, pins: 0, clockTexts: 0 }
+  const counts: DrawCounts = { blits: 0, ghostBlits: 0 }
+  const surfaces: { ghost: unknown } = { ghost: null }
   const game = createGame({
     canvas: {
       width: 0,
@@ -215,7 +303,7 @@ function drivenGame(): Driven {
       style: { width: '', height: '' },
       getBoundingClientRect: () => ({ left: 11, top: 7 }),
     },
-    context: silentContext(),
+    context: countingContext(counts, surfaces),
     createSurface: stubSurface,
     createFallback: () => null,
     measure: () => M0_VIEW,
@@ -223,6 +311,8 @@ function drivenGame(): Driven {
       run()
     },
   })
+  // Before the first `drive`, and `createGame` itself never draws.
+  surfaces.ghost = game.atlases.ghost.surface
 
   let now = 1000
   const drive = (count: number): void => {
@@ -243,6 +333,7 @@ function drivenGame(): Driven {
     game.pointer.move(1, px(cell[0]), py(cell[1]))
   }
   game.pointer.up(1)
+  seedGhosts(game)
 
   return { game, drive, counts }
 }
@@ -280,16 +371,17 @@ describe('the real draw path allocates nothing, measured', () => {
     expect(offenders).toEqual([])
   })
 
-  it('is not vacuous: the rig really did draw roads, cars, pins and a changing clock', () => {
+  it('is not vacuous: the rig really did draw roads, ghosts, cars, pins and a changing clock', () => {
     // A green harness is a claim about the inputs it was given. Without this,
     // the budget above is satisfied by a rig that draws an empty board — which
     // is precisely how `inputs.ts`'s 152 B/clear survived a whole task.
-    const { game, drive } = drivenGame()
-    drive(WARMUP_FRAMES + PROFILED_FRAMES)
+    const { game, drive, counts } = drivenGame()
+    const frames = WARMUP_FRAMES + PROFILED_FRAMES
+    drive(frames)
 
     let roads = 0
     for (let c = 0; c < game.world.cells; c++) if ((game.state.roads[c] as number) !== 0) roads++
-    expect(roads, 'no road, so drawRoads short-circuits on every cell').toBe(4)
+    expect(roads, 'no road, so the road pass short-circuits on every cell').toBe(4)
 
     const frame = game.builder.frame
     expect(frame.carCount, 'no cars, so drawCars never iterates').toBe(6)
@@ -305,6 +397,47 @@ describe('the real draw path allocates nothing, measured', () => {
     // ...and the camera really is the M0 one, so the revealed rect is a strict
     // sub-rect of the board and the draw loops have something to cull.
     expect([frame.camera.x0, frame.camera.y0]).toEqual([REVEALED_X0, REVEALED_Y0])
+
+    // ---- the ghost pass, M1d Task 8 ----------------------------------------
+    //
+    // **Counted from the recorded draw, not from state**, and that is the
+    // difference between "a ghost byte exists" and "the ghost pass ran". A
+    // budget measured over a window in which the pass never executed is
+    // vacuous for this task exactly as an idle input queue was for `inputs.ts`.
+    expect(counts.ghostBlits, 'the ghost pass never blitted — the budget is vacuous').toBe(
+      GHOST_CELLS.length * frames,
+    )
+    // Per frame, not merely non-zero: a ghost drawn on the first frame and gone
+    // by the second satisfies `> 0` while leaving the profiled window empty.
+    expect(counts.ghostBlits / frames).toBe(GHOST_CELLS.length)
+    // The road layer is still doing its own work, so `ghostBlits` is not the
+    // road count wearing a new name.
+    //
+    // `frames - 1` and not `frames`, and the difference is a real property
+    // rather than a fudge: `drivenGame` seeds the ghosts by writing state, which
+    // is visible on the very next frame, while it lays the road through the
+    // POINTER, whose actions are drained by the following tick. So the first
+    // frame of this window draws six ghosts and no road. Measured 17,996 =
+    // 4 x 4,499; a rig that stopped lagging would fail here, which is the point
+    // of writing the arithmetic down instead of loosening the comparison.
+    expect(counts.blits).toBe(roads * (frames - 1))
+
+    // The seeded ghosts survived 4,500 frames of real ticks. If `sim` ever
+    // starts clearing them — a car routed over row 27, a refund paid — this
+    // goes red rather than quietly measuring a frame with no ghost in it.
+    for (const [cell, mask] of GHOST_CELLS) {
+      expect(game.state.ghostMask[cell] as number, `ghost at cell ${cell}`).toBe(mask)
+      expect(game.state.ghostCommitted[cell] as number).toBe(1)
+      expect(game.state.roads[cell] as number, 'a ghost cell must carry no live road').toBe(0)
+      // Inside the revealed rect, or the pass would cull every one of them and
+      // `ghostBlits` above would be 0 for a reason that is not about the pass.
+      const x = cell % BOARD_W
+      const y = Math.floor(cell / BOARD_W)
+      expect(x >= frame.camera.x0 && x < frame.camera.x0 + frame.camera.cols).toBe(true)
+      expect(y >= frame.camera.y0 && y < frame.camera.y0 + frame.camera.rows).toBe(true)
+    }
+    // Distinct masks across two atlas rows, so the pass reads more than one tile.
+    expect(new Set(GHOST_CELLS.map(([, m]) => m)).size).toBe(GHOST_CELLS.length)
   })
 
   /**

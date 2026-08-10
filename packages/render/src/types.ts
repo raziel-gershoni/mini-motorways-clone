@@ -268,6 +268,27 @@ export interface RenderFrame {
   readonly gridW: number
   /** Board-indexed 8-bit neighbour masks; the raw `state.roads` view. */
   readonly roads: Uint8Array
+  /**
+   * Board-indexed 8-bit neighbour masks of **ghost** road — spec §5.11's
+   * deferred refund, the raw `state.ghostMask` view (M1d Task 8).
+   *
+   * A mask, not a boolean, and the reason is mechanical: the ghost layer is
+   * blitted from a 256-tile atlas indexed by exactly this byte, mask 0 is the
+   * blank tile, and a ghost cell is by definition one whose LIVE mask reached 0.
+   * A boolean would have nothing to index with.
+   *
+   * **`roads[c]` and `ghosts[c]` are never both non-zero**, by construction in
+   * `sim`: a cell becomes a ghost only when an erase takes its last road bit,
+   * and placing a road over a ghost pays the refund and clears the mask. So the
+   * two layers never paint the same cell, and `canvas.ts` fixes their order for
+   * safety rather than for appearance — see there.
+   *
+   * In production this byte holds 0 or a SINGLE set bit (the one bit the erase
+   * removed), so a ghosted segment shows as two half-spokes, one per endpoint,
+   * meeting on the edge they share. `render` does not rely on that: it blits
+   * whatever mask it is given.
+   */
+  readonly ghosts: Uint8Array
   /** Board-indexed `TerrainClass`; `game`'s fold of `world.terrain` and `state.cleared`. */
   readonly terrainClass: Uint8Array
   readonly houseCount: number

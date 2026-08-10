@@ -20,9 +20,9 @@ import {
 } from '@laneways/sim'
 import {
   PALETTE,
-  buildAtlas,
+  buildAtlases,
   drawFrame,
-  type Atlas,
+  type Atlases,
   type AtlasSurface,
   type AtlasSurfaceFactory,
   type DrawContext,
@@ -87,8 +87,8 @@ import { seedStartingCity } from './startingCity'
  * **`bootShell` calls `boot()` itself.** Calling `boot()` again from here
  * re-runs `ready`/`expand`/`requestFullscreen`, which is why this file never
  * imports it. Task 8's handoff names it first of the three things not to get
- * wrong; the other two are `rebuildAtlas` reassigning the atlas the draw path
- * actually reads (it does — `atlas` is a `let` and `draw` closes over it), and
+ * wrong; the other two are `rebuildAtlas` reassigning the atlases the draw path
+ * actually reads (it does — `atlases` is a `let` and `draw` closes over it), and
  * the pointer reading the shell's **cached** canvas offset rather than calling
  * `getBoundingClientRect` per event (it does — `shell.canvasLeft`).
  *
@@ -262,8 +262,15 @@ export interface Game {
   readonly pointer: PointerInput
   readonly queue: InputQueue
   readonly erase: EraseControl
-  /** The CURRENT atlas. A getter, because the shell rebuilds it on a tile-size change. */
-  readonly atlas: Atlas
+  /**
+   * The CURRENT pair of atlases — live roads and M1d Task 8's ghost layer. A
+   * getter, because the shell rebuilds them on a tile-size change.
+   *
+   * A pair rather than two fields: both are baked at a fixed tile size and with
+   * a baked palette, so refreshing one without the other is the failure
+   * `render`'s `Atlases` and `assertAtlases` exist for.
+   */
+  readonly atlases: Atlases
   /** How many ticks ran before the first frame. See `WARM_START_TICKS`. */
   readonly warmStartTicks: number
   /** One frame. `now` is `requestAnimationFrame`'s own timestamp — there is no second clock. */
@@ -289,9 +296,9 @@ export function createGame(deps: GameDeps): Game {
 
   // `let`, and read through the `draw` closure below rather than captured by
   // value: the shell calls `rebuildAtlas` at boot AND on every device-tile
-  // change, and a draw path holding the boot atlas would blit source rects of
+  // change, and a draw path holding the boot atlases would blit source rects of
   // the wrong size for the rest of the session.
-  let atlas: Atlas | null = null
+  let atlases: Atlases | null = null
 
   const shell = bootShell({
     canvas: deps.canvas,
@@ -299,8 +306,12 @@ export function createGame(deps: GameDeps): Game {
     reveal: { x0: REVEALED_X0, y0: REVEALED_Y0, cols: REVEALED_W, rows: REVEALED_H },
     measure: deps.measure,
     settle: deps.settle,
+    // BOTH layers, in one call, through the one constructor that cannot return
+    // a mismatched pair. Rebuilding the road atlas alone here would leave the
+    // ghost layer rasterised for the previous tile size for the rest of the
+    // session, which `assertAtlases` turns from a soft resample into a throw.
     rebuildAtlas: (tileDevicePx: number): void => {
-      atlas = buildAtlas(deps.createSurface, tileDevicePx, PALETTE)
+      atlases = buildAtlases(deps.createSurface, tileDevicePx, PALETTE)
     },
   })
 
@@ -308,7 +319,7 @@ export function createGame(deps: GameDeps): Game {
   // is unreachable — and it is a named throw rather than a `!` because the
   // alternative failure is `drawFrame` reading `null.tileDevicePx` sixty times a
   // second with nothing saying why.
-  if (atlas === null) {
+  if (atlases === null) {
     throw new Error(
       'createGame: bootShell returned without building an atlas — the draw path has no ' +
         'source surface, so every road would be missing. rebuildAtlas must be called at boot.',
@@ -360,7 +371,7 @@ export function createGame(deps: GameDeps): Game {
       // the driver being rebuilt.
       camera: () => shell.camera,
       draw: (frame) => {
-        drawFrame(deps.context, frame, atlas as Atlas, PALETTE)
+        drawFrame(deps.context, frame, atlases as Atlases, PALETTE)
       },
     }),
     queue,
@@ -400,8 +411,8 @@ export function createGame(deps: GameDeps): Game {
     queue,
     erase,
     warmStartTicks,
-    get atlas(): Atlas {
-      return atlas as Atlas
+    get atlases(): Atlases {
+      return atlases as Atlases
     },
     frame: loop.frame,
   }
@@ -566,7 +577,7 @@ export function attachVisibility(target: VisibilityTarget, pointer: PointerInput
 // The production factories — the only three `document` references in `game`
 // ---------------------------------------------------------------------------
 
-/** `buildAtlas`'s surface factory. Three lines, and `atlas.ts` prescribes them. */
+/** `buildAtlases`'s surface factory. Three lines, and `atlas.ts` prescribes them. */
 export function createCanvasSurface(widthPx: number, heightPx: number): AtlasSurface {
   const surface = document.createElement('canvas')
   surface.width = widthPx

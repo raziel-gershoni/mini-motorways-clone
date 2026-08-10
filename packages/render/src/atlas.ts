@@ -83,6 +83,77 @@ export const MAX_ATLAS_DIMENSION_PX = 4096
  */
 export const ROAD_STROKE_FRACTION = 0.6
 
+/**
+ * Which layer a build produces. M1d Task 8, spec §5.11: a road whose refund is
+ * deferred *"renders as a thinner, lower-opacity ghost until the last committed
+ * car clears"*.
+ *
+ * **Two surfaces rather than one surface and a per-frame context change**, and
+ * the reason is `drawFrame`'s blit: `drawImage` copies pixels and takes no
+ * colour, width or alpha, so "thinner and lower-opacity" is a property a tile
+ * has to be *rasterised* with. `DrawContext` accordingly still declares no
+ * `globalAlpha` — the frame loop has no alpha state at all, so none can leak
+ * from the ghost pass into the next one.
+ *
+ * A boolean "this cell is a ghost" could not have driven a blit at all: the
+ * atlas is indexed by the 8-bit mask, mask 0 is the blank tile, and a ghost cell
+ * is by definition one whose LIVE mask reached 0. `sim` therefore keeps the
+ * removed bit in `ghostMask` and `render` blits it exactly like a road bit.
+ */
+export const AtlasVariant = Object.freeze({
+  ROAD: 0,
+  GHOST: 1,
+} as const)
+
+/** An `AtlasVariant` value, derived from the const rather than hand-written. */
+export type AtlasVariantCode = (typeof AtlasVariant)[keyof typeof AtlasVariant]
+
+/**
+ * The ghost layer's stroke width, as a fraction of the tile. Half the live
+ * road's, which is "thinner" with a margin no antialiasing can close.
+ *
+ * A literal rather than `ROAD_STROKE_FRACTION / 2`, deliberately: derived, the
+ * art pass could not widen the road without widening the ghost with it, and the
+ * one property that has to hold — `GHOST_STROKE_FRACTION < ROAD_STROKE_FRACTION`
+ * — is asserted in `test/atlas.test.ts` rather than encoded in the expression.
+ *
+ * Spec §6's 55-65 % band is a rule about *roads*; a ghost is the absence of one,
+ * and drawing it inside that band would be drawing a road.
+ */
+export const GHOST_STROKE_FRACTION = 0.3
+
+/**
+ * The live road layer's bake-time alpha. **1, so this assignment paints exactly
+ * what omitting it would paint** — a fresh 2D context starts at `globalAlpha = 1`
+ * and every build gets a fresh surface from the factory.
+ *
+ * Labelled inert here for the same reason `lineJoin` is (see `buildAtlas`): a
+ * reader must not mistake an assertion on an assignment nothing depends on for
+ * an assertion on one that matters. It is written unconditionally, and NOT as
+ * `if (variant === GHOST)`, because the branch is the thing worth avoiding: an
+ * alpha applied on one path and skipped on the other is how a future third
+ * variant inherits whichever value the last build left behind.
+ */
+export const ROAD_STROKE_ALPHA = 1
+
+/**
+ * The ghost layer's bake-time alpha — spec §5.11's "lower-opacity", as an
+ * opacity.
+ *
+ * **Not baked into the colour as `#rrggbbaa`.** That form works on a real
+ * context and was rejected: it fuses opacity and hue into one string, so
+ * "draw ghosts at full opacity" and "draw ghosts in the live road colour" become
+ * the same one-character edit and neither can be evidence about the other. Here
+ * the fade is `globalAlpha`, the hue is `palette.road`, and the width is
+ * `lineWidth` — three knobs, three mutations, three detectors.
+ *
+ * 0.35 rather than 0.5: at 0.5 over `palette.land` the ghost reads as a road
+ * drawn in a second, lighter road colour, which is the confusion §5.11 exists to
+ * avoid. The value is art and the art pass owns it; what is not art is that it
+ * must be strictly below `ROAD_STROKE_ALPHA`, which is asserted.
+ */
+export const GHOST_STROKE_ALPHA = 0.35
+
 /** 8 directions, index 0 = N, clockwise. */
 export const ROAD_DIR_COUNT = 8
 
@@ -118,6 +189,13 @@ export interface AtlasContext {
   lineWidth: number
   lineCap: CanvasLineCap
   lineJoin: CanvasLineJoin
+  /**
+   * Set ONCE per build, before any drawing, and never touched by `drawFrame` —
+   * see `GHOST_STROKE_ALPHA`. It is what makes the ghost layer's opacity a
+   * property of the rasterised surface rather than of a draw call, which is the
+   * only place it can live when the draw call is a `drawImage`.
+   */
+  globalAlpha: number
   strokeStyle: string | CanvasGradient | CanvasPattern
   save(): void
   restore(): void
@@ -166,8 +244,8 @@ export interface Atlas {
   readonly widthPx: number
   readonly heightPx: number
   /**
-   * The stroke width actually used, in device px — `ROAD_STROKE_FRACTION *
-   * tileDevicePx`.
+   * The stroke width actually used, in device px — the variant's stroke
+   * fraction times `tileDevicePx`.
    *
    * Public because it is half of the arithmetic that says how far a round cap
    * reaches past a spoke's endpoint (`strokeWidthPx / 2`), which is the
@@ -177,18 +255,62 @@ export interface Atlas {
    */
   readonly strokeWidthPx: number
   /**
+   * Which layer this surface holds — `AtlasVariant.ROAD` or `.GHOST`.
+   *
+   * Public for the same reason `palette` is: the two atlases are
+   * indistinguishable from their other fields (same size, same grid, same
+   * palette, same tile count), so without this a caller that swapped them would
+   * draw every live road as a faded hairline and every ghost as a road, with
+   * nothing to notice. `assertAtlases` in `canvas.ts` is what makes that loud.
+   */
+  readonly variant: AtlasVariantCode
+  /**
+   * The `globalAlpha` this atlas was baked at, in `(0, 1]`. Public so
+   * "the ghost is fainter than the road" is assertable as a relation between two
+   * built atlases rather than as a re-read of the two constants.
+   */
+  readonly strokeAlpha: number
+  /**
    * The palette this atlas was **baked with**, carried so a caller can tell a
    * stale atlas from a current one.
    *
-   * `drawFrame(ctx, frame, atlas, palette)` takes a palette of its own and
+   * `drawFrame(ctx, frame, atlases, palette)` takes a palette of its own and
    * cannot re-tint a blit, so the two can silently disagree: the roads keep the
    * colour they were rasterised with while everything else changes. Task 5
    * compares `atlas.palette` against the palette it was handed and rebuilds (or
    * throws) rather than drawing a board in two themes. Identity comparison is
    * enough — `PALETTE` is frozen and preallocated, and a palette that is a
    * different object is a different palette by construction.
+   *
+   * **M1d Task 8 doubled the reach of this field and it is worth stating rather
+   * than deriving twice.** The GHOST atlas bakes `palette.road` exactly as the
+   * road atlas does — the fade is `globalAlpha`, not a second colour — so a
+   * palette change invalidates BOTH surfaces, and a rebuild that refreshes one
+   * leaves the board drawn in two themes with only the ghosts wrong. `Atlases`
+   * below is what keeps them built together; `assertAtlases` (canvas.ts) checks
+   * both, because checking one is a guard on half the hazard.
    */
   readonly palette: Palette
+}
+
+/**
+ * The two surfaces `drawFrame` needs, built together and rebuilt together.
+ *
+ * **A pair rather than two parameters, because everything true of one atlas is
+ * true of the other and each of those truths is a way to get it wrong.** Both
+ * bake the palette (see `Atlas.palette`), both are rasterised at a fixed
+ * `tileDevicePx` and must be rebuilt when the shell's tile size moves
+ * (`shell.ts`'s `syncAtlas`), and both are indexed by the same 8-bit mask. A
+ * caller holding two loose `Atlas` values can refresh one and not the other —
+ * for the palette that ships a two-theme board, for the tile size a resampled
+ * ghost layer — and neither failure has a symptom that points at its cause.
+ * `buildAtlases` is the one constructor that cannot produce a mismatched pair.
+ */
+export interface Atlases {
+  /** Live roads: `frame.roads`, `AtlasVariant.ROAD`. */
+  readonly road: Atlas
+  /** Deferred-refund ghosts: `frame.ghosts`, `AtlasVariant.GHOST`. */
+  readonly ghost: Atlas
 }
 
 /**
@@ -296,15 +418,35 @@ function assertSurfaceSize(surface: AtlasSurface, sizePx: number): void {
  *
  * `palette` defaults to `PALETTE` and is a parameter so the colour is not a
  * hidden global. **The colour is baked at build time** — `drawFrame(ctx, frame,
- * atlas, palette)` blits, and a blit cannot re-tint — so changing the road
+ * atlases, palette)` blits, and a blit cannot re-tint — so changing the road
  * colour means rebuilding the atlas. `Atlas.palette` carries the one it was
  * baked with so a caller can detect the mismatch. There is no palette switch in
  * M2.
+ *
+ * **`variant` selects the width and the alpha, and nothing else** (M1d Task 8).
+ * A GHOST build strokes the same 256 masks, the same spokes, the same clip and
+ * the same `palette.road`, at `GHOST_STROKE_FRACTION` of the tile and
+ * `GHOST_STROKE_ALPHA` opacity. Two consequences worth recording:
+ *
+ * - **Only 9 of a ghost atlas's 256 tiles are reachable in production.**
+ *   `roads.ts`'s `settleErasedCell` stores the ONE bit the erase removed, so a
+ *   production `ghostMask` entry is 0 or a single set bit. The other 247 tiles
+ *   are rasterised for exactly the reason tile 0 is: so the mask indexes the
+ *   grid directly, with no second numbering to keep in step. A ghosted segment
+ *   therefore draws as two half-spokes, one in each endpoint cell, meeting at
+ *   the edge they share — because `eraseRoad` ghosts both endpoints with the
+ *   mirrored bit.
+ * - **It costs a second surface.** 928 x 928 device px at M2's 58 px tile, about
+ *   3.4 MB, doubling the atlas footprint. Paid at boot and on a tile-size
+ *   change, never per frame. Packing both layers onto one 16x32 surface would
+ *   save nothing but the object and would halve the headroom under
+ *   `MAX_ATLAS_DIMENSION_PX`, which is a silent-failure limit.
  */
 export function buildAtlas(
   createSurface: AtlasSurfaceFactory,
   tileDevicePx: number,
   palette: Palette = PALETTE,
+  variant: AtlasVariantCode = AtlasVariant.ROAD,
 ): Atlas {
   assertTileSize(tileDevicePx)
 
@@ -322,8 +464,15 @@ export function buildAtlas(
     )
   }
 
-  const strokeWidthPx = ROAD_STROKE_FRACTION * tileDevicePx
+  // Two independent lookups, not one variant record, so that "ghosts are drawn
+  // at full width" and "ghosts are drawn at full opacity" are two edits with two
+  // detectors rather than one edit that proves nothing about either.
+  const isGhost = variant === AtlasVariant.GHOST
+  const strokeWidthPx = (isGhost ? GHOST_STROKE_FRACTION : ROAD_STROKE_FRACTION) * tileDevicePx
+  const strokeAlpha = isGhost ? GHOST_STROKE_ALPHA : ROAD_STROKE_ALPHA
+
   ctx.strokeStyle = palette.road
+  ctx.globalAlpha = strokeAlpha
   ctx.lineWidth = strokeWidthPx
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
@@ -362,7 +511,28 @@ export function buildAtlas(
     widthPx: sizePx,
     heightPx: sizePx,
     strokeWidthPx,
+    variant,
+    strokeAlpha,
     palette,
+  }
+}
+
+/**
+ * Builds both layers at one tile size and one palette — the only constructor
+ * that cannot produce a mismatched pair. See `Atlases` for why that matters.
+ *
+ * Allocates: two surfaces, two contexts, two small objects and the pair. It runs
+ * at boot and on a tile-size change, never per frame, exactly as `buildAtlas`
+ * does.
+ */
+export function buildAtlases(
+  createSurface: AtlasSurfaceFactory,
+  tileDevicePx: number,
+  palette: Palette = PALETTE,
+): Atlases {
+  return {
+    road: buildAtlas(createSurface, tileDevicePx, palette, AtlasVariant.ROAD),
+    ghost: buildAtlas(createSurface, tileDevicePx, palette, AtlasVariant.GHOST),
   }
 }
 

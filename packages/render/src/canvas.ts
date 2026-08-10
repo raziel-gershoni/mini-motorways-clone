@@ -1,4 +1,11 @@
-import { atlasSourceX, atlasSourceY, type Atlas, type AtlasSurface } from './atlas'
+import {
+  atlasSourceX,
+  atlasSourceY,
+  AtlasVariant,
+  type Atlas,
+  type Atlases,
+  type AtlasSurface,
+} from './atlas'
 import { createHudRects, gridToScreenX, gridToScreenY, hudRects } from './camera'
 import { TerrainClass } from './types'
 import type { Camera, HudRects, Palette, Rect, RenderFrame } from './types'
@@ -79,13 +86,22 @@ import type { Camera, HudRects, Palette, Rect, RenderFrame } from './types'
  *
  * ## The inherited hazard, stated at the signature
  *
- * `drawFrame(ctx, frame, atlas, palette)` reads as though `palette` governed
+ * `drawFrame(ctx, frame, atlases, palette)` reads as though `palette` governed
  * every colour on screen. It does not govern the roads: **the atlas bakes its
  * stroke colour in at build time and a blit cannot re-tint its source**, so a
  * palette change without an atlas rebuild leaves every road in the previous
  * theme while everything else follows — a failure that reads as a rendering bug
  * rather than a caching one. Task 4 put the baked palette on `Atlas` so the
- * mismatch is *detectable*; `assertAtlasPalette` below is what makes it *loud*.
+ * mismatch is *detectable*; `assertAtlases` below is what makes it *loud*.
+ *
+ * **M1d Task 8 doubled that hazard rather than adding a different one.** The
+ * ghost layer is a second baked surface with the same property — it strokes
+ * `palette.road` too, faded by a bake-time `globalAlpha` — so a rebuild that
+ * refreshes one surface and not the other ships a board whose ghosts are in last
+ * week's theme. `Atlases` keeps the pair together, `buildAtlases` is the
+ * constructor that cannot mismatch them, and `assertAtlases` checks BOTH
+ * palettes: a guard on half the hazard is the failure mode this whole paragraph
+ * exists to record.
  */
 
 /**
@@ -290,13 +306,25 @@ function tilesText(tilesLeft: number): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Draws one frame. Nine phases, in this order, and the order is load-bearing:
+ * Draws one frame. Ten phases, in this order, and the order is load-bearing:
  *
  * ```
  * 1 top band + letterbox fills    2 playfield fill    3 non-land terrain
- * 4 roads                         5 destinations      6 houses
- * 7 cars                          8 bottom band fill  9 HUD content
+ * 4 ghost roads                   5 live roads        6 destinations
+ * 7 houses                        8 cars              9 bottom band fill
+ * 10 HUD content
  * ```
+ *
+ * **Phases 4 and 5 cannot paint the same cell, and the order between them is
+ * fixed anyway.** `sim` only ghosts a cell whose live mask reached 0, and
+ * `placeRoad` pays the pending refund and clears the ghost, so
+ * `roads[c] !== 0 && ghosts[c] !== 0` is unreachable — which means swapping
+ * these two calls changes no pixel today and is an equivalent mutant *on the
+ * pixels*. It is written ghost-first regardless, so that the LIVE layer wins if
+ * that invariant is ever broken: a road that exists must not be hidden under the
+ * memory of one that does not. Recorded rather than left as apparent coverage —
+ * the command ORDER is asserted in `test/canvas.test.ts` and that assertion is
+ * pinning a chosen safety margin, not a visible behaviour.
  *
  * **The five fills partition the canvas, and the count is forced rather than
  * chosen.** Plan Decision 4 requires them to cover the canvas *exactly once* —
@@ -342,25 +370,25 @@ function tilesText(tilesLeft: number): string {
  * building whose anchor is outside is not drawn at all, even if its footprint
  * would reach inside — correct for M2, where the rect is frozen and Task 2's
  * seed places every building well within it, and the thing M1d must revisit when
- * the rect becomes dynamic (the fix then is a `clip` around phases 3-7, which
+ * the rect becomes dynamic (the fix then is a `clip` around phases 3-8, which
  * would also stop a partially-visible building painting into the HUD band).
  *
  * **Cars are culled by their own position and not by anything the buildings do,
  * and a car near the rect's last column or row overhangs it by up to
  * `3 * tileSize / 4` CSS px.** That is correct — the sprite is centred on a
  * position the sim genuinely put at the edge — and the reason it never reaches
- * the HUD is the **draw order**: the bottom band is phase 8 and cars are phase
- * 7, so it paints over anything that spilled below the grid rect. Not anchor
+ * the HUD is the **draw order**: the bottom band is phase 9 and cars are phase
+ * 8, so it paints over anything that spilled below the grid rect. Not anchor
  * culling, which is the buildings' protection and not the cars'. Sideways the
  * overhang survives, because the two letterbox columns are phase 1.
  */
 export function drawFrame(
   ctx: DrawContext,
   frame: RenderFrame,
-  atlas: Atlas,
+  atlases: Atlases,
   palette: Palette,
 ): void {
-  assertAtlasPalette(atlas, palette)
+  assertAtlases(atlases, palette)
 
   const camera = frame.camera
   const dpr = camera.dpr
@@ -391,7 +419,7 @@ export function drawFrame(
 
   // 1. The background matte, in three pieces: the top band down to the grid
   //    rect, then the letterbox column on each side of it. The fourth piece is
-  //    phase 8, because it has to paint over the cars.
+  //    phase 9, because it has to paint over the cars.
   ctx.fillStyle = palette.background
   ctx.fillRect(0, 0, right, gridTop)
   ctx.fillRect(0, gridTop, gridLeft, gridBottom - gridTop)
@@ -403,12 +431,15 @@ export function drawFrame(
   ctx.fillRect(gridLeft, gridTop, gridRight - gridLeft, gridBottom - gridTop)
 
   drawTerrain(ctx, frame, palette)
-  drawRoads(ctx, frame, atlas)
+  // 4 then 5. See the phase list: the two layers are disjoint per cell, and the
+  // live one is drawn second so that it wins if they ever stop being.
+  drawMaskLayer(ctx, frame, frame.ghosts, atlases.ghost)
+  drawMaskLayer(ctx, frame, frame.roads, atlases.road)
   drawDestinations(ctx, frame, palette)
   drawHouses(ctx, frame, palette)
   drawCars(ctx, frame, palette)
 
-  // 8. The bottom band: from the grid rect's bottom edge down to the canvas
+  // 9. The bottom band: from the grid rect's bottom edge down to the canvas
   // BOTTOM, not merely to the HUD band's own height. It covers three things at
   // once — the vertical gap between the grid rect and the band, the band, and
   // the bottom safe-area inset under it. A fill that started at `hudTop` would
@@ -478,18 +509,37 @@ function drawTerrain(ctx: DrawContext, frame: RenderFrame, palette: Palette): vo
 }
 
 /**
- * Phase 4. One `drawImage` per road cell, from that mask's own tile of the
- * 256-entry atlas — the whole reason the atlas exists (plan Decision 4: 139
- * blits, ~0.069 ms at M2's regime, against a path-stroke per cell).
+ * Phases 4 and 5. One `drawImage` per non-zero cell of `masks`, from that mask's
+ * own tile of the 256-entry `atlas` — the whole reason the atlas exists (plan
+ * Decision 4: 139 blits, ~0.069 ms at M2's regime, against a path-stroke per
+ * cell).
+ *
+ * **One function, called twice, and that is a deliberate departure from the
+ * brief's "one more loop".** The catalogue's most expensive bounds finding is
+ * that `drawTerrain`'s and `drawRoads`' `xEnd`/`yEnd` could each be shrunk with
+ * 178 tests green — *two* loops, *two* bounds, and the fixture happened to
+ * defeat both. A third copy would be a third bound whose only protection is a
+ * copied test. Sharing means there is exactly one bound here, and the ghost
+ * bounds tests in `test/canvas.test.ts` are a second, independent detector for
+ * it rather than the only detector for a second one. What they DO uniquely
+ * cover, and what the brief's separate-loop shape would not have made any
+ * easier, is that the ghost pass is called with `frame.ghosts` and the GHOST
+ * atlas: pass `frame.roads` or `atlases.road` and every ghost assertion fails.
  *
  * The source rect is in **device** px (`atlas.tileDevicePx`) and the destination
  * rect in **CSS** px (`camera.tileSize`); at the DPR-2 cap the two differ by
  * exactly the ratio, and swapping them draws every road at half or double size.
  *
- * Mask 0 is never blitted. `state.roads` uses 0 for "no road", and tile 0 is a
- * blank that exists only so the mask indexes the atlas grid directly.
+ * Mask 0 is never blitted. `state.roads` and `state.ghostMask` both use 0 for
+ * "nothing here", and tile 0 is a blank that exists only so the mask indexes the
+ * atlas grid directly.
  */
-function drawRoads(ctx: DrawContext, frame: RenderFrame, atlas: Atlas): void {
+function drawMaskLayer(
+  ctx: DrawContext,
+  frame: RenderFrame,
+  masks: Uint8Array,
+  atlas: Atlas,
+): void {
   const camera = frame.camera
   const tile = camera.tileSize
   const source = atlas.tileDevicePx
@@ -500,7 +550,7 @@ function drawRoads(ctx: DrawContext, frame: RenderFrame, atlas: Atlas): void {
     const rowBase = y * frame.gridW
     const py = gridToScreenY(camera, y)
     for (let x = camera.x0; x < xEnd; x++) {
-      const mask = frame.roads[rowBase + x] as number
+      const mask = masks[rowBase + x] as number
       if (mask === 0) continue
       ctx.drawImage(
         atlas.surface,
@@ -518,7 +568,7 @@ function drawRoads(ctx: DrawContext, frame: RenderFrame, atlas: Atlas): void {
 }
 
 /**
- * Phase 5, above the roads: a road is legal on a carpark cell (it is the
+ * Phase 6, above both road layers: a road is legal on a carpark cell (it is the
  * driveway), so drawing the building first would leave the road on top of it.
  *
  * The footprint box is derived from the orientation — the second copy of
@@ -587,7 +637,7 @@ function drawDestinations(ctx: DrawContext, frame: RenderFrame, palette: Palette
 }
 
 /**
- * Phase 6, above the roads for the same reason as phase 5: `placeRoad` allows a
+ * Phase 7, above the roads for the same reason as phase 6: `placeRoad` allows a
  * road on a house cell.
  *
  * Reads `[0, houseCount)` and nothing beyond it. That prefix is the whole
@@ -619,7 +669,7 @@ function drawHouses(ctx: DrawContext, frame: RenderFrame, palette: Palette): voi
 }
 
 /**
- * Phase 7, above the buildings: a car drives onto the carpark, and a car parked
+ * Phase 8, above the buildings: a car drives onto the carpark, and a car parked
  * under its destination is a car the player cannot see.
  *
  * **`carXY` is in cell-CENTRE units and this is the one place the two coordinate
@@ -657,7 +707,7 @@ function drawCars(ctx: DrawContext, frame: RenderFrame, palette: Palette): void 
 }
 
 /**
- * Phase 9. Spec §7.2's three persistent elements, laid out by `hudRects` and
+ * Phase 10. Spec §7.2's three persistent elements, laid out by `hudRects` and
  * drawn centred in its rectangles.
  *
  * All three are in the **bottom** band: §7.2 puts the clock at the top and §8.3
@@ -754,6 +804,52 @@ function groupColour(palette: Palette, index: number): string {
 }
 
 /**
+ * Both atlases must be current, and each must be the layer it is being used as.
+ *
+ * Three checks, and each catches something no other one does:
+ *
+ * - **Palette identity, per surface.** See `assertAtlasPalette`. Checked on the
+ *   ghost too, because it bakes `palette.road` exactly as the road atlas does —
+ *   a rebuild that refreshes one and not the other is the whole new hazard M1d
+ *   Task 8 introduced, and a guard on half of it would report clean for it.
+ * - **Variant.** Nothing else can see a swapped pair: the two atlases have the
+ *   same size, grid, tile count and palette, so `{ road: ghost, ghost: road }`
+ *   type-checks, builds, draws, and renders every live road as a faded hairline.
+ *   `buildAtlases` cannot produce that pair — but `Atlases` is a plain
+ *   interface, `main.ts` could construct one by hand, and every test in
+ *   `render` does.
+ * - **Tile size.** The two are rebuilt together by `buildAtlases`; a differing
+ *   `tileDevicePx` means somebody rebuilt one of them alone, which is the
+ *   palette hazard's twin and the only symptom would be a resampled ghost layer.
+ *
+ * Four reference comparisons and two number comparisons per frame, allocating
+ * only on the failing path.
+ */
+function assertAtlases(atlases: Atlases, palette: Palette): void {
+  assertAtlasPalette(atlases.road, palette, 'road')
+  assertAtlasPalette(atlases.ghost, palette, 'ghost')
+  if (
+    atlases.road.variant !== AtlasVariant.ROAD ||
+    atlases.ghost.variant !== AtlasVariant.GHOST
+  ) {
+    throw new Error(
+      'drawFrame: the two atlases are the wrong way round — `atlases.road` must be built with ' +
+        'AtlasVariant.ROAD and `atlases.ghost` with AtlasVariant.GHOST. Swapped, every live road ' +
+        'draws as a thin faded ghost and every ghost draws as a solid road, which reads as an art ' +
+        'regression rather than as a wiring error. Use buildAtlases, which cannot produce this pair',
+    )
+  }
+  if (atlases.road.tileDevicePx !== atlases.ghost.tileDevicePx) {
+    throw new Error(
+      `drawFrame: the road atlas is built for a ${atlases.road.tileDevicePx} px tile and the ghost ` +
+        `atlas for a ${atlases.ghost.tileDevicePx} px one, so one of them was rebuilt without the ` +
+        'other. Both are rasterised at a fixed tile size and the shell rebuilds on every tile-size ' +
+        'change; rebuild them together with buildAtlases',
+    )
+  }
+}
+
+/**
  * The atlas and the palette must be the same object, and this is the loud half
  * of plan Task 5's inherited hazard.
  *
@@ -778,14 +874,14 @@ function groupColour(palette: Palette, index: number): string {
  * wiring error that is true on frame 1 and every frame after, so failing fast in
  * development is the only outcome that differs from shipping the bug.
  */
-function assertAtlasPalette(atlas: Atlas, palette: Palette): void {
+function assertAtlasPalette(atlas: Atlas, palette: Palette, which: string): void {
   if (atlas.palette !== palette) {
     throw new Error(
-      'drawFrame: the atlas was baked with a different palette than this frame is being drawn ' +
-        'in. The atlas rasterises its road colour at build time and a blit cannot re-tint its ' +
-        'source, so the roads would keep the old theme while everything else changed — rebuild ' +
-        'the atlas with the new palette instead of passing it here. If both palettes LOOK ' +
-        'identical, the cause is two resolved copies of @laneways/render (a duplicated ' +
+      `drawFrame: the ${which} atlas was baked with a different palette than this frame is being ` +
+        'drawn in. The atlas rasterises its road colour at build time and a blit cannot re-tint ' +
+        'its source, so the roads would keep the old theme while everything else changed — ' +
+        'rebuild the atlas with the new palette instead of passing it here. If both palettes ' +
+        'LOOK identical, the cause is two resolved copies of @laneways/render (a duplicated ' +
         'dependency, a stale build output on the import path), each with its own frozen PALETTE ' +
         'object — rebuilding the atlas will not help and the module graph is what to fix',
     )

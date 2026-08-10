@@ -142,6 +142,12 @@ export function createFrameBuilder(state: GameState, world: WorldData, camera: C
     // is the guarantee; `readonly` on a typed-array property does not stop
     // element writes, and this plan does not claim it does).
     roads: state.roads,
+    // The ghost layer, M1d Task 8. A raw view exactly like `roads`, and NOT a
+    // per-frame fold: `sim` already stores the removed road bit per cell in the
+    // shape `render` blits, so folding would be copying 960 bytes a frame to
+    // produce the bytes we already have. `buildFrame` therefore never touches
+    // this field, which is why it is assigned once, here.
+    ghosts: state.ghostMask,
     terrainClass: new Uint8Array(world.cells),
     houseCount: 0,
     houseCell: state.houseCell,
@@ -239,7 +245,7 @@ export interface FrameDriverDeps {
    * new one up without the driver being rebuilt.
    */
   readonly camera: () => Camera
-  /** Draws the built frame. Task 9 passes `(f) => drawFrame(ctx, f, atlas, palette)`. */
+  /** Draws the built frame. `main.ts` passes `(f) => drawFrame(ctx, f, atlases, palette)`. */
   readonly draw: (frame: RenderFrame) => void
 }
 

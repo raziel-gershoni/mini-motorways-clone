@@ -50,7 +50,8 @@ const RECT = { x0: 1, y0: 1, cols: 6, rows: 4 } as const
  * prefix, and the prefix is never exercised.
  *
  * **All three collections carry a dead slot, destinations included.** Six of
- * the frame's twenty-two fields sit behind `destCount`, and an earlier version
+ * the frame's twenty-three fields sit behind `destCount` (twenty-two before M1d
+ * Task 8 added `ghosts`), and an earlier version
  * of this fixture had `destCell.length === destCount` — no dead destination
  * existed, so appending one at cell 0 past the count, and setting `destCount`
  * to 0 outright, both left all 82 tests green. Task 5 draws destinations from
@@ -59,8 +60,14 @@ const RECT = { x0: 1, y0: 1, cols: 6, rows: 4 } as const
  */
 function handBuiltFrame(): RenderFrame {
   const roads = new Uint8Array(CELLS)
+  const ghosts = new Uint8Array(CELLS)
   const terrainClass = new Uint8Array(CELLS)
   roads[2 * W + 3] = 0b0001_0001 // N|S, a non-zero mask
+  // A ghost (M1d Task 8) on a DIFFERENT cell from the road, because `sim` can
+  // never put both on one: a cell becomes a ghost only when an erase takes its
+  // last road bit, and placing a road over a ghost clears it. A fixture with
+  // both on one cell would be representing a state the sim cannot reach.
+  ghosts[3 * W + 3] = 0b0100_0000 // W, one bit — the shape a real erase leaves
   terrainClass[1 * W + 1] = TerrainClass.WATER
   terrainClass[1 * W + 2] = TerrainClass.TREE
 
@@ -100,6 +107,7 @@ function handBuiltFrame(): RenderFrame {
     ),
     gridW: W,
     roads,
+    ghosts,
     terrainClass,
     houseCount: 2,
     houseCell,
@@ -222,7 +230,39 @@ describe('RenderFrame is constructible from plain typed arrays and scalars alone
   it('indexes the board-indexed arrays as y * gridW + x', () => {
     const frame = handBuiltFrame()
     expect(frame.roads[2 * frame.gridW + 3] as number).toBe(0b0001_0001)
+    expect(frame.ghosts[3 * frame.gridW + 3] as number).toBe(0b0100_0000)
     expect(frame.terrainClass[1 * frame.gridW + 1] as number).toBe(TerrainClass.WATER)
+  })
+
+  it('carries the ghost layer as a board-indexed MASK, the same shape and length as roads', () => {
+    // M1d Task 8. A mask and not a boolean, because the ghost layer is blitted
+    // from a 256-tile atlas indexed by exactly this byte and mask 0 is the blank
+    // tile — a boolean would have nothing to index with. Same length as `roads`
+    // and the same `y * gridW + x` convention, so one cell index addresses both.
+    const frame = handBuiltFrame()
+    expect(frame.ghosts).toBeInstanceOf(Uint8Array)
+    expect(frame.ghosts.length).toBe(frame.roads.length)
+    expect(frame.ghosts.length).toBe(CELLS)
+    // Non-vacuous: there IS a ghost, and it is a real 8-bit direction mask
+    // rather than a 1 standing in for a flag.
+    const set = [...frame.ghosts].filter((m) => m !== 0)
+    expect(set).toEqual([0b0100_0000])
+  })
+
+  it('never puts a road and a ghost on the same cell, which sim cannot produce either', () => {
+    // Stated at the boundary because `render` draws both layers and the ORDER
+    // between them is only unobservable while this holds. `sim` guarantees it:
+    // `eraseRoad` ghosts an endpoint only when its mask reaches 0, and
+    // `placeRoad` pays the pending refund and clears the ghost.
+    const frame = handBuiltFrame()
+    let both = 0
+    for (let c = 0; c < CELLS; c++) {
+      if ((frame.roads[c] as number) !== 0 && (frame.ghosts[c] as number) !== 0) both++
+    }
+    expect(both).toBe(0)
+    // ...and both layers are non-empty, so "no overlap" is not "nothing there".
+    expect([...frame.roads].some((m) => m !== 0)).toBe(true)
+    expect([...frame.ghosts].some((m) => m !== 0)).toBe(true)
   })
 })
 

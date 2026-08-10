@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { REVEALED_X0, REVEALED_Y0, REVEALED_W, REVEALED_H } from '@laneways/shared'
-import { PALETTE, buildAtlas, drawFrame, fitCamera } from '@laneways/render'
+import { PALETTE, buildAtlases, drawFrame, fitCamera } from '@laneways/render'
 import type { DrawContext, RenderFrame, RevealedRect, ViewportMetrics } from '@laneways/render'
 import {
   SETTLE_FRAMES,
@@ -519,6 +519,7 @@ describe('the five matte fills tile the backing store the shell actually created
       camera,
       gridW: 24,
       roads: new Uint8Array(24 * 40),
+      ghosts: new Uint8Array(24 * 40),
       terrainClass: new Uint8Array(24 * 40),
       houseCount: 0,
       houseCell: new Int32Array(0),
@@ -555,7 +556,7 @@ describe('the five matte fills tile the backing store the shell actually created
       fillText: () => undefined,
       drawImage: () => undefined,
     }
-    const atlas = buildAtlas(
+    const atlases = buildAtlases(
       (w, h) => ({
         width: w,
         height: h,
@@ -563,6 +564,7 @@ describe('the five matte fills tile the backing store the shell actually created
           lineWidth: 0,
           lineCap: 'round' as const,
           lineJoin: 'round' as const,
+          globalAlpha: 1,
           strokeStyle: '',
           save: () => undefined,
           restore: () => undefined,
@@ -577,7 +579,7 @@ describe('the five matte fills tile the backing store the shell actually created
       rig.shell.tileDevicePx,
       PALETTE,
     )
-    drawFrame(ctx, emptyFrame(rig.shell.camera), atlas, PALETTE)
+    drawFrame(ctx, emptyFrame(rig.shell.camera), atlases, PALETTE)
     return { fills, canvas: rig.canvas }
   }
 

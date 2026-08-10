@@ -19,6 +19,8 @@ import {
   createFieldInputRanges,
   placeHouse,
   placeDestination,
+  placeRoad,
+  eraseRoad,
   packRouteStep,
   weekOfTick,
   dayOfWeek,
@@ -391,12 +393,97 @@ describe('the destination unpack', () => {
     expect(frame.houseCell).toBe(r.state.houseCell)
     expect(frame.houseColour).toBe(r.state.houseColour)
     expect(frame.roads).toBe(r.state.roads)
+    expect(frame.ghosts).toBe(r.state.ghostMask)
     expect(Array.from(frame.houseCell.subarray(0, 3))).toEqual([
       cellOf(8, 24),
       cellOf(8, 13),
       cellOf(17, 18),
     ])
     expect(Array.from(frame.houseColour.subarray(0, 3))).toEqual([0, 0, 1])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2b. The ghost layer (M1d Task 8)
+// ---------------------------------------------------------------------------
+
+describe('the ghost layer reaches the renderer', () => {
+  /**
+   * Spec §5.11's deferred refund, from `sim`'s bytes to `RenderFrame`. `game`'s
+   * whole share of it is one raw view, and that is the design: `state.ghostMask`
+   * is already the per-cell 8-bit mask `render` blits, so folding it would be
+   * copying 960 bytes a frame to produce the bytes we already have.
+   *
+   * These are `frame.ts`'s tests. The DRAWING of the layer — which surface,
+   * which tile, which rect, and the culling in both directions — is
+   * `packages/render/test/canvas.test.ts`, and the thinner/fainter stroke is
+   * `packages/render/test/atlas.test.ts`.
+   */
+
+  /** Two adjacent LAND cells inside the revealed rect: (10, 20) and (11, 20). */
+  const GHOST_A = cellOf(10, 20)
+  const GHOST_B = cellOf(11, 20)
+
+  it('carries no ghost on a board where nothing has been erased', () => {
+    // The negative control, and it is the common case: `ghostMask` is 960 zero
+    // bytes for nearly every frame of a run, and the draw path must add nothing.
+    const r = rig(true)
+    const frame = build(r, builderFor(r))
+    expect(frame.ghosts.length).toBe(r.world.cells)
+    expect([...frame.ghosts].filter((m) => m !== 0)).toEqual([])
+  })
+
+  it('shows the bit a REAL erase-under-a-committed-car deferred, on that cell', () => {
+    // End to end through `sim`'s own `placeRoad`/`eraseRoad`, not by poking the
+    // region: what `render` has to be able to draw is whatever the erase writes,
+    // and a fixture that wrote the byte itself would agree with a `frame.ts`
+    // that read the wrong region as long as the test wrote to that one too.
+    const r = rig(true)
+    expect(placeRoad(r.state, r.world, GHOST_A, GHOST_B)).toBe(true)
+    const beforeTiles = tilesLeft(r.state)
+
+    // One car standing ON (11, 20) and in flight: `isCommittedTo` answers true
+    // for a car already on the cell, which is the cheapest committed car there
+    // is and needs no route walk to be one.
+    r.state.carPhase[0] = PHASE_OUTBOUND
+    r.state.carCell[0] = GHOST_B
+
+    expect(eraseRoad(r.state, r.world, GHOST_A, GHOST_B)).toBe(true)
+
+    const frame = build(r, builderFor(r))
+    // (10, 20) had no committed car, so it refunded at once and is not a ghost.
+    // (11, 20) deferred, and the bit it kept points back the way the segment
+    // went: W = direction 6 = 0b0100_0000.
+    expect(frame.ghosts[GHOST_B] as number).toBe(0b0100_0000)
+    expect(frame.ghosts[GHOST_A] as number).toBe(0)
+    // The live layer lost it in the same operation, so the two layers are
+    // disjoint on this cell exactly as `render` documents they always are.
+    expect(frame.roads[GHOST_B] as number).toBe(0)
+    expect(frame.roads[GHOST_A] as number).toBe(0)
+    // One of the two tiles came back and the other is still owed.
+    expect(tilesLeft(r.state)).toBe(beforeTiles + 1)
+  })
+
+  it('follows the region without a rebuild, so a ghost cannot render stale', () => {
+    // The staleness half. `ghosts` is assigned once, in `createFrameBuilder`, so
+    // a frame built BEFORE the erase and a frame built after must disagree
+    // through the same builder — which is what "a raw view" buys and what a
+    // per-frame fold or a one-shot copy would both break.
+    const r = rig(true)
+    const fb = builderFor(r)
+    expect(placeRoad(r.state, r.world, GHOST_A, GHOST_B)).toBe(true)
+    expect((build(r, fb).ghosts[GHOST_B] as number)).toBe(0)
+
+    r.state.carPhase[0] = PHASE_OUTBOUND
+    r.state.carCell[0] = GHOST_B
+    expect(eraseRoad(r.state, r.world, GHOST_A, GHOST_B)).toBe(true)
+    expect((build(r, fb).ghosts[GHOST_B] as number)).toBe(0b0100_0000)
+
+    // ...and back again when the refund is paid, through the same builder. A
+    // road placed on a ghost cell pays the pending tile and clears the mask.
+    expect(placeRoad(r.state, r.world, GHOST_A, GHOST_B)).toBe(true)
+    expect((build(r, fb).ghosts[GHOST_B] as number)).toBe(0)
+    expect((build(r, fb).roads[GHOST_B] as number)).toBe(0b0100_0000)
   })
 })
 

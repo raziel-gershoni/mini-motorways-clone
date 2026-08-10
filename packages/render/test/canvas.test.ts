@@ -1,6 +1,15 @@
 import { describe, it, expect, vi } from 'vitest'
 import * as cameraModule from '../src/camera'
-import { buildAtlas, type Atlas, type AtlasContext, type AtlasSurface } from '../src/atlas'
+import {
+  AtlasVariant,
+  buildAtlas,
+  buildAtlases,
+  type Atlas,
+  type Atlases,
+  type AtlasContext,
+  type AtlasSurface,
+  type AtlasVariantCode,
+} from '../src/atlas'
 import {
   CAR_SIZE_FRACTION,
   DEST_ORIENTATION_N,
@@ -217,6 +226,7 @@ const SILENT_CONTEXT: AtlasContext = {
   lineWidth: 1,
   lineCap: 'butt',
   lineJoin: 'miter',
+  globalAlpha: 1,
   strokeStyle: '#000000',
   save: () => undefined,
   restore: () => undefined,
@@ -228,8 +238,22 @@ const SILENT_CONTEXT: AtlasContext = {
   stroke: () => undefined,
 }
 
-function atlasAt(tileDevicePx: number, palette: Palette = PALETTE): Atlas {
-  return buildAtlas((w, h) => new SilentSurface(w, h), tileDevicePx, palette)
+/**
+ * Both layers, through the real builders. A PAIR everywhere, because `drawFrame`
+ * takes a pair and a test that assembled one by hand would be free to assemble a
+ * mismatched one and never notice.
+ */
+function atlasesAt(tileDevicePx: number, palette: Palette = PALETTE): Atlases {
+  return buildAtlases((w, h) => new SilentSurface(w, h), tileDevicePx, palette)
+}
+
+/** One layer on its own, for the `assertAtlases` cases that need a mismatched pair. */
+function oneAtlasAt(
+  tileDevicePx: number,
+  palette: Palette = PALETTE,
+  variant: AtlasVariantCode = AtlasVariant.ROAD,
+): Atlas {
+  return buildAtlas((w, h) => new SilentSurface(w, h), tileDevicePx, palette, variant)
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +303,7 @@ function frameA(paused = false): RenderFrame {
     camera: cameraA(),
     gridW: A_BOARD_W,
     roads: new Uint8Array(cells),
+    ghosts: new Uint8Array(cells),
     terrainClass: new Uint8Array(cells),
     houseCount: 0,
     houseCell: new Int32Array(0),
@@ -313,6 +338,7 @@ function frameOn(camera: Camera, boardW: number, boardH: number): RenderFrame {
     camera,
     gridW: boardW,
     roads: new Uint8Array(cells),
+    ghosts: new Uint8Array(cells),
     terrainClass: new Uint8Array(cells),
     carCount: 0,
     carXY: new Float32Array(2),
@@ -382,10 +408,21 @@ function by(y: number): number {
  *   0   WATER*    .         .       .        .       .       .       .
  *   1    .      (dead)     WATER    carpark  DEST    DEST    DEST     .
  *   2    .       TREE       .       road17   DEST    DEST    DEST     .
- *   3   road*    road1      .       .        .       .      MOUNTAIN  .
+ *   3   road*    road1     ghost64   .      ghost8   .      MOUNTAIN  .
  *   4    .       house      WATER   road+car  .      car     house    .
  *   5    .        .         .       .        .       .       .      TREE*
  * ```
+ *
+ * **The two ghost cells are a real erase, not a sprinkling of bytes** (M1d Task
+ * 8). `ghost64` at (2, 3) is mask 64 = W, which is exactly what
+ * `eraseRoad((1,3), (2,3))` leaves behind: (1, 3) loses its E bit and keeps N so
+ * it refunds nothing and stays a live road, while (2, 3) loses its only bit and
+ * its refund is deferred. That pair is also the "a live road ADJACENT to a ghost
+ * is unaffected" case, on the two cells that shared the erased segment — the
+ * tightest form of it. `ghost8` at (4, 3) is a single DIAGONAL bit (SE), so
+ * "the ghost is derived from `ghostMask`" has a case where the mask's geometry
+ * is visible. Neither cell carries a live road, and in `sim` neither could:
+ * `roads[c]` and `ghosts[c]` are never both non-zero.
  *
  * `*` is outside the revealed rect `x in [1, 7), y in [1, 5)`. The two starred
  * road cells and both starred terrain cells carry NON-ZERO values, because "an
@@ -432,6 +469,13 @@ function frameB(paused = false): RenderFrame {
   roads[0 * B_W + 3] = 6 //  (3, 0), NE|E — one row BEFORE y0
   roads[5 * B_W + 3] = 9 //  (3, 5), N|SE — one row PAST y0 + rows
 
+  // The ghost layer. See the table above: (2, 3) is the far end of the segment
+  // erased off (1, 3), and (4, 3) is a lone diagonal. Bounds coverage for this
+  // layer lives in `ghostBoundsFrame`, not here.
+  const ghosts = new Uint8Array(B_CELLS)
+  ghosts[3 * B_W + 2] = 64 // (2, 3), W  — points back at the live road on (1, 3)
+  ghosts[3 * B_W + 4] = 8 //  (4, 3), SE — a diagonal, so the mask's geometry shows
+
   const terrainClass = new Uint8Array(B_CELLS)
   terrainClass[1 * B_W + 2] = TerrainClass.WATER // (2, 1) — the rect's first row
   terrainClass[2 * B_W + 1] = TerrainClass.TREE // (1, 2) — its first column
@@ -474,6 +518,7 @@ function frameB(paused = false): RenderFrame {
     camera: cameraB(),
     gridW: B_W,
     roads,
+    ghosts,
     terrainClass,
     houseCount: 2,
     houseCell,
@@ -532,6 +577,60 @@ function outOfRectFrame(): RenderFrame {
   }
 }
 
+/**
+ * Fixture B's camera and an otherwise **empty** board carrying nothing but
+ * ghosts: one on each of the four bounds of the revealed rect, and one cell past
+ * each of the four bounds.
+ *
+ * **Both directions of every bound, which is the finding that cost M2 seven
+ * 0-detector mutants and then seven more.** The first half — content ON each far
+ * bound — is what makes shrinking `xEnd` or `yEnd` fail; a fixture whose content
+ * sits in the rect's top-left corner passes a shrunk loop with everything green.
+ * The second half — a marker one cell PAST each bound — is what makes extending
+ * one fail, and each marker is past **exactly one** bound: a marker in a diagonal
+ * corner is past two at once, so no single one-cell over-extension reaches it and
+ * the mutant survives. The companion `it()` below asserts both of those
+ * properties of the fixture rather than trusting this comment.
+ *
+ * The rest of the board is emptied so that "the ghost layer" is the only thing
+ * these tests can be reading. Fixture B's own two ghosts stay where they are;
+ * they are about geometry and adjacency, not about bounds.
+ *
+ * ```
+ *  y\x   0        1        2        3        4        5        6        7
+ *   0    .        .        .        .      G past y0  .        .        .
+ *   1    .        .      G on y0    .        .        .        .      G past x1
+ *   2    .      G on x0    .        .        .        .        .        .
+ *   3  G past x0  .        .        .        .        .      G on x1    .
+ *   4    .        .        .      G on y1    .        .        .        .
+ *   5    .        .      G past y1  .        .        .        .        .
+ * ```
+ */
+function ghostBoundsFrame(): RenderFrame {
+  const ghosts = new Uint8Array(B_CELLS)
+  // Inside, one on each of the four bounds. Four DISTINCT masks, so a lookup
+  // that ignored the mask and blitted a constant tile is visible here too.
+  ghosts[2 * B_W + 1] = 1 //   (1, 2) — x = x0,            mask 1  N
+  ghosts[1 * B_W + 2] = 4 //   (2, 1) — y = y0,            mask 4  E
+  ghosts[3 * B_W + 6] = 16 //  (6, 3) — x = x0 + cols - 1, mask 16 S
+  ghosts[4 * B_W + 3] = 64 //  (3, 4) — y = y0 + rows - 1, mask 64 W
+  // Outside, one cell past exactly one bound each.
+  ghosts[3 * B_W + 0] = 2 //   (0, 3) — one column BEFORE x0
+  ghosts[1 * B_W + 7] = 8 //   (7, 1) — one column PAST x0 + cols
+  ghosts[0 * B_W + 4] = 32 //  (4, 0) — one row BEFORE y0
+  ghosts[5 * B_W + 2] = 128 // (2, 5) — one row PAST y0 + rows
+
+  return {
+    ...frameB(),
+    roads: new Uint8Array(B_CELLS),
+    terrainClass: new Uint8Array(B_CELLS),
+    ghosts,
+    houseCount: 0,
+    destCount: 0,
+    carCount: 0,
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Reading the recording back
 // ---------------------------------------------------------------------------
@@ -545,9 +644,9 @@ interface Painted {
   readonly command: Command
 }
 
-function draw(frame: RenderFrame, atlas: Atlas, palette: Palette = PALETTE): Command[] {
+function draw(frame: RenderFrame, atlases: Atlases, palette: Palette = PALETTE): Command[] {
   const ctx = new RecordingContext()
-  drawFrame(ctx, frame, atlas, palette)
+  drawFrame(ctx, frame, atlases, palette)
   return ctx.log
 }
 
@@ -724,6 +823,20 @@ function blits(log: readonly Command[]): DrawImageCommand[] {
   return log.filter((c): c is DrawImageCommand => c.op === 'drawImage')
 }
 
+/**
+ * The blits that came from one layer's surface.
+ *
+ * **Source identity, not geometry**, and that is what makes every ghost
+ * assertion in this file able to fail for the right reason: the two atlases have
+ * the same size, the same grid and the same tile rects, so a ghost blit and a
+ * road blit of the same mask on the same cell are identical in every recorded
+ * number. The surface object is the only thing that separates them, which is
+ * also exactly what a mutation drawing ghosts from the ROAD atlas would change.
+ */
+function layerBlits(log: readonly Command[], atlas: Atlas): DrawImageCommand[] {
+  return blits(log).filter((c) => c.image === atlas.surface)
+}
+
 function texts(log: readonly Command[]): FillTextCommand[] {
   return log.filter((c): c is FillTextCommand => c.op === 'fillText')
 }
@@ -777,11 +890,12 @@ describe('drawFrame: the entire recorded frame, hand-written', () => {
     // The strongest single assertion in this file: every command, every
     // coordinate and every colour of a complete frame, hand-computed from
     // fixture B's camera. It pins the draw order the plan calls load-bearing
-    // (top band -> land -> terrain -> roads -> destinations -> houses -> cars
-    // -> HUD band -> HUD content) together with the geometry of every element,
-    // so a reordering and a mis-transform are the same failure to write down.
-    const atlas = atlasAt(B_TILE_DEVICE)
-    const log = draw(frameB(), atlas)
+    // (top band -> land -> terrain -> ghosts -> roads -> destinations -> houses
+    // -> cars -> HUD band -> HUD content) together with the geometry of every
+    // element, so a reordering and a mis-transform are the same failure to write
+    // down.
+    const atlases = atlasesAt(B_TILE_DEVICE)
+    const log = draw(frameB(), atlases)
 
     expect(log).toEqual([
       // 1. the background matte, in three pieces: the top band down to the grid
@@ -806,13 +920,21 @@ describe('drawFrame: the entire recorded frame, hand-written', () => {
       fill(MOUNTAIN, 332, 324, 66, 66), // (6, 3) — the last column
       set('fillStyle', WATER),
       fill(WATER, 68, 390, 66, 66), // (2, 4) — the last row
-      // 4. roads, row-major, one blit each from that mask's own atlas tile
-      blit(atlas, 0, 132, 134, 192), //   (3, 1) mask 16 -> tile (0, 1)
-      blit(atlas, 132, 132, 134, 258), // (3, 2) mask 17 -> tile (1, 1)
-      blit(atlas, 132, 0, 2, 324), //     (1, 3) mask 1  -> tile (1, 0)
-      blit(atlas, 528, 0, 134, 390), //   (3, 4) mask 4  -> tile (4, 0)
-      blit(atlas, 264, 0, 332, 390), //   (6, 4) mask 2  -> tile (2, 0)
-      // 5. the destination: a 3x2 footprint, its carpark, then its waiting pins
+      // 4. ghosts, row-major, from the GHOST atlas's surface — the same tile
+      //    arithmetic and the same rect, a different surface. Both are on row 3,
+      //    so `x` ascending is the only thing ordering them.
+      blit(atlases.ghost, 0, 528, 68, 324), //    (2, 3) mask 64 -> tile (0, 4)
+      blit(atlases.ghost, 1056, 0, 200, 324), //  (4, 3) mask 8  -> tile (8, 0)
+      // 5. roads, row-major, one blit each from that mask's own atlas tile.
+      //    AFTER the ghosts: the two layers are disjoint per cell, so this order
+      //    paints nothing twice — it is fixed so the live layer wins if that
+      //    ever stops being true.
+      blit(atlases.road, 0, 132, 134, 192), //   (3, 1) mask 16 -> tile (0, 1)
+      blit(atlases.road, 132, 132, 134, 258), // (3, 2) mask 17 -> tile (1, 1)
+      blit(atlases.road, 132, 0, 2, 324), //     (1, 3) mask 1  -> tile (1, 0)
+      blit(atlases.road, 528, 0, 134, 390), //   (3, 4) mask 4  -> tile (4, 0)
+      blit(atlases.road, 264, 0, 332, 390), //   (6, 4) mask 2  -> tile (2, 0)
+      // 6. the destination: a 3x2 footprint, its carpark, then its waiting pins
       set('fillStyle', GROUP[4] as string),
       fill(GROUP[4] as string, 200, 192, 198, 132),
       set('fillStyle', ROAD_EDGE),
@@ -821,23 +943,23 @@ describe('drawFrame: the entire recorded frame, hand-written', () => {
       fill(UI_TEXT, 211, 203, 11, 11),
       fill(UI_TEXT, 233, 203, 11, 11),
       fill(UI_TEXT, 255, 203, 11, 11),
-      // 6. houses, above roads because a road is legal on a house cell
+      // 7. houses, above roads because a road is legal on a house cell
       set('fillStyle', GROUP[2] as string),
       fill(GROUP[2] as string, 13, 401, 44, 44),
       set('fillStyle', GROUP[5] as string),
       fill(GROUP[5] as string, 343, 401, 44, 44),
-      // 7. cars, above buildings because a car drives onto the carpark
+      // 8. cars, above buildings because a car drives onto the carpark
       set('fillStyle', GROUP[1] as string),
       fill(GROUP[1] as string, 150.5, 406.5, 33, 33),
       set('fillStyle', GROUP[3] as string),
       fill(GROUP[3] as string, 315.5, 340.5, 33, 33),
-      // 8. the bottom band: from the grid rect's bottom edge (456) down to the
+      // 9. the bottom band: from the grid rect's bottom edge (456) down to the
       //    canvas bottom — the vertical gap, the HUD band and the safe-area
       //    inset in one fill, and issued after the cars so nothing spilling out
       //    of the playfield survives into the HUD.
       set('fillStyle', BACKGROUND),
       fill(BACKGROUND, 0, 456, 400, 244),
-      // 9. HUD content
+      // 10. HUD content
       set('font', HUD_FONT),
       set('textAlign', 'center'),
       set('textBaseline', 'middle'),
@@ -883,7 +1005,7 @@ describe('the OTHER direction: is everything inside the rect drawn? (review I1)'
    */
 
   it('draws every non-LAND cell in the rect, including one on each of its four bounds', () => {
-    const log = draw(frameB(), atlasAt(B_TILE_DEVICE))
+    const log = draw(frameB(), atlasesAt(B_TILE_DEVICE))
     // Four in the rect, two more outside it that must NOT appear.
     expect(fillsStyled(log, WATER)).toEqual([
       fill(WATER, bx(2), by(1), 66, 66), // y = y0, the first row
@@ -894,8 +1016,11 @@ describe('the OTHER direction: is everything inside the rect drawn? (review I1)'
   })
 
   it('blits every road cell in the rect, including one on each of its four bounds', () => {
-    const atlas = atlasAt(B_TILE_DEVICE)
-    const all = blits(draw(frameB(), atlas))
+    const atlases = atlasesAt(B_TILE_DEVICE)
+    // Filtered to the ROAD surface: the ghost layer blits from the same rects
+    // with the same arithmetic, so an unfiltered count would conflate the two
+    // and this test would stop being about roads at all.
+    const all = layerBlits(draw(frameB(), atlases), atlases.road)
     expect(all.length).toBe(5)
     expect(all.map((b) => [b.dx, b.dy])).toEqual([
       [bx(3), by(1)], // y = y0
@@ -934,7 +1059,7 @@ describe('the draw order the plan calls load-bearing', () => {
     // and never the implementation. Stated as a chain of strict inequalities
     // because that is exactly what "buildings above roads, cars above
     // buildings" means for a painter's-algorithm renderer.
-    const atlas = atlasAt(B_TILE_DEVICE)
+    const atlas = atlasesAt(B_TILE_DEVICE)
     const log = draw(frameB(), atlas)
 
     const topBand = indexOfRect(log, 0, 0, 400, 192)
@@ -972,7 +1097,7 @@ describe('no clearRect, and five opaque fills that tile the canvas exactly', () 
     // 1,412,880 device px, ~0.141 ms, more than the entire road layer costs.
     // The mutation is FREE to write and looks like defensive hygiene, which is
     // exactly why it needs an assertion rather than a comment.
-    const log = draw(frameB(), atlasAt(B_TILE_DEVICE))
+    const log = draw(frameB(), atlasesAt(B_TILE_DEVICE))
     expect(log.filter((c) => c.op === 'clearRect')).toEqual([])
   })
 
@@ -989,7 +1114,7 @@ describe('no clearRect, and five opaque fills that tile the canvas exactly', () 
 
   it('tiles the canvas with exactly five fills: no gap, no overlap, asserted against the camera', () => {
     const camera = cameraB()
-    const strip = bands(draw(frameB(), atlasAt(B_TILE_DEVICE)))
+    const strip = bands(draw(frameB(), atlasesAt(B_TILE_DEVICE)))
 
     assertExactTiling(strip, camera)
 
@@ -1022,7 +1147,7 @@ describe('no clearRect, and five opaque fills that tile the canvas exactly', () 
     // always said it is "the letterbox outside the grid rect"; until this fill
     // structure existed, no pixel was ever painted in it outside the two bands.
     const camera = cameraB()
-    const strip = bands(draw(frameB(), atlasAt(B_TILE_DEVICE)))
+    const strip = bands(draw(frameB(), atlasesAt(B_TILE_DEVICE)))
     const styles = strip.map((b) => (b.command.op === 'fillRect' ? b.command.fillStyle : ''))
     expect(styles).toEqual([BACKGROUND, BACKGROUND, BACKGROUND, LAND, BACKGROUND])
 
@@ -1051,7 +1176,7 @@ describe('no clearRect, and five opaque fills that tile the canvas exactly', () 
     // rect and each exactly one CSS px outside it, so a fill one pixel too big
     // is caught and a fill one pixel too small is caught by the tiling proof.
     const camera = cameraB()
-    const strip = bands(draw(frameB(), atlasAt(B_TILE_DEVICE)))
+    const strip = bands(draw(frameB(), atlasesAt(B_TILE_DEVICE)))
     const gridRight = camera.originX + camera.cols * camera.tileSize
     const gridBottom = camera.originY + camera.rows * camera.tileSize
     const probes: readonly (readonly [number, number, string])[] = [
@@ -1094,7 +1219,7 @@ describe('no clearRect, and five opaque fills that tile the canvas exactly', () 
     // model (calls x 0.16 us + pixels / 10 Gpx/s) that is
     // 0.1418 ms -> 0.1421 ms, a 0.23% increase on the pass.
     const camera = cameraA()
-    const strip = bands(draw(frameA(), atlasAt(58)))
+    const strip = bands(draw(frameA(), atlasesAt(58)))
 
     const deviceArea = assertExactTiling(strip, camera)
     expect(camera.dpr).toBe(2)
@@ -1185,7 +1310,7 @@ describe('the bands tile the DEVICE grid too, which the DPR-1.5 cap breaks (revi
 
   it('snaps ALL SIX cut lines, not only the two that happen to be odd on one device', () => {
     const camera = cameraD()
-    const strip = bands(draw(frameOn(camera, 24, 40), atlasAt(43)))
+    const strip = bands(draw(frameOn(camera, 24, 40), atlasesAt(43)))
     const dev = (v: number): number => Math.round(v * camera.dpr)
 
     // `assertExactTiling` checks every edge of every fill is whole in device
@@ -1218,12 +1343,12 @@ describe('the bands tile the DEVICE grid too, which the DPR-1.5 cap breaks (revi
     const camera = cameraC()
     // `deviceRect`, called for every fill inside `assertExactTiling`, is the
     // half-pixel assertion; this test exists so its failure names this viewport.
-    assertExactTiling(bands(draw(frameOn(camera, 24, 40), atlasAt(43))), camera)
+    assertExactTiling(bands(draw(frameOn(camera, 24, 40), atlasesAt(43))), camera)
   })
 
   it('tiles the backing store exactly in DEVICE pixels: 618 x 1373, no gap, no overlap', () => {
     const camera = cameraC()
-    const strip = bands(draw(frameOn(camera, 24, 40), atlasAt(43)))
+    const strip = bands(draw(frameOn(camera, 24, 40), atlasesAt(43)))
     const dev = (v: number): number => Math.round(v * camera.dpr)
 
     // The backing store Task 8 must allocate, hand-computed:
@@ -1242,14 +1367,14 @@ describe('the bands tile the DEVICE grid too, which the DPR-1.5 cap breaks (revi
     // The fix must not perturb the integral case: at the universal cap of 2 with
     // an integer CSS camera, round(v * 2) / 2 === v, so every literal in this
     // file is unchanged by it.
-    expect(bands(draw(frameA(), atlasAt(58))).map((b) => [b.x, b.y, b.w, b.h])).toEqual([
+    expect(bands(draw(frameA(), atlasesAt(58))).map((b) => [b.x, b.y, b.w, b.h])).toEqual([
       [0, 0, 406, 86],
       [0, 86, 0, 638],
       [406, 86, 0, 638],
       [0, 86, 406, 638],
       [0, 724, 406, 146],
     ])
-    expect(bands(draw(frameB(), atlasAt(B_TILE_DEVICE))).map((b) => [b.x, b.y, b.w, b.h])).toEqual([
+    expect(bands(draw(frameB(), atlasesAt(B_TILE_DEVICE))).map((b) => [b.x, b.y, b.w, b.h])).toEqual([
       [0, 0, 400, 192],
       [0, 192, 2, 264],
       [398, 192, 2, 264],
@@ -1281,7 +1406,7 @@ describe('the bands tile the DEVICE grid too, which the DPR-1.5 cap breaks (revi
         { x0: 1, y0: 1, cols: 6, rows: 4 },
       )
       expect(camera.tileSize, `${cssW}x${cssH}`).toBe(1)
-      const strip = bands(draw(frameOn(camera, B_W, B_H), atlasAt(2)))
+      const strip = bands(draw(frameOn(camera, B_W, B_H), atlasesAt(2)))
       expect(assertExactTiling(strip, camera), `${cssW}x${cssH}`).toBe(
         Math.round(camera.cssW * camera.dpr) * Math.round(camera.cssH * camera.dpr),
       )
@@ -1317,7 +1442,7 @@ describe('the transform: a car at a fractional grid position', () => {
     // resolved this position before the frame was handed over, and drawing it
     // is one multiply.
     const camera = cameraA()
-    const paints = content(draw(frameA(), atlasAt(58)))
+    const paints = content(draw(frameA(), atlasesAt(58)))
     expect(paints.length).toBe(1)
     expect(paints[0]?.command).toEqual({
       op: 'fillRect',
@@ -1339,7 +1464,7 @@ describe('the transform: a car at a fractional grid position', () => {
     // the CSS centre is `gridToScreen(cell) + tileSize / 2` — the one place in
     // `render` where the two coordinate conventions meet.
     const frame = frameB()
-    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)))
+    const paints = content(draw(frame, atlasesAt(B_TILE_DEVICE)))
     // Car 0 sits at exactly (3, 4). Its rect must be centred in that cell.
     const car = paints.find((p) => p.w === 33 && p.h === 33 && p.y === 406.5)
     expect(car).toBeDefined()
@@ -1354,7 +1479,7 @@ describe('the liveness prefixes: counts, not array lengths', () => {
   it('draws exactly carCount cars from an array sized for eight', () => {
     const frame = frameB()
     expect(frame.carCount * 2).toBeLessThan(frame.carXY.length) // non-vacuity
-    const log = draw(frame, atlasAt(B_TILE_DEVICE))
+    const log = draw(frame, atlasesAt(B_TILE_DEVICE))
     expect(groupFills(log, 33, 33).length).toBe(2)
   })
 
@@ -1362,7 +1487,7 @@ describe('the liveness prefixes: counts, not array lengths', () => {
     const frame = frameB()
     expect(frame.houseCount).toBeLessThan(frame.houseCell.length)
     expect(frame.destCount).toBeLessThan(frame.destCell.length)
-    const log = draw(frame, atlasAt(B_TILE_DEVICE))
+    const log = draw(frame, atlasesAt(B_TILE_DEVICE))
     expect(groupFills(log, 44, 44).length).toBe(2)
     expect(groupFills(log, 198, 132).length).toBe(1)
   })
@@ -1374,7 +1499,7 @@ describe('the liveness prefixes: counts, not array lengths', () => {
     // Only reading `[0, count)` can.
     const frame = frameB()
     const camera = frame.camera
-    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)))
+    const paints = content(draw(frame, atlasesAt(B_TILE_DEVICE)))
     const px = bx(camera.x0) + B_TILE / 2
     const py = by(camera.y0) + B_TILE / 2
     expect([px, py]).toEqual([35, 225])
@@ -1426,21 +1551,21 @@ describe('terrain: the drawing half of the fold', () => {
     // time per cell is the double-coverage plan Decision 4 exists to remove.
     const frame = frameB()
     frame.terrainClass[2 * B_W + 1] = TerrainClass.LAND // (1, 2) was a tree
-    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)))
+    const paints = content(draw(frame, atlasesAt(B_TILE_DEVICE)))
     const centre = covering(paints, bx(1) + 33, by(2) + 33)
     expect(centre).toEqual([])
 
     // The other half of the claim: that point IS covered, by the playfield fill
     // — index 3 of the matte since Task 9 (top band, two letterbox columns,
     // playfield, bottom band).
-    const landBand = bands(draw(frame, atlasAt(B_TILE_DEVICE)))[3]
+    const landBand = bands(draw(frame, atlasesAt(B_TILE_DEVICE)))[3]
     expect(landBand?.command.op === 'fillRect' ? landBand.command.fillStyle : '').toBe(LAND)
     expect(covering(landBand === undefined ? [] : [landBand], bx(1) + 33, by(2) + 33).length).toBe(1)
   })
 
   it('draws a tree on the same cell when the class is TREE, inset so land shows around it', () => {
     const frame = frameB() // (1, 2) is TREE
-    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)))
+    const paints = content(draw(frame, atlasesAt(B_TILE_DEVICE)))
     const centre = covering(paints, bx(1) + 33, by(2) + 33)
     expect(centre.length).toBe(1)
     expect(centre[0]?.command).toEqual(fill(TREE, 18.5, 274.5, 33, 33))
@@ -1452,7 +1577,7 @@ describe('terrain: the drawing half of the fold', () => {
   })
 
   it('fills the whole cell for water and for mountain', () => {
-    const log = draw(frameB(), atlasAt(B_TILE_DEVICE))
+    const log = draw(frameB(), atlasesAt(B_TILE_DEVICE))
     expect(fillsStyled(log, WATER)).toEqual([
       fill(WATER, 68, 192, 66, 66),
       fill(WATER, 68, 390, 66, 66),
@@ -1468,7 +1593,7 @@ describe('terrain: the drawing half of the fold', () => {
     // states a behaviour with no test behind it reads exactly like coverage.
     const frame = frameB()
     frame.terrainClass[1 * B_W + 2] = 9 // the water cell
-    const paints = content(draw(frame, atlasAt(B_TILE_DEVICE)))
+    const paints = content(draw(frame, atlasesAt(B_TILE_DEVICE)))
     expect(covering(paints, bx(2) + 33, by(1) + 33)).toEqual([])
   })
 
@@ -1479,7 +1604,7 @@ describe('terrain: the drawing half of the fold', () => {
     const frame = frameB()
     expect(frame.gridW).toBe(8)
     expect(frame.camera.cols).toBe(6)
-    const log = draw(frame, atlasAt(B_TILE_DEVICE))
+    const log = draw(frame, atlasesAt(B_TILE_DEVICE))
     expect(fillsStyled(log, WATER)[0]).toEqual(fill(WATER, bx(2), by(1), 66, 66))
     expect(fillsStyled(log, MOUNTAIN)[0]).toEqual(fill(MOUNTAIN, bx(6), by(3), 66, 66))
   })
@@ -1487,29 +1612,39 @@ describe('terrain: the drawing half of the fold', () => {
 
 describe('roads: one blit per road cell, from that mask’s own atlas tile', () => {
   it('blits mask 17 from tile (1, 1), source in device px and destination in CSS px', () => {
-    const atlas = atlasAt(B_TILE_DEVICE)
-    const seventeen = blits(draw(frameB(), atlas)).find((b) => b.dx === 134 && b.dy === 258)
-    expect(seventeen).toEqual(blit(atlas, 132, 132, 134, 258))
+    const atlases = atlasesAt(B_TILE_DEVICE)
+    const road = atlases.road
+    const seventeen = layerBlits(draw(frameB(), atlases), road).find(
+      (b) => b.dx === 134 && b.dy === 258,
+    )
+    expect(seventeen).toEqual(blit(road, 132, 132, 134, 258))
     // The source rect is the atlas's tile size and the destination rect the
     // camera's — at the DPR-2 cap they differ by exactly the ratio, and
     // swapping them is a road drawn at half or double size.
-    expect(seventeen?.sw).toBe(atlas.tileDevicePx)
+    expect(seventeen?.sw).toBe(road.tileDevicePx)
     expect(seventeen?.dw).toBe(B_TILE)
-    expect(atlas.tileDevicePx).not.toBe(B_TILE)
+    expect(road.tileDevicePx).not.toBe(B_TILE)
   })
 
   it('never blits mask 0 — it is the blank tile, and 0 means "no road"', () => {
     const frame = frameB()
     frame.roads.fill(0)
-    expect(blits(draw(frame, atlasAt(B_TILE_DEVICE)))).toEqual([])
+    const atlases = atlasesAt(B_TILE_DEVICE)
+    expect(layerBlits(draw(frame, atlases), atlases.road)).toEqual([])
+    // ...and the same for the ghost layer, from its own array: the two share one
+    // loop, so `mask === 0` skipped for roads and not for ghosts is not
+    // constructible — but the ghost half needs its own observer anyway, because
+    // "blit tile 0 for every empty cell" is 960 blits a frame and a black board.
+    frame.ghosts.fill(0)
+    expect(layerBlits(draw(frame, atlases), atlases.ghost)).toEqual([])
   })
 
   it('reads a DIFFERENT source tile for each of the five masks, so the lookup is not a constant', () => {
     // With one road cell the tile is (1, 1) and `sx === sy`, so a transposed
     // lookup is invisible — which is why the fixture's five masks are 16, 17, 1,
     // 4 and 2: five distinct tiles, three of them off the diagonal.
-    const atlas = atlasAt(B_TILE_DEVICE)
-    const all = blits(draw(frameB(), atlas))
+    const atlases = atlasesAt(B_TILE_DEVICE)
+    const all = layerBlits(draw(frameB(), atlases), atlases.road)
     expect(all.map((b) => [b.sx, b.sy])).toEqual([
       [0, 132], // mask 16 -> tile (0, 1)
       [132, 132], // mask 17 -> tile (1, 1)
@@ -1542,7 +1677,8 @@ describe('culling: only cells inside the revealed rect are drawn', () => {
       expect(frame.roads[y * B_W + x] as number, `(${x}, ${y}) must carry a mask`).toBeGreaterThan(0)
     }
     expect(frame.roads[2 * B_W + 3] as number).toBe(17)
-    expect(blits(draw(frame, atlasAt(B_TILE_DEVICE))).length).toBe(5)
+    const atlases = atlasesAt(B_TILE_DEVICE)
+    expect(layerBlits(draw(frame, atlases), atlases.road).length).toBe(5)
   })
 
   it('fills no terrain outside the rect, though a non-LAND cell sits past every bound', () => {
@@ -1559,7 +1695,7 @@ describe('culling: only cells inside the revealed rect are drawn', () => {
         `(${x}, ${y}) must be non-LAND`,
       ).not.toBe(TerrainClass.LAND)
     }
-    const log = draw(frame, atlasAt(B_TILE_DEVICE))
+    const log = draw(frame, atlasesAt(B_TILE_DEVICE))
     expect(fillsStyled(log, WATER).length).toBe(2) // the two in-rect ones only
     expect(fillsStyled(log, TREE).length).toBe(1)
   })
@@ -1617,7 +1753,7 @@ describe('culling: only cells inside the revealed rect are drawn', () => {
     // [456, 489], entirely below the grid rect.
     const below = frameB()
     below.carXY[1] = 4.75
-    const belowLog = draw(below, atlasAt(B_TILE_DEVICE))
+    const belowLog = draw(below, atlasesAt(B_TILE_DEVICE))
     const belowCar = content(belowLog).find((p) => p.w === 33 && p.h === 33 && p.y === 456)
     expect(belowCar, 'the car at the rect’s last row').toBeDefined()
     expect((belowCar?.y ?? 0) + (belowCar?.h ?? 0), 'the car spills past the grid rect').toBe(489)
@@ -1637,7 +1773,7 @@ describe('culling: only cells inside the revealed rect are drawn', () => {
     const beside = frameB()
     beside.carXY[0] = 6.75
     beside.carXY[1] = 3
-    const besideLog = draw(beside, atlasAt(B_TILE_DEVICE))
+    const besideLog = draw(beside, atlasesAt(B_TILE_DEVICE))
     const besideCar = content(besideLog).find((p) => p.w === 33 && p.h === 33 && p.x === 398)
     expect(besideCar, 'the car at the rect’s last column').toBeDefined()
     const rightBox = bands(besideLog)[2]
@@ -1657,7 +1793,7 @@ describe('culling: only cells inside the revealed rect are drawn', () => {
     // destination at (0, 0), so all three loops are shown to cull and not just
     // the house one.
     const frame = outOfRectFrame()
-    const log = draw(frame, atlasAt(B_TILE_DEVICE))
+    const log = draw(frame, atlasesAt(B_TILE_DEVICE))
     expect(groupFills(log, 44, 44).length).toBe(2)
     expect(groupFills(log, 198, 132).length).toBe(1)
     expect(groupFills(log, 33, 33).length).toBe(2)
@@ -1704,7 +1840,7 @@ describe('destinations: the footprint, the carpark and the waiting pins', () => 
     // And the drawn rect follows it: fixture B's destination is oriented W.
     const frame = frameB()
     frame.destOrientation[0] = DEST_ORIENTATION_N
-    const log = draw(frame, atlasAt(B_TILE_DEVICE))
+    const log = draw(frame, atlasesAt(B_TILE_DEVICE))
     expect(painted(log).filter((p) => p.w === 132 && p.h === 198).length).toBe(1)
     expect(painted(log).filter((p) => p.w === 198 && p.h === 132).length).toBe(0)
   })
@@ -1712,7 +1848,7 @@ describe('destinations: the footprint, the carpark and the waiting pins', () => 
   it('draws the carpark cell the frame names, not one it computes', () => {
     const frame = frameB()
     frame.destCarpark[0] = 3 * B_W + 5 // move it to (5, 3)
-    const log = draw(frame, atlasAt(B_TILE_DEVICE))
+    const log = draw(frame, atlasesAt(B_TILE_DEVICE))
     expect(fillsStyled(log, ROAD_EDGE)).toEqual([
       fill(ROAD_EDGE, bx(5) + 16.5, by(3) + 16.5, 33, 33),
     ])
@@ -1726,7 +1862,7 @@ describe('destinations: the footprint, the carpark and the waiting pins', () => 
     // rect's edge the building is drawn and its bay is not.
     const frame = frameB()
     frame.destCarpark[0] = 1 * B_W + 7 // (7, 1): on the board, outside the rect
-    const log = draw(frame, atlasAt(B_TILE_DEVICE))
+    const log = draw(frame, atlasesAt(B_TILE_DEVICE))
     expect(fillsStyled(log, ROAD_EDGE)).toEqual([])
     // Non-vacuity: the building it belongs to IS still drawn.
     expect(groupFills(log, 198, 132).length).toBe(1)
@@ -1738,22 +1874,22 @@ describe('destinations: the footprint, the carpark and the waiting pins', () => 
     // -1 would otherwise be drawn as a cell at the far top-left.
     const frame = frameB()
     frame.destCarpark[0] = -1
-    expect(fillsStyled(draw(frame, atlasAt(B_TILE_DEVICE)), ROAD_EDGE)).toEqual([])
+    expect(fillsStyled(draw(frame, atlasesAt(B_TILE_DEVICE)), ROAD_EDGE)).toEqual([])
   })
 
   it('draws one pin per waiting customer, capped, and none at zero', () => {
     const frame = frameB()
     frame.destPins[0] = 0
-    expect(fillsStyled(draw(frame, atlasAt(B_TILE_DEVICE)), UI_TEXT).length).toBe(0)
+    expect(fillsStyled(draw(frame, atlasesAt(B_TILE_DEVICE)), UI_TEXT).length).toBe(0)
 
     frame.destPins[0] = 2
-    expect(fillsStyled(draw(frame, atlasAt(B_TILE_DEVICE)), UI_TEXT).length).toBe(2)
+    expect(fillsStyled(draw(frame, atlasesAt(B_TILE_DEVICE)), UI_TEXT).length).toBe(2)
 
     // The cap exists because a destination's pin count is unbounded in the sim
     // while its footprint is 2 cells wide; without it the row runs off the
     // building and across the board.
     frame.destPins[0] = 40
-    const capped = fillsStyled(draw(frame, atlasAt(B_TILE_DEVICE)), UI_TEXT)
+    const capped = fillsStyled(draw(frame, atlasesAt(B_TILE_DEVICE)), UI_TEXT)
     expect(capped.length).toBe(MAX_DRAWN_PINS)
     expect(MAX_DRAWN_PINS).toBe(6)
     const last = capped[capped.length - 1]
@@ -1765,7 +1901,7 @@ describe('the HUD', () => {
   it('renders week, day, score and tilesLeft centred in hudRects’ three rectangles', () => {
     const camera = cameraB()
     const rects = hudRects(camera, createHudRects())
-    const drawn = texts(draw(frameB(), atlasAt(B_TILE_DEVICE)))
+    const drawn = texts(draw(frameB(), atlasesAt(B_TILE_DEVICE)))
 
     expect(drawn.map((t) => t.text)).toEqual(['W3 D5', '12 TRIPS', '17 TILES'])
     expect(drawn.map((t) => [t.x, t.y])).toEqual([
@@ -1801,7 +1937,7 @@ describe('the HUD', () => {
     // `[x - maxWidth/2, x + maxWidth/2]`. Passing `maxWidth = rect.w` makes
     // overflow impossible, and the argument is recorded.
     const rects = hudRects(cameraB(), createHudRects())
-    const drawn = texts(draw(frameB(), atlasAt(B_TILE_DEVICE)))
+    const drawn = texts(draw(frameB(), atlasesAt(B_TILE_DEVICE)))
     const expected = [rects.clock, rects.score, rects.tiles]
 
     for (const [i, t] of drawn.entries()) {
@@ -1831,7 +1967,7 @@ describe('the HUD', () => {
     expect(Math.floor((320 - 32) / 3)).toBe(96) // the arithmetic, independently
 
     const frame: RenderFrame = { ...frameOn(camera, 24, 40), score: 999_999, week: 1234, day: 6 }
-    const drawn = texts(draw(frame, atlasAt(camera.tileSize * camera.dpr)))
+    const drawn = texts(draw(frame, atlasesAt(camera.tileSize * camera.dpr)))
     expect(drawn.map((t) => t.text)).toEqual(['W1234 D6', '999999 TRIPS', '40 TILES'])
     for (const t of drawn) expect(t.maxWidth).toBe(96)
     // Containment holds for a label of any length, which is the point.
@@ -1845,7 +1981,7 @@ describe('the HUD', () => {
     // invalidates draws last week's score forever. That staleness IS observable
     // here; the allocation saving is not, and the report says so rather than
     // claiming a test for it.
-    const atlas = atlasAt(B_TILE_DEVICE)
+    const atlas = atlasesAt(B_TILE_DEVICE)
     expect(texts(draw(frameB(), atlas)).map((t) => t.text)).toEqual([
       'W3 D5',
       '12 TRIPS',
@@ -1865,7 +2001,7 @@ describe('the HUD', () => {
   })
 
   it('draws a pause indicator in the clock rect only when the frame is paused', () => {
-    const atlas = atlasAt(B_TILE_DEVICE)
+    const atlas = atlasesAt(B_TILE_DEVICE)
     const running = fillsStyled(draw(frameB(false), atlas), UI_TEXT)
     const paused = fillsStyled(draw(frameB(true), atlas), UI_TEXT)
 
@@ -1892,7 +2028,7 @@ describe('the HUD', () => {
     // — so a clock string wider than 66 CSS px runs straight through the second
     // bar. That is layout arithmetic, true whatever the glyph widths are, and it
     // is why this assertion is over coordinates and not over metrics.
-    const atlas = atlasAt(B_TILE_DEVICE)
+    const atlas = atlasesAt(B_TILE_DEVICE)
     const clock = hudRects(cameraB(), createHudRects()).clock
     const barW = clock.h / 8 // 7
     const gutter = 5 * barW // 35: four bar-widths of indicator, one of gap
@@ -1931,7 +2067,7 @@ describe('allocation inside the frame loop, as far as this toolchain can see it'
     // `fitCamera` itself, and boot-time allocation is exactly what these
     // factories are for. The spies watch the frame loop and nothing else.
     const frame = frameB()
-    const atlas = atlasAt(B_TILE_DEVICE)
+    const atlas = atlasesAt(B_TILE_DEVICE)
     const spies = [
       vi.spyOn(cameraModule, 'createHudRects'),
       vi.spyOn(cameraModule, 'createPoint'),
@@ -1961,6 +2097,242 @@ describe('allocation inside the frame loop, as far as this toolchain can see it'
   })
 })
 
+describe('ghost roads: a second layer, from the ghost atlas, keyed by ghostMask', () => {
+  /**
+   * M1d Task 8. Spec §5.11: a road whose refund is deferred renders as a
+   * thinner, lower-opacity ghost. The **stroke** properties are asserted in
+   * `test/atlas.test.ts`, against the recorded atlas build, as two independent
+   * `it()`s — they cannot be asserted here, because a blit records a source rect
+   * and never a width or an alpha, and pretending otherwise would be exactly the
+   * "cannot observe" mislabelling that hid a real Critical in Task 4.
+   *
+   * What IS observable here, and is the whole of this file's share of the
+   * feature: *which* surface each blit reads, *which* tile of it, *where* it
+   * lands, and *whether* the layer is culled to the revealed rect.
+   */
+
+  it('blits every ghost cell from the GHOST surface, at that mask’s own tile', () => {
+    const atlases = atlasesAt(B_TILE_DEVICE)
+    const ghosts = layerBlits(draw(frameB(), atlases), atlases.ghost)
+    expect(ghosts).toEqual([
+      blit(atlases.ghost, 0, 528, bx(2), by(3)), //   (2, 3) mask 64 -> tile (0, 4)
+      blit(atlases.ghost, 1056, 0, bx(4), by(3)), //  (4, 3) mask 8  -> tile (8, 0)
+    ])
+    // The surface really is the other one. Without this the assertion above is
+    // satisfied by a ghost pass that blits the ROAD atlas, which is a ghost
+    // drawn as a solid road — the feature's whole point, silently absent.
+    expect(atlases.ghost.surface).not.toBe(atlases.road.surface)
+    for (const g of ghosts) expect(g.image).not.toBe(atlases.road.surface)
+  })
+
+  it('derives the tile from ghostMask, so a ghosted DIAGONAL segment draws diagonally', () => {
+    // Two things at once, and both are needed. (a) The source tile follows the
+    // mask — change the byte and the blit moves, so a boolean "this cell is a
+    // ghost" driving a constant tile is dead here. (b) The tile it lands on is
+    // one whose recorded SPOKES are diagonal, which is what "draws diagonally"
+    // means when the drawing is a blit.
+    const atlases = atlasesAt(B_TILE_DEVICE)
+    const frame = frameB()
+    const diagonal = layerBlits(draw(frame, atlases), atlases.ghost).find((b) => b.dx === bx(4))
+    expect([diagonal?.sx, diagonal?.sy]).toEqual([1056, 0]) // mask 8 -> tile (8, 0)
+
+    frame.ghosts[3 * B_W + 4] = 128 // NW, tile (0, 8)
+    const moved = layerBlits(draw(frame, atlases), atlases.ghost).find((b) => b.dx === bx(4))
+    expect([moved?.sx, moved?.sy]).toEqual([0, 1056])
+    expect([moved?.sx, moved?.sy]).not.toEqual([diagonal?.sx, diagonal?.sy])
+
+    // And the geometry on those tiles really is diagonal — read off a REAL
+    // ghost build, not asserted about the mask numbering. Masks 8 (SE) and 128
+    // (NW) each run centre-to-corner, so both coordinates move.
+    const rec: { x1: number; y1: number; x2: number; y2: number }[] = []
+    const recording: AtlasContext = {
+      lineWidth: 0,
+      lineCap: 'round',
+      lineJoin: 'round',
+      globalAlpha: 1,
+      strokeStyle: '',
+      save: () => undefined,
+      restore: () => undefined,
+      beginPath: () => undefined,
+      rect: () => undefined,
+      clip: () => undefined,
+      moveTo: (x, y) => {
+        rec.push({ x1: x, y1: y, x2: Number.NaN, y2: Number.NaN })
+      },
+      lineTo: (x, y) => {
+        const last = rec[rec.length - 1]
+        if (last !== undefined) {
+          rec[rec.length - 1] = { x1: last.x1, y1: last.y1, x2: x, y2: y }
+        }
+      },
+      stroke: () => undefined,
+    }
+    buildAtlas(
+      (w, h) => ({ width: w, height: h, getContext: () => recording }),
+      16,
+      PALETTE,
+      AtlasVariant.GHOST,
+    )
+    // Tile (8, 0) is x in [128, 144), centre (136, 8); SE runs to (144, 16).
+    const se = rec.find((s) => s.x1 === 136 && s.y1 === 8)
+    expect(se).toEqual({ x1: 136, y1: 8, x2: 144, y2: 16 })
+    expect(se?.x2 !== se?.x1 && se?.y2 !== se?.y1, 'not a diagonal').toBe(true)
+  })
+
+  it('leaves an adjacent LIVE road untouched — the other end of the erased segment', () => {
+    // (1, 3) carries mask 1 and (2, 3) is its ghost: exactly what
+    // `eraseRoad((1,3), (2,3))` produces. The live cell must still blit from the
+    // ROAD atlas, at its own tile, unmoved and unfaded — "the ghost layer" must
+    // not be "the road layer, redrawn".
+    const atlases = atlasesAt(B_TILE_DEVICE)
+    const log = draw(frameB(), atlases)
+    const live = layerBlits(log, atlases.road).filter((b) => b.dx === bx(1) && b.dy === by(3))
+    expect(live).toEqual([blit(atlases.road, 132, 0, bx(1), by(3))]) // mask 1 -> tile (1, 0)
+    // ...and exactly one blit lands there, so the ghost pass did not also paint
+    // the live cell.
+    expect(blits(log).filter((b) => b.dx === bx(1) && b.dy === by(3)).length).toBe(1)
+    // Non-vacuous: the two cells really are neighbours and really do differ.
+    expect(frameB().roads[3 * B_W + 1] as number).toBe(1)
+    expect(frameB().ghosts[3 * B_W + 2] as number).toBe(64)
+    expect(frameB().roads[3 * B_W + 2] as number).toBe(0)
+  })
+
+  it('draws the ghost layer BEFORE the live road layer', () => {
+    // The two are disjoint per cell, so this pins a chosen safety margin rather
+    // than a visible behaviour — said out loud at the site in `canvas.ts` and
+    // repeated here, so nobody reads the assertion as coverage of a pixel.
+    const atlases = atlasesAt(B_TILE_DEVICE)
+    const log = draw(frameB(), atlases)
+    const ghostCommands = layerBlits(log, atlases.ghost)
+    const roadCommands = layerBlits(log, atlases.road)
+    expect([ghostCommands.length, roadCommands.length]).toEqual([2, 5])
+    const lastGhost = log.indexOf(ghostCommands[1] as Command)
+    const firstRoad = log.indexOf(roadCommands[0] as Command)
+    expect(lastGhost).toBeGreaterThanOrEqual(0)
+    expect(firstRoad).toBeGreaterThan(lastGhost)
+    // ...and both are after the terrain and before the destinations, so the new
+    // phase sits where the phase list says it does.
+    expect(indexOfRect(log, 68, 192, 66, 66)).toBeLessThan(lastGhost) // the water cell
+    expect(firstRoad).toBeLessThan(indexOfRect(log, 200, 192, 198, 132)) // the footprint
+  })
+
+  it('draws every ghost cell INSIDE the rect, including one on each of its four bounds', () => {
+    // The under-approximation half. Shrink either far bound of the shared mask
+    // loop and one of these four disappears.
+    const atlases = atlasesAt(B_TILE_DEVICE)
+    const drawn = layerBlits(draw(ghostBoundsFrame(), atlases), atlases.ghost)
+    expect(drawn.map((b) => [b.dx, b.dy])).toEqual([
+      [bx(2), by(1)], // y = y0
+      [bx(1), by(2)], // x = x0
+      [bx(6), by(3)], // x = x0 + cols - 1
+      [bx(3), by(4)], // y = y0 + rows - 1
+    ])
+    // A count as well as a list: the list alone is satisfied by a loop that also
+    // drew the four outside, since `toEqual` on a mapped array would catch it —
+    // but stating the count makes the over-approximation half readable as its
+    // own claim rather than as a side effect of ordering.
+    expect(drawn.length).toBe(4)
+  })
+
+  it('draws NO ghost outside the rect, though a non-zero mask sits past every bound', () => {
+    // The over-approximation half. "What else could prevent the blit" is an
+    // empty mask, so all four outside cells carry one — the count is what
+    // separates "culled" from "there was nothing there".
+    const frame = ghostBoundsFrame()
+    const atlases = atlasesAt(B_TILE_DEVICE)
+    const drawn = layerBlits(draw(frame, atlases), atlases.ghost)
+    const cam = frame.camera
+    for (const b of drawn) {
+      const gx = (b.dx - B_ORIGIN_X) / B_TILE + cam.x0
+      const gy = (b.dy - B_ORIGIN_Y) / B_TILE + cam.y0
+      expect(gx >= cam.x0 && gx < cam.x0 + cam.cols, `ghost at column ${gx}`).toBe(true)
+      expect(gy >= cam.y0 && gy < cam.y0 + cam.rows, `ghost at row ${gy}`).toBe(true)
+    }
+    expect(drawn.length).toBe(4)
+  })
+
+  it('is not vacuous: the ghost fixture has a cell ON each bound and one PAST exactly one bound', () => {
+    // Both halves of the bounds fixture, asserted rather than commented. A
+    // fixture whose in-rect ghosts avoid the far bounds cannot see a shrunk
+    // loop; a fixture whose out-of-rect ghosts sit in diagonal corners cannot
+    // see an extended one, because a corner is past two bounds at once.
+    const frame = ghostBoundsFrame()
+    const c = frame.camera
+    expect([c.x0, c.y0, c.cols, c.rows]).toEqual([1, 1, 6, 4])
+    const at = (x: number, y: number): number => frame.ghosts[y * frame.gridW + x] as number
+
+    const onBounds = [
+      [1, 2, 'x = x0'],
+      [2, 1, 'y = y0'],
+      [6, 3, 'x = x0 + cols - 1'],
+      [3, 4, 'y = y0 + rows - 1'],
+    ] as const
+    for (const [x, y, why] of onBounds) {
+      expect(at(x, y), `no ghost on ${why}`).toBeGreaterThan(0)
+      expect(x >= c.x0 && x < c.x0 + c.cols && y >= c.y0 && y < c.y0 + c.rows).toBe(true)
+    }
+
+    const outside = [
+      [0, 3],
+      [7, 1],
+      [4, 0],
+      [2, 5],
+    ] as const
+    for (const [x, y] of outside) {
+      expect(at(x, y), `(${x}, ${y}) must carry a mask`).toBeGreaterThan(0)
+      const past = [
+        x < c.x0,
+        x >= c.x0 + c.cols,
+        y < c.y0,
+        y >= c.y0 + c.rows,
+      ].filter(Boolean).length
+      expect(past, `(${x}, ${y}) is past ${past} bounds, not exactly 1`).toBe(1)
+      // Exactly ONE cell past, not two: a marker two cells out survives a
+      // one-cell over-extension just as a corner does.
+      const overshoot =
+        x < c.x0
+          ? c.x0 - x
+          : x >= c.x0 + c.cols
+            ? x - (c.x0 + c.cols) + 1
+            : y < c.y0
+              ? c.y0 - y
+              : y - (c.y0 + c.rows) + 1
+      expect(overshoot, `(${x}, ${y}) is ${overshoot} cells past its bound`).toBe(1)
+    }
+    // And the four bound cells are NOT all in one corner, which is the shape
+    // that made the original road fixture blind in the first place.
+    expect(new Set(onBounds.map(([x]) => x)).size).toBeGreaterThan(1)
+    expect(new Set(onBounds.map(([, y]) => y)).size).toBeGreaterThan(1)
+  })
+
+  it('skips mask 0, so an empty ghost layer costs no blits at all', () => {
+    // The common case by far: no erase is pending, `ghostMask` is 960 zero
+    // bytes, and the ghost pass must add nothing to the frame. Without this, a
+    // pass that blitted tile 0 per cell would draw 336 invisible tiles a frame
+    // inside the revealed rect and only a profiler would notice.
+    const frame = frameB()
+    frame.ghosts.fill(0)
+    const atlases = atlasesAt(B_TILE_DEVICE)
+    const log = draw(frame, atlases)
+    expect(layerBlits(log, atlases.ghost)).toEqual([])
+    // The road layer is untouched by an empty ghost layer.
+    expect(layerBlits(log, atlases.road).length).toBe(5)
+  })
+
+  it('indexes ghosts at y * gridW + x, where gridW is the BOARD width', () => {
+    // `gridW` (8) differs from `cols` (6) on this fixture, so reading with the
+    // camera's stride lands on a different cell — and the same byte read at a
+    // different stride is a ghost drawn in the wrong place, not an absent one.
+    const frame = frameB()
+    frame.ghosts.fill(0)
+    frame.ghosts[3 * frame.gridW + 5] = 4 // (5, 3)
+    const atlases = atlasesAt(B_TILE_DEVICE)
+    const drawn = layerBlits(draw(frame, atlases), atlases.ghost)
+    expect(drawn.map((b) => [b.dx, b.dy])).toEqual([[bx(5), by(3)]])
+    expect(frame.gridW).not.toBe(frame.camera.cols)
+  })
+})
+
 describe('the baked-palette hazard Task 4 handed forward', () => {
   it('throws when the atlas was baked with a different palette than the frame is drawn in', () => {
     // The atlas bakes its road colour at build time and a blit cannot re-tint,
@@ -1969,7 +2341,7 @@ describe('the baked-palette hazard Task 4 handed forward', () => {
     // roads in the previous theme with everything else correct — which reads as
     // a rendering bug rather than a caching one, in a milestone where nobody is
     // looking for either.
-    const stale = atlasAt(B_TILE_DEVICE, { ...PALETTE, road: '#ff00ff' })
+    const stale = atlasesAt(B_TILE_DEVICE, { ...PALETTE, road: '#ff00ff' })
     expect(() => draw(frameB(), stale, PALETTE)).toThrow(/baked with a different palette/)
     expect(() => draw(frameB(), stale, PALETTE)).toThrow(/rebuild/)
   })
@@ -1977,7 +2349,7 @@ describe('the baked-palette hazard Task 4 handed forward', () => {
   it('does not throw when the two agree', () => {
     // The negative control: without it, a guard that throws unconditionally
     // passes the assertion above.
-    expect(() => draw(frameB(), atlasAt(B_TILE_DEVICE), PALETTE)).not.toThrow()
+    expect(() => draw(frameB(), atlasesAt(B_TILE_DEVICE), PALETTE)).not.toThrow()
   })
 
   it('compares by IDENTITY, so a structurally identical copy is still rejected', () => {
@@ -1989,7 +2361,58 @@ describe('the baked-palette hazard Task 4 handed forward', () => {
     const twin: Palette = { ...PALETTE, groups: PALETTE.groups }
     expect(twin).toEqual(PALETTE)
     expect(twin).not.toBe(PALETTE)
-    expect(() => draw(frameB(), atlasAt(B_TILE_DEVICE), twin)).toThrow(/baked with a different/)
+    expect(() => draw(frameB(), atlasesAt(B_TILE_DEVICE), twin)).toThrow(/baked with a different/)
+  })
+
+  it('checks the GHOST atlas too, and names which one is stale', () => {
+    // **M1d Task 8 doubled this hazard and a guard on half of it reports clean
+    // for the other half.** The ghost atlas bakes `palette.road` exactly as the
+    // road atlas does — the fade is `globalAlpha`, not a second colour — so a
+    // rebuild that refreshes one and not the other ships a board whose GHOSTS
+    // are in last week's theme, with every road correct. That is strictly harder
+    // to notice than the original, and without this test `assertAtlases` could
+    // check `atlases.road` alone and pass everything above.
+    const stale = { ...PALETTE, road: '#ff00ff' }
+    const half = {
+      road: oneAtlasAt(B_TILE_DEVICE, PALETTE, AtlasVariant.ROAD),
+      ghost: oneAtlasAt(B_TILE_DEVICE, stale, AtlasVariant.GHOST),
+    }
+    expect(() => draw(frameB(), half, PALETTE)).toThrow(/ghost atlas was baked with a different/)
+    // The mirror, so "names which one" is a claim about both arms rather than
+    // about the one that happened to be written.
+    const otherHalf = {
+      road: oneAtlasAt(B_TILE_DEVICE, stale, AtlasVariant.ROAD),
+      ghost: oneAtlasAt(B_TILE_DEVICE, PALETTE, AtlasVariant.GHOST),
+    }
+    expect(() => draw(frameB(), otherHalf, PALETTE)).toThrow(
+      /road atlas was baked with a different/,
+    )
+  })
+
+  it('throws when the two atlases are the wrong way round', () => {
+    // Nothing else can see this: the pair have the same size, grid, tile count
+    // and palette, so a swap type-checks, builds and draws — every live road as
+    // a thin faded ghost and every ghost as a solid road, which reads as an art
+    // regression rather than as a wiring error. `buildAtlases` cannot produce
+    // the pair; a hand-assembled one can, and `main.ts` assembles by calling it.
+    const road = oneAtlasAt(B_TILE_DEVICE, PALETTE, AtlasVariant.ROAD)
+    const ghost = oneAtlasAt(B_TILE_DEVICE, PALETTE, AtlasVariant.GHOST)
+    expect(() => draw(frameB(), { road: ghost, ghost: road }, PALETTE)).toThrow(
+      /the wrong way round/,
+    )
+    // Negative control: the same two objects, correctly ordered, draw fine.
+    expect(() => draw(frameB(), { road, ghost }, PALETTE)).not.toThrow()
+  })
+
+  it('throws when only one of the two was rebuilt for a new tile size', () => {
+    // The palette hazard's twin. Both surfaces are rasterised at a fixed tile
+    // size and the shell rebuilds on every tile-size change; rebuild one alone
+    // and the ghost layer is resampled from a stale surface for the rest of the
+    // session, with no symptom that points at its cause.
+    const road = oneAtlasAt(B_TILE_DEVICE, PALETTE, AtlasVariant.ROAD)
+    const ghost = oneAtlasAt(B_TILE_DEVICE / 2, PALETTE, AtlasVariant.GHOST)
+    expect(() => draw(frameB(), { road, ghost }, PALETTE)).toThrow(/rebuilt without the other/)
+    expect(road.tileDevicePx).not.toBe(ghost.tileDevicePx)
   })
 })
 
@@ -2002,7 +2425,7 @@ describe('colour lookup', () => {
     // palette contains and no test would ever be looking for.
     const frame = frameB()
     frame.houseColour[0] = 7
-    const log = draw(frame, atlasAt(B_TILE_DEVICE))
+    const log = draw(frame, atlasesAt(B_TILE_DEVICE))
     const house = painted(log).find((p) => p.w === 44 && p.h === 44)
     const style = house?.command.op === 'fillRect' ? house.command.fillStyle : ''
     expect(style).toMatch(/^#[0-9a-f]{6}$/)

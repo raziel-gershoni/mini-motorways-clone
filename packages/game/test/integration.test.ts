@@ -195,6 +195,7 @@ function stubSurface(widthPx: number, heightPx: number): AtlasSurface {
     lineWidth: 0,
     lineCap: 'round',
     lineJoin: 'round',
+    globalAlpha: 1,
     strokeStyle: '',
     save: () => undefined,
     restore: () => undefined,
@@ -621,7 +622,8 @@ describe('the assembly boots', () => {
     // Decision 5's fit and Decision 6's cap, on the M0 device, through the real
     // shell: `rawDpr` 3 in, `dpr` 2 out.
     expect([camera.tileSize, camera.originX, camera.originY, camera.dpr]).toEqual([29, 0, 86, 2])
-    expect(game.atlas.tileDevicePx).toBe(58)
+    expect(game.atlases.road.tileDevicePx).toBe(58)
+    expect(game.atlases.ghost.tileDevicePx).toBe(58)
     expect(game.shell.rebuilds).toBe(1)
 
     // The seed. Without it the build renders terrain and roads and nothing else.
@@ -980,7 +982,8 @@ describe('a viewport change that alters the tile size', () => {
     rig.viewportChanged(true)
     expect(rig.game.shell.rebuilds).toBe(2)
     expect(rig.game.shell.camera.tileSize).toBe(22)
-    expect(rig.game.atlas.tileDevicePx).toBe(44)
+    expect(rig.game.atlases.road.tileDevicePx).toBe(44)
+    expect(rig.game.atlases.ghost.tileDevicePx).toBe(44)
 
     rig.oneTick(0.5)
     const after = blits(rig.ctx.log)
@@ -1306,7 +1309,8 @@ describe('the DOM edge', () => {
     ;(deferred[0] as () => void)()
     expect(rig.game.shell.camera.tileSize).toBe(22)
     expect(rig.game.shell.rebuilds).toBe(2)
-    expect(rig.game.atlas.tileDevicePx).toBe(44)
+    expect(rig.game.atlases.road.tileDevicePx).toBe(44)
+    expect(rig.game.atlases.ghost.tileDevicePx).toBe(44)
   })
 
   it('auto-starts only where a document exists', () => {
