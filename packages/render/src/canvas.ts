@@ -859,6 +859,12 @@ function assertAtlases(atlases: Atlases, palette: Palette): void {
  * palette per frame, which the same Global Constraint forbids. Both want to be
  * loud.
  *
+ * `which` is the literal union `'road' | 'ghost'` and not `string`: the only
+ * job this parameter has is to send the reader to the right rebuild, and a
+ * mislabelled call — `'ghost'` passed for the road atlas — would produce a
+ * confident, precise, wrong message that no test would ever read. A `string`
+ * cannot refuse that; the union does, at compile time.
+ *
  * **Why a throw rather than a comment**, which was the option the plan also
  * offered. The failure it prevents is silent, permanent and misattributed: roads
  * in the previous theme, everything else correct, presenting as a rendering bug
@@ -874,7 +880,7 @@ function assertAtlases(atlases: Atlases, palette: Palette): void {
  * wiring error that is true on frame 1 and every frame after, so failing fast in
  * development is the only outcome that differs from shipping the bug.
  */
-function assertAtlasPalette(atlas: Atlas, palette: Palette, which: string): void {
+function assertAtlasPalette(atlas: Atlas, palette: Palette, which: 'road' | 'ghost'): void {
   if (atlas.palette !== palette) {
     throw new Error(
       `drawFrame: the ${which} atlas was baked with a different palette than this frame is being ` +

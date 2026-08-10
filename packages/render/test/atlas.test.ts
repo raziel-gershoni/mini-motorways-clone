@@ -660,19 +660,40 @@ describe('the GHOST variant: thinner and fainter, as two independent properties'
     // The independence claim, made positively. Opacity is `globalAlpha` and not
     // an `#rrggbbaa` colour precisely so that this holds: bake the fade into the
     // colour instead and "full opacity" and "the road colour" become one edit.
-    // Fires on neither the width nor the alpha mutation, which is why it is here
-    // rather than folded into either of them.
+    //
+    // **Fires on NEITHER the width nor the alpha mutation**, which is the whole
+    // reason it is a block of its own: it asserts only the three properties that
+    // must not move. The complement — that exactly two DO move — is the next
+    // `it()`, because that one fires on both and the two claims must not share a
+    // detector set. An earlier version of this file made both claims here and
+    // said in this comment that it fired on neither, which was false of its own
+    // last two lines; a comment written to make an independence claim auditable
+    // is the one place that error costs most.
     const road = buildAt(T).log
     const ghost = buildGhostAt(T).log
     for (const prop of ['strokeStyle', 'lineCap', 'lineJoin']) {
       expect(setValue(ghost, prop), prop).toBe(setValue(road, prop))
     }
     expect(setValue(ghost, 'strokeStyle')).toBe(PALETTE.road)
-    // ...and it changes exactly the two that it must, so "nothing else" is a
-    // statement about a complete list rather than about three sampled entries.
+  })
+
+  it('changes exactly TWO of the five stroke assignments, so "nothing else" is a complete list', () => {
+    // The complement of the test above, and **it fires on BOTH the width and the
+    // alpha mutation** — deliberately, and separated from them so that neither
+    // of those two has a detector it shares with the "nothing else" claim.
+    //
+    // Without this, "same colour, same cap, same join" is a statement about three
+    // sampled entries rather than about the whole recorded stroke state: a build
+    // that also set `lineDashOffset`, or that set only one of width and alpha,
+    // would satisfy it.
+    const road = buildAt(T).log
+    const ghost = buildGhostAt(T).log
     expect(ghost.filter((c) => c.op === 'set').length).toBe(5)
-    expect(setValue(ghost, 'lineWidth')).not.toBe(setValue(road, 'lineWidth'))
-    expect(setValue(ghost, 'globalAlpha')).not.toBe(setValue(road, 'globalAlpha'))
+    expect(road.filter((c) => c.op === 'set').length).toBe(5)
+    const differing = ['lineWidth', 'lineCap', 'lineJoin', 'strokeStyle', 'globalAlpha'].filter(
+      (prop) => setValue(ghost, prop) !== setValue(road, prop),
+    )
+    expect(differing).toEqual(['lineWidth', 'globalAlpha'])
   })
 
   it('bakes the palette it is handed, so a ghost atlas goes stale exactly as a road one does', () => {
