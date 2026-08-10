@@ -3,7 +3,18 @@ import { nonZeroWord, type GameState } from './state'
 import type { WorldData } from './world'
 import { neighbours, edgeCost } from './graph'
 import { OPPOSITE } from './roads'
-import { CT_REBUILDS, CT_SYNCS, INF, NB, ST_EXPANSIONS, ST_PUSHES, type FlowField, type Scratch } from './scratch'
+import {
+  CT_REBUILDS,
+  CT_SYNCS,
+  CUR_PENDING,
+  CUR_TOP,
+  INF,
+  NB,
+  ST_EXPANSIONS,
+  ST_PUSHES,
+  type FlowField,
+  type Scratch,
+} from './scratch'
 
 /**
  * Multi-source Dijkstra over the *road graph* (never raw passable terrain —
@@ -18,14 +29,20 @@ import { CT_REBUILDS, CT_SYNCS, INF, NB, ST_EXPANSIONS, ST_PUSHES, type FlowFiel
  * this cell, and draining that bucket walks into the wrong list. Allocating a
  * fresh entry per insertion and skipping stale entries on drain avoids it.
  *
- * `computeFlowField` allocates no arrays — every typed array it touches is
+ * `computeFlowField` allocates NOTHING — every typed array it touches is
  * either `out` or `scratch`, both caller-provided; `createFlowField`/
  * `createScratch` (scratch.ts) are the only typed-array allocation points.
- * It does allocate one closure (the `push` arrow function) per call, which
- * the brief anticipates and which is harmless at the up-to-once-per-colour-
- * per-tick rate this runs at (design decision 3) — the claim here is about
- * the data buffers a hot pathfinding loop would actually churn through, not
- * about zero JS object creation of any kind.
+ *
+ * **That used to read "it does allocate one closure (the `push` arrow
+ * function) per call ... which is harmless", and the harmless part was
+ * measured and found false (M1e Task 3).** The demo board's 18 destinations
+ * move `destPins` almost every tick, so `syncFields` rebuilds on nearly every
+ * tick rather than the once-in-a-while the old note assumed, and
+ * `demoAllocation.test.ts` charged this file **17.3-19.0 B/frame against a 4 B
+ * floor** — about 142 B per call, at 0.127 calls/frame. `push` is now a
+ * module-scope function and the two counters it used to capture live in
+ * `scratch.cursor`; the same rig measures **0.00 B/frame**. The rate has not
+ * changed, only the belief about what it costs.
  *
  * **The staleness check inside the drain loop (`dist[cur] !== d`) is a
  * performance guard, not a correctness one.** Pushes happen only on strict
@@ -58,6 +75,60 @@ import { CT_REBUILDS, CT_SYNCS, INF, NB, ST_EXPANSIONS, ST_PUSHES, type FlowFiel
  * only non-stale drains — makes its removal visible even though `dist`/`dir`
  * would not.
  */
+
+/**
+ * Pushes a `(cell, d)` entry into bucket `d % NB`. Throws on overflow rather
+ * than writing out of range: an out-of-range typed-array write is a silent
+ * no-op that would corrupt the pool's bucket chains (`entryCell[e]` reads
+ * `undefined`, `entryNext[e]` reads 0), turning a capacity bug into a silent
+ * wrong answer or an infinite drain loop instead of a stack trace.
+ *
+ * **Module-scope, not a closure, and that is the whole of M1e Task 3.** The
+ * previous spelling was an arrow function defined inside `computeFlowField`,
+ * charged at 16.8-21.8 B/frame (M1d) / 17.3-19.0 B/frame (M1e Task 3) on the
+ * demo board against a 4 B floor, where 18 destinations rebuild the field on
+ * nearly every tick. `scratch.cursor` exists to make this hoist possible — a
+ * module-scope function cannot reach `computeFlowField`'s locals — and is
+ * preallocated at boot like every other buffer here.
+ *
+ * **The mechanism is the closure, NOT the mutability, and the difference was
+ * measured rather than reasoned about.** Every earlier statement of this —
+ * M1d's carry-forward, `demoAllocation.test.ts`'s allowance, and this task's
+ * own brief — said the cost was V8 boxing *the mutable* `top` and `pending`
+ * into a `Context`. It is not. Three variants on the same rig, same three-window
+ * instrument:
+ *
+ *   - closure, `let top`/`let pending` captured (the original): 15.7-18.2 B/frame
+ *   - closure, counters already moved to `scratch.cursor` so only `const`
+ *     bindings are captured: **15.2-17.0 B/frame — essentially unchanged**
+ *   - closure capturing NOTHING, everything passed as arguments: 5.4-6.1
+ *     B/frame, still over the floor
+ *   - module scope (this): 0.00 B/frame, absent from the profile
+ *
+ * So roughly 45 B/call is the closure object itself, which V8 allocates per call
+ * even with zero captures, and roughly 90 B/call is the `Context` — which costs
+ * the same for `const` captures as for `let` ones. Moving the counters into
+ * `scratch.cursor` was worth ~0 bytes on its own. **The rule this leaves behind
+ * is "do not define a function inside this one", not "do not capture a mutable
+ * variable"**: a future helper that captures nothing but is still spelled inline
+ * would reinstate a quarter of the charge, and the old wording would have read
+ * as permission for it.
+ */
+function push(scratch: Scratch, cell: number, d: number): void {
+  const { entryCell, entryNext, bucketHead, stats, pushesPerCell, cursor } = scratch
+  const top = cursor[CUR_TOP] as number
+  if (top >= entryCell.length) {
+    throw new Error(`computeFlowField: entry pool exhausted (capacity ${entryCell.length})`)
+  }
+  const b = d % NB
+  entryCell[top] = cell
+  entryNext[top] = bucketHead[b] as number
+  bucketHead[b] = top
+  cursor[CUR_TOP] = top + 1
+  cursor[CUR_PENDING] = (cursor[CUR_PENDING] as number) + 1
+  stats[ST_PUSHES] = (stats[ST_PUSHES] as number) + 1
+  pushesPerCell[cell] = (pushesPerCell[cell] as number) + 1
+}
 
 /**
  * Fills `out` and `scratch` for the source slice `sourcesFlat[offset,
@@ -115,6 +186,17 @@ export function computeFlowField(
   pushesPerCell.fill(0)
   stats[ST_EXPANSIONS] = 0
   stats[ST_PUSHES] = 0
+  // **Both cursor slots, unconditionally, and neither line is hygiene.** These
+  // two used to be `let top = 0` / `let pending = 0`, which the language would
+  // not let anyone spell without the reset; now they are buffer slots that
+  // survive the call. A leftover is reachable rather than theoretical:
+  // `computeFlowField` throws from the middle of the drain loop on pool
+  // exhaustion, and `syncFields` exists to retry that rebuild next tick over
+  // this same scratch. Carrying `CUR_TOP` in wastes pool and eventually throws;
+  // carrying a positive `CUR_PENDING` in makes the drain loop spin forever on
+  // buckets that are already empty.
+  scratch.cursor[CUR_TOP] = 0
+  scratch.cursor[CUR_PENDING] = 0
 
   for (let i = 1; i < sourcesCount; i++) {
     const prev = sourcesFlat[sourcesOffset + i - 1] as number
@@ -125,29 +207,6 @@ export function computeFlowField(
           `got ${prev} at index ${i - 1} followed by ${cur} at index ${i}`,
       )
     }
-  }
-
-  const cap = entryCell.length
-  let top = 0
-  let pending = 0
-
-  // Pushes a (cell, d) entry into bucket `d % NB`. `push` throws on overflow
-  // rather than writing out of range: an out-of-range typed-array write is a
-  // silent no-op that would corrupt the pool's bucket chains (`entryCell[e]`
-  // reads `undefined`, `entryNext[e]` reads 0), turning a capacity bug into a
-  // silent wrong answer or an infinite drain loop instead of a stack trace.
-  const push = (cell: number, d: number): void => {
-    if (top >= cap) {
-      throw new Error(`computeFlowField: entry pool exhausted (capacity ${cap})`)
-    }
-    const b = d % NB
-    entryCell[top] = cell
-    entryNext[top] = bucketHead[b] as number
-    bucketHead[b] = top
-    top++
-    pending++
-    stats[ST_PUSHES] = (stats[ST_PUSHES] as number) + 1
-    pushesPerCell[cell] = (pushesPerCell[cell] as number) + 1
   }
 
   for (let i = 0; i < sourcesCount; i++) {
@@ -166,10 +225,10 @@ export function computeFlowField(
     }
     if ((state.roads[s] as number) === 0) continue // no road bit: not accepted, per source validity above
     dist[s] = 0
-    push(s, 0)
+    push(scratch, s, 0)
   }
 
-  for (let d = 0; pending > 0; d++) {
+  for (let d = 0; (scratch.cursor[CUR_PENDING] as number) > 0; d++) {
     const b = d % NB
     let e = bucketHead[b] as number
     bucketHead[b] = -1
@@ -180,7 +239,7 @@ export function computeFlowField(
     while (e >= 0) {
       const cur = entryCell[e] as number
       e = entryNext[e] as number
-      pending--
+      scratch.cursor[CUR_PENDING] = (scratch.cursor[CUR_PENDING] as number) - 1
       if ((dist[cur] as number) !== d) continue // stale entry; see module comment — a performance guard, not a correctness one
 
       stats[ST_EXPANSIONS] = (stats[ST_EXPANSIONS] as number) + 1
@@ -200,7 +259,7 @@ export function computeFlowField(
           // OPPOSITE[k]) actually exists, since every road segment is
           // written mirrored on both endpoints.
           dir[ni] = OPPOSITE[k] as number
-          push(ni, nd)
+          push(scratch, ni, nd)
         }
       }
     }

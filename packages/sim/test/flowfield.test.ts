@@ -15,6 +15,8 @@ import {
   NB,
   ST_EXPANSIONS,
   ST_PUSHES,
+  CUR_TOP,
+  CUR_PENDING,
   type FlowField,
   type Scratch,
 } from '../src/scratch'
@@ -620,6 +622,145 @@ describe('computeFlowField: reset contract (fresh vs. used scratch/field)', () =
     computeField(state, world, sources, field, scratch)
     expect(Array.from(field.dist)).toEqual(dist1)
     expect(Array.from(field.dir)).toEqual(dir1)
+  })
+})
+
+/**
+ * M1e Task 3 moved `computeFlowField`'s queue cursor — the entry pool's write
+ * pointer and the count of undrained entries — out of two `let`s captured by a
+ * `push` closure and into `scratch.cursor`. The output is unchanged (the field
+ * golden `252514232` is the primary evidence for that); what is new is that the
+ * two counters now OUTLIVE the call, so "reset at entry" went from a property
+ * the language guaranteed (`let top = 0` cannot be spelled without its
+ * initialiser) to a property one deletable line upholds.
+ *
+ * These tests pin the cursor's post-conditions and that reset. Everything else
+ * about the queue is already covered by the field/dir/counter tests above and
+ * below — this block exists for the state that used to be unobservable.
+ */
+describe('computeFlowField: the queue cursor on scratch (M1e Task 3)', () => {
+  it('leaves cursor[CUR_TOP] equal to ST_PUSHES and cursor[CUR_PENDING] at 0: every push bumped the pool exactly once, and the drain consumed every entry it made', () => {
+    const { state, world } = randomGraphFixture('cursor-postconditions', 9, 7, 250)
+    const sources = firstRoadedCells(state, world, 2)
+    const field = createFlowField(world.cells)
+    const scratch = scratchOnly(world)
+    computeField(state, world, sources, field, scratch)
+
+    // Vacuity: a graph that pushed nothing would satisfy both assertions with
+    // the pool untouched.
+    expect(scratch.stats[ST_PUSHES]).toBeGreaterThan(10)
+    // `top` is the pool's bump pointer, so it must land on exactly the number
+    // of entries written. Failing to advance it (`cursor[CUR_TOP] = top`)
+    // rewrites entry 0 every time and corrupts every bucket chain; advancing
+    // it twice wastes half the pool.
+    expect(scratch.cursor[CUR_TOP]).toBe(scratch.stats[ST_PUSHES])
+    // The drain ran to completion: `pending` is what the drain loop's
+    // termination condition reads, so a non-zero value here means the loop
+    // exited with entries still queued (or that the two slots are aliased).
+    expect(scratch.cursor[CUR_PENDING]).toBe(0)
+  })
+
+  it('holds on a straight corridor too — the fixture where a corrupted bucket chain TERMINATES instead of spinning, so the cursor assertion is what fails', () => {
+    // **Deliberately a degree-<=2 line, and that is the whole point of this
+    // test existing beside the dense one above.** `cursor[CUR_TOP] = top`
+    // (never advancing the pool's bump pointer) makes every push reuse entry 0,
+    // so as soon as two entries are live in the same bucket, `entryNext[0]`
+    // points at 0 and the drain loop's `while (e >= 0)` walks a self-loop
+    // forever. On a dense graph that is a HANG, which is not an assertion and
+    // therefore not a detector. On a straight line exactly one entry is ever
+    // pending, `entryNext[0]` is always -1, the walk terminates, the field is
+    // even correct — and the only surviving observable is the cursor itself.
+    const { map, world } = landFixture('cursor-corridor', 8, 5)
+    const state = createState('cursor-corridor-seed', map)
+    const line = [0, 1, 2, 3, 4, 5].map((x) => cellAt(world.w, x, 2))
+    placeChain(state, world, line)
+    const field = createFlowField(world.cells)
+    const scratch = scratchOnly(world)
+    computeField(state, world, [line[0] as number], field, scratch)
+
+    // One source push plus one relaxation per remaining cell of the corridor.
+    expect(scratch.stats[ST_PUSHES]).toBe(line.length)
+    expect(scratch.cursor[CUR_TOP]).toBe(scratch.stats[ST_PUSHES])
+    expect(scratch.cursor[CUR_PENDING]).toBe(0)
+    // Vacuity: the corridor really was traversed, so `top` is not trivially 0.
+    expect(field.dist[line[line.length - 1] as number]).toBe(ORTHO_COST * (line.length - 1))
+  })
+
+  it('resets the cursor at call entry: a second call on the same scratch reports its OWN push count, not the running total', () => {
+    const { state, world } = randomGraphFixture('cursor-reset', 9, 7, 250)
+    const sources = firstRoadedCells(state, world, 2)
+    const field = createFlowField(world.cells)
+    const scratch = scratchOnly(world)
+
+    computeField(state, world, sources, field, scratch)
+    const first = scratch.cursor[CUR_TOP] as number
+    expect(first).toBeGreaterThan(10)
+
+    // Same graph, same sources, so the relaxation pattern is identical and the
+    // second call's own push count equals the first's. Without the reset the
+    // pool would keep bumping from where it stopped and `cursor[CUR_TOP]`
+    // would read 2 x first — an assertion failure here, rather than the
+    // silent, correct-until-the-pool-runs-out behaviour it is in the field.
+    computeField(state, world, sources, field, scratch)
+    expect(scratch.cursor[CUR_TOP]).toBe(scratch.stats[ST_PUSHES])
+    expect(scratch.cursor[CUR_TOP]).toBe(first)
+    expect(scratch.cursor[CUR_PENDING]).toBe(0)
+  })
+
+  it('the reset is UNCONDITIONAL: a cursor left dirty by a previous call is overwritten, not carried into the queue', () => {
+    const { state, world } = randomGraphFixture('cursor-poison', 9, 7, 250)
+    const sources = firstRoadedCells(state, world, 2)
+
+    const freshField = createFlowField(world.cells)
+    const freshScratch = scratchOnly(world)
+    computeField(state, world, sources, freshField, freshScratch)
+
+    const field = createFlowField(world.cells)
+    const scratch = scratchOnly(world)
+    // Doctored, and deliberately so — the same technique
+    // `assertBucketCountExceedsEveryEdgeCost`'s guard test uses, rather than
+    // trusting that no reachable call leaves a leftover. A leftover IS
+    // reachable: `computeFlowField` throws from the middle of the drain loop
+    // on pool exhaustion, and `syncFields` is designed to be called again on
+    // the same scratch the next tick (see its comment). That real leftover is
+    // POSITIVE, and a positive leftover with the reset removed spins the drain
+    // loop forever on empty buckets — a hang, which is not an assertion and
+    // cannot be a detector. A negative value produces the bounded half of the
+    // same failure: the drain terminates early, leaving the field short.
+    scratch.cursor[CUR_TOP] = 5
+    scratch.cursor[CUR_PENDING] = -1000
+
+    computeField(state, world, sources, field, scratch)
+
+    expect(Array.from(field.dist)).toEqual(Array.from(freshField.dist))
+    expect(Array.from(field.dir)).toEqual(Array.from(freshField.dir))
+    expect(scratch.cursor[CUR_TOP]).toBe(scratch.stats[ST_PUSHES])
+    expect(scratch.cursor[CUR_PENDING]).toBe(0)
+  })
+
+  it('a call that throws mid-drain leaves cursor[CUR_PENDING] positive — the state the entry reset exists to clear', () => {
+    // Vacuity for the test above, and the reason the reset is not decorative.
+    // `syncFields` zeroes the stamps before rebuilding precisely so a throwing
+    // rebuild is retried on the next tick, over this same scratch.
+    const { state, world } = randomGraphFixture('cursor-leftover', 9, 7, 250)
+    const sources = firstRoadedCells(state, world, 2)
+    const field = createFlowField(world.cells)
+    const tiny: Scratch = {
+      ...scratchOnly(world),
+      entryCell: new Int32Array(3),
+      entryNext: new Int32Array(3),
+    }
+    expect(() => computeField(state, world, sources, field, tiny)).toThrow(/entry pool exhausted/)
+    expect(tiny.cursor[CUR_PENDING]).toBeGreaterThan(0)
+
+    // ...and the next call over the same scratch still gets the right answer,
+    // with a pool big enough to finish.
+    const good = createFlowField(world.cells)
+    const goodScratch: Scratch = { ...scratchOnly(world), cursor: tiny.cursor }
+    computeField(state, world, sources, good, goodScratch)
+    const freshField = createFlowField(world.cells)
+    computeField(state, world, sources, freshField, scratchOnly(world))
+    expect(Array.from(good.dist)).toEqual(Array.from(freshField.dist))
   })
 })
 

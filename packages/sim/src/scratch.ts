@@ -89,9 +89,14 @@ export interface FlowField {
  *
  * Members split by lifetime, since M1c mixes two shapes that used to be one:
  *
- *   - Pathfinding scratch (`bucketHead` ... `stats`, `pushesPerCell`): fully
- *     overwritten at the entry of every `computeFlowField` call; carries
- *     nothing between calls.
+ *   - Pathfinding scratch (`bucketHead` ... `stats`, `cursor`,
+ *     `pushesPerCell`): fully overwritten at the entry of every
+ *     `computeFlowField` call; carries nothing between calls. `cursor` is the
+ *     newest member and the one whose reset is load-bearing rather than
+ *     hygienic: it holds the queue's own bump pointer and undrained count, so
+ *     a value carried in from a previous call (which a rebuild that THREW
+ *     mid-drain really does leave behind — see `syncFields`) would corrupt the
+ *     next call's queue rather than merely misreport it.
  *   - Source buffers (`sourcesFlat`, `sourceCounts`, `slotCounts`): rewritten
  *     in full by whatever assembles sources each tick (M1c Task 4's
  *     dispatch); NOT reset by `computeFlowField` itself, since they are its
@@ -112,6 +117,7 @@ export interface Scratch {
   readonly nbrCell: Int32Array // DIR_COUNT
   readonly nbrDir: Int8Array // DIR_COUNT
   readonly stats: Int32Array // ST_EXPANSIONS, ST_PUSHES
+  readonly cursor: Int32Array // CUR_TOP, CUR_PENDING — computeFlowField's queue cursor, overwritten at every call entry
   readonly pushesPerCell: Int32Array // cells; reset per computeFlowField call, incremented in push
   readonly sourcesFlat: Int32Array // groupCount * maxDestinations; colour c occupies [c*maxDestinations, c*maxDestinations + sourceCounts[c])
   readonly sourceCounts: Int32Array // groupCount
@@ -127,6 +133,18 @@ const STATS_LENGTH = 2
 export const CT_SYNCS = 0
 export const CT_REBUILDS = 1
 const COUNTERS_LENGTH = 2
+
+/**
+ * `computeFlowField`'s queue cursor: `CUR_TOP` is the entry pool's bump
+ * pointer, `CUR_PENDING` the number of entries pushed but not yet drained.
+ *
+ * **Two slots, never one.** `push` advances both, and the drain loop reads only
+ * `CUR_PENDING`; aliasing them to one index makes every push count as a drain
+ * and the queue empties itself while the pool never grows.
+ */
+export const CUR_TOP = 0
+export const CUR_PENDING = 1
+const CURSOR_LENGTH = 2
 
 /**
  * `entryPoolCapacity(cells) = cells * (1 + DISTINCT_EDGE_COSTS)`: one push
@@ -245,6 +263,7 @@ export function createScratch(
     nbrCell: new Int32Array(DIR_COUNT),
     nbrDir: new Int8Array(DIR_COUNT),
     stats: new Int32Array(STATS_LENGTH),
+    cursor: new Int32Array(CURSOR_LENGTH),
     pushesPerCell: new Int32Array(cells),
     sourcesFlat: new Int32Array(groupCount * maxDestinations),
     sourceCounts: new Int32Array(groupCount),

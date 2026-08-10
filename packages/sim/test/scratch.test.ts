@@ -10,6 +10,8 @@ import {
   ST_PUSHES,
   CT_SYNCS,
   CT_REBUILDS,
+  CUR_TOP,
+  CUR_PENDING,
   createFlowField,
   createFlowFields,
   createScratch,
@@ -76,6 +78,20 @@ describe('createScratch: allocation', () => {
     expect(s.counters.length).toBeGreaterThan(Math.max(CT_SYNCS, CT_REBUILDS))
     expect(s.counters[CT_SYNCS]).toBe(0)
     expect(s.counters[CT_REBUILDS]).toBe(0)
+  })
+
+  it('sizes cursor to hold CUR_TOP and CUR_PENDING, both starting at 0, and the two are DISTINCT slots', () => {
+    const s = createScratch(20, 2, 3, new Int32Array(0))
+    expect(s.cursor).toBeInstanceOf(Int32Array)
+    expect(s.cursor.length).toBeGreaterThan(Math.max(CUR_TOP, CUR_PENDING))
+    expect(s.cursor[CUR_TOP]).toBe(0)
+    expect(s.cursor[CUR_PENDING]).toBe(0)
+    // Asserted explicitly rather than left implied by the two reads above,
+    // which are satisfied by a single slot addressed twice: `push` bumps the
+    // pool's write pointer AND the drain counter, so aliasing them makes every
+    // push count as a drain and the queue empties itself. Both reads are 0 on
+    // a fresh scratch either way, so nothing else here can see the collapse.
+    expect(CUR_TOP).not.toBe(CUR_PENDING)
   })
 
   it('stores fieldInputRanges as given, not recomputed', () => {

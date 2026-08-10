@@ -151,6 +151,31 @@ interface Allocator {
  * derivation is correct — which makes this a liveness check on the path
  * arithmetic, not on the code under test.
  */
+/**
+ * **Only ever call this with a scope that is SUPPOSED to allocate.**
+ *
+ * It was called with `SIM_SRC` at four sites on the frame rig, and every one of
+ * them passed for a reason nobody had checked: `flowfield.ts`'s per-call
+ * closure charged 1.5-1.8 B/frame on the starting city — under the budget, so
+ * invisible, but enough to resolve the scope. M1e Task 3 removed that
+ * allocation and `sim` became genuinely clean on this rig, at which point the
+ * liveness check started failing 4 runs in 5 **because the code got better**.
+ *
+ * The file already knew this: the tick-rig control below says in as many words
+ * that "the clean profile resolves NOTHING at all under `packages/`, so
+ * `assertScopeResolves` is the wrong liveness check here and would fire on
+ * success." The frame-rig sites had not been carried across.
+ *
+ * `GAME_PKG` is the scope to use: this test file's own `drive`/
+ * `profileAllocations` allocate on every rig here, so it resolves whenever the
+ * path arithmetic works — which is the property being checked — and it cannot
+ * be made to fail by `sim` or `game/src` getting cleaner. Nothing is lost by
+ * dropping the `SIM_SRC` calls: `repoRelative` is one function applied to every
+ * URL alike (pinned against synthetic roots in `allocationPaths.test.ts`), so
+ * there is no mechanism that resolves `game` files and not `sim` files, and the
+ * budget assertions themselves do not depend on liveness — a `sim` allocation
+ * that appears is reported by `offenders` whether or not anything else did.
+ */
 function assertScopeResolves(all: readonly Allocator[], scope: string): void {
   if (all.some((a) => a.file.startsWith(scope))) return
   throw new Error(
@@ -799,9 +824,12 @@ describe('the frame loop allocates nothing, measured', () => {
     expect(all.length, 'the profile was empty').toBeGreaterThan(3)
 
     // The scope must resolve something, or every assertion below is vacuous.
+    // `GAME_PKG`, not `SIM_SRC`: see `assertScopeResolves`. A clean `sim` is the
+    // goal, so a liveness check keyed on `sim` allocating fails when the code
+    // improves. The `sim` budgets below are unaffected — they are assertions
+    // about what IS in the profile, not about what must be.
     assertScopeResolves(all, GAME_PKG)
 
-    assertScopeResolves(all, SIM_SRC)
     const bad = allOffenders(all, PROFILED_FRAMES, BUDGETS)
     expect(bad, `unbudgeted per-frame allocation:\n${bad.join('\n')}`).toEqual([])
 
@@ -906,9 +934,12 @@ describe('the frame loop allocates nothing, measured', () => {
     expect(counters.actions).toBeGreaterThan(5000)
     expect(all.length, 'the profile was empty').toBeGreaterThan(3)
     expect(rig.queue.poolSize, 'the pool was still growing').toBe(poolAfterWarmup)
+    // `GAME_PKG`, not `SIM_SRC`: see `assertScopeResolves`. A clean `sim` is the
+    // goal, so a liveness check keyed on `sim` allocating fails when the code
+    // improves. The `sim` budgets below are unaffected — they are assertions
+    // about what IS in the profile, not about what must be.
     assertScopeResolves(all, GAME_PKG)
 
-    assertScopeResolves(all, SIM_SRC)
     const bad = allOffenders(all, PROFILED_FRAMES, BUDGETS)
     expect(bad, `unbudgeted per-frame allocation:\n${bad.join('\n')}`).toEqual([])
 
@@ -975,7 +1006,10 @@ describe('the frame loop allocates nothing, measured', () => {
     const all = profileAllocations(() => {
       driveWithDrag(rig, PROFILED_FRAMES, 1e6, counters)
     })
-    assertScopeResolves(all, SIM_SRC)
+    // `GAME_PKG`, not `SIM_SRC`: see `assertScopeResolves`. This arm asserts
+    // `sim/roads.ts` charges ZERO, so keying its liveness on `sim` allocating
+    // asked the profile to contain the thing the arm exists to rule out.
+    assertScopeResolves(all, GAME_PKG)
     // Vacuity: without actions `canPlaceRoad` never runs and a zero below means
     // nothing at all. This is the assertion that separates "clean" from
     // "measured nothing".
@@ -1004,7 +1038,7 @@ describe('the frame loop allocates nothing, measured', () => {
     const idleProfile = profileAllocations(() => {
       drive(idle, PROFILED_FRAMES, 1e6)
     })
-    assertScopeResolves(idleProfile, SIM_SRC)
+    assertScopeResolves(idleProfile, GAME_PKG)
     const idleBytes = idleProfile
       .filter((a) => a.file === 'packages/sim/src/roads.ts')
       .reduce((sum, a) => sum + a.bytes, 0)

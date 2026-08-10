@@ -212,6 +212,16 @@ function poisonAll(scratch: Scratch, field: FlowField, fill: Fill, seed: string)
   fill(scratch.nbrCell, `${seed}-nbrCell`)
   fill(scratch.nbrDir, `${seed}-nbrDir`)
   fill(scratch.stats, `${seed}-stats`)
+  // **`cursor` joined this list with M1e Task 3 and it is the member with the
+  // sharpest failure mode.** It holds the entry pool's bump pointer and the
+  // count of undrained entries — state that was two `let`s inside
+  // `computeFlowField` until the closure that captured them was removed. A
+  // poisoned `CUR_PENDING` carried into the drain loop does not merely produce
+  // a wrong field: a positive one (which `all 0x7f` supplies) spins it forever
+  // on empty buckets. This arm's promise is "every scratch array is fully
+  // overwritten at entry", and the list is spelled out member by member, so a
+  // new member is only covered if someone adds it here.
+  fill(scratch.cursor, `${seed}-cursor`)
   fill(field.dist, `${seed}-dist`)
   fill(field.dir, `${seed}-dir`)
 }

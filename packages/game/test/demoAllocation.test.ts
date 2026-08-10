@@ -23,6 +23,22 @@ import { repoRelative } from './allocationPaths'
  * that sentence had never been tested.
  *
  * ---------------------------------------------------------------------------
+ * IT FOUND ONE THING, AND THE EXEMPTION FOR IT IS GONE BECAUSE THE THING IS
+ * ---------------------------------------------------------------------------
+ *
+ * On its first run this file charged `packages/sim/src/flowfield.ts` at
+ * **16.8-21.8 B/frame** against the 4 B floor — a pre-existing M1b allocation
+ * that only this input's rebuild frequency could expose. It carried a
+ * `FLOWFIELD_ALLOWANCE_BYTES_PER_FRAME = 64` written to assert the violation
+ * was STILL PRESENT rather than merely bounded. M1e Task 3 made
+ * `computeFlowField`'s `push` a module-scope function (its two counters now
+ * live in `scratch.cursor`), the assertion went red as designed, and the
+ * allowance was **deleted, not widened** — measured at 0.00 B/frame over five
+ * draws x three windows, with the file absent from every profile. `sim` is
+ * back under the ordinary floor here, so do not reintroduce an exemption for
+ * it: a charge on `flowfield.ts` now is a regression, not a known cost.
+ *
+ * ---------------------------------------------------------------------------
  * WHY THIS IS ITS OWN FILE
  * ---------------------------------------------------------------------------
  *
@@ -87,35 +103,6 @@ const PROFILED_SCOPES: readonly string[] = [
   'packages/sim/src/',
   'packages/render/src/',
 ]
-
-/**
- * **A DISCLOSED, MEASURED ALLOWANCE for a pre-existing allocation in `sim` that
- * this board is the first input to expose.**
- *
- * `packages/sim/src/flowfield.ts` charges **16.45 / 17.50 / 19.68 B/frame**
- * across three draws on the demo board, and **1.47 / 1.85** on the shipped
- * starting city under the identical rig — below the 4 B noise floor, which is
- * why every existing harness is green. The difference is field-rebuild
- * frequency: the demo board's 18 destinations move `destPins` almost every
- * tick, so `syncFields` re-runs `computeFlowField` where the starting city
- * (no roads, one pin per 129 ticks) almost never does.
- *
- * **It is not caused by this task.** No file in `sim` is touched here; the code
- * is M1b's and the input is new. The likely mechanism, stated as a hypothesis
- * rather than a finding because function-level profiler attribution is
- * documented unstable in this repo: `computeFlowField`'s `push` helper is a
- * closure over the mutable `top` and `pending`, which V8 boxes into a `Context`
- * — the same shape `loop.ts`'s known residual has, one level up.
- *
- * **The allowance asserts the violation is STILL PRESENT, not merely under a
- * ceiling**, so that whoever fixes it is forced to delete this block rather
- * than leaving a dead exemption that the next reader mistakes for a real
- * constraint. Owner: not this task, and not "someone" — it is written into the
- * report this task returns, naming `flowfield.ts` and this test as the place
- * the evidence lives.
- */
-const FLOWFIELD_FILE = 'packages/sim/src/flowfield.ts'
-const FLOWFIELD_ALLOWANCE_BYTES_PER_FRAME = 64
 
 function profileBytesByFile(body: () => void): Map<string, number> {
   interface RawSession {
@@ -293,7 +280,6 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
 
     const budgetFor = (file: string): number => {
       if (file.endsWith('/loop.ts')) return LOOP_BUDGET_BYTES_PER_FRAME
-      if (file === FLOWFIELD_FILE) return FLOWFIELD_ALLOWANCE_BYTES_PER_FRAME
       return NOISE_FLOOR_BYTES_PER_FRAME
     }
     const offenders = [...perFrameMin]
@@ -301,17 +287,6 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
       .map(([file, perFrame]) => `${file} at ${perFrame.toFixed(2)} B/frame`)
       .sort()
     expect(offenders).toEqual([])
-
-    // **The allowance must fail when the violation is fixed.** See
-    // `FLOWFIELD_ALLOWANCE_BYTES_PER_FRAME`: an exemption that only sets a
-    // ceiling outlives the problem it documents, and the next reader treats a
-    // dead exemption as a real constraint. The minimum is used here too, so
-    // this cannot pass on a lucky stray.
-    expect(
-      perFrameMin.get(FLOWFIELD_FILE) ?? 0,
-      'flowfield.ts no longer allocates on this board — DELETE the allowance ' +
-        'and its comment rather than widening this assertion',
-    ).toBeGreaterThan(NOISE_FLOOR_BYTES_PER_FRAME)
   })
 
   it('is not vacuous: the rig really drove 24 cars, 18 destinations and 71 road cells', () => {
@@ -367,10 +342,6 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     // reasoning.
     expect(LOOP_BUDGET_BYTES_PER_FRAME).toBe(32)
     expect(NOISE_FLOOR_BYTES_PER_FRAME).toBe(4)
-    // 64 is ~3x the worst of the three measured draws (19.68) and 16x the
-    // noise floor: loose enough never to fire on the instrument's own spread,
-    // tight enough that a real regression on top of it still shows.
-    expect(FLOWFIELD_ALLOWANCE_BYTES_PER_FRAME).toBe(64)
     expect(PROFILED_FRAMES).toBeGreaterThanOrEqual(3000)
     expect(WINDOW_COUNT).toBeGreaterThanOrEqual(3)
     expect([...PROFILED_SCOPES].sort()).toEqual([
