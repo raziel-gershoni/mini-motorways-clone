@@ -568,3 +568,27 @@ The prose now states the conditional, and `demoLayout.test.ts` §6 is the
 detector — **the first test in the repo that erases anything on the demo board**,
 covering both branches and asserting the tile-ledger identity (§9's `tiles +
 roadCells + ghostCells`) across the deferral.
+
+---
+
+## 16. TWO CARRIED QUESTIONS, ANSWERED BY A HUMAN ON HARDWARE (2026-08-10)
+
+The user opened the demo board — 24 cars, a car refused entry on ~53 % of ticks, queues forming and
+draining — on their phone in Telegram, and reported:
+
+- **Frame cost under a full jam: SMOOTH THROUGHOUT.** §7 asked for exactly this and had no other
+  route to an answer. It is one device, qualitative, no numbers, no Android, no
+  `performanceClass: LOW` — so it is **evidence the architecture holds at 24 cars, not a measured
+  budget.** What it does retire is the fear that cost scaling with traffic was a latent cliff.
+  Note the board they ran also carries `flowfield.ts`'s 16.8–21.8 B/frame (§8), so that allocation
+  is not perceptible at this density either.
+- **The stop/start snap: CONFIRMED ROBOTIC, worth fixing.** A blocked car holds `carProgress`
+  bit-identical, so it renders perfectly frozen and then resumes at the full 330 units/tick on the
+  granting tick — 0 to 3.96 cells/s across one frame. Predicted from the code before it was seen,
+  and the prediction was right the first time a human could observe it. **This is a RENDERER
+  concern**: the sim's step function is spec-correct (§5.5 prices speed by geometry) and must not
+  change. Fixing it in `sim` would move goldens and buy nothing the player can see.
+
+**Both answers exist only because the default board changed.** Neither question was answerable on
+the shipped starting city, which never moves a car. That is the practical argument for §12's rule:
+a feature nobody can see is a feature nobody can judge.
