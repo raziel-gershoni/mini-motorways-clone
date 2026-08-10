@@ -20,12 +20,13 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  * 0, `ENTER_VALVE` 0, and a maximum of **one** car in flight. Six cars, frozen.
  * The player opened it and said it looked like the same demo. They were right.
  *
- * This file is the board where all of it fires. It is reached by
- * `?startapp=demo` inside Telegram or `?layout=demo` in a browser
- * (`layouts.ts`, `main.ts`), and it changes **nothing** about the shipped city:
- * `startingCity.ts` and `firstCity.ts` are untouched, all seven goldens hold,
- * and the default boot path through `createGame` is instruction-for-instruction
- * what it was.
+ * This file is the board where all of it fires, and **it is the board a plain
+ * load now opens on** — `DEFAULT_LAYOUT_ID` (`layouts.ts`). It shipped behind
+ * `?startapp=demo` / `?layout=demo` first, which left the default the board
+ * that demonstrates nothing; there was no reason for that and the default
+ * moved. It still changes **nothing** about the starting city, which is now the
+ * one behind a token (`?layout=city`): `startingCity.ts` and `firstCity.ts` are
+ * untouched byte-for-byte and every golden holds.
  *
  * ---------------------------------------------------------------------------
  * THE ARITHMETIC, AND THE DRAFT THAT FAILED IT

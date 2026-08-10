@@ -45,7 +45,7 @@ import { PointerOutcome } from '../src/pointer'
 import { EraseControlSurface } from '../src/eraseControl'
 import { SizingOutcome } from '../src/shell'
 import { DEMO_WARM_START_TICKS } from '../src/demoLayout'
-import { LAYOUT_IDS } from '../src/layouts'
+import { CITY_LAYOUT_ID, DEFAULT_LAYOUT_ID, LAYOUT_IDS } from '../src/layouts'
 import {
   BOOT_FAILURE_ELEMENT_ID,
   BOOT_FAILURE_STYLE,
@@ -248,6 +248,28 @@ interface Rig {
   readonly viewportChanged: (stable: boolean) => void
 }
 
+/**
+ * Builds the real game on the shipped starting city, unless a case names
+ * another board.
+ *
+ * **The rig pins `city`; it does NOT inherit `DEFAULT_LAYOUT_ID`, and that is
+ * the point of the line rather than a detail of it.** Every case in this file
+ * except the three below was written against the starting city and reads its
+ * numbers off it: six live cars, the road cost of column 8, tick 383, the
+ * 258-tick warm start re-derived from `SEED_FIRST_PIN_TICK`. The default board
+ * is now the demo (24 cars, 18 destinations, a 1,200-tick warm start), so a rig
+ * that took whatever the default happened to be would silently re-point all of
+ * them at a board none of their arithmetic describes — measured: **17 of this
+ * file's cases go red on that one word**, which is a diffuse failure that says
+ * nothing about the thing that actually changed.
+ *
+ * **`in`, not `??` or a default parameter.** The three cases that are *about*
+ * the default have to reach `createGame` with `layoutId` genuinely absent, and
+ * they say so by passing `layoutId: undefined` explicitly. `??` cannot tell
+ * that apart from omitting the property, so it would quietly convert those
+ * three into city cases and leave the default with no end-to-end detector at
+ * all.
+ */
 function buildRig(
   options: {
     warmStartTicks?: number
@@ -284,7 +306,9 @@ function buildRig(
     },
     warmStartTicks: options.warmStartTicks,
     preferFallback: options.preferFallback,
-    layoutId: options.layoutId,
+    // See the note above: `city` unless the case names a board, and `in` so a
+    // case can still name "no board at all".
+    layoutId: 'layoutId' in options ? options.layoutId : CITY_LAYOUT_ID,
     seed: options.seed,
   })
 
@@ -1900,19 +1924,53 @@ describe('20,000 ticks on a deliberately bad network', () => {
  * about `hashState`, not about the assembled game.
  */
 describe('createGame opens the layout it was asked for', () => {
-  it('defaults to the shipped starting city, with today’s warm start and seed', () => {
-    const rig = buildRig()
+  it('opens the DEMO board when the launch names nothing — no token, no city', () => {
+    // **The end-to-end half of the default, through the real `createGame`.**
+    // `layouts.test.ts` pins the constant; this is the only place that runs a
+    // whole boot with `layoutId` absent, which is what every plain load and
+    // every Telegram open with no `startapp` does.
+    //
+    // `layoutId: undefined` is written out rather than omitted so the rig's
+    // `in` check sees it — omitting it means "the city", which is what the
+    // other 17 cases in this file want and this one must not get.
+    const rig = buildRig({ layoutId: undefined })
+    expect(rig.game.layoutId).toBe(DEFAULT_LAYOUT_ID)
+    expect(rig.game.layoutId).toBe('demo')
+    expect(rig.game.world.map.id).toBe('demoCity')
+    expect(rig.game.warmStartTicks).toBe(DEMO_WARM_START_TICKS)
+    expect(rig.game.state.header[H_TICK] as number).toBe(DEMO_WARM_START_TICKS)
+    expect(rig.game.state.header[H_HOUSE_COUNT] as number).toBe(12)
+    expect(rig.game.state.header[H_DEST_COUNT] as number).toBe(18)
+    expect(rig.game.state.carPhase.length).toBe(24)
+    // **And the board it is NOT.** Each of the four above is satisfied by the
+    // demo entry alone, so none of them would notice the city coming back if a
+    // future edit gave the two entries the same map. The city's own numbers are
+    // the discriminator, and they are asserted as absences here and as
+    // presences in the case below.
+    expect(rig.game.world.map.id).not.toBe('firstCity')
+    expect(rig.game.warmStartTicks).not.toBe(WARM_START_TICKS)
+  })
+
+  it('opens the starting city on layoutId "city" — still reachable, still today’s board', () => {
+    // The board that used to be the default. It is not deleted and it is not
+    // degraded: same map, same warm start, same three houses and six cars, one
+    // token away. `startingCity.test.ts` holds its seed golden; this holds the
+    // assembled boot.
+    const rig = buildRig({ layoutId: CITY_LAYOUT_ID })
     expect(rig.game.layoutId).toBe('city')
     expect(rig.game.world.map.id).toBe('firstCity')
     expect(rig.game.warmStartTicks).toBe(WARM_START_TICKS)
     expect(rig.game.state.header[H_TICK] as number).toBe(WARM_START_TICKS)
     // Three houses, three destinations, six cars — the board the player called
-    // "the same demo", unchanged by everything in this task.
+    // "the same demo", unchanged by the default moving off it.
     expect(rig.game.state.header[H_HOUSE_COUNT] as number).toBe(3)
     expect(rig.game.state.header[H_DEST_COUNT] as number).toBe(3)
     // `carPhase` is sized by the MAP (`CARS_PER_HOUSE * maxHouses`), not by the
     // seed: `firstCity` allows 40 houses, so 80 slots of which 6 are live.
     expect(rig.game.state.carPhase.length).toBe(80)
+    // ...and it is what the rig hands back with no board named, which is what
+    // keeps the other 17 cases in this file measuring the city.
+    expect(buildRig().game.layoutId).toBe('city')
   })
 
   it('opens the demo board on layoutId "demo", already busy on the first frame', () => {
@@ -2023,7 +2081,15 @@ describe('createGame opens the layout it was asked for', () => {
   })
 
   it('treats an empty layoutId as absent, so a half-copied link still boots', () => {
-    expect(buildRig({ layoutId: '' }).game.layoutId).toBe('city')
+    // `?layout=` and `#tgWebAppStartParam=` both parse to `''`. It must land on
+    // the default rather than on `layoutFor('')`'s throw — and on the SAME
+    // board as no token at all, which is the half a bare `.toBe('demo')` would
+    // not say.
+    expect(buildRig({ layoutId: '' }).game.layoutId).toBe(DEFAULT_LAYOUT_ID)
+    expect(buildRig({ layoutId: '' }).game.layoutId).toBe('demo')
+    expect(buildRig({ layoutId: '' }).game.layoutId).toBe(
+      buildRig({ layoutId: undefined }).game.layoutId,
+    )
   })
 })
 
@@ -2193,8 +2259,10 @@ describe('a boot that throws puts the reason on the screen', () => {
     // board on every launch.
     const made: BootSurface[] = []
     const { result, logged } = captureErrors(() =>
+      // `layoutId: undefined` and the empty token beneath it: this is the
+      // launch with nothing in the URL, which is the one every player makes.
       startOrReport(
-        () => buildRig().game,
+        () => buildRig({ layoutId: undefined }).game,
         () => {
           const surface = bootSurface()
           made.push(surface)
@@ -2205,7 +2273,10 @@ describe('a boot that throws puts the reason on the screen', () => {
     )
     expect(made.length).toBe(0)
     expect(logged.length).toBe(0)
-    expect(result?.layoutId).toBe('city')
+    // Nothing named a board, which is what the entry point does on a plain
+    // load: a successful boot hands back the DEFAULT layout.
+    expect(result?.layoutId).toBe(DEFAULT_LAYOUT_ID)
+    expect(result?.layoutId).toBe('demo')
   })
 
   it('declines quietly where there is no DOM, and survives a reporter that itself throws', () => {

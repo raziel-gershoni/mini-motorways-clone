@@ -17,21 +17,67 @@ import { seedStartingCity } from '../src/startingCity'
  * The registry that pairs a layout id with its map, its seeder, its RNG seed
  * and its warm start. Two entries today; the shape exists so a third costs one
  * object literal rather than a branch in `createGame`.
+ *
+ * **Which entry the no-token path reaches is a third thing, and it has its own
+ * case at the top of this file.** It is `demo`. The starting city was the
+ * default until the demo board existed, is still one token away, and has its
+ * own case here as well — the two are asserted separately because "the default
+ * is X" and "Y is still reachable" fail for different reasons and want
+ * different messages.
  */
 
 describe('the layout registry', () => {
-  it('defaults to the shipped city, and the default id is a real entry', () => {
-    expect(DEFAULT_LAYOUT_ID).toBe(CITY_LAYOUT_ID)
-    expect(DEFAULT_LAYOUT_ID).toBe('city')
+  it('THE DEFAULT IS THE DEMO BOARD, by name — a plain load opens `demo`', () => {
+    // **The detector for one line, `DEFAULT_LAYOUT_ID` in `layouts.ts`, and it
+    // is deliberately the narrowest test in the file.** Flipping that constant
+    // is flipping what every player sees on a plain load, and before this case
+    // existed the flip failed *diffusely*: 20 cases went red across three
+    // files, 17 of them integration cases whose real complaint was "this board
+    // has 24 cars and my arithmetic says 6". None of them named the cause. This
+    // one does, in its title and in its message.
+    //
+    // The literal `'demo'` is load-bearing next to the symbolic form. Without
+    // it, renaming `DEMO_LAYOUT_ID` and re-pointing the default at the city in
+    // the same edit would satisfy `toBe(DEMO_LAYOUT_ID)` — the two constants
+    // would agree with each other about a board neither of them is.
+    expect(DEFAULT_LAYOUT_ID, 'the board a plain load opens').toBe('demo')
+    expect(DEFAULT_LAYOUT_ID).toBe(DEMO_LAYOUT_ID)
+    // ...and it is NOT the starting city, stated as its own assertion because
+    // that is the specific flip a reader of this file is most likely to make:
+    // the city was the default until the demo board existed, and the reason it
+    // is not any more (six cars that never move) is not visible from here.
+    expect(DEFAULT_LAYOUT_ID).not.toBe(CITY_LAYOUT_ID)
+    // An id that is not a key would boot `undefined.map()`, which is the
+    // failure the whole registry is shaped to make unconstructible.
     expect(LAYOUTS[DEFAULT_LAYOUT_ID]).toBeDefined()
+    expect(LAYOUT_IDS).toContain(DEFAULT_LAYOUT_ID)
   })
 
-  it('resolves an absent token to the default, so the shipped boot is unchanged', () => {
-    // `undefined` is what `layoutToken` returns for no token at all, and it has
-    // to land on the city: every existing golden and the whole shipped game
-    // depend on that branch being today's code.
-    expect(layoutFor(undefined)).toBe(LAYOUTS[CITY_LAYOUT_ID])
-    expect(layoutFor('')).toBe(LAYOUTS[CITY_LAYOUT_ID])
+  it('resolves an absent token to the default — no token, no city', () => {
+    // `undefined` is what a launch with nothing in the URL produces, and `''`
+    // is what `layoutToken` returns for a value outside Telegram's charset.
+    // Both are "nobody named a board", and both must land on the SAME board —
+    // asserted through `DEFAULT_LAYOUT_ID` rather than through `demo` so this
+    // case is about the resolution and the case above is about the choice.
+    expect(layoutFor(undefined)).toBe(LAYOUTS[DEFAULT_LAYOUT_ID])
+    expect(layoutFor('')).toBe(LAYOUTS[DEFAULT_LAYOUT_ID])
+    expect(layoutFor('')).toBe(layoutFor(undefined))
+    // Non-vacuity: `LAYOUTS[DEFAULT_LAYOUT_ID]` would be satisfied by a
+    // registry with one entry in it, and by a `layoutFor` that ignores its
+    // argument entirely. The city is a different object and is still reachable.
+    expect(layoutFor(undefined)).not.toBe(LAYOUTS[CITY_LAYOUT_ID])
+    expect(layoutFor(CITY_LAYOUT_ID)).toBe(LAYOUTS[CITY_LAYOUT_ID])
+  })
+
+  it('keeps the starting city reachable by its own id, and unchanged', () => {
+    // The board that was the default until this milestone. `?layout=city` in a
+    // browser, `?startapp=city` inside Telegram. Deleting it, renaming it or
+    // folding it into the demo entry all fail here.
+    expect(CITY_LAYOUT_ID).toBe('city')
+    expect(layoutFor('city')).toBe(LAYOUTS[CITY_LAYOUT_ID])
+    expect(layoutFor('city').map().id).toBe('firstCity')
+    expect(layoutFor('city').runSeed).toBe(RUN_SEED)
+    expect(layoutFor('city').warmStartTicks).toBe(WARM_START_TICKS)
   })
 
   it('resolves the demo token to the demo layout', () => {
@@ -41,14 +87,29 @@ describe('the layout registry', () => {
   })
 
   it('REFUSES an unknown id loudly, naming it and listing the ones that exist', () => {
-    // The failure this exists to prevent: `?startapp=demoo` silently boots the
-    // shipped city, and the player reports "it looks like the same demo" for
-    // the second time — the exact bug this whole task is fixing, reintroduced
-    // by a typo with no signal. A throw is the only outcome that cannot be
-    // mistaken for the default board.
+    // The failure this exists to prevent, restated for the default that is
+    // actually in force: `?startapp=cty` silently opening the demo board, while
+    // the reader believes they are looking at the starting city and has nothing
+    // to point at. It is the same lie the demo link told in the other
+    // direction. A throw is the only outcome that cannot be mistaken for the
+    // default board.
     expect(() => layoutFor('demoo')).toThrow(/layoutFor: unknown layout "demoo"/)
-    expect(() => layoutFor('demoo')).toThrow(/city/)
-    expect(() => layoutFor('demoo')).toThrow(/demo/)
+    // The whole line, which is what catches the list being dropped.
+    expect(() => layoutFor('demoo')).toThrow(/the layouts that exist are city, demo/)
+    // **The per-id form, on a token that cannot supply either id — and both
+    // halves of that sentence were defects here until this edit.** The message
+    // used to end with the prose "...silently boots the shipped city", so
+    // `/city/` matched whether or not the list was ever printed; the prose says
+    // "the default" now. And `/demo/` was asserted against the token `demoo`,
+    // which CONTAINS it, so that half was satisfied by the quoted token
+    // regardless — the catalogue's "a `toContain` over a composed message is
+    // satisfied by any other part of that message", twice in one line.
+    // `nope` shares no substring with either id, so these two can only be
+    // satisfied by `LAYOUT_IDS`, and they are what catches a THIRD layout
+    // going unlisted where the whole-line form would have to be edited anyway.
+    for (const id of LAYOUT_IDS) {
+      expect(() => layoutFor('nope'), `layout id ${id}`).toThrow(new RegExp(id))
+    }
     expect(() => layoutFor('CITY')).toThrow(/unknown layout "CITY"/)
   })
 
@@ -73,8 +134,9 @@ describe('the layout registry', () => {
   })
 
   it('the city entry is today’s three constants, unchanged', () => {
-    // If any of these three drifts, the shipped boot has quietly changed and
-    // `integration.test.ts`'s re-derivation of 258 is measuring something else.
+    // If any of these three drifts, the board behind `?layout=city` has quietly
+    // changed and `integration.test.ts`'s re-derivation of 258 — which now runs
+    // on an explicitly-named city rig — is measuring something else.
     const city = LAYOUTS[CITY_LAYOUT_ID]
     expect(city?.map().id).toBe(firstCity().id)
     expect(city?.runSeed).toBe(RUN_SEED)

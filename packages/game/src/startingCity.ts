@@ -15,6 +15,14 @@ import {
  * cell coordinates, placed once at startup, fully deterministic, no schedule
  * and no RNG.
  *
+ * **It is no longer the board a plain load opens on** — `DEFAULT_LAYOUT_ID`
+ * (`layouts.ts`) is the demo, because six cars that never move demonstrate
+ * nothing. This city is reached by `?layout=city` / `?startapp=city`, and
+ * nothing about it changed when the default moved: same map, same seeder, same
+ * `RUN_SEED`, same 258-tick warm start, same seed golden `1178110182`, all
+ * pinned by `test/startingCity.test.ts` against the explicit `city` id rather
+ * than against whatever the default happens to be.
+ *
  * **M1e REPLACES THIS FILE.** It is not M1e's authored spawn schedule and it
  * must not grow into one. `placeHouse`/`placeDestination` (`buildings.ts`) had
  * no production caller anywhere in `packages/` before this file existed, and

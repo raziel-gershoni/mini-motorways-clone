@@ -3,6 +3,7 @@ import { Session } from 'node:inspector'
 import { REVEALED_X0, REVEALED_Y0 } from '@laneways/shared'
 import type { AtlasContext, AtlasSurface } from '@laneways/render'
 import { createGame, type GameContext } from '../src/main'
+import { CITY_LAYOUT_ID } from '../src/layouts'
 import { repoRelative } from './allocationPaths'
 
 /**
@@ -297,6 +298,13 @@ function drivenGame(): Driven {
   const counts: DrawCounts = { blits: 0, ghostBlits: 0 }
   const surfaces: { ghost: unknown } = { ghost: null }
   const game = createGame({
+    // **`city`, named rather than defaulted.** `PATH` below is a hand-drawn
+    // stroke down `firstCity`'s clear column 8 and the ghost seeding erases
+    // cells out of it; the default board is the demo, whose 71 seeded road
+    // cells and 24 cars make every one of those coordinates mean something
+    // else. `demoAllocation.test.ts` is the demo board's own profile — this
+    // file's budgets were measured on the city and stay on it.
+    layoutId: CITY_LAYOUT_ID,
     canvas: {
       width: 0,
       height: 0,

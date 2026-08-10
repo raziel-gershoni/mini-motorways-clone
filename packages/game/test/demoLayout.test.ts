@@ -55,7 +55,11 @@ import { seedStartingCity } from '../src/startingCity'
 import { NO_CROSSING, carAheadOf, longestQueue, travelDir } from '../src/queueProbe'
 
 /**
- * The demo layout — the board `?startapp=demo` opens.
+ * The demo layout — **the board a plain load opens**, and `?startapp=demo`
+ * still names explicitly. It shipped behind the link first and became
+ * `DEFAULT_LAYOUT_ID` once it was clear there was no reason for the default to
+ * stay on a board that never moves a car; `layouts.test.ts` owns that choice
+ * and nothing in this file depends on it.
  *
  * **What this file is really testing is an OBSERVABILITY claim, not a
  * correctness one.** M1d shipped blocking, ghost roads and lane-speed
@@ -64,10 +68,10 @@ import { NO_CROSSING, carAheadOf, longestQueue, travelDir } from '../src/queuePr
  * and the maximum number of cars in flight is 1. So the assertions below are
  * mostly INEQUALITIES over a measured run, not equalities over a fixture —
  * the question is "would a human see this", and the only honest answer is a
- * measurement on the board that ships.
+ * measurement on the board a player actually opens.
  *
  * The two contrast tests are what make the inequalities mean anything: the
- * same measurement on the shipped city, in the same file, in the same run,
+ * same measurement on the starting city, in the same file, in the same run,
  * scores zero.
  */
 

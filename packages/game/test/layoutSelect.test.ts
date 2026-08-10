@@ -14,6 +14,12 @@ import { startParam } from '../src/telegram'
  * The mechanism here is the one that is not: a `t.me/<bot>/<app>?startapp=demo`
  * link, which the player sends themselves in Saved Messages and taps.
  *
+ * **What a token is FOR changed when the default did.** It used to be the only
+ * way to reach the demo board; the demo is the default now, so the token's
+ * everyday job is the other direction — `?startapp=city` for the shipped
+ * starting city. Nothing in this file cares: it resolves a token to a string
+ * and `layouts.ts` resolves the string to a board.
+ *
  * Telegram delivers that value BOTH as a raw `tgWebAppStartParam` launch
  * parameter in `location.hash` and as `start_param` inside the signed
  * `tgWebAppData` the SDK parses. Reading one and not the other is a silent
@@ -113,9 +119,15 @@ describe('startParam', () => {
 // ---------------------------------------------------------------------------
 
 describe('layoutToken', () => {
-  it('is empty for a launch that names nothing — the shipped city', () => {
-    // The most important case in the file: this is every existing player's
-    // launch, and it has to resolve to today's board.
+  it('is empty for a launch that names nothing — the DEFAULT board', () => {
+    // The most important case in the file: this is every player's launch.
+    //
+    // **It says `''`, not which board that is, and the distinction is the
+    // point.** This function's job ends at "was a token supplied"; which entry
+    // `''` reaches is `DEFAULT_LAYOUT_ID`'s, and it moved from the starting
+    // city to the demo without one line here changing. `layouts.test.ts` owns
+    // that answer, and duplicating it here would be a second place to update
+    // and a first place to forget.
     expect(layoutToken('', '', null)).toBe('')
     expect(layoutToken('#tgWebAppData=x&tgWebAppVersion=8.0', '', null)).toBe('')
     expect(layoutToken('', '?fallback=1', null)).toBe('')
@@ -177,7 +189,7 @@ describe('layoutToken', () => {
     // `?layout=` and `#tgWebAppStartParam=` both parse to `''`, which the
     // charset test rejects — so they land on the default rather than on
     // `layoutFor('')`'s throw. A player who taps a half-copied link gets the
-    // shipped board, which is the right answer for an absent value.
+    // default board, which is the right answer for an absent value.
     expect(layoutToken('#tgWebAppStartParam=', '', null)).toBe('')
     expect(layoutToken('', '?layout=', null)).toBe('')
     expect(layoutToken('', '', '')).toBe('')
@@ -186,7 +198,9 @@ describe('layoutToken', () => {
   it('passes a well-formed but unknown token THROUGH, so layoutFor can refuse it loudly', () => {
     // The vacuity case the whole mechanism turns on. If this function
     // normalised `demoo` to `''`, a mistyped link would silently boot the
-    // shipped city and look exactly like the bug the demo layout exists to fix.
+    // DEFAULT board and look exactly like the bug the demo layout exists to
+    // fix — today that means `?startapp=cty` opening the demo while the reader
+    // believes they asked for the starting city.
     expect(layoutToken('', '?layout=demoo', null)).toBe('demoo')
     expect(layoutToken('#tgWebAppStartParam=nonsense', '', null)).toBe('nonsense')
   })

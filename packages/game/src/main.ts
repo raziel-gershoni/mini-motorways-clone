@@ -102,9 +102,14 @@ export { RUN_SEED, SEED_FIRST_PIN_TICK, WARM_START_TICKS } from './startingCity'
  * THE WARM START: WHAT IT IS FOR, AND WHAT IT IS NOT
  * ---------------------------------------------------------------------------
  *
- * See `WARM_START_TICKS`. In one line: a fresh board takes 378 ticks to show its
- * first pin, and this runs 258 of them before the first frame so the player
- * waits the sim's own designed 4 seconds instead of 12.6.
+ * **Per layout, not global** — `layout.warmStartTicks`, overridable by
+ * `deps.warmStartTicks`. `WARM_START_TICKS` is the city's **258**: a fresh
+ * board takes 378 ticks to show its first pin, so running 258 of them first
+ * makes the player wait the sim's own designed 4 seconds instead of 12.6.
+ * `DEMO_WARM_START_TICKS` is **1,200**, and its job is different in kind — the
+ * demo board is the default, and a default that starts empty and fills up over
+ * forty seconds is the frozen-city problem again for the first half of a
+ * playtest. See each constant.
  *
  * ---------------------------------------------------------------------------
  * NOTHING HERE RUNS PER FRAME EXCEPT `Game.frame`
@@ -165,10 +170,11 @@ export interface GameDeps {
   /**
    * Which board to open on — a key of `LAYOUTS` (`layouts.ts`).
    *
-   * `undefined` (and `''`) mean the shipped starting city, which is what every
-   * launch that names nothing gets. An id that is not in the table THROWS; see
-   * `layoutFor`. `startGame` reads it from `layoutToken(location.hash,
-   * location.search, startParam())`.
+   * `undefined` (and `''`) mean `DEFAULT_LAYOUT_ID`, which is what every launch
+   * that names nothing gets — **the demo board**, since a plain load of the
+   * shipped starting city never moves a car. `'city'` opens that city. An id
+   * that is not in the table THROWS; see `layoutFor`. `startGame` reads it from
+   * `layoutToken(location.hash, location.search, startParam())`.
    */
   readonly layoutId?: string
   /**
@@ -205,7 +211,7 @@ export interface Game {
   readonly atlases: Atlases
   /** How many ticks ran before the first frame. See the layout's own constant. */
   readonly warmStartTicks: number
-  /** The layout this game opened on — `'city'` unless a link named another. */
+  /** The layout this game opened on — `DEFAULT_LAYOUT_ID` unless a link named another. */
   readonly layoutId: string
   /** One frame. `now` is `requestAnimationFrame`'s own timestamp — there is no second clock. */
   readonly frame: (now: number) => void
@@ -213,11 +219,12 @@ export interface Game {
 
 export function createGame(deps: GameDeps): Game {
   // The ONE line that decides which board this run opens on. With no token
-  // `layoutFor` returns the `city` entry, whose four fields are exactly the
-  // four values this function used to name inline — so the default path is
-  // instruction-for-instruction what it was and no golden can move through it.
-  // An unknown token throws by name rather than falling back; `layouts.ts`
-  // says why that matters more than it looks.
+  // `layoutFor` returns `DEFAULT_LAYOUT_ID`'s entry — the demo board, because
+  // the shipped starting city never moves a car on a plain load; `?layout=city`
+  // still opens it. Nothing here reads a map, a seed or a warm start directly,
+  // so no golden can move through this function whichever entry it gets. An
+  // unknown token throws by name rather than falling back; `layouts.ts` says
+  // why that matters more than it looks.
   const layout = layoutFor(deps.layoutId)
   const map = layout.map()
   const world = createWorld(map)
@@ -560,8 +567,9 @@ export function createBootFailureSurface(): HTMLElement {
  * **Why a DOM surface exists at all, rather than a thrown error and a log.**
  *
  * `layoutFor` throws by name on an unknown layout id, deliberately — a silent
- * fallback to the shipped city is indistinguishable from "the link did nothing",
- * which is the exact report the demo layout exists to answer. That throw
+ * fallback to the default board is indistinguishable from "the link did
+ * nothing", which is the exact report the demo layout exists to answer, and
+ * which now applies to `?startapp=cty` reaching the demo instead. That throw
  * propagates out of `createGame` -> `startGame` -> **this module's own
  * evaluation**, and the consequence is much larger than the game not starting:
  * nothing below the entry point runs, so there is no canvas sizing, no pointer
@@ -647,7 +655,7 @@ export function bootFailureText(error: unknown, token: string): string {
     `The link asked for the layout: ${token === '' ? '(none)' : token}\n` +
     `Layouts that exist: ${LAYOUT_IDS.join(', ')}\n\n` +
     'Open the app again with one of those ids after ?startapp=, or with no ' +
-    '?startapp= at all for the board that ships.\n\n' +
+    '?startapp= at all for the default board.\n\n' +
     reason
   )
 }
@@ -775,7 +783,7 @@ export function hashParams(hash: string): URLSearchParams {
 const LAYOUT_TOKEN = /^[\w-]{1,512}$/
 
 /**
- * Which layout this launch asked for, or `''` for "the shipped starting city".
+ * Which layout this launch asked for, or `''` for "whatever the default is".
  *
  * **Three sources, one per reachable launch path, and all three are needed.**
  *
