@@ -320,6 +320,15 @@ is the check: it reads a build-unique id minted per build by `vite.config.ts` in
 the served document actually names** must contain it too. A fresh document
 pointing at a stale bundle is a blank board and the first check cannot see it.
 
+**`.build-id` is shared mutable state, and a build-without-deploy produces a
+false negative.** Task 9 hit this: another worker ran `pnpm build` in the shared
+checkout without deploying, and `verify-deploy.js` then reported *"the deployment
+did not activate"* for 40 attempts while the live artefact was correct and
+current. The script already warns that crying "did not activate" too early is as
+corrosive as reporting success on a stale asset; **a third case belongs beside
+those two — the artefact is fine and the EXPECTATION is stale.** The fix is to
+record the last *deployed* id rather than only the last *built* one.
+
 **The Telegram Mini App URL is set in @BotFather and is NOT settable through the
 Bot API.** `setChatMenuButton` returns `ok: true` and changes nothing. If the URL
 must change, **that is a human action** — say so rather than attempting it.
