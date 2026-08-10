@@ -3359,6 +3359,56 @@ describe('REFUSED_GHOST: a ghost is not traversable by a car that has not commit
     expect(canEnter(r.state, r.world, 0, GHOST_CELL, DIR_E)).toBe(EnterOutcome.ENTER_VALVE)
   })
 
+  it('...and it does not release it WHERE THE TWO ACTUALLY COMPETE: ghost AND occupied AND saturated', () => {
+    // **The state neither neighbouring test reaches, and without it the rule
+    // "the valve must not release a `REFUSED_GHOST`" — written three times in
+    // `blocking.ts` — has zero detectors.** Found by the whole-milestone review.
+    //
+    // The valve lives INSIDE `canEnter`'s `occupant !== FREE` branch. So it can
+    // only ever compete with the ghost check when the slot is occupied AND the
+    // counter is saturated AND the cell is a ghost the car is not committed to.
+    // The two tests above each hold exactly one half of that conjunction:
+    //
+    //   - `the ghost test sits IN FRONT of the occupancy test` occupies the slot
+    //     and leaves `carBlockedTicks` at 0, so the valve never arms;
+    //   - `THE VALVE DOES NOT RELEASE IT` saturates the counter and leaves the
+    //     slot FREE, so the branch the valve lives in is never entered — the
+    //     answer would be `ENTER_FREE`, not `ENTER_VALVE`, even with the ghost
+    //     check deleted.
+    //
+    // Neither can distinguish the orders, and hoisting the valve in front of the
+    // ghost check survives all of them. **This is two catalogue shapes stacked**:
+    // a compound whose halves are each uncovered, and — because Task 5 recorded
+    // this rule as killed at 2-3 detectors — an over-broad mutation crediting its
+    // kills to a different arm.
+    //
+    // Unreachable through `runDispatch` + `runMovement` (see the enumeration
+    // below), which is exactly the unreachability every other guard in this file
+    // is tested at anyway.
+    const r = makeRig('ghost-vs-valve-competing', 'ghost-vs-valve-competing')
+    handCar(r, { i: 0, cell: 149, progress: 0, step: DIR_W, enteredBy: DIR_W })
+    ghost(r, GHOST_CELL, 1)
+    claimCell(r.state, 1, GHOST_CELL, DIR_E)
+    r.state.carBlockedTicks[0] = MAX_BLOCKED_TICKS
+
+    // All three conditions asserted, so a fixture that stops holding one of them
+    // turns this red rather than passing for the wrong reason.
+    expect(isCommittedTo(r.state, r.world, 0, GHOST_CELL), 'fixture: car 0 must NOT be committed').toBe(false)
+    expect(occupantOf(r.state, GHOST_CELL, LANE_OF_DIR[DIR_E] as number), 'fixture: the slot must be TAKEN').toBe(1)
+    expect(r.state.carBlockedTicks[0], 'fixture: the counter must be SATURATED').toBe(MAX_BLOCKED_TICKS)
+
+    // The rule. Under "valve preempts ghost" this is `ENTER_VALVE`, and a car
+    // drives onto a road that no longer exists because it waited 45 seconds.
+    expect(canEnter(r.state, r.world, 0, GHOST_CELL, DIR_E)).toBe(EnterOutcome.REFUSED_GHOST)
+
+    // Control, on the same rig with the same saturated counter and the same
+    // occupied slot: clear ONLY the ghost and the valve fires. So the refusal
+    // above is attributable to the ghost and to nothing else — the counter did
+    // saturate, the slot was taken, and the valve was armed and ready.
+    r.state.ghostMask[GHOST_CELL] = 0
+    expect(canEnter(r.state, r.world, 0, GHOST_CELL, DIR_E)).toBe(EnterOutcome.ENTER_VALVE)
+  })
+
   it('runMovement CANNOT produce a REFUSED_GHOST, and that is enumerated rather than argued', () => {
     // **The finding that corrects this milestone's own instructions.** Tasks 3
     // and 4 each recorded a labelled-inert mutant in `cars.ts` and named Task 5

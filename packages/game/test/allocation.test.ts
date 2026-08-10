@@ -1395,9 +1395,23 @@ function buildTickRig(seed: string): TickRig {
 
 /**
  * 32 cars on a SHORT corridor with the carpark in the middle of it, so trips
- * turn over fast: ~630 completed trips per 900 ticks, against 32 for the snake
- * rig above. Built for `completeTrip` density and nothing else — it is
- * rebuild-heavy by construction, because every arrival consumes a pin.
+ * turn over fast — **652 completed trips per `ARRIVAL_TICKS` = 2,600**, against
+ * 32 for the snake rig above. Built for `completeTrip` density and nothing else
+ * — it is rebuild-heavy by construction, because every arrival consumes a pin.
+ *
+ * **This said "~630 completed trips per 900 ticks" until M1d Task 9, which is
+ * the rig's PRE-BLOCKING figure and was contradicted by `ARRIVAL_TICKS`'s own
+ * doc comment 200 lines above.** That comment records the transition correctly:
+ * once `canEnter` began refusing entries in Task 3, throughput on this rig fell
+ * from ~630 per 900 ticks to **225**, which is why the window was lengthened to
+ * 2,600 rather than the vacuity floors being lowered. Re-measured at the close
+ * of the milestone: **224 per 900 ticks and 652 per 2,600** — the same rate,
+ * 0.249 vs 0.251 trips/tick.
+ *
+ * The stale figure cost real time, because 630 is *also* roughly what this rig
+ * completes over 2,600 blocked ticks, so "630" reads as current under one window
+ * and as pre-blocking under the other. Both the number and the window it is
+ * measured over are stated above for that reason.
  */
 function buildDenseTripRig(seed: string): DenseRig {
   const rows = Array.from({ length: DENSE_H }, () => '.'.repeat(DENSE_W))
@@ -1433,8 +1447,9 @@ function buildDenseTripRig(seed: string): DenseRig {
     drive(n: number) {
       let crossings = 0
       for (let i = 0; i < n; i++) {
-        // Topped up rather than waited out: `destPins` is a Uint8 and 630 trips
-        // would exhaust any single fill.
+        // Topped up rather than waited out: `destPins` is a Uint8 and the 652
+        // trips this rig turns over in an `ARRIVAL_TICKS` window would exhaust
+        // any single fill several times.
         if ((state.destPins[0] as number) < 60) state.destPins[0] = 255
         step(state, world, fields, scratch, noActions)
         for (let c = 0; c < state.carCell.length; c++) {
@@ -2022,30 +2037,6 @@ describe('the tick allocates nothing on the blocking path, measured', () => {
     // departure — so that is the margin that matters, and it is asserted here
     // rather than asserted about.
     expect(GHOST_BUDGET_BYTES_PER_EVENT * 2).toBeLessThan(10)
-  })
-
-  it('DOES report a sim/src allocation on the same rig, same scope, same predicate — the guard can fail', () => {
-    // The positive control, and it is the reason the two zeros above are
-    // evidence rather than an empty list. The clean profile resolves NOTHING at
-    // all under `packages/` — a genuinely allocation-free tick — so
-    // `assertScopeResolves` is the wrong liveness check here and would fire on
-    // success. This is the right one, and it is the delta-between-two-profiles
-    // idiom the draw control was rewritten into: the same rig, the same
-    // `offenders` predicate, the same `SIM_SRC` scope, plus one `snapshot()` per
-    // tick — a real `sim/src` allocator on a real production seam.
-    buildTickRig('tick-alloc-jit-warm-3').drive(JIT_WARMUP_TICKS)
-    const rig = buildTickRig('tick-alloc-control')
-    rig.drive(TICK_WARMUP)
-    let crossings = 0
-    const all = profileAllocations(() => {
-      for (let i = 0; i < PROFILED_TICKS; i++) {
-        crossings += rig.drive(1).crossings
-        snapshot(rig.state)
-      }
-    })
-    expect(crossings).toBeGreaterThan(1000)
-    const bad = offenders(all, PROFILED_TICKS, SIM_SRC, BUDGETS)
-    expect(bad.join('\n')).toMatch(/packages\/sim\/src\/state\.ts at \d/)
   })
 })
 

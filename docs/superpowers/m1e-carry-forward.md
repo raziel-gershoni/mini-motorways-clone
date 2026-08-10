@@ -292,14 +292,20 @@ quietly measure less*.
   keep `destPins` stable under assertion, so the pin timer is frozen. **Worth
   closing when M1e's authored spawn schedule lands** — this has now been carried
   forward twice.
-- **A duplicated test in `allocation.test.ts`.** Two `it()` blocks with the
-  *identical* name — `'DOES report a sim/src allocation on the same rig, same
-  scope, same predicate — the guard can fail'` — and identical bodies, one inside
-  the blocking-path `describe` and one at its foot. It reads as two independent
-  positive controls and is one. Found by Task 9, **not fixed by it**: deleting a
-  test in the milestone's final commit is exactly the move the catalogue's
-  "eleven tests left the repo unnoticed" entry warns against. **M1e should delete
-  one.**
+- **The refund ledger is BUDGET-EXACT, and this was open going into the review.**
+  The whole-milestone review ran 25,000 ticks with an erase/re-place cycle every
+  700 and found **`tiles + roadCells + ghostCells` constant at 9,999 throughout**,
+  with `valves=40`, `maxBlocked=1350`, `ghostTicks=8052`, no starvation, no
+  reservation mismatch and no wrap. So a deferred refund is never lost and never
+  double-paid — **only its TIMING can be early or late.** M1d's plan left the
+  exactness question to M1e; it is answered, and the tile-ledger identity is the
+  invariant to assert if anyone touches `settleErasedCell`, `payGhostRefund` or
+  `noteGhostDeparture`.
+- **The shipped long-run test never erases a road**, so the ghost path has no
+  long-horizon coverage *in the suite* — the 25,000-tick evidence above lives in a
+  review, not in a test. **M1e should fold the erase/re-place cycle into the
+  long-run test** and assert the tile-ledger identity there. A finding whose only
+  carrier is a report is the shape this project keeps getting bitten by.
 
 ---
 
