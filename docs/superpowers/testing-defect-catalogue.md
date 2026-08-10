@@ -132,3 +132,44 @@ pnpm -r --no-bail --filter './packages/*' --filter './tools/*' test
 **When a module's job is to refuse things, put the refusal REASON in its return type.** The catalogue's most-repeated family — "a negative assertion is only meaningful if the fixture disables every OTHER mechanism that produces the same observation", six instances on M1c alone — is normally fixed by fixture surgery, which does not scale and rots as branches are added. M2 Task 7 made the reason part of the signature instead: `PointerOutcome` has eight non-zero codes, five of which exist so a negative assertion can name *which* guard fired. `queue.length === 0` is satisfied by a tap that missed, a paused game, a second pointer, an ended drag, an off-grid sample and a repeated cell — six causes, one observable — and the enum separates all six at no runtime cost. Two codes are consumed by production, so it is not test-only scaffolding. **Rule of thumb: if a function has more than two ways to decline, the reason belongs in the signature, not in a comment.** It converts "something stopped it" into "this guard stopped it" for every test at once.
 
 An implementer inferred that destination-vs-destination overlap is *subsumed* by the Chebyshev spacing rule rather than needing its own check, stated the inference plainly, and flagged it. The reviewer checked all 4×4 orientation pairings and it held. Stating a load-bearing inference so someone can check it costs a sentence; the recurring failure is the same inference left silent. Cheap insurance, not distrust.
+
+## A handoff document can be complete in structure and still drop items
+
+M1d's final review enumerated eight items to carry into M1e. The carry-forward
+written from it had **eleven well-organised sections and 336 lines** — and two of
+the eight were absent. Not skimped: absent. The document read as thorough from
+every angle except the only one that mattered, whether each named item was in it.
+
+Both survivors were the ones with no code artefact to anchor them. The nine that
+landed each had a file, a constant or a golden to hang off. The two that vanished
+were *"routing and movement now disagree"* — a property of the gap **between** two
+components, owned by neither — and *"no human has seen the ghost art"*, which is
+an absence of evidence rather than a fact about code. **A handoff item with no
+home in the source is the one that evaporates**, and those are disproportionately
+the cross-cutting ones worth carrying.
+
+Checking cost one grep per item against the list. Do that before believing a
+handoff, and prefer a checklist of names over a reading of the prose: this
+document passed a reading.
+
+Related: [a signal that looks complete because the count is present]. Same shape
+one level up — there, a count without its items; here, a structure without them.
+
+## "Tested" and "looked at" are different claims, and only one has a test
+
+M1d shipped ghost-road rendering with 182 assertions across three render test
+files. Genuinely well covered — and **no human being has ever seen it.** The last
+device check was the close of M2, before ghosts existed.
+
+Inside those 182 assertions sit two pure aesthetic judgements: the ghost stroke is
+half the live road's width, and spec §6's 55-65 % width band was **deliberately
+ruled not to apply**, on the reasoning that the band governs roads and a ghost is
+the absence of one. The reasoning is sound. It is also the kind of call that can
+be perfectly self-consistent and still look like a rendering glitch on a phone,
+and **every assertion in the suite would stay green either way** — the tests pin
+that the code draws what it intended, never that the intention was right.
+
+When a milestone adds anything visual, the coverage number is not the relevant
+number. Ask when a person last looked, and if the answer predates the feature,
+say so in the same sentence as the coverage. On this project the honest form is
+"182 assertions, zero human minutes."
