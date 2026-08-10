@@ -292,3 +292,38 @@ file was missing from `git status` during a pre-commit sweep.
 So the check that actually works is not "did the count hold" but: **diff your expected file list
 against `git status` before quoting a green suite.** A test count detects deleted tests; it cannot
 detect deleted assertions inside surviving tests, and a restore step deletes whatever it reverts.
+
+## A harness's liveness check can be kept alive by the very defect it is measuring
+
+`allocation.test.ts` called `assertScopeResolves(all, SIM_SRC)` at four frame-rig sites — the guard
+that proves the profiler's scope is not blind. Every one of those four was satisfied **by the
+flow-field allocation itself**. When M1e Task 3 removed that allocation, the guard **failed 4 runs in
+5 — because the code got better.**
+
+That is the worst possible polarity for a liveness check: it is green exactly while a defect exists
+and goes red when the defect is fixed, so its signal is inverted relative to what anyone reads it as.
+Worse, the natural response to "my fix turned the harness red" is to assume the fix is wrong.
+
+The shape generalises past allocation. **Any check of the form "the instrument can see something
+here" must be satisfied by something that will still be there after the work succeeds.** A liveness
+guard anchored to the subject under repair is a guard with an expiry date nobody wrote down.
+
+The fix used here was to repoint the guard at a scope that is structurally always populated — which
+the file's own tick-rig control had already concluded independently, meaning the right answer was
+sitting in the same file.
+
+## Bytes-per-frame is the wrong denominator for gated work, and there is a free right one
+
+Task 2's reviewer found the allocation harness **structurally cannot see week-gated work**: an
+escaping object inside a boundary-gated branch leaves the suite green, because a handful of events
+across thousands of driven frames lands under the 4 B/frame floor *by construction*. Not a tuning
+problem — an arithmetic one.
+
+Task 3 closed it. **Divide by the event count, not the frame count.** `scratch.counters` is already a
+cumulative, allocation-free event counter; reading it either side of a profiled window converted
+18 B/frame into **142 B/call** on the flow field. A week boundary firing 8 times in 3,000 frames is
+0.1 B/frame — invisible — but ~40 B/boundary, which is a 10× signal against any sane budget.
+
+So: for anything that does not run every frame, **one counter per gated branch and a per-event
+budget**, with the per-event floor measured under the real event rate before it is trusted. A
+per-frame budget on gated work is not a weak test; it is a guaranteed pass.
