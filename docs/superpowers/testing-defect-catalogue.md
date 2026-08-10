@@ -8,6 +8,12 @@ It outlived its original filename (`m1c-carry-forward.md`): the shapes are miles
 
 ## Process
 
+**Never run two implementers at once. They share the main checkout; only reviewers get worktrees.**
+
+This was violated once, knowingly, to parallelise a fix round against the next task. The consequence: one agent's verification came back **red with 48 failures in a package it had never opened**, because the other was mid-mutation-battery on a shared source file at that moment. The tree was restored before either looked at `git status`, so the evidence was gone by the time it was examined. It was caught only because the failure count was implausible for the change — **and had the stray mutation landed in the package that agent was actually editing, it would have read as its own regression.** A mutation battery makes the working tree transiently wrong by design; two of them interleaved make every measurement in both untrustworthy and leave no trace. Before quoting any suite-wide number, check `git status` for strays and source mtimes against your own last write.
+
+
+
 Plan first, then **adversarially review the plan before executing it**. M0 and M1a ran plan → execute → review, and every substantive defect in both was a plan defect. M1b's pre-execution review returned 9 Critical for the cost of one review — two of which produce green tests and execution would never have caught.
 
 Every task mutation-tests its own tests, **and confirms each mutant actually executed** — a crash count reads exactly like a kill count. For each behaviour, record the one-line change that makes its test fail, and where you cannot construct one, say so — that answer is useful.
