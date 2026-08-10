@@ -173,3 +173,39 @@ When a milestone adds anything visual, the coverage number is not the relevant
 number. Ask when a person last looked, and if the answer predates the feature,
 say so in the same sentence as the coverage. On this project the honest form is
 "182 assertions, zero human minutes."
+
+## A milestone can pass every gate it has and still change nothing a player can see
+
+M1d shipped correct, tested (1,487 tests), reviewed at 0 Critical, and deployed with the artefact
+verified byte-for-byte against the local build. Then the user opened it and said it looked like the
+same demo. **They were right.** Instrumenting `canEnter` at its only call site, on the exact
+production boot, over 200,000 ticks — 1 h 51 m of play — gives `REFUSED_OCCUPIED = 0`,
+`ENTER_VALVE = 0`, ticks with a blocked car `= 0`. Not rare. **Never.** The milestone's headline
+feature cannot fire on the board that ships.
+
+The cause is arithmetic, not code: `PIN_PERIOD_TICKS = 518` with two slots per colour is one pin per
+colour per 259 ticks, against a ~60-tick round trip. **Service is 4.3x faster than arrival**, so a
+second car of a colour is never wanted, and the population is frozen at 6 by construction —
+`placeHouse` has one caller, before tick 1, and no shipped control can add a car.
+
+**The number that explains this was in the plan before Task 1 was written**, and in the plan review:
+*"maxActive = 1 … six cars and no spawner."* Both filed it under **"What this plan does not settle"**
+— an epistemic footnote — rather than treating it as a scope decision. And every observability
+criterion M1d had was machine-side: assert a jam *on a purpose-built bottleneck fixture*, assert
+per-branch counters non-zero *on that same fixture*, grep the served bundle for a build token.
+**All three are satisfiable by a build no human can distinguish from the previous one.** All three
+passed.
+
+M2 did not have this hole — its plan opens with *"draw a road with your finger, watch a car take it,
+see the score tick"* and treats an invisible playfield edge as an input defect rather than a styling
+one. **The observability lens existed one milestone earlier and was dropped.**
+
+So: every milestone that changes behaviour needs one acceptance criterion phrased as *what a human
+will see, on the board that ships, without being told where to look.* If the honest answer is
+"nothing", that is a legitimate milestone — but it must be **said out loud at plan time**, not
+discovered by the user. A test fixture built to exhibit a feature proves the feature exists; it
+proves nothing about whether the shipped configuration can reach it.
+
+Related: [tested and looked-at are different claims]. That entry is this one at feature scale; this
+is the milestone-scale version, and it is worse, because here the tests were not merely silent about
+the player — they were passing *on inputs the player cannot produce*.
