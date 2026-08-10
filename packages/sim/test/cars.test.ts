@@ -14,6 +14,8 @@ import {
   type MapData,
 } from '@laneways/shared'
 import { createState, snapshot, restore, hashState, H_TILES, type GameState } from '../src/state'
+import { hashBytes } from '../src/hash'
+import { m1eInsertedRanges, spliceM1eInsertions } from './m1eSplice'
 import { createWorld, type WorldData } from '../src/world'
 import { createFlowFields } from '../src/scratch'
 import { packRouteStep, routeStep, ROUTE_BYTES } from '../src/dispatch'
@@ -1786,8 +1788,25 @@ describe('golden replay: a route through every lane-speed multiplier (M1d Task 7
     // route turns at eight of its ten cells. It moves for any change to the
     // multiplier set, the turn classification, the intersection degree
     // threshold, the averaging rule, or which cell each term is read from.
+    //
+    // **Re-blessed once, in M1e Task 1 (was 3113654132 at M1d Task 7), and in
+    // no other task of the milestone.** PURE LAYOUT, proved by an exact byte
+    // splice (`m1eSplice.ts`): removing the two inserted ranges — 16 B of new
+    // header slots at offset 52 and 148 B of new regions at offset 1,676, both
+    // MID-BUFFER — reproduces 3113654132 bit-for-bit with no slot zeroed.
+    // `createState`'s two initial timer writes land inside those ranges, so
+    // there is no behavioural term. Offsets are FOR THIS FIXTURE: 20x12 with
+    // groupCount 5 and maxDestinations 16, whole buffer 8,068 -> 8,232 B. This
+    // fixture runs 110 ticks, inside week 0 and below the first spawn attempt,
+    // so nothing behavioural in M1e can reach it.
     // ---------------------------------------------------------------------
-    expect(hashState(state)).toBe(3113654132)
+    const m1e = m1eInsertedRanges(world.map)
+    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 1676, 1824])
+    const spliced = spliceM1eInsertions(state, world.map)
+    expect(spliced.length, "the splice must land on M1d's buffer size").toBe(8068)
+    expect(m1e.totalBytes).toBe(8232)
+    expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(3113654132)
+    expect(hashState(state)).toBe(1531344761)
   })
 })
 

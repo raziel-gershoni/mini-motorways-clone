@@ -1,4 +1,9 @@
-import { CARS_PER_HOUSE, type MapData } from '@laneways/shared'
+import {
+  CARS_PER_HOUSE,
+  DEST_SPAWN_PERIOD_TICKS,
+  HOUSE_SPAWN_PERIOD_TICKS,
+  type MapData,
+} from '@laneways/shared'
 import { seedFromString } from './rng'
 import { hashBytes } from './hash'
 import { computeLayout, type RegionCtor } from './layout'
@@ -51,6 +56,16 @@ import { assertWorldMatches, mapIdHash, type WorldData } from './world'
  *   H_PINS_DROPPED   6  pins dropped: every same-colour dest capped     M1c
  *   H_ROUTES_REFUSED 7  dispatch route walks refused (too long/zero)   M1c
  *   H_EPOCH          8  tick-in-progress marker; see "Atomicity" below  M1c
+ *   H_GAME_OVER      9  0 while live, 1 once a destination timer filled M1e
+ *   H_FAILED_DEST   10  which destination that was; read via the guard    M1e
+ *   H_DEST_SPAWN_TIMER   11  ticks to the next destination attempt        M1e
+ *   H_SPAWN_COLOUR_CURSOR 12 round-robin colour cursor for spawning       M1e
+ *
+ * **The four M1e slots are declared in Task 1 and nothing reads them yet.**
+ * Two of them are FUNCTIONALLY PAIRED and must not be read apart:
+ * `H_FAILED_DEST` is only meaningful while `H_GAME_OVER` is 1, so
+ * `failedDestination` below is the only correct reader — the slot is
+ * zero-initialised and 0 is a real destination index.
  *
  * `H_TILES` stays in the mutable `header`, not `mapIdentity`: `placeRoad`/
  * `eraseRoad` write it, and it must not be a field input (M1e's upgrade
@@ -112,7 +127,20 @@ export const H_DEST_COUNT = 5
 export const H_PINS_DROPPED = 6
 export const H_ROUTES_REFUSED = 7
 export const H_EPOCH = 8
-export const HEADER_LENGTH = 9
+/** 0 while the run is live; 1 once a destination's overcrowd timer completed (spec §5.8). */
+export const H_GAME_OVER = 9
+/**
+ * The destination whose timer completed. Meaningful ONLY when `H_GAME_OVER` is
+ * 1, which is why every reader goes through `failedDestination` below rather
+ * than reading the slot: zero-initialised, this names destination 0, and a
+ * live run must not be able to answer "which destination killed you".
+ */
+export const H_FAILED_DEST = 10
+/** Ticks until the next destination spawn attempt (spawn.ts). Initialised in `createState`. */
+export const H_DEST_SPAWN_TIMER = 11
+/** Round-robin cursor over colours for destination spawning (spawn.ts). */
+export const H_SPAWN_COLOUR_CURSOR = 12
+export const HEADER_LENGTH = 13
 
 export const MI_MAP = 0
 export const MI_MAP_W = 1
@@ -164,6 +192,25 @@ export interface GameState {
   readonly carCell: Int32Array
   readonly carProgress: Int32Array
   readonly carTargetDest: Int32Array
+  /**
+   * Ticks until the next house-spawn attempt for colour `c`, counting DOWN
+   * from `HOUSE_SPAWN_PERIOD_TICKS` — M1e Task 1 declares the shape and the
+   * initial value, Task 5 gives it its semantics. Per COLOUR, not per house:
+   * §5.9's interval is "between same-group house spawns".
+   */
+  readonly houseSpawnTimer: Int32Array
+  /**
+   * The integrated overcrowd meter per destination, in MILLI-TICKS (spec
+   * §5.8). Declared in M1e Task 1, written by Task 3. `Int32` because the
+   * failure threshold is 2,640,000; `regions.ts` records why that is
+   * arithmetic rather than taste.
+   */
+  readonly destOvercrowd: Int32Array
+  /**
+   * Consecutive ticks destination `d` has been at or over its timer capacity,
+   * driving §5.8's ramp. Saturates, exactly as `carBlockedTicks` does.
+   */
+  readonly destOverTicks: Int32Array
   readonly carRouteLen: Int16Array
   readonly carRouteCursor: Int16Array
   /**
@@ -219,6 +266,9 @@ const REGION_FIELD_NAMES = Object.freeze([
   'carCell',
   'carProgress',
   'carTargetDest',
+  'houseSpawnTimer',
+  'destOvercrowd',
+  'destOverTicks',
   'carRouteLen',
   'carRouteCursor',
   'occupancy',
@@ -263,6 +313,9 @@ function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
   const carCell = views.get('carCell')
   const carProgress = views.get('carProgress')
   const carTargetDest = views.get('carTargetDest')
+  const houseSpawnTimer = views.get('houseSpawnTimer')
+  const destOvercrowd = views.get('destOvercrowd')
+  const destOverTicks = views.get('destOverTicks')
   const carRouteLen = views.get('carRouteLen')
   const carRouteCursor = views.get('carRouteCursor')
   const occupancy = views.get('occupancy')
@@ -290,6 +343,9 @@ function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
     !(carCell instanceof Int32Array) ||
     !(carProgress instanceof Int32Array) ||
     !(carTargetDest instanceof Int32Array) ||
+    !(houseSpawnTimer instanceof Int32Array) ||
+    !(destOvercrowd instanceof Int32Array) ||
+    !(destOverTicks instanceof Int32Array) ||
     !(carRouteLen instanceof Int16Array) ||
     !(carRouteCursor instanceof Int16Array) ||
     !(occupancy instanceof Int16Array) ||
@@ -322,6 +378,9 @@ function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
     carCell,
     carProgress,
     carTargetDest,
+    houseSpawnTimer,
+    destOvercrowd,
+    destOverTicks,
     carRouteLen,
     carRouteCursor,
     occupancy,
@@ -356,7 +415,15 @@ export function nonZeroWord(v: number): number {
 
 /**
  * A fresh `GameState` is all-zero in every region except `rng`,
- * `mapIdentity`, `header[H_TILES]` — and, as of M1d Task 2, `occupancy`.
+ * `mapIdentity`, `header[H_TILES]`, `occupancy` (M1d Task 2) — and, as of M1e
+ * Task 1, `header[H_DEST_SPAWN_TIMER]` and `houseSpawnTimer`.
+ *
+ * **The two M1e timers do not weaken the "byte-identical from-scratch" property
+ * below**: both are unconditional writes of a compile-time constant, so two
+ * fresh states of the same shape still agree byte for byte. What they do change
+ * is that "a building-free state is all-zero outside three named places" is now
+ * "outside five", and `state.test.ts` enumerates all five rather than letting
+ * the list rot.
  *
  * **`occupancy` is the ONE region that carries a `-1` sentinel at creation**,
  * and it is not an exception to the liveness convention below: every LIVENESS
@@ -392,6 +459,18 @@ export function createState(seed: string, map: MapData): GameState {
   s.header[H_TILES] = map.startingTiles
   // Lifecycle event 1 (blocking.ts): a whole-region fill, never a prefix.
   s.occupancy.fill(FREE)
+  // M1e Decision 9. A zero timer means "fire now", so without these the very
+  // first tick of every run attempts a destination spawn and one house spawn
+  // per colour. Written here beside `H_TILES` for the same reason: these are
+  // the initial values of the declared shape, not behaviour.
+  //
+  // **Both writes land INSIDE the bytes this task inserts** — `H_DEST_SPAWN_TIMER`
+  // is one of the four new header slots and `houseSpawnTimer` is one of the
+  // three new regions — which is what makes the re-bless proof
+  // (`test/m1eSplice.ts`) an exact byte splice with no correction term. See
+  // Decision 9.
+  s.header[H_DEST_SPAWN_TIMER] = DEST_SPAWN_PERIOD_TICKS
+  s.houseSpawnTimer.fill(HOUSE_SPAWN_PERIOD_TICKS)
   return s
 }
 
@@ -437,6 +516,24 @@ export function restore(buffer: ArrayBuffer, world: WorldData): GameState {
 
 export function hashState(s: GameState): number {
   return hashBytes(s.bytes)
+}
+
+/**
+ * True once a destination's overcrowd timer completed. `step` returns
+ * immediately while it holds — M1e Task 8 wires that; **Task 1 declares the
+ * slot and this reader and nothing calls either yet.**
+ */
+export function isGameOver(s: GameState): boolean {
+  return (s.header[H_GAME_OVER] as number) !== 0
+}
+
+/**
+ * The destination that ended the run, or -1 while it is live. Guarded rather
+ * than exposed raw: `H_FAILED_DEST` is zero-initialised, so an unguarded read
+ * during a live run names destination 0 with total confidence.
+ */
+export function failedDestination(s: GameState): number {
+  return isGameOver(s) ? (s.header[H_FAILED_DEST] as number) : -1
 }
 
 /**

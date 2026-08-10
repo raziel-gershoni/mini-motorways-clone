@@ -13,12 +13,16 @@ import { parseMap, type MapData } from '../mapFormat'
  * `mapIdHash` (`packages/sim/src/world.ts`) folds `id`, `w`, `h`,
  * `startingTiles`, `maxHouses`, `maxDestinations`, `groupCount` and every
  * terrain byte into `mapIdentity[MI_MAP]`, which lives in the state buffer. So
- * changing ONE integer on `firstCity` moves the state golden `340556353`, the
- * road-network golden `2076760277`, the loop golden `2942219448` and the seed
- * golden `1178110182` at once — the trap
+ * changing ONE integer on `firstCity` moves the state golden `3507307907`, the
+ * road-network golden `2312109239`, the loop golden `3806414869` and the seed
+ * golden `968680755` at once — the trap
  * `docs/superpowers/plans/2026-08-04-m2-playable-renderer.md:20` records. A new
  * file, a new `id`, and `firstCity` untouched byte-for-byte is the only shape
  * that leaves all seven goldens where they are.
+ *
+ * (Those four were `340556353`, `2076760277`, `2942219448` and `1178110182`
+ * until M1e Task 1 re-blessed every whole-buffer golden for pure layout. The
+ * numbers move; the trap does not.)
  *
  * `maxDestinations` is the field that forced the issue rather than a
  * preference: the demo needs **18** circle destinations to generate enough

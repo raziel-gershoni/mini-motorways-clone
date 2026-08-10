@@ -43,6 +43,10 @@ import {
   type TickAction,
   type WorldData,
 } from '@laneways/sim'
+import { hashBytes } from '@laneways/sim'
+// See the note on the same import in `startingCity.test.ts`: one shared M1e
+// re-bless proof rather than a second copy of the splice.
+import { m1eInsertedRanges, spliceM1eInsertions } from '../../sim/test/m1eSplice'
 import {
   DEMO_DESTINATIONS,
   DEMO_HOUSES,
@@ -467,11 +471,31 @@ describe('the demo-layout golden', () => {
     expect(state.header[H_DEST_COUNT] as number).toBe(18)
     expect(state.header[H_HOUSE_COUNT] as number).toBe(12)
     expect(state.ghostMask.every((b) => b === 0), 'the seed erases nothing').toBe(true)
-    // Minted here, in this task. It is the ONLY new golden: the post-warm-start
-    // state deliberately gets none, because a demo layout gets tuned and a
-    // golden re-blessed on every tune stops being a tripwire. The behaviour
-    // after the warm start is pinned as inequalities below instead.
-    expect(hashState(state)).toBe(1039862014)
+    // Minted in M2's demo-board task. It is the ONLY new golden there: the
+    // post-warm-start state deliberately gets none, because a demo layout gets
+    // tuned and a golden re-blessed on every tune stops being a tripwire. The
+    // behaviour after the warm start is pinned as inequalities below instead.
+    //
+    // **Re-blessed once, in M1e Task 1 (was 1039862014), and in no other task
+    // of the milestone** — it is taken immediately after `seedDemoLayout`,
+    // before any tick, so nothing behavioural M1e adds can reach it.
+    //
+    // **PURE LAYOUT, proved by an exact byte splice** (`m1eSplice.ts`).
+    // Removing the two inserted ranges — 16 B of new header slots at offset 52
+    // and 156 B of new regions at offset 668, both MID-BUFFER — reproduces
+    // 1039862014 bit-for-bit with no slot zeroed. `createState`'s two initial
+    // timer writes land inside those ranges, so there is no behavioural term.
+    // Offsets are FOR `demoCity`, and this is the one fixture whose block B is
+    // NOT 148 B: the demo has groupCount 3 and maxDestinations 18 against
+    // `firstCity`'s 5 and 16, so `(3 + 18 + 18) * 4 = 156`. Quoting
+    // `startingCity.test.ts`'s figures here would be a fabricated derivation.
+    const m1e = m1eInsertedRanges(demoCity())
+    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 668, 824])
+    const spliced = spliceM1eInsertions(state, demoCity())
+    expect(spliced.length, "the splice must land on M1d's buffer size").toBe(9720)
+    expect(m1e.totalBytes).toBe(9892)
+    expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(1039862014)
+    expect(hashState(state)).toBe(3152640907)
   })
 
   it('differs from an unseeded demoCity — otherwise the golden pins nothing', () => {
@@ -481,17 +505,22 @@ describe('the demo-layout golden', () => {
     )
   })
 
-  it('leaves the shipped seed golden 1178110182 exactly where it was', () => {
-    // In the SAME file and the same run as the new golden, deliberately: the
-    // one thing this whole task must not do is move an existing number.
+  it('leaves the shipped seed golden 968680755 exactly where it was', () => {
+    // In the SAME file and the same run as the demo golden, deliberately: the
+    // one thing a demo-board change must not do is move the CITY's number.
     // `startingCity.test.ts:237` fixes the seed this golden was blessed under;
     // it is 'm2-starting-city', NOT `RUN_SEED`, and the RNG state is inside the
     // hashed buffer, so the wrong seed here reads as a moved golden.
+    //
+    // Re-blessed in M1e Task 1 (was 1178110182) for the same pure-layout reason
+    // as its owner in `startingCity.test.ts`. Deliberately NOT given a splice
+    // proof of its own: this is a duplicate of that golden, and the proof lives
+    // once, beside the assertion that owns the number.
     const map = firstCity()
     const world = createWorld(map)
     const state = createState('m2-starting-city', map)
     seedStartingCity(state, world)
-    expect(hashState(state)).toBe(1178110182)
+    expect(hashState(state)).toBe(968680755)
   })
 })
 

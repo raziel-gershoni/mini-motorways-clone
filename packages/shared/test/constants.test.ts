@@ -14,6 +14,7 @@ import {
   REVEALED_X0, REVEALED_Y0, REVEALED_W, REVEALED_H,
   MAX_GROUP_COUNT, MAX_PATH_LEN,
   COST_UNIT_SCALE, CAR_SPEED_UNITS_PER_TICK,
+  MS_PER_SECOND, DESTINATIONS_PER_WEEK, DEST_SPAWN_PERIOD_TICKS, HOUSE_SPAWN_PERIOD_TICKS,
 } from '../src/index'
 import * as C from '../src/index'
 
@@ -234,5 +235,56 @@ describe('rule constants', () => {
     expect(rampSeconds).toBeCloseTo(50, 6)
     expect(accruedWhileRamping).toBeCloseTo(25, 6)
     expect(rampSeconds + remaining).toBeCloseTo(115, 6)
+  })
+
+  it('derives both M1e spawn cadences through the clock, at the intervals §5.9 states', () => {
+    // M1e Task 1. Both are conversions, and the conversion belongs in
+    // `constants.ts` and nowhere else — the same rule `FIRST_PIN_DELAY_TICKS`
+    // and `MAX_BLOCKED_TICKS` already follow.
+    expect(HOUSE_SPAWN_PERIOD_TICKS).toBe(10 * TICKS_PER_SECOND)
+    expect(HOUSE_SPAWN_PERIOD_TICKS).toBe(300)
+    expect(HOUSE_SPAWN_PERIOD_TICKS / TICKS_PER_SECOND).toBe(10) // reads back as §5.9's 10 s, exactly
+    expect(DESTINATIONS_PER_WEEK).toBe(2)
+    expect(DEST_SPAWN_PERIOD_TICKS).toBe(TICKS_PER_WEEK / DESTINATIONS_PER_WEEK)
+    expect(DEST_SPAWN_PERIOD_TICKS).toBe(2250)
+    // A period that is not a whole number of ticks would be silently truncated
+    // by the countdown and drift the schedule against the week — the exact
+    // failure `TICKS_PER_DAY` is 0 to prevent. `DESTINATIONS_PER_WEEK` must
+    // therefore divide the week.
+    expect(TICKS_PER_WEEK % DESTINATIONS_PER_WEEK).toBe(0)
+    expect(Number.isInteger(DEST_SPAWN_PERIOD_TICKS)).toBe(true)
+    // Both are the initial value of a countdown `createState` arms, so a zero
+    // or negative period means every spawner fires on tick 1 forever.
+    expect(HOUSE_SPAWN_PERIOD_TICKS).toBeGreaterThan(0)
+    expect(DEST_SPAWN_PERIOD_TICKS).toBeGreaterThan(0)
+    // They are different cadences and must stay so: a house attempt is 15x more
+    // frequent than a destination attempt, which is what makes one a per-colour
+    // trickle and the other a weekly event.
+    expect(DEST_SPAWN_PERIOD_TICKS).toBeGreaterThan(HOUSE_SPAWN_PERIOD_TICKS)
+  })
+
+  it('derives both spawn cadences from the clock rather than storing the products', () => {
+    // Same idiom as the MAX_BLOCKED_TICKS scan above, and for the same reason:
+    // `toBe(10 * TICKS_PER_SECOND)` is satisfied by a bare 300 just as happily.
+    const src = readFileSync(new URL('../src/constants.ts', import.meta.url), 'utf8')
+    expect(src).toMatch(/export const HOUSE_SPAWN_PERIOD_TICKS = 10 \* TICKS_PER_SECOND/)
+    expect(src).not.toMatch(/export const HOUSE_SPAWN_PERIOD_TICKS = 300/)
+    expect(src).toMatch(
+      /export const DEST_SPAWN_PERIOD_TICKS = TICKS_PER_WEEK \/ DESTINATIONS_PER_WEEK/,
+    )
+    expect(src).not.toMatch(/export const DEST_SPAWN_PERIOD_TICKS = 2250/)
+    // Vacuity: the scan is reading the real file, not an empty string.
+    expect(src).toMatch(/export const TICKS_PER_WEEK = TICKS_PER_SECOND \* SECONDS_PER_WEEK/)
+  })
+
+  it('names the millisecond conversion so a /1000 cannot be misread as DENOM', () => {
+    // MS_PER_SECOND and DENOM are both 1000 and mean entirely different things.
+    // Asserted as equal-and-distinct on purpose: the day one of them changes,
+    // every `/ 1000` in the codebase has to be re-read, and this is where that
+    // is noticed.
+    expect(MS_PER_SECOND).toBe(1000)
+    expect(MS_PER_SECOND).toBe(DENOM) // true today, and not a definition
+    expect(MAX_OVERCROWD_TIME_MS / MS_PER_SECOND).toBe(90) // spec §5.8's bare "90", read back
+    expect(OVERCROWD_GRACE_MS / MS_PER_SECOND).toBe(2)
   })
 })

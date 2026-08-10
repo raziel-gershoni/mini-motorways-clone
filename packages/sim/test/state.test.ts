@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { parseMap, CARS_PER_HOUSE, MAX_PATH_LEN } from '@laneways/shared'
+import {
+  parseMap,
+  CARS_PER_HOUSE,
+  MAX_PATH_LEN,
+  DEST_SPAWN_PERIOD_TICKS,
+  HOUSE_SPAWN_PERIOD_TICKS,
+} from '@laneways/shared'
 import {
   createState,
   snapshot,
@@ -16,7 +22,13 @@ import {
   H_PINS_DROPPED,
   H_ROUTES_REFUSED,
   H_EPOCH,
+  H_GAME_OVER,
+  H_FAILED_DEST,
+  H_DEST_SPAWN_TIMER,
+  H_SPAWN_COLOUR_CURSOR,
   HEADER_LENGTH,
+  isGameOver,
+  failedDestination,
   MI_MAP,
   MI_MAP_W,
   MI_MAP_H,
@@ -27,6 +39,7 @@ import { computeLayout } from '../src/layout'
 import { createWorld, mapIdHash } from '../src/world'
 import { LANE_COUNT } from '../src/roads'
 import { FREE } from '../src/blocking'
+import { regionsFor } from '../src/regions'
 
 /**
  * A small non-square (w=5, h=3) fixture map, shared across this file. Not
@@ -264,6 +277,9 @@ describe('view layout wiring', () => {
     { name: 'carCell', ctor: Int32Array, len: maxCars },
     { name: 'carProgress', ctor: Int32Array, len: maxCars },
     { name: 'carTargetDest', ctor: Int32Array, len: maxCars },
+    { name: 'houseSpawnTimer', ctor: Int32Array, len: MAP.groupCount },
+    { name: 'destOvercrowd', ctor: Int32Array, len: MAP.maxDestinations },
+    { name: 'destOverTicks', ctor: Int32Array, len: MAP.maxDestinations },
     { name: 'carRouteLen', ctor: Int16Array, len: maxCars },
     { name: 'carRouteCursor', ctor: Int16Array, len: maxCars },
     { name: 'occupancy', ctor: Int16Array, len: cells * LANE_COUNT },
@@ -296,6 +312,9 @@ describe('view layout wiring', () => {
       carCell: s.carCell,
       carProgress: s.carProgress,
       carTargetDest: s.carTargetDest,
+      houseSpawnTimer: s.houseSpawnTimer,
+      destOvercrowd: s.destOvercrowd,
+      destOverTicks: s.destOverTicks,
       carRouteLen: s.carRouteLen,
       carRouteCursor: s.carRouteCursor,
       occupancy: s.occupancy,
@@ -374,20 +393,75 @@ describe('the new M1c header slots exist and start at 0', () => {
     expect(s.header[H_ROUTES_REFUSED]).toBe(0)
   })
 
-  it('HEADER_LENGTH is exactly 9 — one slot per named constant, in order 0..8', () => {
-    expect(HEADER_LENGTH).toBe(9)
-    expect([H_TICK, H_SCORE, H_WEEK, H_TILES, H_HOUSE_COUNT, H_DEST_COUNT, H_PINS_DROPPED, H_ROUTES_REFUSED, H_EPOCH]).toEqual([
-      0, 1, 2, 3, 4, 5, 6, 7, 8,
-    ])
+  it('HEADER_LENGTH is exactly 13 — one slot per named constant, in order 0..12', () => {
+    // Re-derived in M1e Task 1 (was 9, slots 0..8). The point of this test is
+    // that the header has no unnamed slots and no gaps: a header grown by
+    // bumping the length without declaring a constant is bytes in every
+    // golden that nothing can ever read, and the digest cannot tell you.
+    expect(HEADER_LENGTH).toBe(13)
+    expect([
+      H_TICK, H_SCORE, H_WEEK, H_TILES, H_HOUSE_COUNT, H_DEST_COUNT, H_PINS_DROPPED,
+      H_ROUTES_REFUSED, H_EPOCH, H_GAME_OVER, H_FAILED_DEST, H_DEST_SPAWN_TIMER,
+      H_SPAWN_COLOUR_CURSOR,
+    ]).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
   })
 })
 
-describe('a building-free fresh state is all-zero outside rng/mapIdentity/header[H_TILES]/occupancy', () => {
+describe('the M1e Task 1 header slots and the two guarded readers', () => {
+  it('a fresh state is live, names no failed destination, and arms both spawn timers', () => {
+    const s = createState('m1e-shape', MAP)
+    expect(isGameOver(s)).toBe(false)
+    // Not `s.header[H_FAILED_DEST]`: the slot is 0, which is a real
+    // destination index. The guarded reader is the only correct one.
+    expect(failedDestination(s)).toBe(-1)
+    expect(s.header[H_DEST_SPAWN_TIMER]).toBe(DEST_SPAWN_PERIOD_TICKS)
+    expect(s.header[H_SPAWN_COLOUR_CURSOR]).toBe(0)
+    expect(Array.from(s.houseSpawnTimer)).toEqual(
+      new Array(MAP.groupCount).fill(HOUSE_SPAWN_PERIOD_TICKS),
+    )
+    // Vacuity: a timer armed to 0 is the "fire on tick 1" bug the writes exist
+    // to prevent, and `toEqual([0,0,...])` would look just as deliberate.
+    expect(DEST_SPAWN_PERIOD_TICKS).toBeGreaterThan(0)
+    expect(HOUSE_SPAWN_PERIOD_TICKS).toBeGreaterThan(0)
+    expect(s.houseSpawnTimer.length).toBe(MAP.groupCount)
+    // The two meters are NOT armed — they are counters from zero, and a
+    // non-zero one would mean every destination starts part-way to killing you.
+    expect(Array.from(s.destOvercrowd).every((v) => v === 0)).toBe(true)
+    expect(Array.from(s.destOverTicks).every((v) => v === 0)).toBe(true)
+  })
+
+  it('failedDestination reports the slot only once the run is over', () => {
+    const s = createState('m1e-shape-over', MAP)
+    s.header[H_FAILED_DEST] = 3
+    expect(failedDestination(s), 'a live run must not answer this').toBe(-1)
+    s.header[H_GAME_OVER] = 1
+    expect(failedDestination(s)).toBe(3)
+    expect(isGameOver(s)).toBe(true)
+  })
+
+  it('isGameOver treats any non-zero as over, not only 1', () => {
+    // `!== 0`, not `=== 1`. Nothing writes anything but 1 today; the reader is
+    // written so that a future writer storing a reason code cannot silently
+    // turn a dead city back into a live one.
+    const s = createState('m1e-shape-nonzero', MAP)
+    s.header[H_GAME_OVER] = 7
+    expect(isGameOver(s)).toBe(true)
+    expect(failedDestination(s)).toBe(0) // the slot, unset — and now meaningful
+  })
+})
+
+describe('a building-free fresh state is all-zero outside rng/mapIdentity/header/occupancy/houseSpawnTimer', () => {
   // The property every unchanged-goldens assertion depends on: every region is
   // zero-initialised except `occupancy`, which M1d Task 2 fills with `FREE =
   // -1` (a zero-filled occupancy region would read as "car 0 occupies every
-  // lane of every cell"). The exception is named in the title and asserted
-  // separately below rather than being quietly dropped from the list.
+  // lane of every cell"), and `houseSpawnTimer`, which M1e Task 1 arms with
+  // `HOUSE_SPAWN_PERIOD_TICKS` (a zero countdown means "fire on tick 1"). Both
+  // exceptions are named in the title and asserted separately below rather
+  // than being quietly dropped from the list.
+  //
+  // The list below is deliberately EVERY region that must be zero, checked by
+  // name against `REGION_FIELD_NAMES` in the last test of this block — a
+  // silently short list is how a new region gets no coverage at all.
   it('every car/house/destination region reads back as all zero on a fresh state', () => {
     const s = createState('all-zero-fresh', MAP)
     const regions: readonly (Int32Array | Int16Array | Uint8Array)[] = [
@@ -411,6 +485,13 @@ describe('a building-free fresh state is all-zero outside rng/mapIdentity/header
       s.destReserved,
       s.carPhase,
       s.carRoute,
+      s.ghostMask,
+      s.ghostCommitted,
+      // M1e Task 1: the two meters start at zero. `houseSpawnTimer` is the
+      // third new region and is deliberately NOT here — it is armed, and the
+      // exception is asserted by name below.
+      s.destOvercrowd,
+      s.destOverTicks,
     ]
     for (const region of regions) {
       expect(Array.from(region).every((v) => v === 0)).toBe(true)
@@ -426,5 +507,34 @@ describe('a building-free fresh state is all-zero outside rng/mapIdentity/header
     // makes the whole board unenterable, and `every(v => v === FREE)` above is
     // the only thing standing between it and a green suite.
     expect(Array.from(s.occupancy).some((v) => v === 0)).toBe(false)
+  })
+
+  it('houseSpawnTimer is the OTHER exception: every slot is armed and not one reads 0', () => {
+    const s = createState('all-armed-fresh', MAP)
+    expect(s.houseSpawnTimer.length).toBe(MAP.groupCount)
+    expect(Array.from(s.houseSpawnTimer).every((v) => v === HOUSE_SPAWN_PERIOD_TICKS)).toBe(true)
+    // Same construction as `occupancy`'s second assertion: 0 is a MEANINGFUL
+    // value in this region ("fire this tick"), so "not zero-filled" is its own
+    // claim rather than a corollary of the one above.
+    expect(Array.from(s.houseSpawnTimer).some((v) => v === 0)).toBe(false)
+  })
+
+  it('the zero list above covers every region that is not one of the five named exceptions', () => {
+    // The catalogue's "a hand-maintained registry only checks what somebody
+    // remembered to add". The two lists above are hand-written; this derives
+    // the same partition from the layout table and fails if a future region is
+    // declared and then left out of both.
+    const s = createState('zero-list-complete', MAP)
+    const ARMED = new Set(['rng', 'mapIdentity', 'header', 'occupancy', 'houseSpawnTimer'])
+    const views = s as unknown as Record<string, Int32Array | Int16Array | Uint8Array | Uint32Array>
+    for (const e of computeLayout(regionsFor(MAP)).entries) {
+      if (ARMED.has(e.name)) continue
+      const view = views[e.name]
+      expect(view, `no view for region "${e.name}"`).toBeDefined()
+      expect(
+        Array.from(view!).every((v) => v === 0),
+        `region "${e.name}" is not zero on a fresh state and is not a declared exception`,
+      ).toBe(true)
+    }
   })
 })

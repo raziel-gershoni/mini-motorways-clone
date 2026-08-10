@@ -48,6 +48,36 @@ export function regionsFor(map: MapData): readonly Region[] {
     { name: 'carCell', ctor: Int32Array, len: maxCars },
     { name: 'carProgress', ctor: Int32Array, len: maxCars },
     { name: 'carTargetDest', ctor: Int32Array, len: maxCars },
+    // M1e Task 1. All three are Int32 and all three append to the END of the
+    // 4-byte tier, so the tier's cumulative length stays a multiple of 4 and
+    // `computeLayout` inserts no pad byte. These are the LAST regions this
+    // milestone adds: "Which goldens move, exactly" fixes the shape at 29
+    // regions and 13,992 B for `firstCity`, and every task after this one
+    // appends behaviour, never shape.
+    //
+    // **This is an insertion, not an append**, and the re-bless proof depends
+    // on knowing it: `computeLayout` emits the 4-byte tier, then the 2-byte
+    // tier, then the 1-byte tier, so these 148 B (on `firstCity`) sit in FRONT
+    // of `carRouteLen` and shift every region after them. See
+    // `m1eSplice.ts` in `test/`.
+    //
+    // Ticks until the next house-spawn attempt for each colour, counting DOWN
+    // from `HOUSE_SPAWN_PERIOD_TICKS` (written by `createState`). Per COLOUR
+    // and not per house: §5.9's interval is "between same-group house spawns".
+    { name: 'houseSpawnTimer', ctor: Int32Array, len: groupCount },
+    // The integrated overcrowd meter, in MILLI-TICKS (ticks x DENOM) — spec
+    // §5.8. Int32 and not Uint8/Int16 by arithmetic, not by taste: the failure
+    // threshold `OVERCROWD_FAIL_MILLITICKS` is 2,640,000 (M1e Task 3 declares
+    // it; the derivation is the plan's §5.8 block), which no 8- or 16-bit slot
+    // can hold, so a narrower meter could never reach the threshold and the
+    // city could never die.
+    { name: 'destOvercrowd', ctor: Int32Array, len: maxDestinations },
+    // Consecutive ticks at or over the timer capacity, driving §5.8's
+    // `s(t) = min(1, 0.02t)` ramp. SATURATES at `OVERCROWD_RAMP_FULL_TICKS`
+    // (1,500, also M1e Task 3), so no width question can arise at any run
+    // length — the same construction `carBlockedTicks` uses against
+    // `MAX_BLOCKED_TICKS`.
+    { name: 'destOverTicks', ctor: Int32Array, len: maxDestinations },
     // --- 2-byte-aligned tier: Int16 ---
     { name: 'carRouteLen', ctor: Int16Array, len: maxCars },
     { name: 'carRouteCursor', ctor: Int16Array, len: maxCars },
@@ -199,6 +229,23 @@ export const FIELD_INPUT_REGIONS = Object.freeze(['mapIdentity', 'destCell', 'ro
  *                     nearly every tick a ghost exists, with byte-identical
  *                     output. That is the `H_TICK` failure and the occupancy
  *                     failure a third time. Dated: M1e, with occupancy.
+ *
+ * M1e Task 1 adds the last three, and all three are FIELD_IRRELEVANT:
+ *
+ *   - houseSpawnTimer: a per-colour countdown nothing in routing reads. It
+ *                      moves every tick, so classifying it FIELD_INPUT is the
+ *                      `H_TICK` failure a fourth time: rebuild every colour
+ *                      every tick forever, silently, with correct answers.
+ *                      Dated: never — a spawn cadence cannot become an edge
+ *                      cost. (What the spawner eventually PLACES does reach
+ *                      the field, through `destCell`/`destMeta`/`roads`, all
+ *                      three already FIELD_INPUT — the cadence is not the
+ *                      placement.)
+ *   - destOvercrowd:   the failure meter. It moves on nearly every tick any
+ *                      destination is over capacity, and no edge cost, source
+ *                      set or `dir` read depends on it. Dated: never.
+ *   - destOverTicks:   as above, and MORE so — it moves on every tick a
+ *                      destination is over capacity. Dated: never.
  */
 export const FIELD_IRRELEVANT_REGIONS = Object.freeze([
   'rng',
@@ -211,6 +258,9 @@ export const FIELD_IRRELEVANT_REGIONS = Object.freeze([
   'carCell',
   'carProgress',
   'carTargetDest',
+  'houseSpawnTimer',
+  'destOvercrowd',
+  'destOverTicks',
   'carRouteLen',
   'carRouteCursor',
   'occupancy',

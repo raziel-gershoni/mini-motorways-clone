@@ -44,19 +44,40 @@ describe('regionsFor', () => {
     expect(totalBytes).toBe(declaredBytes)
   })
 
-  it('totals exactly 13,828 bytes for firstCity, per the plan\'s region table', () => {
-    // M1c: 7,908 B over 22 regions. M1d Task 2 appended two `Int16` regions to
-    // the end of the `Int16` tier — `occupancy` (2 x 960 cells = 1,920
-    // elements, 3,840 B) and `carBlockedTicks` (maxCars = 80, 160 B) — for
-    // 7,908 + 4,000 = 11,908. **M1d Task 5 appends the last two**, both `Uint8`
-    // and both one per cell, to the end of the `Uint8` tier: `ghostMask` (960
-    // B) and `ghostCommitted` (960 B), for 11,908 + 1,920 = **13,828** —
-    // exactly the figure the plan's "Why exactly two re-blesses are true" table
-    // predicts, and the milestone's final buffer size. No task after this one
-    // changes it: Tasks 6 and 7 bless NEW goldens, which they could not do if
-    // the shape were still moving.
+  it('totals exactly 13,992 bytes for firstCity, per the M1e region table', () => {
+    // M1d closed at 13,828 B over 26 regions. M1e Task 1 appends three Int32
+    // regions to the END of the 4-byte tier and grows `header` from 9 to 13
+    // slots: +16 (header) + 20 (houseSpawnTimer) + 64 (destOvercrowd) + 64
+    // (destOverTicks) = +164. The 4-byte tier goes 1,660 -> 1,824, which is a
+    // multiple of 4, so no pad byte is inserted anywhere.
     const { totalBytes } = computeLayout(regionsFor(MAP))
-    expect(totalBytes).toBe(13828)
+    expect(totalBytes).toBe(13992)
+  })
+
+  it('the three M1e Task 1 regions have the exact element counts and byte sizes the plan predicts', () => {
+    // Spelled out separately from the total, because a total is satisfied by
+    // any three regions summing to 148 B — including a `Uint8` overcrowd meter
+    // (which cannot hold 2,640,000) or a per-CELL timer (which is not what a
+    // per-COLOUR house cadence means).
+    const byName = new Map(regionsFor(MAP).map((r) => [r.name, r]))
+    const houseTimer = byName.get('houseSpawnTimer')!
+    const meter = byName.get('destOvercrowd')!
+    const over = byName.get('destOverTicks')!
+    expect(houseTimer.ctor).toBe(Int32Array)
+    expect(houseTimer.len).toBe(MAP.groupCount)
+    expect(houseTimer.len * houseTimer.ctor.BYTES_PER_ELEMENT).toBe(20)
+    expect(meter.ctor).toBe(Int32Array)
+    expect(meter.len).toBe(MAP.maxDestinations)
+    expect(meter.len * meter.ctor.BYTES_PER_ELEMENT).toBe(64)
+    expect(over.ctor).toBe(Int32Array)
+    expect(over.len).toBe(MAP.maxDestinations)
+    expect(over.len * over.ctor.BYTES_PER_ELEMENT).toBe(64)
+    // The lengths are the two DIFFERENT map fields they claim to be. On
+    // `firstCity` `groupCount` (5) and `maxDestinations` (16) differ, so this
+    // separates a per-colour timer from a per-destination one — but say it
+    // rather than rely on the fixture, because a map where they coincided
+    // would make the three assertions above interchangeable.
+    expect(MAP.groupCount).not.toBe(MAP.maxDestinations)
   })
 
   it('the two M1d Task 5 ghost regions have the exact element counts and byte sizes the plan predicts', () => {
@@ -92,7 +113,7 @@ describe('regionsFor', () => {
     expect(blocked.len * blocked.ctor.BYTES_PER_ELEMENT).toBe(160)
   })
 
-  it('declares exactly the 26 named regions the plan lists, no more and no fewer', () => {
+  it('declares exactly the 29 named regions the plan lists, no more and no fewer', () => {
     const names = regionsFor(MAP).map((r) => r.name)
     expect(names).toEqual([
       'rng',
@@ -107,6 +128,9 @@ describe('regionsFor', () => {
       'carCell',
       'carProgress',
       'carTargetDest',
+      'houseSpawnTimer',
+      'destOvercrowd',
+      'destOverTicks',
       'carRouteLen',
       'carRouteCursor',
       'occupancy',

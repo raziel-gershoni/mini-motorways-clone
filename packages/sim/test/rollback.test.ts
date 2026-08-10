@@ -5,6 +5,7 @@ import { createWorld, type WorldData } from '../src/world'
 import { placeRoad, tilesLeft, DIR_COUNT, DX, DY } from '../src/roads'
 import { seedFromString, randomBelow, nextRandom } from '../src/rng'
 import { hashBytes } from '../src/hash'
+import { m1eInsertedRanges, spliceM1eInsertions } from './m1eSplice'
 import {
   createFlowField,
   createFlowFields,
@@ -693,20 +694,34 @@ describe('blessed goldens', () => {
     )
     expect(tilesLeft(state), 'and must not have overspent the budget').toBeGreaterThanOrEqual(0)
 
-    // **Re-blessed in M1d Task 5 (was 3949962277 at Task 2; 2790151213 at M1c;
-    // 3183850973 at M1b) — the second and last re-bless of this number in
-    // M1d.** Task 5 appended `ghostMask` and `ghostCommitted`, one `Uint8` per
-    // cell each. See "Why exactly two re-blesses are true" in the M1d plan.
-    // **Layout only, derived**: splicing the inserted bytes back out
-    // reproduces 3949962277 exactly. The splice is **60 bytes at offset 1,468**
-    // for THIS fixture (GOLDEN_MAP is 6x5: 30 cells x 2 regions x 1 B),
-    // against a whole buffer of 1,468 -> 1,528 bytes — not `firstCity`'s
-    // 1,920, which is a different map. This fixture never calls `step`, so it
-    // cannot move for a behavioural reason in this milestone, and it has no
-    // car to be committed to anything: both ghost regions are all-zero.
+    // **Re-blessed in M1e Task 1 (was 2076760277 at M1d Task 5; 3949962277 at
+    // M1d Task 2; 2790151213 at M1c; 3183850973 at M1b). Task 1 is the ONLY
+    // shape change in M1e** and this golden moves in no other task of the
+    // milestone — the fixture never calls `step`, so nothing behavioural M1e
+    // adds can reach it.
+    //
+    // **PURE LAYOUT, proved by an exact byte splice** (see `m1eSplice.ts`):
+    // removing the two inserted ranges — 16 B of new header slots at offset 52
+    // and 40 B of new regions at offset 404, both MID-BUFFER, neither an
+    // append — reproduces 2076760277 bit-for-bit with no slot zeroed.
+    // `createState`'s two initial timer writes land inside those ranges, so
+    // there is no behavioural term. Offsets are FOR THIS FIXTURE: GOLDEN_MAP is
+    // 6x5 with groupCount 2 and maxDestinations 4, so its whole buffer goes
+    // 1,528 -> 1,584 B, not `firstCity`'s 13,828 -> 13,992. It shares block B's
+    // size with `determinism.test.ts`'s 4x4 map and NOT its buffer size,
+    // because the three new regions are sized by `groupCount` and
+    // `maxDestinations` and not by cells.
     expect(state.ghostMask.every((b) => b === 0), 'no fixture cell is a ghost').toBe(true)
     expect(state.ghostCommitted.every((b) => b === 0)).toBe(true)
-    expect(hashState(state)).toBe(2076760277)
+    const m1e = m1eInsertedRanges(GOLDEN_MAP)
+    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 404, 444])
+    const spliced = spliceM1eInsertions(state, GOLDEN_MAP)
+    // Vacuity: the splice must land on M1d's own total for this map, or a
+    // no-op splice would "prove" a digest that never moved.
+    expect(spliced.length, "the splice must land on M1d's buffer size").toBe(1528)
+    expect(m1e.totalBytes).toBe(1584)
+    expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(2076760277)
+    expect(hashState(state)).toBe(2312109239)
   })
 
   it("field golden: pins hashBytes over each colour's dist/dir bytes, folded together, computed over the SAME fixed network above", () => {

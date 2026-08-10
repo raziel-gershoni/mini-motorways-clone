@@ -17,8 +17,9 @@ import { DEMO_RUN_SEED, DEMO_WARM_START_TICKS, seedDemoLayout } from './demoLayo
  * and the demo's four in `demoLayout.ts` — so this file rebinds which entry the
  * no-token path reaches and edits neither. Every golden is pinned to an
  * explicit board by the test that owns it (`startingCity.test.ts` holds the
- * seed golden `1178110182` on `firstCity`; `demoLayout.test.ts` holds
- * `1039862014` on the demo), never to "whatever the default is", and
+ * seed golden `968680755` on `firstCity`; `demoLayout.test.ts` holds
+ * `3152640907` on the demo — `1178110182` and `1039862014` respectively until
+ * M1e Task 1's pure-layout re-bless), never to "whatever the default is", and
  * `layouts.test.ts` asserts each entry's four values rather than trusting the
  * reading.
  *
@@ -70,7 +71,8 @@ export const DEMO_LAYOUT_ID = 'demo'
  * **The starting city is not deleted and is not unreachable — it is one token
  * away**, `?layout=city` in a browser and `?startapp=city` inside Telegram, and
  * it keeps its own tests, its own RNG seed and its own seed golden
- * `1178110182`. What changed is which id the *absent* token resolves to.
+ * `968680755` (was `1178110182`; re-blessed for pure layout in M1e Task 1).
+ * What changed is which id the *absent* token resolves to.
  *
  * ---------------------------------------------------------------------------
  * WHAT DEPENDS ON THIS CONSTANT

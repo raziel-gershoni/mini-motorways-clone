@@ -11,6 +11,9 @@ export const SECONDS_PER_WEEK = 150
 export const DAYS_PER_WEEK = 7
 export const TICKS_PER_WEEK = TICKS_PER_SECOND * SECONDS_PER_WEEK
 
+/** Milliseconds per second. Named so a `/ 1000` that means "ms to s" cannot be misread as DENOM. */
+export const MS_PER_SECOND = 1000
+
 /**
  * Deliberately 0, and deliberately not used as a divisor.
  *
@@ -220,6 +223,25 @@ export const PIN_PERIOD_TICKS = 518
  * (30): 4 * 30 = 120.
  */
 export const FIRST_PIN_DELAY_TICKS = 4 * TICKS_PER_SECOND
+
+// --- Spawning (spec §5.9; the RATE is [OURS], the intervals are [MOD]) ---
+/**
+ * §5.9 gives geometry and MINIMUM intervals but no rate, so the rate is
+ * authored here. **This is a SCHEDULE, not a delivery rate** — measured on
+ * `firstCity` with no player input, the schedule delivers well under two a
+ * week because most attempts are refused by the Chebyshev-2 spacing rule; the
+ * M1e plan's "What this plan does not settle" records the measured figure and
+ * the ceiling. Do not read this constant as "the board gains two destinations
+ * a week".
+ *
+ * **Declared in M1e Task 1 with the buffer shape and consumed by Task 5.**
+ * Nothing reads it yet beyond `DEST_SPAWN_PERIOD_TICKS` below, which
+ * `createState` uses to arm `H_DEST_SPAWN_TIMER`.
+ */
+export const DESTINATIONS_PER_WEEK = 2
+export const DEST_SPAWN_PERIOD_TICKS = TICKS_PER_WEEK / DESTINATIONS_PER_WEEK
+/** §5.9's "10 s between same-group house spawns", converted here and nowhere else. */
+export const HOUSE_SPAWN_PERIOD_TICKS = 10 * TICKS_PER_SECOND
 
 // --- Movement (M1c decision 3, "Movement accumulates progress in the pathfinder's own cost units") ---
 /**

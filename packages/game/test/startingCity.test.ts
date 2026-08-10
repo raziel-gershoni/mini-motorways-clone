@@ -50,6 +50,12 @@ import {
   type TickInputs,
   type WorldData,
 } from '@laneways/sim'
+import { hashBytes } from '@laneways/sim'
+// The M1e Task 1 re-bless proof, shared with the five `sim` golden sites. A
+// relative reach into another package's test directory is unusual here and
+// deliberate: the alternative is a second copy of the splice, and two copies
+// of a proof drift in exactly the direction that makes the proof stop proving.
+import { m1eInsertedRanges, spliceM1eInsertions } from '../../sim/test/m1eSplice'
 import {
   seedStartingCity,
   STARTING_DESTINATIONS,
@@ -614,21 +620,35 @@ describe('the seeded-state golden', () => {
     // is the point: this is the only assertion that sees a change nobody
     // wrote a named test for.
     //
-    // **Re-blessed in M1d Task 5 (was 3576722662 at Task 2; 2505371110 at M2)
-    // — the second and last re-bless of this number in M1d.** The state buffer
-    // grew from 11,908 to 13,828 bytes with `ghostMask` and `ghostCommitted`,
-    // one `Uint8` per cell each. **Layout only, derived**: splicing the 1,920
-    // inserted bytes back out of this buffer reproduces 3576722662 exactly.
-    // 1,920 is `firstCity`'s figure specifically (960 cells x 2 regions x 1 B)
-    // and this is the only one of the four re-blessed goldens that runs on
-    // `firstCity`; the other three splice 32, 60 and 480 bytes on their own
-    // maps. This golden is taken immediately after `seedStartingCity`, before
-    // any tick, so it cannot move for a behavioural reason in this milestone —
-    // and with no tick there is no car in flight and nothing erased, so both
-    // ghost regions are all-zero.
+    // **Re-blessed in M1e Task 1 (was 1178110182 at M1d Task 5; 3576722662 at
+    // M1d Task 2; 2505371110 at M2). Task 1 is the ONLY shape change in M1e**
+    // and this golden moves in no other task of the milestone: it is taken
+    // immediately after `seedStartingCity`, before any tick, so nothing
+    // behavioural M1e adds can reach it.
+    //
+    // **PURE LAYOUT, proved by an exact byte splice** (`m1eSplice.ts`, in
+    // `sim`'s test directory — this is the only cross-package import in this
+    // file and it exists so the seven re-blessed sites share one proof rather
+    // than seven transcriptions of it). Removing the two inserted ranges — 16 B
+    // of new header slots at offset 52 and 148 B of new regions at offset 1,676,
+    // both MID-BUFFER, neither an append — reproduces 1178110182 bit-for-bit
+    // with no slot zeroed. `createState`'s two initial timer writes land inside
+    // those ranges, so there is no behavioural term in this re-bless at all.
+    // The buffer goes 13,828 -> 13,992 B; this and `demoLayout.test.ts` are the
+    // only two goldens on a shipped map, and the demo's is a different one.
+    //
+    // With no tick there is no car in flight and nothing erased, so both ghost
+    // regions are all-zero.
     expect(state.ghostMask.every((b) => b === 0), 'the seed erases nothing').toBe(true)
     expect(state.ghostCommitted.every((b) => b === 0)).toBe(true)
-    expect(hashState(state)).toBe(1178110182)
+    const m1e = m1eInsertedRanges(firstCity())
+    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 1676, 1824])
+    const spliced = spliceM1eInsertions(state, firstCity())
+    // Vacuity: the splice must land on M1d's own total for `firstCity`.
+    expect(spliced.length, "the splice must land on M1d's buffer size").toBe(13828)
+    expect(m1e.totalBytes).toBe(13992)
+    expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(1178110182)
+    expect(hashState(state)).toBe(968680755)
   })
 
   it('differs from the unseeded state — otherwise the golden pins nothing', () => {

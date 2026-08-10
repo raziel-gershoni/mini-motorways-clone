@@ -51,6 +51,8 @@ import {
 } from '../src/buildings'
 import { ROUTE_BYTES, routeStep } from '../src/dispatch'
 import { step, type TickAction, type TickInputs } from '../src/step'
+import { hashBytes } from '../src/hash'
+import { m1eInsertedRanges, spliceM1eInsertions } from './m1eSplice'
 
 /**
  * M1c's deliverable: the whole trip loop, driven through `step`, over a
@@ -1048,21 +1050,27 @@ describe('golden replay: the whole trip loop', () => {
     // buffer layout. When a rule change makes it fail intentionally, re-bless
     // it in the same commit as the change, never separately.
     //
-    // **Re-blessed in M1d Task 5 (was 452702392 at Task 2; 3896659943 at M1c).
-    // This is the second and last re-bless of this number: both of M1d's
-    // buffer changes are now behind us, and Tasks 6-9 must leave it alone.**
-    // Task 5 appended `ghostMask` and `ghostCommitted`, one `Uint8` per cell
-    // each. **Layout only, and this is the fixture that PROVES it rather than
-    // merely asserting it** — unlike the three static goldens, 130 real ticks
-    // of dispatch, movement, arrivals and scoring have run here with a car
-    // mid-flight. Splicing the inserted bytes back out of this buffer
-    // reproduces 452702392 bit-for-bit, so not one byte of any pre-existing
-    // region moved across a live trip loop, occupancy included. The splice is
-    // **480 bytes at offset 7,588** for THIS fixture (20x12 = 240 cells x 2
-    // regions x 1 B), against a whole buffer of 7,588 -> 8,068 bytes;
-    // `firstCity`'s 1,920 belongs to `startingCity.test.ts` and to no other
-    // golden here. Every behavioural literal above is likewise unchanged, and
-    // the field golden did not move.
+    // **Re-blessed in M1e Task 1 (was 2942219448 at M1d Task 5; 452702392 at
+    // M1d Task 2; 3896659943 at M1c). Task 1 is the ONLY shape change in M1e**
+    // and this golden moves in no other task of the milestone: the fixture runs
+    // 150 ticks, entirely inside week 0 and below the first spawn attempt, so
+    // nothing M1e adds can fire in it.
+    //
+    // **PURE LAYOUT, proved by an exact byte splice** (see `m1eSplice.ts`) —
+    // and **this is the fixture that proves it hardest**, because unlike the
+    // four static goldens, 130 real ticks of dispatch, movement, arrivals and
+    // scoring have run here with a car mid-flight. Removing the two inserted
+    // ranges — 16 B of new header slots at offset 52 and 148 B of new regions
+    // at offset 1,676, both MID-BUFFER — reproduces 2942219448 bit-for-bit
+    // with no slot zeroed, so not one byte of any pre-existing region moved
+    // across a live trip loop, occupancy included. `createState`'s two initial
+    // timer writes land inside those ranges, so there is no behavioural term.
+    // Offsets are FOR THIS FIXTURE: 20x12, whole buffer 8,068 -> 8,232 B. It
+    // shares block B's 148 B with `firstCity` (same groupCount 5 and
+    // maxDestinations 16) and shares neither offset nor buffer size with the
+    // two 2-colour goldens in `determinism.test.ts` and `rollback.test.ts`.
+    // Every behavioural literal above is likewise unchanged, and the field
+    // golden did not move.
     //
     // The fixture never erases a road, so **both ghost regions are all-zero**
     // — asserted rather than assumed, because a golden that moved partly for
@@ -1070,7 +1078,13 @@ describe('golden replay: the whole trip loop', () => {
     // from one that moved purely for layout.
     expect(r.state.ghostMask.every((b) => b === 0), 'the loop fixture erases nothing').toBe(true)
     expect(r.state.ghostCommitted.every((b) => b === 0)).toBe(true)
-    expect(hashState(r.state)).toBe(2942219448)
+    const m1e = m1eInsertedRanges(r.map)
+    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 1676, 1824])
+    const spliced = spliceM1eInsertions(r.state, r.map)
+    expect(spliced.length, "the splice must land on M1d's buffer size").toBe(8068)
+    expect(m1e.totalBytes).toBe(8232)
+    expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(2942219448)
+    expect(hashState(r.state)).toBe(3806414869)
   })
 
   it('leaves the three existing goldens alone — this task adds a golden, it does not move one', () => {
@@ -1090,16 +1104,42 @@ describe('golden replay: the whole trip loop', () => {
     const determinism = readFileSync(`${here}determinism.test.ts`, 'utf8')
     const rollback = readFileSync(`${here}rollback.test.ts`, 'utf8')
 
-    expect(determinism, 'the state golden moved').toContain('toBe(340556353)')
-    expect(rollback, 'the road-network golden moved').toContain('toBe(2076760277)')
+    // **M1e Task 1 had to change the SHAPE of these three needles, not just
+    // the numbers in them, and the reason is a live instance of the
+    // catalogue's "a source scan matches comments, not just code".** Each of
+    // those files now carries a splice proof that asserts its own PRIOR digest
+    // — `expect(hashBytes(spliced), ...).toBe(340556353)` — so the old bare
+    // `toContain('toBe(340556353)')` would have gone on matching after the
+    // re-bless and reported the state golden unmoved while it had moved. The
+    // needle is now the whole golden expression, `hashState(...)` included,
+    // which the prior-digest line cannot satisfy. Do not simplify these back
+    // to bare numbers.
+    expect(determinism, 'the state golden moved').toContain('expect(hashState(s)).toBe(3507307907)')
+    expect(rollback, 'the road-network golden moved').toContain(
+      'expect(hashState(state)).toBe(2312109239)',
+    )
     expect(rollback, 'the field golden moved — that one is a tripwire, not a re-bless').toContain(
-      'toBe(252514232)',
+      'expect(foldedFieldsHash(fields)).toBe(252514232)',
     )
     // Vacuity: the scan is looking at real files with real content, not at two
     // empty strings that trivially fail to contain anything else either.
     expect(determinism.length).toBeGreaterThan(1000)
     expect(rollback.length).toBeGreaterThan(1000)
-    expect(determinism).not.toContain('toBe(2076760277)') // the two files own different numbers
+    // The two files own different numbers. Asserted on the bare digest, not on
+    // the expression: this arm wants to catch the state golden being COPIED
+    // into the wrong file in any form, comment included.
+    expect(determinism).not.toContain('2312109239')
+    // And the M1e re-bless PROOF must survive alongside the number it
+    // licenses. Deleting the splice assertion is the cheapest way to make a
+    // future layout re-bless unfalsifiable again, and it leaves every other
+    // test in the repo green — so the retired digest's one code-level
+    // occurrence in each file is pinned here, by name.
+    expect(determinism, 'the M1e splice proof left determinism.test.ts').toContain(
+      "expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(340556353)",
+    )
+    expect(rollback, 'the M1e splice proof left rollback.test.ts').toContain(
+      "expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(2076760277)",
+    )
   })
 })
 
@@ -2006,7 +2046,21 @@ describe('golden replay: a jammed same-direction queue', () => {
     // refusal, the held progress, the claim/release protocol, the ascending
     // iteration order — as well as for everything the loop golden already
     // covers.
+    //
+    // **Re-blessed once, in M1e Task 1 (was 294084758 at M1d Task 6), and in
+    // no other task of the milestone.** PURE LAYOUT, proved by the same exact
+    // byte splice as the loop golden above (`m1eSplice.ts`): removing the two
+    // inserted ranges reproduces 294084758 bit-for-bit with no slot zeroed.
+    // Same map shape as the loop fixture, so the same offsets and the same
+    // 8,068 -> 8,232 B; this fixture runs 130 ticks, inside week 0 and below
+    // the first spawn attempt, so nothing behavioural in M1e can reach it.
     // ---------------------------------------------------------------------
-    expect(hashState(r.state)).toBe(294084758)
+    const m1e = m1eInsertedRanges(r.map)
+    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 1676, 1824])
+    const spliced = spliceM1eInsertions(r.state, r.map)
+    expect(spliced.length, "the splice must land on M1d's buffer size").toBe(8068)
+    expect(m1e.totalBytes).toBe(8232)
+    expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(294084758)
+    expect(hashState(r.state)).toBe(1007037587)
   })
 })

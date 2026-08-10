@@ -9,6 +9,8 @@ import { createFlowFields, createScratch } from '../src/scratch'
 import { createFieldInputRanges } from '../src/regions'
 import { nextRandom } from '../src/rng'
 import { step, type TickInputs } from '../src/step'
+import { hashBytes } from '../src/hash'
+import { m1eInsertedRanges, spliceM1eInsertions } from './m1eSplice'
 
 /**
  * The determinism boundary is the sim *plus everything it depends on*. Spec §4
@@ -552,28 +554,43 @@ describe('golden replay', () => {
       step(s, GOLDEN_WORLD, fields, scratch, NO_INPUT)
       if (i % 1000 === 0) nextRandom(s.rng, 0)
     }
-    // **Re-blessed in M1d Task 5 (was 1729791425 at Task 2; 2413319809 at M1c;
-    // 1073292924 at M1b). This is the SECOND AND LAST re-bless of this number
-    // in M1d** — the plan's "Why exactly two re-blesses are true" fixes the
-    // buffer shape here at 26 regions, and Tasks 6-9 must leave it alone.
+    // **Re-blessed in M1e Task 1 (was 340556353 at M1d Task 5; 1729791425 at
+    // M1d Task 2; 2413319809 at M1c; 1073292924 at M1b). This is the ONLY
+    // shape change in M1e** — the plan's "Which goldens move, exactly" fixes
+    // the buffer at 29 regions and 13,992 B for `firstCity`, and every later
+    // task appends behaviour, never shape.
     //
-    // Task 5 appended `ghostMask` and `ghostCommitted`, one `Uint8` per cell
-    // each, to the end of the `Uint8` tier. **Layout only, and derived rather
-    // than assumed**: splicing the inserted bytes back out of this buffer
-    // reproduces 1729791425 exactly, so no pre-existing byte moved. The splice
-    // is **32 bytes at offset 1,384** FOR THIS FIXTURE, not the 1,920 of
-    // `firstCity` — GOLDEN_MAP above is 4x4, so 16 cells x 2 regions x 1 B =
-    // 32, against a whole buffer of 1,384 -> 1,416 bytes. Each of the four
-    // re-blessed goldens runs on a DIFFERENT map and each splice is a
-    // different size (32, 60, 480, 1,920); quoting `firstCity`'s figure here
-    // would be impossible on its face and would read as a fabricated
-    // derivation.
+    // **PURE LAYOUT, proved by an exact byte splice** (see `m1eSplice.ts`):
+    // removing the two inserted ranges — 16 B of new header slots at offset 52
+    // and 40 B of new regions at offset 404, both MID-BUFFER — reproduces
+    // 340556353 bit-for-bit with no slot zeroed. `createState`'s two initial
+    // timer writes land inside those ranges, so there is no behavioural term in
+    // this re-bless at all. Offsets are FOR THIS FIXTURE: GOLDEN_MAP is 4x4
+    // with groupCount 2 and maxDestinations 4, so block B is 40 B and the whole
+    // buffer goes 1,416 -> 1,472, not `firstCity`'s 148 B and 13,828 -> 13,992.
+    // The assertions below are the derivation; this paragraph only reads them
+    // out.
+    //
+    // This number moves TWICE MORE in this milestone and in no other task:
+    // Task 2 (the weekly tile grant, which this 13,499-tick fixture crosses
+    // twice) and Task 5 (the spawn timers cycling). Both carry a direct
+    // assertion on the changed slots beside the digest.
+    //
     // This fixture places no building and therefore has no car, so it cannot
     // move for a behavioural reason in this milestone at all — and both ghost
     // regions are all-zero in it, asserted below, which is what makes "the
     // digest moved for layout" checkable rather than merely stated.
     expect(s.ghostMask.every((b) => b === 0), 'no fixture cell is a ghost').toBe(true)
     expect(s.ghostCommitted.every((b) => b === 0), 'no fixture cell has a committed count').toBe(true)
-    expect(hashState(s)).toBe(340556353)
+    const m1e = m1eInsertedRanges(GOLDEN_MAP)
+    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 404, 444])
+    const spliced = spliceM1eInsertions(s, GOLDEN_MAP)
+    // Vacuity first: the splice must have removed exactly the 56 bytes this
+    // task inserted, landing on M1d's own total for this map. A no-op splice
+    // would otherwise "prove" a digest that never moved.
+    expect(spliced.length, "the splice must land on M1d's buffer size").toBe(1416)
+    expect(m1e.totalBytes).toBe(1472)
+    expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(340556353)
+    expect(hashState(s)).toBe(3507307907)
   })
 })
