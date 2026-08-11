@@ -351,10 +351,24 @@ export type PlaceCheck = { readonly ok: true } | { readonly ok: false; readonly 
  * `PlaceCheck` by identity by accident, and the allocation harness on the demo
  * FRAME loop cannot see either function at all — neither has a per-frame caller
  * until Task 5, measured as `buildings.ts` absent from 9 of 9 profile windows
- * with an escaping allocation injected at the top of both. The detectors are
- * `buildings.test.ts`'s frozen/identity block (deterministic, all eight
- * outcomes) and `placementAllocation.test.ts`'s per-CALL rig. Reverting any one
- * `return` below to a literal turns exactly one identity assertion red.
+ * with an escaping allocation injected at the top of both.
+ *
+ * Two detectors, and **which one covers what was measured by sweeping all 21
+ * `return` sites in these two functions, one at a time**:
+ *
+ *   - `buildings.test.ts`'s frozen/identity block turns red on **21 of 21**. It
+ *     is deterministic and it is the real guard. Its case list is keyed on
+ *     return SITE, not on outcome, because `B_OOB` is returned from three lines
+ *     and `B_TERRAIN` from two — a list keyed on the eight outcomes left **six
+ *     sites unpinned**, five of them the carpark line of a cell pass.
+ *   - `placementAllocation.test.ts`'s per-CALL rig turns red on **9 of 21**:
+ *     the hot branches only. Reverting the carpark line of the terrain pass
+ *     measures 0.57-1.15 B/call on the city board and 0.0000 on the demo,
+ *     against a budget of 2. It is the guard against a regression on a path the
+ *     rig walks often, not against one reverted statement.
+ *
+ * **So if you add a rejection reason, or a second `return` for an existing one,
+ * add a case to `everyPlaceOutcome()` — the profiler will not cover you.**
  *
  * `Object.freeze` does not recurse — there is one object per outcome and each
  * is frozen at its own level, which is what the `roads.ts` note means by

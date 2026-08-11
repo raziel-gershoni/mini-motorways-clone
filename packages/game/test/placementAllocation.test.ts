@@ -112,13 +112,17 @@ const WINDOW_COUNT = 3
 /**
  * **The per-call budget. Measured, not sketched.**
  *
- * Signal — what a regression costs, on this exact rig:
+ * Signal — what a regression costs, **measured on the statistic asserted below
+ * rather than on a rig where every call was `canPlaceHouse`**:
  *
- *   - one escaping `{ ok, reason }` literal per call: **40.0 B/call**, measured
- *     as `canPlaceHouse`'s figure before Task 4 (40.045 / 40.017 over two
- *     windows), and independently the 40.6-44.3 M1d measured for the identical
- *     literal in `canPlaceRoad`. This is the SMALLEST single-object regression
- *     there is, so it is the number the budget must sit under.
+ *   - every `return` reverted to a literal, so one escaping object per call:
+ *     **29.63-32.53 B/call on the city board and 31.47-34.85 on the demo**, six
+ *     draws each. **The weakest is 29.63**, and that is the number the budget
+ *     sits under. (An earlier version of this comment used 40.0 — `canPlaceHouse`'s
+ *     pre-Task-4 figure from an isolated rig where it was 100 % of the calls.
+ *     Here it is one call in five, so the honest figure is ~30. Right diagnosis,
+ *     optimistic number, which is the mistake the flow-field budget made one
+ *     level up.)
  *   - the arrays Task 4 removed: **1,888 B/call** on the demo board.
  *
  * Noise — clean, 8 draws x 3 windows on each of the two boards, i.e. 16 draws:
@@ -131,16 +135,43 @@ const WINDOW_COUNT = 3
  *     repo adopted that statistic for independent sampling noise.
  *   - one stray sample over 15,000 calls: 512 / 15,000 = **0.0341 B/call**.
  *
- * So the band between 0.0373 and 40.0 is empty, and **2** sits in it: **54x
+ * So the band between 0.0373 and 29.63 is empty, and **2** sits in it: **54x
  * above the worst value the asserted statistic has ever produced**, 58x above a
- * single stray sample, and **20x below the weakest real signal**.
+ * single stray sample, and **14.8x below the weakest real signal**.
  *
  * Both directions are load-bearing. A budget of 0 is impossible for a sampling
  * profiler — one sample is already 0.0341 here, and a single window has read
- * 0.63. And a budget of 20, which would still "pass today", would clear one
- * escaping object per call by only 2x; the natural response to a marginal red
- * is to widen it, which is how a budget turns into the allowance this milestone
- * has twice deleted.
+ * 0.63. And a budget of 20, which would still "pass today", would clear a
+ * whole-predicate regression by only 1.5x; the natural response to a marginal
+ * red is to widen it, which is how a budget turns into the allowance this
+ * milestone has twice deleted.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT THIS ARM CANNOT SEE, AND WHY THE ANSWER IS NOT A TIGHTER BUDGET
+ * ---------------------------------------------------------------------------
+ *
+ * The figures above are for reverting **every** `return`. A regression at ONE
+ * site costs what that branch's share of the calls costs, and the two
+ * predicates have 21 return sites. Measured, six draws each:
+ *
+ *   - a cold site — the carpark line of the terrain pass — reads **0.57-1.15
+ *     B/call on the city board and 0.0000 on the demo**, where the rig's stride
+ *     never takes that branch. **Below this budget on 12 of 12 draws.**
+ *   - a hot one — the footprint-overhang `B_OOB` — reads **1.85-2.98**, i.e. it
+ *     straddles the budget. Caught in most draws, not reliably.
+ *
+ * So this arm is a guard against a regression on a path the rig walks often,
+ * and **it is not the detector for a single reverted `return`.** That is
+ * `buildings.test.ts`'s frozen/identity block, which is deterministic and
+ * covers **21 of 21 sites**; a sweep of all 21, one at a time, turns the sim
+ * suite red 21 times and this file red 9 times. Two arms, each covering what
+ * the other cannot, exactly as `roads.ts` documents for its own singletons.
+ *
+ * **Do not "fix" this by lowering the budget.** 0.3 would catch the cold site
+ * on the city board and still miss it on the demo, because there the branch is
+ * never taken and no threshold can see a zero — while moving the bound from 54x
+ * above the noise to 8x above it. Tighter is not safer for a statistical
+ * instrument; outside the band in the right direction is.
  */
 const PLACEMENT_BUDGET_BYTES_PER_CALL = 2
 
@@ -446,10 +477,12 @@ describe('placement validity allocates nothing per call, measured', () => {
   it('pins its own shape, so widening the budget or thinning the rig is a visible edit', () => {
     expect(PLACEMENT_BUDGET_BYTES_PER_CALL).toBe(2)
     // The bound must stay clear of the signal in BOTH directions, or it is an
-    // allowance wearing a budget's name. Weakest real signal: 40.0 B/call, one
-    // escaping result literal, measured on this rig before Task 4. Single stray
-    // sample over 15,000 calls: 512 / 15,000 = 0.0341 B/call.
-    expect(PLACEMENT_BUDGET_BYTES_PER_CALL * 20).toBeLessThanOrEqual(40.0)
+    // allowance wearing a budget's name. Weakest real signal over 12 draws:
+    // 29.63 B/call, every return reverted to a literal. Single stray sample
+    // over 15,000 calls: 512 / 15,000 = 0.0341 B/call. Deliberately not written
+    // at exact equality — the previous form asserted `* 20 <= 40.0`, which held
+    // only because both sides were the same number.
+    expect(PLACEMENT_BUDGET_BYTES_PER_CALL * 14).toBeLessThan(29.63)
     expect(PLACEMENT_BUDGET_BYTES_PER_CALL).toBeGreaterThan((SAMPLING_INTERVAL_BYTES / CALLS_PER_SCAN) * 8)
     // The condition the per-call rate depends on: enough calls per window for
     // the sampler to see a 40 B/call signal at the 512 B interval at all. This
