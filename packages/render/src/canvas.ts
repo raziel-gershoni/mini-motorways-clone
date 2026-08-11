@@ -208,6 +208,72 @@ export const PIN_STRIDE_FRACTION = 1 / 3
  */
 export const MAX_DRAWN_PINS = 6
 
+/**
+ * The overcrowd ring's radius, as a fraction of the destination footprint's
+ * LONGER side in tiles.
+ *
+ * `0.62 * 3` = 1.86 tiles against a footprint half-diagonal of
+ * `hypot(1, 1.5)` = 1.803, so the ring encircles the building with a little air
+ * rather than cutting through its corners.
+ *
+ * **The radius is the same for both orientations, and that is geometry rather
+ * than an accident.** Every footprint is a 2x3 or a 3x2 box, so `max(w, h)` is
+ * 3 either way and the two boxes share a diagonal. The `max` is written out
+ * anyway so the derivation survives a footprint change; no test can separate it
+ * from the constant 3 today, and `canvas.test.ts` says so rather than pretending
+ * otherwise.
+ */
+export const RING_RADIUS_FRACTION = 0.62
+
+/**
+ * The ring's stroke width, as a fraction of the tile, **rounded to a whole CSS
+ * pixel and floored at 1**. A fixed pixel width does not follow the three tile
+ * sizes `fitCamera` produces (27, 29, 30 CSS px); at 0.16 the ring is 4 or 5 CSS
+ * px — visible on a phone, and thin enough that a nearly-closed ring still reads
+ * as a ring rather than as a disc.
+ *
+ * **The rounding is a measured allocation fix, not tidiness, and it is worth the
+ * paragraph because the number it produces is indistinguishable to the eye.**
+ * `ctx.lineWidth` is a native accessor on a real `CanvasRenderingContext2D`, but
+ * on any context that is a plain object — which is every test double in this
+ * repo and the only shape the allocation harness ever profiles — it is a JS
+ * property initialised to the Smi `0`. Storing `29 * 0.16 = 4.64` transitions
+ * that field's representation to Double and allocates a fresh `HeapNumber` on
+ * every store thereafter, and the transition itself deoptimises every function
+ * in this file that had the old map in its feedback. Measured on
+ * `drawAllocation.test.ts`'s city rig: **17.34 / 18.90 / 20.46 / 25.66 / 37.27
+ * B/frame charged to this file on five consecutive runs**, against a floor of 4
+ * and a pre-change baseline of 0.00-0.43. With the round, the same rig measures
+ * **0.00**.
+ *
+ * The floor at 1 is the other half: `fitCamera` clamps the tile at 1 for a
+ * degenerate viewport, where `round(0.16)` is 0 — and a `lineWidth` of 0 paints
+ * *nothing* on a real canvas, which is a ring that silently disappears rather
+ * than a ring that is thin.
+ */
+export const RING_WIDTH_FRACTION = 0.16
+
+/** The thinnest ring that is still a ring. See `RING_WIDTH_FRACTION`. */
+export const RING_MIN_WIDTH_CSS = 1
+
+/** The ring's stroke width in whole CSS px on a given tile. See `RING_WIDTH_FRACTION`. */
+export function ringWidth(tile: number): number {
+  const rounded = Math.round(tile * RING_WIDTH_FRACTION)
+  return rounded > RING_MIN_WIDTH_CSS ? rounded : RING_MIN_WIDTH_CSS
+}
+
+/**
+ * Twelve o'clock. A gauge that starts anywhere else is readable only by someone
+ * who already knows where it starts.
+ */
+export const RING_START_ANGLE = -Math.PI / 2
+
+/** The frame's meter is a byte; this is the value a closed ring would need. */
+export const RING_FULL = 255
+
+/** One turn. Named so the ring's sweep is not `Math.PI * 2` written twice. */
+const TAU = Math.PI * 2
+
 /** A pause bar's width, as a fraction of the clock rect's height. */
 export const PAUSE_BAR_FRACTION = 1 / 8
 
@@ -225,6 +291,30 @@ export const PAUSE_GUTTER_BARS = 5
  * targets.
  */
 export const HUD_FONT = '600 20px system-ui, -apple-system, sans-serif'
+
+/**
+ * The shutdown screen's font, preallocated for the same reason `HUD_FONT` is.
+ *
+ * Larger than the HUD's 20 px because this is the only text in the game that
+ * has to be read rather than glanced at, and one size for all three lines
+ * because a second `ctx.font` assignment per frame buys a typographic hierarchy
+ * the three lines do not need — they are already ordered by what they answer.
+ */
+export const SHUTDOWN_FONT = '700 24px system-ui, -apple-system, sans-serif'
+
+/** Baseline-to-baseline spacing of the three shutdown lines, in CSS px. */
+export const SHUTDOWN_LINE_STRIDE_CSS = 34
+
+/**
+ * The margin the shutdown text keeps from each canvas edge, in CSS px. It is
+ * what `maxWidth` is derived from, so it is also the guarantee that
+ * "DESTINATION 12 OVERCROWDED" cannot leave the screen at the 320 CSS px
+ * viewport `fitCamera` accepts — the run condenses instead.
+ */
+export const SHUTDOWN_TEXT_INSET_CSS = 16
+
+/** The one line of the shutdown screen that carries no number, so it is preallocated whole. */
+export const RESTART_TEXT = 'TAP TO PLAY AGAIN'
 
 /**
  * `sim/buildings.ts`'s orientation numbering, N and S only — the two values that
@@ -325,17 +415,53 @@ function tilesText(tilesLeft: number): string {
   return cachedTilesText
 }
 
+/**
+ * "DESTINATION 3 OVERCROWDED", memoised on the index — **the fourth instance of
+ * this file's single-slot cache, and by a wide margin the cheapest.**
+ * `scoreText` rebuilds whenever the score moves; `failedDest` changes at most
+ * once per run, so after the first shutdown frame this is one integer
+ * comparison and nothing else, forever.
+ *
+ * **The sentinel is -2 rather than -1, and that is the whole of the cache's
+ * correctness.** -1 is the LIVE value `failedDestination` returns, so a cache
+ * primed with -1 would HIT on the first shutdown frame and the screen would
+ * name destination -1 for the rest of the run. -2 is a value the frame cannot
+ * carry, so the first shutdown frame always misses.
+ *
+ * This is what makes `RenderFrame.failedDest` a field with a consumer. A field
+ * nothing reads is dead weight in every frame's type and a false claim in
+ * whatever the plan promised the shutdown screen would say.
+ */
+let cachedFailedDest = -2
+let cachedFailedText = ''
+
+function failedText(d: number): string {
+  if (d !== cachedFailedDest) {
+    cachedFailedDest = d
+    cachedFailedText = `DESTINATION ${d} OVERCROWDED`
+  }
+  return cachedFailedText
+}
+
 // ---------------------------------------------------------------------------
 
 /**
- * Draws one frame. Ten phases, in this order, and the order is load-bearing:
+ * Draws one frame. Eleven phases, in this order, and the order is load-bearing:
  *
  * ```
  * 1 top band + letterbox fills    2 playfield fill    3 non-land terrain
  * 4 ghost roads                   5 live roads        6 destinations
+ *                                   (+ the overcrowd ring, M1e Task 9)
  * 7 houses                        8 cars              9 bottom band fill
- * 10 HUD content
+ * 10 HUD content                  11 the shutdown screen — ONLY when
+ *                                    `frame.gameOver`, see `drawShutdown`
  * ```
+ *
+ * **Phase 11 is the only conditional phase, and that is worth a warning rather
+ * than a note.** A new gated phase is unconstrained by every fixture that does
+ * not set its gate: a trial version of this scrim left the whole render suite
+ * green because the two base fixtures never set `gameOver` and `undefined` is
+ * falsy. Anything added under a flag needs a fixture on both sides of it.
  *
  * **Phases 4 and 5 cannot paint the same cell, and the order between them is
  * fixed anyway.** `sim` only ghosts a cell whose live mask reached 0, and
@@ -474,6 +600,70 @@ export function drawFrame(
   ctx.fillRect(0, gridBottom, right, bottom - gridBottom)
 
   drawHud(ctx, frame, palette)
+
+  // 11. The shutdown screen, and NOTHING when the run is live. Last, after the
+  //     HUD, because the HUD's own labels must not be able to paint over it.
+  if (frame.gameOver) drawShutdown(ctx, frame, palette, right, gridTop, gridBottom)
+}
+
+/**
+ * Phase 11, and the only phase in this file that does not run every frame.
+ *
+ * **What a person sees.** The board they were watching dims but stays visible —
+ * the scrim is translucent, so the frozen cars, the frozen queues and the
+ * nearly-closed ring around the destination that killed the city are all still
+ * there. Three lines sit over it: which destination shut the city down, how
+ * many trips they made, and that a tap starts a new one.
+ *
+ * **The scrim covers the BOARD and stops at the grid rect's bottom edge**, so
+ * the HUD band underneath keeps its own contrast and the clock, score and tile
+ * readouts stay legible. `camera.hudTop` is the top edge of the BOTTOM band —
+ * `max(originY + gridHeight, cssH - bottomInset - HUD_BAND_CSS)` — so the board
+ * is `[originY, hudTop)` and a rect that started at `hudTop + hudHeight` would
+ * cover zero board pixels, and on a viewport with no bottom inset would have
+ * zero height. It runs from `y = 0` rather than from the board top so the top
+ * band and the two letterbox columns dim with it; a bright frame around a dark
+ * board reads as a rendering fault rather than as a state.
+ *
+ * **This is the one place plan Decision 4's "every pixel exactly once" is
+ * knowingly exceeded**, and it is not the ghosting hazard that rule exists for:
+ * the five opaque fills still partition the canvas on this frame as on every
+ * other, so nothing from the previous frame survives. It is one extra
+ * source-over pass over pixels that are already correct, on a frame where the
+ * sim is frozen and there is no tick budget to compete with.
+ *
+ * **Nothing here allocates.** Two of the three lines are the same memoised
+ * caches the HUD uses (`failedText`, `scoreText`) and the third is a
+ * preallocated constant.
+ */
+function drawShutdown(
+  ctx: DrawContext,
+  frame: RenderFrame,
+  palette: Palette,
+  right: number,
+  gridTop: number,
+  gridBottom: number,
+): void {
+  ctx.fillStyle = palette.scrim
+  ctx.fillRect(0, 0, right, gridBottom)
+
+  const cx = right / 2
+  const cy = (gridTop + gridBottom) / 2
+  const maxWidth = right - 2 * SHUTDOWN_TEXT_INSET_CSS
+
+  ctx.font = SHUTDOWN_FONT
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  // `land` on `scrim` is `index.html`'s own pair inverted, which is the same
+  // choice `BOOT_FAILURE_STYLE` makes for the same reason: the panel must not
+  // be mistakable for part of the board.
+  ctx.fillStyle = palette.land
+  // In the order a reader needs them: what happened, what it was worth, what to
+  // do. `maxWidth` on every line, so a long label condenses instead of leaving
+  // the canvas — the same construction guarantee `fillCentred` gives the HUD.
+  ctx.fillText(failedText(frame.failedDest), cx, cy - SHUTDOWN_LINE_STRIDE_CSS, maxWidth)
+  ctx.fillText(scoreText(frame.score), cx, cy, maxWidth)
+  ctx.fillText(RESTART_TEXT, cx, cy + SHUTDOWN_LINE_STRIDE_CSS, maxWidth)
 }
 
 /**
@@ -617,10 +807,12 @@ function drawDestinations(ctx: DrawContext, frame: RenderFrame, palette: Palette
     if (!insideRevealed(camera, ax, ay)) continue
 
     const orientation = frame.destOrientation[d] as number
+    const footprintW = destFootprintW(orientation)
+    const footprintH = destFootprintH(orientation)
     const px = gridToScreenX(camera, ax)
     const py = gridToScreenY(camera, ay)
     ctx.fillStyle = groupColour(palette, frame.destColour[d] as number)
-    ctx.fillRect(px, py, destFootprintW(orientation) * tile, destFootprintH(orientation) * tile)
+    ctx.fillRect(px, py, footprintW * tile, footprintH * tile)
 
     // **The `>= 0` test is SUBSUMED by the `insideRevealed` below it, and this
     // comment is why neither may be deleted on the strength of its own
@@ -656,6 +848,50 @@ function drawDestinations(ctx: DrawContext, frame: RenderFrame, palette: Palette
       for (let p = 0; p < drawn; p++) {
         ctx.fillRect(px + pinSize + p * pinStride, py + pinSize, pinSize, pinSize)
       }
+    }
+
+    // **The overcrowd ring, §5.8's timer made visible.** Inside this loop, so it
+    // inherits the phase's `insideRevealed` cull rather than growing a second
+    // copy of it — the catalogue's most expensive bounds finding is that two
+    // loops mean two bounds and one fixture defeating both.
+    //
+    // **What the ring says is not "this destination is busy".** The meter
+    // integrates while a destination is over its pin capacity and unwinds at
+    // 2 s per second while it is not, so a SERVED destination's ring rises and
+    // falls and an UNREACHABLE one's rises monotonically and never drains. The
+    // second shape is the dominant failure on both shipped boards — a spawned
+    // destination's carpark is road-free by construction, so it takes zero
+    // arrivals ever and nothing on the board looks wrong while it kills the
+    // city. A ring that only ever climbs is the one thing on screen that says
+    // which building to connect, and it is the reason the ring is drawn AT the
+    // building rather than as a bar in the HUD.
+    //
+    // Zero draws nothing: an empty ring on every destination is 16 rings of
+    // noise and the one that matters stops standing out.
+    const meter = frame.destOvercrowd[d] as number
+    if (meter !== 0) {
+      // `max` of the two, which is 3 for both orientations today — see
+      // `RING_RADIUS_FRACTION` for why it is written derived anyway.
+      const span = footprintW > footprintH ? footprintW : footprintH
+      ctx.strokeStyle = palette.overcrowd
+      // A whole CSS pixel, and an integer store. See `RING_WIDTH_FRACTION`:
+      // the fractional form charged this file 17-37 B/frame under the
+      // allocation harness, measured, because a double into a Smi-shaped
+      // property boxes on every store.
+      ctx.lineWidth = ringWidth(tile)
+      ctx.beginPath()
+      // `beginPath` per ring, not per frame: without it every ring after the
+      // first joins the previous one's subpath and the board grows a web of
+      // straight lines between destinations.
+      ctx.arc(
+        px + (footprintW * tile) / 2,
+        py + (footprintH * tile) / 2,
+        span * tile * RING_RADIUS_FRACTION,
+        RING_START_ANGLE,
+        RING_START_ANGLE + (meter / RING_FULL) * TAU,
+      )
+      // `arc` alone appends to the path and paints nothing.
+      ctx.stroke()
     }
   }
 }
@@ -752,9 +988,15 @@ function drawHud(ctx: DrawContext, frame: RenderFrame, palette: Palette): void {
   const rects = hudRects(frame.camera, HUD_SCRATCH)
   const clock = rects.clock
   const barW = clock.h * PAUSE_BAR_FRACTION
-  const gutter = frame.paused ? PAUSE_GUTTER_BARS * barW : 0
+  // **`loop.end()` pauses, so a shutdown frame arrives with `paused: true` —
+  // and the pause glyph would then be offering "tap the clock to resume" while
+  // the clock starts a NEW RUN and throws this city away.** A resume
+  // affordance in front of a destructive action is the class of defect this
+  // task exists to remove, so the bars come down with the board.
+  const showPause = frame.paused && !frame.gameOver
+  const gutter = showPause ? PAUSE_GUTTER_BARS * barW : 0
 
-  if (frame.paused) {
+  if (showPause) {
     const barH = clock.h / 2
     const barY = clock.y + clock.h / 4
     ctx.fillStyle = palette.uiText

@@ -15,10 +15,13 @@ import {
   DEST_ORIENTATION_N,
   DEST_ORIENTATION_S,
   HUD_FONT,
+  PAUSE_BAR_FRACTION,
   MAX_DRAWN_PINS,
+  RING_WIDTH_FRACTION,
   destFootprintH,
   destFootprintW,
   drawFrame,
+  ringWidth,
   type DrawContext,
   type DrawImageSource,
 } from '../src/canvas'
@@ -2506,5 +2509,541 @@ describe('colour lookup', () => {
     const style = house?.command.op === 'fillRect' ? house.command.fillStyle : ''
     expect(style).toMatch(/^#[0-9a-f]{6}$/)
     expect(style).not.toBe('undefined')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The overcrowd ring and the shutdown screen — M1e Task 9
+// ---------------------------------------------------------------------------
+
+/**
+ * **Read this before writing a test in this section.**
+ *
+ * A trial implementation of the scrim as a new final phase, gated on
+ * `frame.gameOver`, was added to `canvas.ts` and the entire render suite stayed
+ * GREEN — because `frameA()` and `frameB()` never set `gameOver`, so it read
+ * `undefined`, so the phase never ran. **A new conditional draw phase is
+ * unconstrained by every test this file had.** That is the catalogue's "a
+ * fixture too permissive to exercise its own guard", and it is why every
+ * fixture below sets `gameOver` explicitly on both sides and why the live-frame
+ * negative at the bottom is not decoration.
+ */
+
+/** Every atlas pair in this section is the same one; the ring and the scrim blit nothing. */
+function drawWith(frame: RenderFrame): Command[] {
+  return draw(frame, atlasesAt(B_TILE_DEVICE))
+}
+
+/**
+ * Fixture B with **two live destinations, both inside the rect, on different
+ * rows and in different columns**, carrying the given meters.
+ *
+ * Both anchors matter. Two destinations is what separates "draws a ring" from
+ * "draws it for the right one"; different rows AND different columns is what
+ * stops a centre assertion passing on a transposed or a constant index — the
+ * first draft put both on row 1, where `expectedCentreY` is the same number for
+ * either and half the assertion carried nothing.
+ *
+ * ```
+ *  dest 0   anchor (4, 1), orientation W -> 3x2 box (4..6, 1..2)
+ *  dest 1   anchor (1, 3), orientation E -> 3x2 box (1..3, 3..4)
+ * ```
+ *
+ * Both carparks are -1 so no bay is painted; the bay is `drawDestinations`'
+ * other 33x33 fill and this section's classifiers do not need to tell them
+ * apart.
+ */
+function frameWithOvercrowd(meters: readonly number[], gameOver = false): RenderFrame {
+  const base = frameB()
+  return {
+    ...base,
+    destCount: 2,
+    destCell: new Int32Array([1 * B_W + 4, 3 * B_W + 1]),
+    destColour: new Uint8Array([4, 1]),
+    destKind: new Uint8Array([0, 1]),
+    destOrientation: new Uint8Array([3, 1]),
+    destPins: new Uint8Array([0, 0]),
+    destCarpark: new Int32Array([-1, -1]),
+    destOvercrowd: new Uint8Array(meters),
+    gameOver,
+  }
+}
+
+/**
+ * The two ring centres, **hand-computed from fixture B's camera** rather than
+ * derived by the same arithmetic the renderer uses.
+ *
+ * ```
+ * dest 0  px = 2 + (4-1)*66 = 200   cx = 200 + 3*66/2 = 299
+ *         py = 192                  cy = 192 + 2*66/2 = 258
+ * dest 1  px = 2                    cx = 2   + 3*66/2 = 101
+ *         py = 192 + (3-1)*66 = 324 cy = 324 + 2*66/2 = 390
+ * ```
+ */
+const RING_CENTRE: readonly (readonly [number, number])[] = [
+  [299, 258],
+  [101, 390],
+]
+function expectedCentreX(d: number): number {
+  return (RING_CENTRE[d] as readonly [number, number])[0]
+}
+function expectedCentreY(d: number): number {
+  return (RING_CENTRE[d] as readonly [number, number])[1]
+}
+
+/**
+ * `max(footprintW, footprintH) * tile * RING_RADIUS_FRACTION` = `3 * 66 * 0.62`.
+ *
+ * **The radius is the same for both orientations and that is geometry, not an
+ * accident to be tested away**: every destination footprint is a 2x3 or a 3x2
+ * box, so `max(w, h)` is 3 either way and the two boxes share a diagonal. A
+ * fixture cannot separate "derived from the footprint" from "three tiles" here,
+ * and adding one that pretended to would be the catalogue's "a test that pins a
+ * property nothing depends on".
+ */
+const RING_RADIUS = 122.76
+
+function arcs(log: readonly Command[]): ArcCommand[] {
+  return log.filter((c): c is ArcCommand => c.op === 'arc')
+}
+
+/**
+ * One live destination anchored at `(gx, gy)` with a part-filled meter, and
+ * nothing else on the board. Returns how many rings were drawn.
+ */
+function ringsDrawnFor(gx: number, gy: number): number {
+  const frame: RenderFrame = {
+    ...frameB(),
+    roads: new Uint8Array(B_CELLS),
+    ghosts: new Uint8Array(B_CELLS),
+    terrainClass: new Uint8Array(B_CELLS),
+    houseCount: 0,
+    carCount: 0,
+    destCount: 1,
+    destCell: new Int32Array([gy * B_W + gx]),
+    destColour: new Uint8Array([4]),
+    destKind: new Uint8Array([0]),
+    destOrientation: new Uint8Array([3]),
+    destPins: new Uint8Array([0]),
+    destCarpark: new Int32Array([-1]),
+    destOvercrowd: new Uint8Array([200]),
+  }
+  return arcs(drawWith(frame)).length
+}
+
+/**
+ * One marker ON each of the rect's four bounds and one marker **one cell past
+ * exactly one bound** each.
+ *
+ * The two halves catch opposite mutations and neither is optional: the `inside`
+ * half fails when a loop bound is SHRUNK, the `outside` half when one is
+ * EXTENDED. A marker in a diagonal corner is past two bounds at once, so no
+ * single one-cell over-extension reaches it — that placement produced seven
+ * 0-detector mutants on M2 Task 5 and the vacuity test below asserts it is not
+ * repeated.
+ */
+const RING_BOUND_MARKERS: readonly {
+  readonly bound: string
+  readonly inside: readonly [number, number]
+  readonly outside: readonly [number, number]
+}[] = [
+  { bound: 'x = x0', inside: [1, 2], outside: [0, 2] },
+  { bound: 'y = y0', inside: [2, 1], outside: [2, 0] },
+  { bound: 'x = x0 + cols - 1', inside: [6, 3], outside: [7, 3] },
+  { bound: 'y = y0 + rows - 1', inside: [3, 4], outside: [3, 5] },
+]
+
+/** Fixture B, in game over, with the knobs each shutdown assertion varies. */
+function gameOverFrame(
+  options: { score?: number; failedDest?: number; camera?: Camera } = {},
+): RenderFrame {
+  const base = frameB()
+  return {
+    ...base,
+    camera: options.camera ?? base.camera,
+    score: options.score ?? base.score,
+    gameOver: true,
+    failedDest: options.failedDest ?? 0,
+  }
+}
+
+/** The same fixture, explicitly LIVE. `undefined` is falsy; this is not. */
+function liveFrame(): RenderFrame {
+  return { ...frameB(), gameOver: false }
+}
+
+function scrimFill(log: readonly Command[]): FillRectCommand | undefined {
+  return log.find(
+    (c): c is FillRectCommand => c.op === 'fillRect' && c.fillStyle === PALETTE.scrim,
+  )
+}
+
+/** The four corner cells of the revealed rect, in board coordinates. */
+function fourBoardCorners(camera: Camera): readonly (readonly [number, number])[] {
+  const x1 = camera.x0 + camera.cols - 1
+  const y1 = camera.y0 + camera.rows - 1
+  return [
+    [camera.x0, camera.y0],
+    [x1, camera.y0],
+    [camera.x0, y1],
+    [x1, y1],
+  ]
+}
+
+/** Does `rect` cover the whole CSS box of board cell `(gx, gy)`? Fixture B only. */
+function rectCoversGridCell(rect: FillRectCommand, gx: number, gy: number): boolean {
+  return (
+    rect.x <= bx(gx) &&
+    rect.x + rect.w >= bx(gx) + B_TILE &&
+    rect.y <= by(gy) &&
+    rect.y + rect.h >= by(gy) + B_TILE
+  )
+}
+
+function rectsOverlap(a: FillRectCommand, b: Rect): boolean {
+  return (
+    Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) > 0 &&
+    Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y)) > 0
+  )
+}
+
+/** Every text drawn AFTER the scrim, i.e. by the shutdown phase and nothing else. */
+function shutdownTexts(log: readonly Command[]): string[] {
+  const scrimIndex = log.findIndex((c) => c.op === 'fillRect' && c.fillStyle === PALETTE.scrim)
+  expect(scrimIndex, 'no scrim was drawn at all').toBeGreaterThan(-1)
+  return log
+    .slice(scrimIndex + 1)
+    .filter((c): c is FillTextCommand => c.op === 'fillText')
+    .map((c) => c.text)
+}
+
+describe('the overcrowd ring', () => {
+  it('draws a ring only for a destination whose meter is non-zero, sized from the value', () => {
+    // Two destinations, one at 0 and one part-filled, so "draws a ring" and
+    // "draws it for the right one" are separable. A single-destination fixture
+    // cannot tell them apart.
+    const found = arcs(drawWith(frameWithOvercrowd([0, 128])))
+    expect(found.length).toBe(1)
+    const arc = found[0] as ArcCommand
+    expect(arc.endAngle - arc.startAngle).toBeCloseTo((128 / 255) * Math.PI * 2, 5)
+  })
+
+  it('draws the ring at the destination it belongs to, not at index 0', () => {
+    // The bug this catches is indexing the ring by draw order rather than by
+    // destination index — which is what a second loop over "the destinations
+    // that drew" would produce.
+    const arc = arcs(drawWith(frameWithOvercrowd([0, 200])))[0] as ArcCommand
+    expect(arc.x).toBeCloseTo(expectedCentreX(1), 5)
+    expect(arc.y).toBeCloseTo(expectedCentreY(1), 5)
+    // ...and the other way round, so neither centre is a constant that happens
+    // to match one of them.
+    const other = arcs(drawWith(frameWithOvercrowd([200, 0])))[0] as ArcCommand
+    expect(other.x).toBeCloseTo(expectedCentreX(0), 5)
+    expect(other.y).toBeCloseTo(expectedCentreY(0), 5)
+  })
+
+  it('sweeps proportionally to the meter, from 12 o’clock, and closes only at 255', () => {
+    // Three values rather than one: a sweep that ignored the meter, one that
+    // used a fixed fraction, and one that inverted it are all separable here.
+    for (const [meter, turns] of [
+      [1, 1 / 255],
+      [64, 64 / 255],
+      [255, 1],
+    ] as const) {
+      const arc = arcs(drawWith(frameWithOvercrowd([0, meter])))[0] as ArcCommand
+      expect(arc.startAngle, `meter ${meter} starts at 12 o'clock`).toBeCloseTo(-Math.PI / 2, 9)
+      expect(arc.endAngle - arc.startAngle, `meter ${meter}`).toBeCloseTo(turns * Math.PI * 2, 9)
+    }
+  })
+
+  it('strokes it in the alarm colour, at a width derived from the tile, around the footprint', () => {
+    const arc = arcs(drawWith(frameWithOvercrowd([0, 128])))[0] as ArcCommand
+    expect(arc.strokeStyle).toBe(PALETTE.overcrowd)
+    // 66 CSS px tile -> round(10.56) = 11. A hairline ring on a 29 px tile is
+    // invisible on a phone and a fixed pixel width does not follow the three
+    // tile sizes M2 fits; the ROUNDING is the measured allocation fix
+    // documented at `RING_WIDTH_FRACTION`.
+    expect(arc.lineWidth).toBe(11)
+    expect(Number.isInteger(arc.lineWidth), 'a fractional width boxes on every store').toBe(true)
+    // Outside the 3x2 footprint's half-diagonal (1.803 tiles), so the ring
+    // encircles the building rather than cutting through its corners.
+    expect(arc.radius).toBeCloseTo(RING_RADIUS, 5)
+    expect(arc.radius).toBeGreaterThan(Math.hypot(1.5, 1) * B_TILE)
+  })
+
+  it('opens a path for the ring and strokes it — an arc alone paints nothing', () => {
+    // `arc` appends to the current path. Without `beginPath` every ring on a
+    // frame joins the previous one; without `stroke` none of them is painted at
+    // all, and every geometry assertion above would still pass.
+    const log = drawWith(frameWithOvercrowd([100, 200]))
+    const shape = log.filter((c) => c.op === 'beginPath' || c.op === 'arc' || c.op === 'stroke')
+    expect(shape.map((c) => c.op)).toEqual([
+      'beginPath',
+      'arc',
+      'stroke',
+      'beginPath',
+      'arc',
+      'stroke',
+    ])
+  })
+
+  it('respects the revealed rect in BOTH directions', () => {
+    for (const marker of RING_BOUND_MARKERS) {
+      const [ix, iy] = marker.inside
+      const [ox, oy] = marker.outside
+      expect(ringsDrawnFor(ox, oy), `past ${marker.bound}`).toBe(0)
+      expect(ringsDrawnFor(ix, iy), `the far edge of ${marker.bound} must still draw`).toBe(1)
+    }
+  })
+
+  it('is not vacuous: every marker is one cell past EXACTLY one bound', () => {
+    const camera = cameraB()
+    const inside = (x: number, y: number): boolean =>
+      x >= camera.x0 && x < camera.x0 + camera.cols && y >= camera.y0 && y < camera.y0 + camera.rows
+    for (const marker of RING_BOUND_MARKERS) {
+      const [ix, iy] = marker.inside
+      const [ox, oy] = marker.outside
+      expect(inside(ix, iy), `${marker.bound}: the inside marker is not inside`).toBe(true)
+      expect(inside(ox, oy), `${marker.bound}: the outside marker is not outside`).toBe(false)
+      // Past exactly one bound: the outside marker differs from the inside one
+      // on exactly one axis, by exactly one cell.
+      expect(Math.abs(ox - ix) + Math.abs(oy - iy), `${marker.bound}: not one cell`).toBe(1)
+    }
+    // ...and the four inside markers really do sit on four DIFFERENT bounds, so
+    // this is four detectors rather than one repeated.
+    expect(new Set(RING_BOUND_MARKERS.map((m) => m.bound)).size).toBe(4)
+  })
+
+  it('keeps the stroke width a whole CSS pixel on every tile size, and never zero', () => {
+    // Two properties, both measured rather than asserted from the formula.
+    //
+    // INTEGER: on a plain-object context — every test double in this repo, and
+    // the only shape the allocation harness profiles — `lineWidth` starts as
+    // the Smi 0, so a fractional store transitions the field to Double and
+    // boxes a HeapNumber on every ring. That measured 17-37 B/frame against a
+    // 4 B floor.
+    //
+    // NEVER ZERO: `fitCamera` clamps the tile at 1 for a degenerate viewport,
+    // where `round(1 * 0.16)` is 0 — and `lineWidth = 0` paints NOTHING on a
+    // real canvas, which is a ring that vanishes rather than one that is thin.
+    for (const tile of [1, 3, 4, 27, 29, 30, 66]) {
+      const width = ringWidth(tile)
+      expect(Number.isInteger(width), `tile ${tile}`).toBe(true)
+      expect(width, `tile ${tile} paints nothing`).toBeGreaterThanOrEqual(1)
+    }
+    // Non-vacuous on the floor: the unfloored value really IS 0 at the tile
+    // sizes the clamp exists for, so the clamp is doing work.
+    expect(Math.round(1 * RING_WIDTH_FRACTION)).toBe(0)
+    expect(ringWidth(1)).toBe(1)
+    // ...and it is not a constant: the three tile sizes M2 actually fits give
+    // real widths, and the largest gives a different one from the smallest.
+    expect([ringWidth(27), ringWidth(29), ringWidth(30)]).toEqual([4, 5, 5])
+    expect(ringWidth(66)).toBe(11)
+  })
+
+  it('draws no ring for a meter of zero, on a fixture where a ring is otherwise drawn', () => {
+    // The negative on its own fixture. `frameB` has both meters at zero and
+    // two live destinations would be drawn either way.
+    expect(arcs(drawWith(frameWithOvercrowd([0, 0]))).length).toBe(0)
+    expect(arcs(drawWith(frameWithOvercrowd([0, 1]))).length, 'and 1 is enough').toBe(1)
+  })
+})
+
+describe('the shutdown screen', () => {
+  it('draws the scrim over the whole board and never into the HUD band', () => {
+    // **Unit: CSS px, snapped by `deviceEdge`** — `Math.round(cssValue * dpr) /
+    // dpr`, which divides back into CSS — which is what every other geometry
+    // assertion in this file is in.
+    //
+    // **`hudTop` is the top edge of the BOTTOM band.** `camera.ts` computes it
+    // as `max(originY + gridHeight, cssH - bottomInset - HUD_BAND_CSS)`, so the
+    // board is `[originY, hudTop)` and the HUD is BELOW it. A rect starting at
+    // `hudTop + hudHeight` covers zero board pixels.
+    const camera = cameraB()
+    const scrim = scrimFill(drawWith(gameOverFrame({ camera }))) as FillRectCommand
+    const gridBottom = camera.originY + camera.rows * camera.tileSize
+    expect(scrim.y, 'the scrim starts at or above the board top').toBeLessThanOrEqual(camera.originY)
+    expect(scrim.y + scrim.h, 'the scrim covers the board bottom').toBeGreaterThanOrEqual(gridBottom)
+    expect(scrim.y + scrim.h, 'the scrim must not run into the HUD band').toBeLessThanOrEqual(
+      camera.hudTop,
+    )
+    // Non-vacuous: on this camera the three bounds are genuinely different
+    // numbers, so a rect satisfying all three is not satisfying one of them
+    // three times.
+    expect(camera.originY).toBe(B_ORIGIN_Y)
+    expect(gridBottom).toBe(456)
+    expect(camera.hudTop).toBe(B_HUD_TOP)
+  })
+
+  it('scrims every board corner and no HUD rect', () => {
+    // The rect assertion above is satisfiable by a rect of the right EXTENT in
+    // the wrong place on x. Point probes close that, and they are the idiom
+    // this file already uses for the playfield fill.
+    const camera = cameraB()
+    const scrim = scrimFill(drawWith(gameOverFrame({ camera }))) as FillRectCommand
+    for (const [gx, gy] of fourBoardCorners(camera)) {
+      expect(rectCoversGridCell(scrim, gx, gy), `corner ${gx},${gy}`).toBe(true)
+    }
+    const rects = hudRects(camera, createHudRects())
+    for (const name of ['clock', 'score', 'tiles'] as const) {
+      expect(rectsOverlap(scrim, rects[name]), `${name} must stay legible`).toBe(false)
+    }
+    // Non-vacuous on `rectsOverlap` itself: it MUST report true for something,
+    // or "no HUD rect overlaps" is a predicate that never fires.
+    expect(rectsOverlap(scrim, { x: 0, y: 0, w: 10, h: 10 })).toBe(true)
+  })
+
+  it('names the score on the SHUTDOWN screen, not merely somewhere on the frame', () => {
+    // `drawHud` is the last statement before this phase and draws
+    // `scoreText(frame.score)` = "47 TRIPS" UNCONDITIONALLY. So
+    // `expect(texts).toContain('47 TRIPS')` over the whole frame is a
+    // 0-DETECTOR: measured, it passes on a game-over frame whose shutdown phase
+    // draws nothing at all, and it passes identically on a live frame. The
+    // scrim is the phase boundary, so slice after it.
+    const log = drawWith(gameOverFrame({ score: 47 }))
+    expect(shutdownTexts(log)).toContain('47 TRIPS')
+    // Vacuity, and the half that makes the slice mean something: the HUD's own
+    // copy is always at a LOWER index, so there must be exactly two.
+    expect(log.filter((c) => c.op === 'fillText' && c.text === '47 TRIPS').length).toBe(2)
+  })
+
+  it('names the destination that shut the city down, as a whole line', () => {
+    expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 2 })))).toContain(
+      'DESTINATION 2 OVERCROWDED',
+    )
+    // The index is what varies, so vary it — a fixture on one value cannot tell
+    // the label apart from a constant string, and the memo makes a stale cache
+    // the likeliest way to get one.
+    expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 7 })))).toContain(
+      'DESTINATION 7 OVERCROWDED',
+    )
+  })
+
+  it('tells the player how to start again', () => {
+    expect(shutdownTexts(drawWith(gameOverFrame({})))).toContain('TAP TO PLAY AGAIN')
+  })
+
+  it('constrains every shutdown line with maxWidth, so none can leave the canvas', () => {
+    // The same construction guarantee `fillCentred` gives the HUD, and it
+    // matters more here: "DESTINATION 12 OVERCROWDED" is 26 characters and the
+    // narrowest viewport `fitCamera` accepts is 320 CSS px.
+    const camera = cameraB()
+    const log = drawWith(gameOverFrame({ camera, failedDest: 12 }))
+    const index = log.findIndex((c) => c.op === 'fillRect' && c.fillStyle === PALETTE.scrim)
+    const lines = log.slice(index + 1).filter((c): c is FillTextCommand => c.op === 'fillText')
+    expect(lines.length, 'three lines: what died, the score, and the way out').toBe(3)
+    for (const line of lines) {
+      expect(line.maxWidth, `"${line.text}" is unconstrained`).toBeGreaterThan(0)
+      expect(line.x - line.maxWidth / 2, `"${line.text}" runs off the left`).toBeGreaterThanOrEqual(0)
+      expect(line.x + line.maxWidth / 2, `"${line.text}" runs off the right`).toBeLessThanOrEqual(
+        camera.cssW,
+      )
+      expect(line.textAlign, 'maxWidth only bounds a CENTRED run').toBe('center')
+    }
+    // Three distinct baselines, so the lines do not stack on one another.
+    expect(new Set(lines.map((l) => l.y)).size).toBe(3)
+  })
+
+  it('draws the shutdown text ON the scrim, in a colour that is not the scrim', () => {
+    const lines = drawWith(gameOverFrame({}))
+      .filter((c): c is FillTextCommand => c.op === 'fillText')
+      .slice(-3)
+    for (const line of lines) {
+      expect(line.fillStyle, `"${line.text}" is invisible on its own scrim`).not.toBe(PALETTE.scrim)
+      expect(line.fillStyle).toBe(PALETTE.land)
+    }
+  })
+
+  it('draws the shutdown AFTER the HUD, so nothing the HUD draws can cover it', () => {
+    const log = drawWith(gameOverFrame({}))
+    const scrimIndex = log.findIndex((c) => c.op === 'fillRect' && c.fillStyle === PALETTE.scrim)
+    const lastHudText = log.map((c) => c.op).lastIndexOf('fillText')
+    expect(scrimIndex).toBeGreaterThan(-1)
+    expect(lastHudText, 'the last text on the frame belongs to the shutdown').toBeGreaterThan(
+      scrimIndex,
+    )
+    // ...and the HUD really did draw first, so this is an ORDER assertion and
+    // not "the HUD was skipped".
+    expect(log.slice(0, scrimIndex).filter((c) => c.op === 'fillText').length).toBe(3)
+  })
+
+  it('still draws the ring of the destination that killed the city, under the scrim', () => {
+    // The screen has to answer WHICH destination, and pointing at it is
+    // stronger than naming it — which is why the scrim is translucent. A frozen
+    // meter is at 249/255, so the ring is nearly closed and it is the only one
+    // on the board.
+    const frame = frameWithOvercrowd([0, 249], true)
+    const log = drawWith(frame)
+    const found = arcs(log)
+    expect(found.length).toBe(1)
+    expect((found[0] as ArcCommand).x).toBeCloseTo(expectedCentreX(1), 5)
+    // Under the scrim, not over it: the dim applies to the ring too, so the
+    // text is the brightest thing on the screen.
+    const scrimIndex = log.findIndex((c) => c.op === 'fillRect' && c.fillStyle === PALETTE.scrim)
+    expect(log.findIndex((c) => c.op === 'arc')).toBeLessThan(scrimIndex)
+  })
+
+  it('draws nothing of the shutdown when the run is live', () => {
+    // Explicit `gameOver: false`, not an absent field. A trial scrim phase left
+    // the whole render suite green precisely because the two base fixtures
+    // never set the flag and `undefined` is falsy.
+    const log = drawWith(liveFrame())
+    expect(liveFrame().gameOver, 'the fixture must SAY false, not omit it').toBe(false)
+    expect(log.some((c) => c.op === 'fillRect' && c.fillStyle === PALETTE.scrim)).toBe(false)
+    expect(log.filter((c) => c.op === 'fillText').length, 'the HUD three and no more').toBe(3)
+    expect(log.some((c) => c.op === 'arc')).toBe(false)
+  })
+
+  it('keeps the five-fill tiling on a LIVE frame and adds exactly one on a dead one', () => {
+    // The scrim is a sixth fill and it is deliberately NOT part of Decision 4's
+    // partition — it is a translucent pass over an already-covered canvas. So
+    // the partition assertion has to stay true while the run is live, and the
+    // scrim has to be the only thing added when it is not.
+    const live = drawWith(liveFrame()).filter((c) => c.op === 'fillRect').length
+    const dead = drawWith(gameOverFrame({})).filter((c) => c.op === 'fillRect').length
+    expect(dead - live, 'exactly one extra fillRect: the scrim').toBe(1)
+    assertExactTiling(bands(drawWith(liveFrame())), cameraB())
+  })
+
+  it('hides the pause bars on a shutdown frame, because the clock no longer resumes anything', () => {
+    // `loop.end()` sets `paused`, so a game-over frame arrives with
+    // `paused: true` — and pause bars promise "tap the clock to resume" while
+    // the clock now starts a NEW RUN and throws this city away. A glyph
+    // offering resume in front of a destructive action is the affordance defect
+    // this whole task exists to remove, not one to add.
+    const camera = cameraB()
+    const barW = (hudRects(camera, createHudRects()).clock.h * PAUSE_BAR_FRACTION)
+    const barCount = (log: readonly Command[]): number =>
+      log.filter((c) => c.op === 'fillRect' && c.fillStyle === PALETTE.uiText && c.w === barW).length
+
+    const paused = { ...frameB(true), gameOver: false }
+    expect(barCount(drawWith(paused)), 'vacuity: a paused LIVE frame draws two bars').toBe(2)
+    const dead = { ...frameB(true), gameOver: true, failedDest: 0 }
+    expect(dead.paused, 'vacuity: the dead frame really is paused too').toBe(true)
+    expect(barCount(drawWith(dead))).toBe(0)
+  })
+})
+
+describe('failedText: the fourth single-slot cache in this file', () => {
+  it('re-formats when the index changes, so the cache cannot go stale', () => {
+    // The staleness direction is the one that matters, and it is the one a
+    // sentinel of -1 gets wrong: -1 is the LIVE value, so a cache primed with
+    // it hits on the first shutdown frame and the screen names destination -1
+    // forever. Drawn live first, deliberately, so the cache has been asked the
+    // live question before the dead one.
+    drawWith(liveFrame())
+    expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: -1 })))).toContain(
+      'DESTINATION -1 OVERCROWDED',
+    )
+    expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 0 })))).toContain(
+      'DESTINATION 0 OVERCROWDED',
+    )
+    expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 5 })))).toContain(
+      'DESTINATION 5 OVERCROWDED',
+    )
+    // ...and back, so the cache is keyed rather than one-shot.
+    expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 0 })))).toContain(
+      'DESTINATION 0 OVERCROWDED',
+    )
   })
 })
