@@ -532,6 +532,9 @@ describe('the frame path actually draws the smoothed position', () => {
         builder,
         camera: () => camera,
         draw: () => undefined,
+        onGameOver: (): void => {
+          throw new Error('the smoothing rig reached game over — the chase would then be measured frozen')
+        },
       })
       driver.beforeStep()
       // The sim moves one tick's worth; the DRAIN is declared as `ticks`.

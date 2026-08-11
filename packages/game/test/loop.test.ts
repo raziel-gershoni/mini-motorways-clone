@@ -493,6 +493,102 @@ describe('pause and stall', () => {
 })
 
 // ---------------------------------------------------------------------------
+// 4b. end(): terminal, and reachable from outside this module — M1e Task 8
+// ---------------------------------------------------------------------------
+
+describe('end(): a loop that has ended cannot be resumed by anyone', () => {
+  it('pauses, refuses every later setPaused, and runs no tick', () => {
+    // **`setPaused` is reachable from OUTSIDE this module**: `main.ts` gives
+    // `createPointerInput` a `setPaused` that forwards straight to it, and the
+    // HUD clock tap is its production caller. Until Task 8 one tap resumed rAF
+    // on a dead sim — the frame driver kept snapshotting, the pause bars
+    // vanished while nothing else changed, and `HitRegion.GRID` re-opened so
+    // the player drew roads that never appeared. Guarding the one caller that
+    // exists is a guard that re-opens with the next one, so the stickiness is a
+    // property of the loop.
+    const { loop, rec } = rig()
+    loop.frame(1000)
+    loop.frame(1100)
+    expect(loop.totalTicks, 'vacuity: it was running').toBe(2)
+    expect(loop.over).toBe(false)
+
+    loop.end()
+    expect(loop.paused, 'end() pauses as well as ending').toBe(true)
+    expect(loop.over).toBe(true)
+
+    loop.setPaused(false)
+    expect(loop.paused, 'setPaused(false) after end() must do nothing').toBe(true)
+    expect(loop.over).toBe(true)
+
+    const ticksBefore = loop.totalTicks
+    const advancesBefore = rec.advanceCount
+    for (let f = 0; f < 30; f++) loop.frame(1100 + (f + 1) * 100)
+    expect(loop.ticksLastFrame).toBe(0)
+    expect(loop.totalTicks, 'and no tick may run').toBe(ticksBefore)
+    expect(rec.advanceCount, 'nor any advance').toBe(advancesBefore)
+  })
+
+  it('is not vacuous: the same 30 frames on a merely PAUSED loop resume and drain', () => {
+    // The negative assertion above is only worth something if `setPaused(false)`
+    // is otherwise capable of restarting this exact rig. Same frames, same
+    // durations, one call short of `end()`.
+    const { loop, rec } = rig()
+    loop.frame(1000)
+    loop.frame(1100)
+    loop.setPaused(true)
+    loop.setPaused(false)
+    for (let f = 0; f < 30; f++) loop.frame(1100 + (f + 1) * 100)
+    expect(loop.totalTicks, 'a merely paused loop comes back').toBeGreaterThan(2)
+    expect(rec.advanceCount).toBeGreaterThan(2)
+  })
+
+  it('still RENDERS, because rAF is never cancelled and pause is a branch inside frame', () => {
+    // Stated because "stop the loop" is not a thing this codebase can do
+    // without restructuring the entry point: `wireGame`'s `onFrame` re-arms
+    // `requestAnimationFrame` unconditionally, and `end()` does not reach it.
+    // What `end()` buys is that the branch skips the drain — the frame still
+    // draws, which is what lets Task 9 put a shutdown screen on it.
+    const { loop, rec } = rig()
+    loop.frame(1000)
+    loop.end()
+    const rendersBefore = rec.renderAlphas.length
+    loop.frame(1100)
+    loop.frame(1200)
+    expect(rec.renderAlphas.length, 'the frame path is still live').toBe(rendersBefore + 2)
+    expect(rec.renderPaused.slice(-2), 'and it renders as paused').toEqual([true, true])
+    expect(rec.advanceCount).toBe(0)
+  })
+
+  it('is idempotent, and ending an already-paused loop leaves it paused', () => {
+    const { loop } = rig()
+    loop.frame(1000)
+    loop.setPaused(true)
+    loop.end()
+    loop.end()
+    expect(loop.paused).toBe(true)
+    expect(loop.over).toBe(true)
+    loop.setPaused(false)
+    expect(loop.paused).toBe(true)
+  })
+
+  it('refuses setPaused(true) after end() too, so `over` cannot be laundered into a resume', () => {
+    // `setPaused`'s existing early return is `if (next === paused) return`, so a
+    // guard written as "refuse only un-pausing" would let `setPaused(true)`
+    // through, do nothing visible, and then let a following `setPaused(false)`
+    // see a state change it should not. One unconditional refusal, not two
+    // conditional ones.
+    const { loop } = rig()
+    loop.frame(1000)
+    loop.end()
+    loop.setPaused(true)
+    loop.setPaused(false)
+    expect(loop.paused).toBe(true)
+    loop.frame(1100)
+    expect(loop.ticksLastFrame).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 5. The pooled input queue
 // ---------------------------------------------------------------------------
 

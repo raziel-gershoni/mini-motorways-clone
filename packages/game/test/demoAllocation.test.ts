@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { Session } from 'node:inspector'
-import { CT_REBUILDS, H_TICK, PHASE_OUTBOUND, PHASE_RETURNING } from '@laneways/sim'
+import { CT_REBUILDS, isGameOver, H_TICK, PHASE_OUTBOUND, PHASE_RETURNING } from '@laneways/sim'
 import type { AtlasContext, AtlasSurface } from '@laneways/render'
 import { DEMO_DEATH_TICK } from './deathTicks'
 import { createGame, type GameContext } from '../src/main'
@@ -404,6 +404,15 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
       'this rig drove past the demo board’s death tick — the budgets above were measured on a corpse',
     ).toBeLessThan(DEMO_DEATH_TICK)
     expect(game.state.header[H_TICK], 'and the measured end tick is 6,459').toBe(6459)
+    // **And the flag itself, which is the only one of the three that is a
+    // STRUCTURAL oracle — M1e Task 8.** The two lines above compare `H_TICK`
+    // against a measured constant, so both are wrong together the day
+    // `DEMO_DEATH_TICK` goes stale; this one reads the byte `step` actually
+    // branches on and is right by construction whatever the board does. It is
+    // also the only one that survives someone changing the layout under this
+    // rig. Task 8 made the freeze real, so from here on a green budget over a
+    // dead sim is a reachable outcome rather than a hypothetical.
+    expect(isGameOver(game.state), 'this window must profile a LIVE sim').toBe(false)
 
     const offenders = [...perFrameMin]
       .filter(([file, perFrame]) => perFrame > budgetFor(file))
@@ -419,6 +428,13 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     // repo, this test says so instead of quietly measuring the old load.
     const { game, drive, counts } = demoRig(false)
     drive(300)
+    // **Every number below passes on a FROZEN board** — measured at M1e Task 7
+    // by freezing the sim and re-running them: frozen cars keep their slot and
+    // their phase, frozen roads keep their bits, and `loop.frame` renders
+    // whether or not a tick drained, so the blit and fill counts keep rising.
+    // This rig only drives 300 frames so it cannot reach the shutdown, but the
+    // guard is what says that rather than the arithmetic.
+    expect(isGameOver(game.state), 'the vacuity guards below are blind to a freeze').toBe(false)
     expect(game.layoutId).toBe('demo')
     expect(game.state.carPhase.length).toBe(24)
     expect(inFlight(game)).toBeGreaterThanOrEqual(15)

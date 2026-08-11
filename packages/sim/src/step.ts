@@ -1,5 +1,5 @@
 import type { GameState } from './state'
-import { H_EPOCH, H_TICK, H_WEEK } from './state'
+import { isGameOver, H_EPOCH, H_TICK, H_WEEK } from './state'
 import { weekOfTick } from './clock'
 import { runWeekBoundary } from './week'
 import type { WorldData } from './world'
@@ -452,6 +452,26 @@ export function step(
         'clearing it, and this buffer is not resumable',
     )
   }
+
+  // §5.8's shutdown, and it lives here rather than in the caller for one
+  // reason: **server-side replay.** A Worker replaying an input log that runs
+  // past the failure must compute the same score as the browser that produced
+  // it, whatever the log's length — so every post-failure tick has to be a
+  // byte-identical no-op in `sim` itself, not merely a tick the game loop chose
+  // not to run. `game`'s `onGameOver`/`loop.end()` is a FOLLOWER of this line,
+  // not the authority; it exists to stop the loop burning 30 steps a second on
+  // nothing.
+  //
+  // **After the poison check and before the `H_EPOCH` write, both
+  // deliberately.** A poisoned buffer must still refuse loudly whether or not
+  // the run also ended, so the epoch guard stays first. And a frozen state must
+  // stay restorable: an epoch left set on every frozen tick would make
+  // `restore` refuse the save M3 is about to write, so the run would end in the
+  // one state a leaderboard cannot accept. `step.test.ts` pins both orderings.
+  //
+  // Nothing below this line runs again for the life of the buffer — not the
+  // clock, not the input loop, not phase 10 itself.
+  if (isGameOver(s)) return
 
   const tick = (s.header[H_TICK] as number) + 1
   s.header[H_EPOCH] = tick

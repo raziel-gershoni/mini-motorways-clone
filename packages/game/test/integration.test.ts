@@ -6,6 +6,8 @@ import {
   COST_UNIT_SCALE,
   DIAG_COST,
   FIRST_PIN_DELAY_TICKS,
+  OVERCROWD_FAIL_MILLITICKS,
+  PIN_CAP_SQUARE_TIMER,
   PIN_PERIOD_TICKS,
 } from '@laneways/shared'
 import {
@@ -24,6 +26,8 @@ import {
   carparkCell,
   claimCell,
   destMetaOrientation,
+  failedDestination,
+  isGameOver,
   occupantOf,
   packRouteStep,
   assertOccupancySound,
@@ -1888,8 +1892,63 @@ describe('a bottleneck jams: throughput collapses below the hand-computed unbloc
 const LONG_RUN_TICKS = 20000
 
 /**
- * **20,000 ticks on a deliberately bad network, with every invariant checked on
+ * **The tick this rig's overcrowd meter completes on, measured at M1e Task 8.**
+ *
+ * `buildJamRig` leaves `H_TICK` at 1, so this is drive number 7,222 of 20,000:
+ * **the live horizon of this sweep is 7,222 ticks, not 20,000**, and the
+ * remaining 12,779 drives are byte-identical no-ops. That is a real reduction
+ * in coverage and it is stated here rather than absorbed — see the block
+ * comment on the test itself for the cause and for what a future task could do
+ * about it.
+ */
+const LONG_RUN_DEATH_TICK = 7223
+/** Destination 1 — a SPAWNED one, whose carpark is road-free by construction. */
+const LONG_RUN_DEATH_DEST = 1
+
+/**
+ * **20,000 drives on a deliberately bad network, with every invariant checked on
  * every tick — and two identical runs agreeing on `hashState`.**
+ *
+ * ---------------------------------------------------------------------------
+ * THIS BOARD NOW LOSES, AT TICK 7,223, AND THE HORIZON IS THAT — M1e TASK 8
+ * ---------------------------------------------------------------------------
+ *
+ * §5.8 made a badly-run city fatal, and this fixture is a badly-run city by
+ * design. **The cause is specific and worth naming, because it is not the jam.**
+ * `jamFixture` holds `destPins[0]` at 255, so every scheduled colour-0 pin
+ * overflows onto the first same-colour destination with room — and since M1e
+ * Task 5 those are the three destinations the SPAWNER placed. A spawned
+ * destination's carpark is road-free by construction (`canPlaceDestination`
+ * rejects a road on any of a candidate's seven cells) on a board where nothing
+ * ever lays another road, so it is never a flow-field source, is never
+ * dispatched to, and **receives zero arrivals for the whole run**. Its meter is
+ * monotone from its first over-capacity tick. Destination 1 completes first, at
+ * tick 7,223; destinations 2 and 3 would follow at 9,072 and 12,969 if the
+ * first one had not already ended the run.
+ *
+ * That is `firstCity`'s D2 mechanism exactly — *unreachable*, not merely
+ * deprioritised — reproduced inside a test fixture by a spawner that is not
+ * connectivity-aware, which is correct game behaviour and an accident here.
+ * **Destination 0, the real one, is nowhere near it**: it is served roughly
+ * every 8.5 ticks against a survivability boundary of 90, and its meter peaks
+ * at 72,029 against a threshold of 2,640,000.
+ *
+ * **What it costs, stated rather than discovered.** Four of this test's figures
+ * were measured over 20,000 live ticks and are now measured over 7,222:
+ * `valves` 98 -> **40** and `minCompletions` 2 -> **1**. `maxBlocked`,
+ * `maxReserved`, the reservation invariant, the two spawner counts and the
+ * replay equality are all unchanged, because every one of them saturates well
+ * before the freeze. Note how close the starvation guard now runs: the minimum
+ * completion count is still **0 at tick 6,000** and only reaches 1 between then
+ * and 7,000, so "no car starves" clears by about 700 ticks.
+ *
+ * **A future task that wants the 20,000-tick horizon back has one lever**, and
+ * it is the one M1e Task 5 Step 12 considered and declined: cap this fixture's
+ * `maxDestinations`/`maxHouses` to its built counts so the spawner places
+ * nothing. Without the spawner this board survives indefinitely — destination 0
+ * alone cannot lose. That trade was made before losing was possible and nobody
+ * has re-taken it; it is not re-taken here either, because changing
+ * `buildJamRig`'s map parameters moves every other fixture built on it.
  *
  * The network is deliberately bad in a specific, named way rather than merely
  * busy: `JAM_STARVED_*` puts **twelve** houses on the corridor with the first
@@ -1922,9 +1981,10 @@ const LONG_RUN_TICKS = 20000
  *   - **two runs agree on `hashState`** — the property the whole product rests
  *     on, over a run in which cars block, queue, starve and valve.
  */
-describe('20,000 ticks on a deliberately bad network', () => {
+describe('20,000 drives on a deliberately bad network, which now LOSES at tick 7,223', () => {
   it('starves nobody, wraps nothing, holds both invariants every tick, and replays identically', () => {
     const rig = buildJamRig('long-run', JAM_STARVED_FIRST_HOUSE_Y, JAM_STARVED_HOUSE_COUNT)
+    expect(rig.state.header[H_TICK], 'the rig arrives one tick in, which is what 7,223 is offset by').toBe(1)
     const carCount = rig.state.carPhase.length
     const completions = new Int32Array(carCount)
     const prevPhase = new Int32Array(carCount)
@@ -1940,8 +2000,17 @@ describe('20,000 ticks on a deliberately bad network', () => {
     let maxBlocked = 0
     let maxReserved = 0
     let reservationMismatches = 0
+    /** The tick `isGameOver` first read true, and the digest at that instant. */
+    let endedAt = -1
+    let deadDest = -1
+    let digestAtDeath = 0
     for (let t = 0; t < LONG_RUN_TICKS; t++) {
       valves += rig.drive(1).valves
+      if (endedAt < 0 && isGameOver(rig.state)) {
+        endedAt = rig.state.header[H_TICK] as number
+        deadDest = failedDestination(rig.state)
+        digestAtDeath = hashState(rig.state)
+      }
       // Soundness, unconditionally, on every one of the 20,000 ticks. Throws by
       // name rather than returning, so a failure names the cell and the car.
       assertOccupancySound(rig.state, rig.world)
@@ -1982,7 +2051,13 @@ describe('20,000 ticks on a deliberately bad network', () => {
       }
     }
     expect(minCompletions, `car ${worst} completed the fewest trips`).toBeGreaterThan(0)
-    expect(minCompletions).toBe(2)
+    // **1, not 2, and the difference is the freeze rather than the traffic.**
+    // The live horizon is 7,222 drives; measured, the slowest car's completion
+    // count is still 0 at tick 6,000 and reaches 1 between 6,000 and 7,000. So
+    // "no car starves" now clears by roughly 700 ticks, where it used to clear
+    // by more than 13,000 — a real narrowing, recorded so that a future change
+    // which delays the first completions fails here for the right reason.
+    expect(minCompletions).toBe(1)
 
     // No counter wraps. `carBlockedTicks` saturates at exactly the threshold —
     // never above it, which is what makes the width question unaskable at any
@@ -1993,7 +2068,9 @@ describe('20,000 ticks on a deliberately bad network', () => {
 
     // The valve genuinely fired, so the run exercised the branch it is here for
     // rather than merely surviving 20,000 quiet ticks.
-    expect(valves, 'the valve never fired, so this is not the bad network it claims to be').toBe(98)
+    // 40 over the live prefix, where 20,000 live ticks gave 98. The rate is
+    // unchanged (about one firing per 180 ticks either way); the horizon is not.
+    expect(valves, 'the valve never fired, so this is not the bad network it claims to be').toBe(40)
 
     // ---------------------------------------------------------------------
     // **The spawner ran here, and the benefit Task 5 claimed for letting it is
@@ -2008,6 +2085,18 @@ describe('20,000 ticks on a deliberately bad network', () => {
     // never sees one. The choice was still the right one — (b) buys a smaller
     // re-derivation and does not even buy inertness — but the sentence
     // overstated it.
+    //
+    // **"Inert" was true of MOVEMENT and is false of the overcrowd meter, and
+    // M1e Task 8 is where that became visible.** A spawned destination is
+    // sourceless, so it is never dispatched to — and §5.8 does not care whether
+    // a queue is unserved by bad luck or by unreachability. Its pins
+    // accumulate, its meter is monotone, and it is what ends this run at tick
+    // 7,223. So (a) now costs this sweep 64 % of its live horizon, which is a
+    // price Step 12 could not have priced. See the block comment above the
+    // describe for the full accounting and for the one lever that would undo
+    // it. **Nothing in this file is "inert" until it has been checked against
+    // the phase list as it stands today**, which is the general form of the
+    // mistake this paragraph has now made twice.
     //
     // **The gap that claim would have papered over is closed elsewhere**, by
     // `sim/test/spawn.test.ts`'s *"drives cars from SPAWNED houses for 20,000
@@ -2068,6 +2157,52 @@ describe('20,000 ticks on a deliberately bad network', () => {
       rig.state.destPins[1] as number,
       'vacuity: destination 1 must actually be receiving the overflow this note describes',
     ).toBeGreaterThan(0)
+
+    // ---------------------------------------------------------------------
+    // **The shutdown, and the freeze after it — M1e Task 8.**
+    //
+    // Asserted as a DEATH rather than as a margin, which is the opposite
+    // polarity to every other window in the repo and is deliberate: this board
+    // genuinely loses, so `isGameOver(state) === false` after the final drive
+    // is unsatisfiable here and asserting it would mean shortening the run to
+    // hide the fact. The oracle is the same either way — read the flag — and
+    // stating the tick is what makes a future change to the pin cadence, the
+    // trigger cap or the spawner move a number rather than pass quietly.
+    // ---------------------------------------------------------------------
+    expect(endedAt, 'the run must end, and on the tick Task 8 measured').toBe(LONG_RUN_DEATH_TICK)
+    expect(deadDest, 'on the first SPAWNED destination, which no car can reach').toBe(
+      LONG_RUN_DEATH_DEST,
+    )
+    expect(rig.state.header[H_TICK], 'and the clock stopped there').toBe(LONG_RUN_DEATH_TICK)
+    expect(LONG_RUN_TICKS, 'so 12,779 of the 20,000 drives are no-ops').toBeGreaterThan(
+      LONG_RUN_DEATH_TICK,
+    )
+    // The freeze itself: 12,779 further drives, every one of them a
+    // byte-identical no-op. This is the property server-side replay rests on,
+    // measured over the longest post-failure run in the repo.
+    expect(hashState(rig.state), 'not one byte moved after the failure').toBe(digestAtDeath)
+    // And the destination that killed it really did receive nothing: a
+    // road-free carpark is not a flow-field source, so its pins only ever
+    // accumulate. If a future change connects it, this line moves first.
+    const deadCarpark = carparkCell(
+      rig.state.destCell[deadDest] as number,
+      destMetaOrientation(rig.state.destMeta[deadDest] as number),
+      rig.world.w,
+      rig.world.h,
+    )
+    expect(rig.state.roads[deadCarpark] as number, 'the dead destination is unreachable').toBe(0)
+    expect(
+      rig.state.destPins[deadDest] as number,
+      'and it is over its trigger cap, which is why its meter ran',
+    ).toBeGreaterThanOrEqual(PIN_CAP_SQUARE_TIMER)
+    // Destination 0 — the real, road-connected one — is the control: it carries
+    // far more pins and is nowhere near failing, so the death above is
+    // attributable to unreachability rather than to the pin count.
+    expect(rig.state.destPins[0] as number).toBeGreaterThan(rig.state.destPins[deadDest] as number)
+    expect(
+      rig.state.destOvercrowd[0] as number,
+      'the served destination is not close to losing',
+    ).toBeLessThan(OVERCROWD_FAIL_MILLITICKS / 10)
 
     // Two identical runs agree, byte for byte, over the whole buffer.
     const second = buildJamRig('long-run', JAM_STARVED_FIRST_HOUSE_Y, JAM_STARVED_HOUSE_COUNT)

@@ -6,11 +6,12 @@ import {
   OVERCROWD_RAMP_FULL_TICKS,
   ARRIVAL_KNOCKBACK_PCT,
   ARRIVAL_KNOCKBACK_MAX_MILLITICKS,
+  OVERCROWD_FAIL_MILLITICKS,
   PIN_CAP_SQUARE_TIMER,
   PIN_CAP_CIRCLE_TIMER,
 } from '@laneways/shared'
 import type { GameState } from './state'
-import { H_DEST_COUNT } from './state'
+import { H_DEST_COUNT, H_FAILED_DEST, H_GAME_OVER } from './state'
 import { destMetaKind, DEST_KIND_CIRCLE } from './buildings'
 
 /**
@@ -25,11 +26,16 @@ import { destMetaKind, DEST_KIND_CIRCLE } from './buildings'
  * decides failure. One quantity cannot do both: a ramp derived from the meter
  * is zero at zero and never starts.
  *
- * **This file does not end the run.** `runOvercrowd` is phase 10 of ten and its
- * only output is two numbers; Task 8 is what reads
- * `OVERCROWD_FAIL_MILLITICKS` and shuts the city down. Splitting the arithmetic
- * from the consequence is what lets the 3,390-tick derivation be wrong loudly
- * in a test rather than fatally in a run.
+ * **This file ends the run, as of M1e Task 8 — and it does not freeze
+ * anything.** `runOvercrowd` sets `H_GAME_OVER`/`H_FAILED_DEST` and returns;
+ * the byte-identical no-op every later tick becomes is `step`'s early return,
+ * one level up. The split is deliberate on both sides. Keeping the arithmetic
+ * separable from the consequence is what lets the 3,390-tick derivation be
+ * wrong loudly in a test rather than fatally in a run, and it is why
+ * `overcrowd.test.ts` can drive the meter thousands of ticks past the failure
+ * to measure the model. Keeping the FREEZE out of here is what stops the two
+ * guards being independently sufficient, which would leave neither with a
+ * detector.
  *
  * **What this model can and cannot express, measured — read plan Decision 2
  * before tuning any of it.** Hold a destination at its cap and serve it one car
@@ -170,13 +176,20 @@ export function applyArrivalKnockback(state: GameState, d: number): void {
 }
 
 /**
- * Phase 10 of the tick order. Task 8 gives it the power to end the run.
+ * Phase 10 of the tick order, and **the one place the run can end.**
  *
  * Iterates the LIVE destination prefix, `H_DEST_COUNT`, and not the whole
  * region: a slot past the prefix holds a zero `destMeta`, which decodes as a
  * square, so an unbounded loop would silently integrate a meter for a
  * destination that does not exist yet. `overcrowd.test.ts` pins that with a
  * hand-written over-cap pin count in slot 1 of a one-destination board.
+ *
+ * **This function has no `isGameOver` guard and must not grow one.** The freeze
+ * is `step`'s early return, one level up; a second one here would be
+ * independently sufficient with it, and by this repo's own catalogue two
+ * independently sufficient structures leave NEITHER with a detector. It is also
+ * what lets `overcrowd.test.ts` keep driving the meter past the failure to
+ * measure the arithmetic, which no `step`-driven fixture could do.
  */
 export function runOvercrowd(state: GameState): void {
   const destCount = state.header[H_DEST_COUNT] as number
@@ -186,6 +199,33 @@ export function runOvercrowd(state: GameState): void {
       const next = over < OVERCROWD_RAMP_FULL_TICKS ? over + 1 : OVERCROWD_RAMP_FULL_TICKS
       state.destOverTicks[d] = next
       state.destOvercrowd[d] = (state.destOvercrowd[d] as number) + overcrowdRampSpeed(next)
+      if ((state.destOvercrowd[d] as number) >= OVERCROWD_FAIL_MILLITICKS) {
+        // §5.8: "the city shuts down IMMEDIATELY. No lives, no partial
+        // failure, no win condition." **Returning here rather than finishing
+        // the loop is not an optimisation: it fixes WHICH destination is blamed
+        // when two complete on the same tick**, at the lowest index, which is
+        // the same ascending-integer tie-break every other order in this sim
+        // uses. `overcrowd.test.ts`'s two-destination fixture is the detector,
+        // and the assertion that sees it is the one reading destination 1's
+        // meter — dropping the `return` still sets `H_GAME_OVER`.
+        //
+        // **The meter is left AT ITS OVERSHOOT, not clamped.** The ramp is
+        // added before this test, so the stored value can exceed
+        // OVERCROWD_FAIL_MILLITICKS by up to `DENOM - 1` (2,640,999), and the
+        // freeze then preserves that overshoot forever. Task 12's long-run
+        // bound on this region is `OVERCROWD_FAIL_MILLITICKS + DENOM - 1` for
+        // exactly this reason. Clamping instead would make the ring Task 9
+        // draws read exactly 97.8 % at every death rather than at most, which
+        // is a cosmetic gain paid for with a lost byte of evidence about how
+        // the crossing happened.
+        //
+        // The comparison is against the FAIL constant, not the FULL one: §5.8's
+        // last 2 s are a hidden grace, and comparing against
+        // OVERCROWD_FULL_MILLITICKS would give every run 60 more ticks.
+        state.header[H_GAME_OVER] = 1
+        state.header[H_FAILED_DEST] = d
+        return
+      }
     } else {
       state.destOverTicks[d] = 0
       const m = (state.destOvercrowd[d] as number) - OVERCROWD_RETURN_MUL

@@ -5,6 +5,7 @@ import {
   destMetaColour,
   destMetaKind,
   destMetaOrientation,
+  isGameOver,
   step,
   tilesLeft,
   weekOfTick,
@@ -250,6 +251,27 @@ export interface FrameDriverDeps {
   readonly camera: () => Camera
   /** Draws the built frame. `main.ts` passes `(f) => drawFrame(ctx, f, atlases, palette)`. */
   readonly draw: (frame: RenderFrame) => void
+  /**
+   * Called ONCE, on the tick `isGameOver(state)` first becomes true. `main.ts`
+   * ends the loop from it.
+   *
+   * **Required, not optional, and the type says so.** M2's erase control took
+   * an OPTIONAL `createFallback` factory, so `createEraseControl({ host })`
+   * compiled, reported `NONE`, and left the player with no way to erase — a
+   * Critical reinstated by an omission with no compile error and no test
+   * failure. The same shape here compiles a `main.ts` whose loop keeps draining
+   * behind a shutdown screen.
+   *
+   * **It is a FOLLOWER, not the authority.** `sim` decides: `step` is already a
+   * byte-identical no-op past the failure, so a caller that ignored this would
+   * compute exactly the same state. What it buys is that the loop stops burning
+   * 30 steps a second on nothing, and that the shell gets an edge to react to.
+   *
+   * Fired on the EDGE, from a `wasOver` read taken before the step — so a
+   * driver built over an already-terminal state (which is what M3's restore
+   * hands it) announces nothing, and a frozen tick does not re-announce.
+   */
+  readonly onGameOver: () => void
 }
 
 /**
@@ -286,7 +308,13 @@ export function createFrameDriver(deps: FrameDriverDeps): LoopDriver {
       snapshotPrev(builder.snapshots, state, world)
     },
     advance(inputs: TickInputs): void {
+      // Read BEFORE the step, so the callback fires on the EDGE rather than on
+      // the condition: `step` is a no-op on every tick after the first, so a
+      // post-step `if (isGameOver(state))` would re-announce 30 times a second
+      // for the rest of the session.
+      const wasOver = isGameOver(state)
       step(state, world, fields, scratch, inputs)
+      if (!wasOver && isGameOver(state)) deps.onGameOver()
     },
     afterDrain(ticks: number): void {
       // `ticks` stopped being ignorable at the smoothing change: it is the

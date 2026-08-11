@@ -485,7 +485,26 @@ function buildRig(draw: (frame: RenderFrame) => void): Rig {
   initCarSnapshots(builder.snapshots, state, world)
   const queue = createInputQueue()
   const loop = createLoop(
-    createFrameDriver({ state, world, fields, scratch, builder, camera: () => camera, draw }),
+    createFrameDriver({
+      state,
+      world,
+      fields,
+      scratch,
+      builder,
+      camera: () => camera,
+      draw,
+      // **Not a no-op, deliberately.** A profiled window over a frozen sim
+      // measures 0 for everything and every budget in this file passes; the
+      // rig's own vacuity guards cannot see it, because frozen cars keep their
+      // slot and frozen roads keep their bits. This rig runs on `firstCity`
+      // and never comes near the 5,580-tick death, so a call here is a
+      // measurement over a corpse and should say so.
+      onGameOver: (): void => {
+        throw new Error(
+          'the allocation rig reached game over — every budget in this file was measured on a frozen sim',
+        )
+      },
+    }),
     queue,
   )
   // The pointer is wired to the SAME queue the loop drains, exactly as Task 9's

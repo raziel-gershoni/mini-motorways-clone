@@ -9,6 +9,10 @@ import {
   REVEALED_Y0,
   REVEALED_W,
   REVEALED_H,
+  DENOM,
+  OVERCROWD_FAIL_MILLITICKS,
+  OVERCROWD_RAMP_FULL_TICKS,
+  PIN_CAP_SQUARE_TIMER,
   type MapData,
 } from '@laneways/shared'
 import {
@@ -17,6 +21,7 @@ import {
   createScratch,
   createFlowFields,
   createFieldInputRanges,
+  isGameOver,
   placeHouse,
   placeDestination,
   placeRoad,
@@ -61,6 +66,9 @@ import {
 } from '../src/frame'
 import { initCarSnapshots, snapshotPrev, snapshotCurr, resolveCar, lerpCar } from '../src/resolve'
 import { createInputQueue } from '../src/inputs'
+
+/** An empty batch, for the `advance` calls that are about the driver rather than about input. */
+const NO_ACTIONS = { actions: [] as const }
 import { createLoop, type Loop } from '../src/loop'
 
 /**
@@ -1122,7 +1130,12 @@ describe('the first frame, and cars that appear later', () => {
 // ---------------------------------------------------------------------------
 
 /** The wiring Task 9's `main.ts` assembles. Kept in production code so its ORDER can be mutated. */
-function driverFor(r: Rig, fb: FrameBuilder, draw?: (f: RenderFrame) => void): ReturnType<typeof createFrameDriver> {
+function driverFor(
+  r: Rig,
+  fb: FrameBuilder,
+  draw?: (f: RenderFrame) => void,
+  onGameOver?: () => void,
+): ReturnType<typeof createFrameDriver> {
   return createFrameDriver({
     state: r.state,
     world: r.world,
@@ -1131,6 +1144,10 @@ function driverFor(r: Rig, fb: FrameBuilder, draw?: (f: RenderFrame) => void): R
     builder: fb,
     camera: () => r.camera,
     draw: draw ?? ((): void => {}),
+    // Required in `FrameDriverDeps` and optional HERE: a default in the test
+    // helper is not a default in the type, and the `@ts-expect-error` in
+    // section 8b is what pins the difference.
+    onGameOver: onGameOver ?? ((): void => {}),
   })
 }
 
@@ -1432,6 +1449,9 @@ describe('createFrameDriver', () => {
         fields: r.fields,
         scratch: r.scratch,
         builder: fb,
+        onGameOver: (): void => {
+          throw new Error('the camera re-fit rig reached game over — it must not')
+        },
         camera: () => current,
         draw: (f): void => {
           drawn.push(f.camera)
@@ -1522,5 +1542,115 @@ describe('fixture preconditions', () => {
   it('has a step action type the queue and step agree on', () => {
     const a: TickAction = { kind: 'place', a: 1, b: 2 }
     expect(a.kind).toBe('place')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 8b. onGameOver: the loop FOLLOWS the sim — M1e Task 8
+// ---------------------------------------------------------------------------
+
+/**
+ * One tick short of the shutdown, poked directly rather than driven.
+ *
+ * `jamFixture`'s `state.destPins[0] = 255` idiom: the meter's arithmetic is
+ * `overcrowd.test.ts`'s subject and driving 3,390 real ticks here would test it
+ * a second time while testing the callback once. What matters to THIS file is
+ * only that the flag flips inside `advance` and that the callback fires on that
+ * edge and no other, so the fixture is placed at the edge.
+ */
+function oneTickFromShutdown(): Rig {
+  const r = rig()
+  expect(placeDestination(r.state, r.world, cellOf(8, 10), ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(
+    true,
+  )
+  r.state.destPins[0] = PIN_CAP_SQUARE_TIMER
+  r.state.destOverTicks[0] = OVERCROWD_RAMP_FULL_TICKS
+  r.state.destOvercrowd[0] = OVERCROWD_FAIL_MILLITICKS - DENOM
+  return r
+}
+
+describe('the frame driver follows the sim into game over', () => {
+  it('calls onGameOver exactly once, on the tick the flag first becomes true', () => {
+    const r = oneTickFromShutdown()
+    const fb = builderFor(r)
+    let calls = 0
+    const driver = driverFor(r, fb, undefined, () => {
+      calls++
+    })
+
+    driver.advance(NO_ACTIONS)
+    expect(isGameOver(r.state), 'vacuity: the fixture really was one tick away').toBe(true)
+    expect(calls, 'once, on the edge').toBe(1)
+
+    // Thirty frozen ticks. `step` is a no-op on every one of them, so a
+    // callback fired per tick — rather than per EDGE — would reach 31 and the
+    // shell would re-run whatever it does 31 times.
+    for (let i = 0; i < 30; i++) driver.advance(NO_ACTIONS)
+    expect(calls, 'exactly once, not once per frozen tick').toBe(1)
+  })
+
+  it('does not call it on a live run', () => {
+    // The negative, with the fixture one pin BELOW the trigger so the meter
+    // unwinds instead of filling — "nothing fired" then means the flag never
+    // flipped, not that the board happened to be quiet.
+    const r = oneTickFromShutdown()
+    r.state.destPins[0] = PIN_CAP_SQUARE_TIMER - 1
+    const fb = builderFor(r)
+    let calls = 0
+    const driver = driverFor(r, fb, undefined, () => {
+      calls++
+    })
+    for (let i = 0; i < 50; i++) driver.advance(NO_ACTIONS)
+    expect(isGameOver(r.state)).toBe(false)
+    expect(calls).toBe(0)
+  })
+
+  it('reads the flag BEFORE the step, so a state that was already over fires nothing', () => {
+    // The `wasOver` half of the guard, isolated. A driver built over an
+    // already-terminal state — which is exactly what M3's restore will hand it
+    // — must not announce a game over that happened in a previous session.
+    const r = oneTickFromShutdown()
+    const fb = builderFor(r)
+    driverFor(r, fb).advance(NO_ACTIONS)
+    expect(isGameOver(r.state)).toBe(true)
+
+    let calls = 0
+    const second = driverFor(r, fb, undefined, () => {
+      calls++
+    })
+    second.advance(NO_ACTIONS)
+    expect(calls, 'a fresh driver over an already-dead state announces nothing').toBe(0)
+  })
+
+  it('requires onGameOver in the TYPE, so a caller that forgets it does not compile', () => {
+    // **The mutation this pins has no runtime detector, deliberately.** M2's
+    // erase control took an OPTIONAL `createFallback` factory, so
+    // `createEraseControl({ host })` compiled, reported `NONE`, and shipped a
+    // build with no way to erase — that milestone's Critical, reinstated by one
+    // omitted property with no compile error and no test failure. Making
+    // `onGameOver` optional here would compile a `main.ts` whose loop keeps
+    // draining behind a shutdown screen, and nothing at runtime would say so.
+    //
+    // `@ts-expect-error` is itself the assertion: it FAILS the typecheck if the
+    // error stops occurring, which is the only direction that matters.
+    const r = rig()
+    const fb = builderFor(r)
+    const deps = {
+      state: r.state,
+      world: r.world,
+      fields: r.fields,
+      scratch: r.scratch,
+      builder: fb,
+      camera: () => r.camera,
+      draw: (): void => {},
+    }
+    // @ts-expect-error onGameOver is REQUIRED — see the comment above.
+    const driver = createFrameDriver(deps)
+    // Vacuity for the `@ts-expect-error`: adding the property must make the
+    // very same object legal, or the directive could be suppressing a
+    // completely different error and still read as this guard.
+    const ok = createFrameDriver({ ...deps, onGameOver: (): void => {} })
+    expect(typeof driver.advance).toBe('function')
+    expect(typeof ok.advance).toBe('function')
   })
 })

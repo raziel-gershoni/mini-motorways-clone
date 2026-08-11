@@ -310,7 +310,12 @@ export function createGame(deps: GameDeps): Game {
   // makes a car appear during the ramp with no prev entry. Keep the call last.
   initCarSnapshots(builder.snapshots, state, world)
 
-  const loop = createLoop(
+  // **Annotated, and that is load-bearing rather than style.** `onGameOver`
+  // closes over `loop`, so the initialiser references the binding it is
+  // initialising; without the annotation TypeScript refuses to infer the type
+  // through that cycle. The call itself is safe — `onGameOver` only ever runs
+  // from inside `advance`, which cannot happen before `createLoop` returns.
+  const loop: Loop = createLoop(
     createFrameDriver({
       state,
       world,
@@ -322,6 +327,15 @@ export function createGame(deps: GameDeps): Game {
       camera: () => shell.camera,
       draw: (frame) => {
         drawFrame(deps.context, frame, atlases as Atlases, PALETTE)
+      },
+      // §5.8's shutdown reaching the shell. `sim` is the authority — `step` is
+      // already a no-op past the failure — so this is a follower: it stops the
+      // loop draining 30 ticks a second into a frozen buffer, and `end()` makes
+      // that refusal sticky against the clock tap below, which forwards
+      // straight to `loop.setPaused`. Task 9 adds the input-side half and the
+      // way back out.
+      onGameOver: () => {
+        loop.end()
       },
     }),
     queue,

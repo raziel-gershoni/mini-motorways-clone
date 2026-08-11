@@ -17,7 +17,15 @@ import {
   PIN_CAP_CIRCLE_HARD,
   type MapData,
 } from '@laneways/shared'
-import { createState, H_DEST_COUNT, type GameState } from '../src/state'
+import {
+  createState,
+  failedDestination,
+  isGameOver,
+  H_DEST_COUNT,
+  H_FAILED_DEST,
+  H_GAME_OVER,
+  type GameState,
+} from '../src/state'
 import { createWorld, type WorldData } from '../src/world'
 import {
   placeDestination,
@@ -46,9 +54,14 @@ import {
  * `step` calls this at all, and calls it AFTER arrivals — is pinned in
  * `step.test.ts` and `trips.test.ts` instead.
  *
- * **`runOvercrowd` does not end the run.** Task 8 gives it that power; here the
- * meter can saturate and nothing happens, which is what lets the 3,390-tick
- * derivation below be wrong loudly in a test rather than fatally in a run.
+ * **`runOvercrowd` DOES end the run, as of M1e Task 8** — it sets `H_GAME_OVER`
+ * and `H_FAILED_DEST` and returns. What it does not do is freeze anything: the
+ * freeze is `step`'s early return, and `step.test.ts` owns it. That split is
+ * deliberate and it is what lets the fixtures below hold a destination at its
+ * cap for thousands of ticks and then keep driving `runOvercrowd` afterwards —
+ * this function has no `isGameOver` guard of its own and must not grow one,
+ * because a second freeze here would be independently sufficient with `step`'s
+ * and neither could then have a detector.
  */
 
 const OC_W = 12
@@ -87,6 +100,27 @@ function overcrowdRig(opts: { kind?: number; pins?: number; reserved?: number } 
   expect(state.header[H_DEST_COUNT]).toBe(1)
   state.destPins[0] = opts.pins ?? 0
   state.destReserved[0] = opts.reserved ?? 0
+  return { state, world }
+}
+
+/**
+ * TWO squares, both at their trigger cap from tick 1, so both meters complete
+ * on the same tick.
+ *
+ * This fixture exists for exactly one rule — §5.8's tie-break — and it is the
+ * only shape that can see it. A one-destination board cannot distinguish
+ * "blames the destination that completed" from "blames the LAST destination
+ * that completed", which is what dropping `runOvercrowd`'s `return` produces.
+ */
+function twoOverCapacityRig(): Rig {
+  const map = ocMap()
+  const world = createWorld(map)
+  const state = createState('overcrowd-pair', map)
+  expect(placeDestination(state, world, 1 * OC_W + 1, ORIENTATION_E, 0, DEST_KIND_SQUARE)).toBe(true)
+  expect(placeDestination(state, world, 5 * OC_W + 1, ORIENTATION_E, 0, DEST_KIND_SQUARE)).toBe(true)
+  expect(state.header[H_DEST_COUNT], 'both must actually be placed').toBe(2)
+  state.destPins[0] = PIN_CAP_SQUARE_TIMER
+  state.destPins[1] = PIN_CAP_SQUARE_TIMER
   return { state, world }
 }
 
@@ -250,6 +284,114 @@ describe('the overcrowd meter', () => {
     expect(state.destOverTicks[0], 'the live one ticked').toBe(1)
     expect(state.destOverTicks[1], 'the one past H_DEST_COUNT did not').toBe(0)
     expect(state.destOvercrowd[1]).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// §5.8's shutdown — M1e Task 8. The flag, the blame, and the overshoot.
+// ---------------------------------------------------------------------------
+
+describe('the city shuts down when a meter completes (§5.8)', () => {
+  it('sets H_GAME_OVER and names the destination on the 3,390th tick, not the 3,389th', () => {
+    // The same operating point as the arithmetic test above, read through the
+    // two header slots instead of through the meter — so a `>=` -> `>` in
+    // `runOvercrowd`'s new comparison, or a comparison against
+    // OVERCROWD_FULL_MILLITICKS instead of OVERCROWD_FAIL_MILLITICKS (i.e.
+    // dropping §5.8's hidden 2 s grace), moves the run's end by a tick or by
+    // 60 and this is what says so.
+    const { state } = overcrowdRig({ pins: PIN_CAP_SQUARE_TIMER })
+    for (let i = 0; i < 3389; i++) runOvercrowd(state)
+    expect(isGameOver(state), 'one tick short').toBe(false)
+    expect(failedDestination(state), 'and no destination is blamed yet').toBe(-1)
+    expect(state.destOvercrowd[0], 'vacuity: the meter really is one tick short').toBe(
+      OVERCROWD_FAIL_MILLITICKS - DENOM,
+    )
+
+    runOvercrowd(state)
+    expect(isGameOver(state)).toBe(true)
+    expect(failedDestination(state)).toBe(0)
+    // The raw slots too, not only the guarded readers: `failedDestination`
+    // returns 0 for a live run's unset slot as well, so reading it alone cannot
+    // separate "blamed destination 0" from "never fired".
+    expect(state.header[H_GAME_OVER]).toBe(1)
+    expect(state.header[H_FAILED_DEST]).toBe(0)
+  })
+
+  it('blames the LOWEST-INDEXED destination when two complete on the same tick', () => {
+    // §5.8 shuts the city down IMMEDIATELY, so `runOvercrowd` returns rather
+    // than finishing its loop. That is not an optimisation — it fixes WHICH
+    // destination is blamed, at the lowest index, which is the same
+    // ascending-integer tie-break every other order in this sim uses.
+    //
+    // **The `return` is what this test is for and the assertion that sees it is
+    // the second one, not the first.** Dropping the `return` leaves
+    // `H_GAME_OVER` set either way; what changes is that destination 1 is
+    // integrated on the same tick, completes too, and overwrites the blame.
+    const { state } = twoOverCapacityRig()
+    for (let i = 0; i < 3389; i++) runOvercrowd(state)
+    expect(isGameOver(state)).toBe(false)
+    expect(state.destOvercrowd[0], 'both are one tick short, together').toBe(
+      OVERCROWD_FAIL_MILLITICKS - DENOM,
+    )
+    expect(state.destOvercrowd[1]).toBe(OVERCROWD_FAIL_MILLITICKS - DENOM)
+
+    runOvercrowd(state)
+    expect(isGameOver(state)).toBe(true)
+    expect(failedDestination(state), 'the lower index, not the last one to complete').toBe(0)
+    // The structural half of the same rule, and the one that cannot be
+    // satisfied by accident: the return means destination 1 was never even
+    // integrated on the failing tick, so its meter is still one tick behind.
+    expect(state.destOvercrowd[1], 'destination 1 was not integrated on the failing tick').toBe(
+      OVERCROWD_FAIL_MILLITICKS - DENOM,
+    )
+    expect(
+      (state.destOvercrowd[0] as number) - (state.destOvercrowd[1] as number),
+      'exactly one tick of full-rate fill apart, which is what the early return buys',
+    ).toBe(DENOM)
+    // NOT asserted: `destOverTicks[1]`. It saturates at
+    // OVERCROWD_RAMP_FULL_TICKS after 1,500 ticks, so it reads 1,500 whether
+    // or not the return ran — a non-discriminating assertion that would sit
+    // here looking like evidence.
+  })
+
+  it('leaves the meter AT ITS OVERSHOOT rather than clamping it, bounded by DENOM - 1', () => {
+    // The ramp was added before the failure test, so the stored value can
+    // exceed the threshold by up to `DENOM - 1` — and the freeze then preserves
+    // that overshoot forever. Task 12's long-run bound on `destOvercrowd` is
+    // `OVERCROWD_FAIL_MILLITICKS + DENOM - 1` for exactly this reason, so the
+    // worst case is constructed here rather than described.
+    //
+    // Reachable on the shipped boards through the arrival knockback, which
+    // moves the crossing off the exact multiple the clean ramp lands on: the
+    // demo board's own D2 crosses at an overshoot rather than on the nose.
+    const { state } = overcrowdRig({ pins: PIN_CAP_SQUARE_TIMER })
+    state.destOverTicks[0] = OVERCROWD_RAMP_FULL_TICKS
+    state.destOvercrowd[0] = OVERCROWD_FAIL_MILLITICKS - 1
+    runOvercrowd(state)
+    expect(isGameOver(state)).toBe(true)
+    expect(state.destOvercrowd[0]).toBe(OVERCROWD_FAIL_MILLITICKS + DENOM - 1)
+    expect(state.destOvercrowd[0], 'the largest value this region can ever hold').toBe(2640999)
+  })
+
+  it('does not fire from the under-capacity branch, however long it runs', () => {
+    // The negative, with the other mechanism disabled rather than merely
+    // absent: this destination's meter is one unwind step below the threshold,
+    // so a failure test placed in the unwind branch — or moved above the
+    // `isOverCapacity` test — would fire immediately. It stays live.
+    const { state } = overcrowdRig({ pins: 0 })
+    state.destOvercrowd[0] = OVERCROWD_FAIL_MILLITICKS + OVERCROWD_RETURN_MUL
+    runOvercrowd(state)
+    expect(state.destOvercrowd[0], 'vacuity: it really did sit at the threshold').toBe(
+      OVERCROWD_FAIL_MILLITICKS,
+    )
+    expect(isGameOver(state), 'a destination coming back DOWN through the line does not lose').toBe(
+      false,
+    )
+    for (let i = 0; i < 100; i++) runOvercrowd(state)
+    expect(isGameOver(state)).toBe(false)
+    expect(state.destOvercrowd[0], 'and it is unwinding, not parked').toBeLessThan(
+      OVERCROWD_FAIL_MILLITICKS,
+    )
   })
 })
 

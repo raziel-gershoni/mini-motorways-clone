@@ -1,6 +1,16 @@
 import { describe, it, expect } from 'vitest'
-import { parseMap, type MapData } from '@laneways/shared'
-import { createState, snapshot, restore, hashState, H_TICK, type GameState } from '../src/state'
+import { parseMap, PIN_CAP_SQUARE_TIMER, type MapData } from '@laneways/shared'
+import {
+  createState,
+  failedDestination,
+  hashState,
+  isGameOver,
+  restore,
+  snapshot,
+  H_EPOCH,
+  H_TICK,
+  type GameState,
+} from '../src/state'
 import { createWorld, type WorldData } from '../src/world'
 import { placeRoad, tilesLeft, DIR_COUNT, DX, DY } from '../src/roads'
 import { seedFromString, randomBelow, nextRandom } from '../src/rng'
@@ -17,6 +27,7 @@ import {
 } from '../src/scratch'
 import { computeFlowField, hashFieldInputRegions, syncFields, fieldFor } from '../src/flowfield'
 import { createFieldInputRanges } from '../src/regions'
+import { placeDestination, DEST_KIND_SQUARE, ORIENTATION_S } from '../src/buildings'
 import { step } from '../src/step'
 import type { TickInputs } from '../src/step'
 
@@ -516,6 +527,81 @@ describe('the snapshot-and-replay arm', () => {
     expect(replayTrace.length).toBe(TICKS - T)
 
     expect(replayTrace).toEqual(originalTrace.slice(T))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Step 2a: a TERMINAL state round-trips — M1e Task 8
+// ---------------------------------------------------------------------------
+
+describe('a state that has already lost', () => {
+  it('snapshots, restores and rolls back exactly like a live one, on reused fields and scratch', () => {
+    // **The non-negotiable Task 8 has to discharge, and it is not the same
+    // claim as "the frozen bytes do not change."** A run that ends must still
+    // be savable and resumable, because M3 writes that save and a Worker reads
+    // it — a terminal state that cannot be round-tripped is a leaderboard entry
+    // that cannot be verified. The specific failure mode this rules out is the
+    // `H_EPOCH` one: if `step`'s early return sat below the epoch write, every
+    // frozen tick would leave the atomicity marker set and `restore` would
+    // refuse the buffer.
+    //
+    // Reused `fields`/`scratch` deliberately, in this file's own idiom: at the
+    // moment of the restore they hold the ABANDONED post-failure timeline, and
+    // nothing between here and the next `syncFields` tells them so.
+    const W = 8
+    const H = 6
+    const map = parseMap(
+      'rollback-terminal-fixture',
+      Array.from({ length: H }, () => '.'.repeat(W)),
+      999,
+      40,
+      16,
+      2,
+    )
+    const world = createWorld(map)
+    const state = createState('rollback-terminal-seed', map)
+    const fields = createFlowFields(2, world.cells)
+    const scratch = scratchFor(world, 2)
+
+    // One square destination held over its trigger cap and no house, so nothing
+    // arrives and the meter is monotone. Same shape as `step.test.ts`'s rig.
+    expect(placeDestination(state, world, 0, ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+    state.destPins[0] = PIN_CAP_SQUARE_TIMER
+
+    let ended = -1
+    for (let t = 0; t < 6000 && ended < 0; t++) {
+      step(state, world, fields, scratch, NO_INPUT)
+      if (isGameOver(state)) ended = state.header[H_TICK] as number
+    }
+    expect(ended, 'vacuity: the fixture must actually have lost').toBe(3390)
+
+    const snap = snapshot(state)
+    const digestAtDeath = hashState(state)
+
+    // Drive the abandoned timeline 400 ticks past the failure. Every one is a
+    // no-op, which is itself the first half of the property.
+    for (let i = 0; i < 400; i++) step(state, world, fields, scratch, NO_INPUT)
+    expect(hashState(state), 'the frozen timeline never moved').toBe(digestAtDeath)
+
+    // The round trip proper. `restore` validates the buffer against the world
+    // in three steps and throws by name on a poisoned epoch, so reaching this
+    // line at all is the assertion; the digest equality is the second half.
+    const restored = restore(snap, world)
+    expect(hashState(restored)).toBe(digestAtDeath)
+    expect(isGameOver(restored), 'still terminal after the round trip').toBe(true)
+    expect(failedDestination(restored)).toBe(0)
+    expect(restored.header[H_EPOCH], 'and unpoisoned, which is what makes it restorable').toBe(0)
+
+    // Rolled back onto the SAME reused pair, and it stays frozen — so the
+    // freeze is a property of the buffer rather than of the objects beside it,
+    // and a stale field from the abandoned timeline cannot revive it.
+    step(restored, world, fields, scratch, NO_INPUT)
+    expect(hashState(restored)).toBe(digestAtDeath)
+
+    // Vacuity, the shape this file already uses: a fresh state of the same
+    // shape must NOT hash the same, or every `toBe` above is comparing two
+    // copies of nothing.
+    expect(hashState(createState('rollback-terminal-seed', map))).not.toBe(digestAtDeath)
   })
 })
 

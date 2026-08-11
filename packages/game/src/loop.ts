@@ -110,9 +110,44 @@ export interface Loop {
    * anywhere, and tests pass literals.
    */
   readonly frame: (now: number) => void
-  /** Pause or resume. Resuming resets the clock reference on the next frame. */
+  /**
+   * Pause or resume. Resuming resets the clock reference on the next frame.
+   *
+   * **A no-op once `end()` has been called** — see `end` for why that guard
+   * lives here and not at the one caller that exists today.
+   */
   readonly setPaused: (paused: boolean) => void
   readonly paused: boolean
+  /**
+   * Ends the run: pauses, and refuses every later `setPaused`. **Sticky, and
+   * that is the whole point.**
+   *
+   * `setPaused` is reachable from outside this module through the `setPaused`
+   * thunk `main.ts` hands `createPointerInput`, whose production caller is a
+   * tap on the HUD clock. Until M1e Task 8 that tap resumed rAF on a dead sim:
+   * the frame driver kept snapshotting and drawing at 30 Hz, `frame.paused`
+   * flipped false so the pause bars vanished, and `HitRegion.GRID` re-opened —
+   * it is refused *while paused* (`REFUSED_PAUSED`) and by nothing else — so
+   * the player drew roads that never appeared, spent no tiles and got no
+   * message. `advance` guards on `!wasOver`, so `onGameOver` never re-fires and
+   * nothing re-pauses. Guarding the one caller that exists is a guard that
+   * re-opens with the next one, so this is a property of the loop.
+   *
+   * **Note what this does NOT do: rAF is never cancelled.** `wireGame`'s
+   * `onFrame` re-arms `requestAnimationFrame` unconditionally and pause is a
+   * branch inside `frame`, so "stop the loop" is not a thing this codebase can
+   * do without restructuring the entry point — and it does not need to be,
+   * because the branch already skips the drain while leaving the draw running,
+   * which is exactly what a shutdown screen needs.
+   *
+   * **It is also not the authority.** `sim`'s `step` is already a byte-identical
+   * no-op past the failure, so a loop that kept draining would compute the same
+   * state; this exists to stop it burning 30 steps a second on nothing and to
+   * let the shell react.
+   */
+  readonly end: () => void
+  /** True once `end()` has been called. Task 9's `pointer.ts` reads it as `gameOver`. */
+  readonly over: boolean
   /** The render interpolation fraction, always in `[0, 1)`. */
   readonly alpha: number
   /** Unspent wall-clock time, always in `[0, TICK_MS)` after a frame. */
@@ -149,6 +184,8 @@ const LOOP_SLOT_COUNT = 3
 export function createLoop(driver: LoopDriver, queue: InputQueue): Loop {
   const slots = new Float64Array(LOOP_SLOT_COUNT)
   let paused = false
+  /** Sticky. Set only by `end()`, never cleared. See `Loop.end`. */
+  let over = false
   let ticksLastFrame = 0
   let totalTicks = 0
   /** True before the first frame and after every resume. Decision 1b. */
@@ -209,6 +246,12 @@ export function createLoop(driver: LoopDriver, queue: InputQueue): Loop {
     frame,
 
     setPaused(next: boolean): void {
+      // **The terminal guard, first and unconditional.** Refusing only
+      // `setPaused(false)` would let `setPaused(true)` through — which is
+      // invisible today and would leave the pair able to disagree the moment
+      // anything else reads a transition. One refusal, not two conditional
+      // ones.
+      if (over) return
       // Guarded, so a redundant `setPaused(false)` mid-run cannot reset the
       // clock reference and silently swallow a frame's worth of time.
       if (next === paused) return
@@ -216,8 +259,16 @@ export function createLoop(driver: LoopDriver, queue: InputQueue): Loop {
       if (!next) resetClock = true
     },
 
+    end(): void {
+      over = true
+      paused = true
+    },
+
     get paused(): boolean {
       return paused
+    },
+    get over(): boolean {
+      return over
     },
     get alpha(): number {
       return slots[L_ALPHA] as number

@@ -1,6 +1,17 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { createState, hashState, snapshot, restore, H_TICK, H_WEEK, H_TILES, H_EPOCH } from '../src/state'
+import {
+  createState,
+  failedDestination,
+  hashState,
+  isGameOver,
+  restore,
+  snapshot,
+  H_EPOCH,
+  H_TICK,
+  H_TILES,
+  H_WEEK,
+} from '../src/state'
 import { createWorld } from '../src/world'
 import { step, type TickInputs, type TickAction } from '../src/step'
 import { createFlowFields, createScratch, CT_SYNCS, CT_REBUILDS, type FlowField, type Scratch } from '../src/scratch'
@@ -14,7 +25,7 @@ import {
   ORIENTATION_S,
   PHASE_OUTBOUND,
 } from '../src/buildings'
-import { TICKS_PER_WEEK, WEEKLY_TILE_GRANT, parseMap } from '@laneways/shared'
+import { PIN_CAP_SQUARE_TIMER, TICKS_PER_WEEK, WEEKLY_TILE_GRANT, parseMap } from '@laneways/shared'
 
 const NO_INPUT: TickInputs = { actions: [] }
 const MAP = parseMap('step-test-map', ['....', '....', '....', '....'], 20, 8, 4, 2)
@@ -488,5 +499,133 @@ describe('step', () => {
       expect(() => step(s, WORLD, fields, tinyPool, NO_INPUT)).toThrow(/H_EPOCH/)
       expect(() => restore(snapshot(s), WORLD)).toThrow(/H_EPOCH/)
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// §5.8's shutdown: `step` freezes from its FIRST LINE — M1e Task 8
+// ---------------------------------------------------------------------------
+
+/**
+ * One square destination held over its trigger cap on a board with no house at
+ * all, so nothing ever arrives, the meter is monotone and the run ends on the
+ * 3,390th tick.
+ *
+ * `destPins` is written by hand rather than driven through `runDemand`, for
+ * `overcrowd.test.ts`'s reason: the meter's whole input is the pin count, and a
+ * fixture that had to accumulate one would take a different number of ticks to
+ * reach the cap on every map. What is NOT hand-written is anything about the
+ * shutdown itself — the flag, the tick and the frozen bytes all come out of
+ * `step`.
+ */
+function shutdownRig(id: string): {
+  s: ReturnType<typeof createState>
+  fields: FlowField[]
+  scratch: Scratch
+} {
+  const s = createState(id, MAP)
+  const fields = freshFields()
+  const scratch = freshScratch()
+  expect(placeDestination(s, WORLD, 0, ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+  s.destPins[0] = PIN_CAP_SQUARE_TIMER
+  return { s, fields, scratch }
+}
+
+/** Steps until the run ends, returning the tick it ended on. Throws rather than looping forever. */
+function driveToShutdown(rig: ReturnType<typeof shutdownRig>): number {
+  for (let i = 0; i < 6000; i++) {
+    step(rig.s, WORLD, rig.fields, rig.scratch, NO_INPUT)
+    if (isGameOver(rig.s)) return rig.s.header[H_TICK] as number
+  }
+  throw new Error('shutdownRig never reached game over in 6,000 ticks')
+}
+
+/** Two adjacent free cells on the 4x4, clear of the destination's footprint and its carpark. */
+const FREE_A = 14
+const FREE_B = 15
+
+describe('§5.8: the city shuts down and `step` freezes', () => {
+  it('ends the run on the 3,390th consecutive over-capacity tick, naming the destination', () => {
+    const rig = shutdownRig('shutdown-tick')
+    for (let i = 0; i < 3389; i++) step(rig.s, WORLD, rig.fields, rig.scratch, NO_INPUT)
+    expect(isGameOver(rig.s), 'one tick short').toBe(false)
+    expect(rig.s.header[H_TICK]).toBe(3389)
+
+    step(rig.s, WORLD, rig.fields, rig.scratch, NO_INPUT)
+    expect(isGameOver(rig.s)).toBe(true)
+    expect(failedDestination(rig.s)).toBe(0)
+    expect(rig.s.header[H_TICK], 'the failing tick itself still counted').toBe(3390)
+  })
+
+  it('freezes the whole buffer: every later step is a byte-identical no-op', () => {
+    // **What the leaderboard needs, and why the freeze lives in `sim` rather
+    // than in the caller.** A Worker replaying an input log that runs past the
+    // failure must compute the same score as the browser that produced it,
+    // whatever the log's length — so a post-failure tick has to be a
+    // byte-identical no-op in `step` itself, not merely a tick the game loop
+    // chose not to run.
+    const rig = shutdownRig('shutdown-freeze')
+    const endedAt = driveToShutdown(rig)
+    const frozen = new Uint8Array(snapshot(rig.s))
+    const digest = hashState(rig.s)
+
+    // Actions on every frozen tick, not an empty batch: the early return is
+    // above the input loop, so a road the log still carries must not be laid.
+    // With an empty batch this test would pass on a `step` whose freeze sat
+    // anywhere below phase 3.
+    const actions: readonly TickAction[] = [{ kind: 'place', a: FREE_A, b: FREE_B }]
+    for (let i = 0; i < 500; i++) step(rig.s, WORLD, rig.fields, rig.scratch, { actions })
+
+    expect(new Uint8Array(snapshot(rig.s))).toEqual(frozen)
+    expect(hashState(rig.s)).toBe(digest)
+    expect(rig.s.header[H_TICK], 'even the clock stops').toBe(endedAt)
+    expect(rig.s.roads[FREE_A], 'and the queued road was never laid').toBe(0)
+    // Vacuity: that action IS one the same board would have applied while
+    // live, so "no road appeared" is the freeze and not a refused placement.
+    const live = shutdownRig('shutdown-freeze-control')
+    step(live.s, WORLD, live.fields, live.scratch, { actions })
+    expect(live.s.roads[FREE_A], 'the control laid it, so the action is a real one').not.toBe(0)
+  })
+
+  it('does not poison the buffer on the frozen ticks — a terminal state stays restorable', () => {
+    // The early return is BEFORE the `H_EPOCH` write, deliberately. If it were
+    // after, every post-failure tick would leave the atomicity marker set and
+    // `restore` would refuse the save M3 is about to write — so the run would
+    // end in a state that cannot be saved, which is the one state a leaderboard
+    // cannot tolerate.
+    const rig = shutdownRig('shutdown-epoch')
+    driveToShutdown(rig)
+    expect(rig.s.header[H_EPOCH], 'the failing tick itself exited cleanly').toBe(0)
+
+    step(rig.s, WORLD, rig.fields, rig.scratch, NO_INPUT)
+    expect(rig.s.header[H_EPOCH], 'and a frozen tick writes no epoch at all').toBe(0)
+
+    const restored = restore(snapshot(rig.s), WORLD)
+    expect(isGameOver(restored), 'the restored run is still over').toBe(true)
+    expect(failedDestination(restored)).toBe(0)
+    expect(hashState(restored)).toBe(hashState(rig.s))
+    // And it stays frozen after the round trip, on fresh fields and scratch —
+    // the freeze is a property of the buffer, not of the objects beside it.
+    step(restored, WORLD, freshFields(), freshScratch(), NO_INPUT)
+    expect(hashState(restored)).toBe(hashState(rig.s))
+  })
+
+  it('scores identically whether the log stops at the failure or runs 2,000 ticks past it', () => {
+    // The replay property stated as the thing it protects rather than as a
+    // byte comparison: two runs of the SAME board over logs of different
+    // lengths must agree on the digest, which is what makes a Worker's verdict
+    // trustworthy without the Worker knowing where the run ended.
+    // The SAME seed on both, obviously — the property is about log length, and
+    // two different seeds would make this pass or fail for a reason that has
+    // nothing to do with the freeze.
+    const short = shutdownRig('shutdown-replay')
+    driveToShutdown(short)
+
+    const long = shutdownRig('shutdown-replay')
+    driveToShutdown(long)
+    for (let i = 0; i < 2000; i++) step(long.s, WORLD, long.fields, long.scratch, NO_INPUT)
+
+    expect(hashState(long.s)).toBe(hashState(short.s))
+    expect(long.s.header[H_TICK]).toBe(short.s.header[H_TICK])
   })
 })

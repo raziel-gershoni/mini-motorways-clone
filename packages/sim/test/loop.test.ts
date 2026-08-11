@@ -1268,6 +1268,14 @@ describe('golden replay: the whole trip loop', () => {
     expect(spliced.length, "the splice must land on M1d's buffer size").toBe(8068)
     expect(m1e.totalBytes).toBe(8232)
     expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(2942219448)
+    // **And the digest is a live board's, not a frozen one — M1e Task 8.**
+    // `H_GAME_OVER` lives in the hashed buffer, so a fixture that reached the
+    // shutdown could not produce this number: a green golden already entails a
+    // clear flag. This line is here for the OTHER direction — it names the
+    // property, so the day a fixture does start dying the failure says
+    // "this run ended" rather than "the digest moved", which is the difference
+    // between a five-minute diagnosis and an afternoon.
+    expect(isGameOver(r.state), 'this golden was taken over a LIVE sim').toBe(false)
     expect(hashState(r.state)).toBe(1877236894)
   })
 
@@ -2271,6 +2279,14 @@ describe('golden replay: a jammed same-direction queue', () => {
     expect(spliced.length, "the splice must land on M1d's buffer size").toBe(8068)
     expect(m1e.totalBytes).toBe(8232)
     expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(294084758)
+    // **And the digest is a live board's, not a frozen one — M1e Task 8.**
+    // `H_GAME_OVER` lives in the hashed buffer, so a fixture that reached the
+    // shutdown could not produce this number: a green golden already entails a
+    // clear flag. This line is here for the OTHER direction — it names the
+    // property, so the day a fixture does start dying the failure says
+    // "this run ended" rather than "the digest moved", which is the difference
+    // between a five-minute diagnosis and an afternoon.
+    expect(isGameOver(r.state), 'this golden was taken over a LIVE sim').toBe(false)
     expect(hashState(r.state)).toBe(307910575)
   })
 })

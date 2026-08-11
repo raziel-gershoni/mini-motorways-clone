@@ -5,6 +5,7 @@ import {
   CARS_PER_HOUSE,
   DEST_SPAWN_PERIOD_TICKS,
   MAX_BLOCKED_TICKS,
+  OVERCROWD_FAIL_MILLITICKS,
   PIN_PERIOD_TICKS,
   REVEALED_X0,
   REVEALED_Y0,
@@ -24,6 +25,7 @@ import {
   ghostMaskOf,
   hashState,
   isGameOver,
+  isOverCapacity,
   placeRoad,
   roadMask,
   step,
@@ -45,6 +47,7 @@ import {
   H_PINS_DROPPED,
   H_SCORE,
   H_SPAWN_COLOUR_CURSOR,
+  H_TICK,
   H_WEEK,
   pinPeriodForWeek,
   type GameState,
@@ -101,7 +104,15 @@ function popcount(mask: number): number {
 interface Rig {
   readonly state: GameState
   readonly world: WorldData
+  /** Measures `ticks` and asserts the drive stayed inside week 0. Every window but one uses this. */
   drive(ticks: number): Measured
+  /**
+   * The same measurement, for a window that DELIBERATELY leaves week 0, with
+   * the week it must land in named at the call site. See the assertion at the
+   * foot of the loop for why this is a stronger tripwire than `drive`'s and
+   * not a weaker one.
+   */
+  driveIntoWeek(ticks: number, endWeek: number): Measured
   /** One tick carrying player actions — the erase path in §6. */
   tick(actions: readonly TickAction[]): void
 }
@@ -154,6 +165,9 @@ function rigFor(seed: (state: GameState, world: WorldData) => void, map = demoCi
       oneTick.actions = NO_ACTIONS
     },
     drive(ticks: number): Measured {
+      return this.driveIntoWeek(ticks, 0)
+    },
+    driveIntoWeek(ticks: number, endWeek: number): Measured {
       const out: Measured = {
         refusals: 0,
         valves: 0,
@@ -204,13 +218,48 @@ function rigFor(seed: (state: GameState, world: WorldData) => void, map = demoCi
       // threshold below silently starts measuring a different game. This fails
       // there instead — see the 5,000-tick window at the bottom of this file,
       // which does cross the boundary and says so.
+      //
+      // **`drive` passes 0 and every existing caller goes through it, so the
+      // tripwire is unchanged.** `driveIntoWeek` is the one door out, and it
+      // makes leaving week 0 a thing a test has to ASK for by naming the week
+      // it expects to land in — which is a stronger statement than the old
+      // refusal, because it also fails when a window lands in week 2 by
+      // accident. The only caller is the matched-pair window below.
       expect(
-        pinPeriodForWeek(state.header[H_WEEK] as number),
-        'this drive left week 0 — the demand ramp now reaches these figures and they must be re-measured',
-      ).toBe(PIN_PERIOD_TICKS)
+        state.header[H_WEEK] as number,
+        `this drive was declared to end in week ${endWeek} and did not`,
+      ).toBe(endWeek)
+      if (endWeek === 0) {
+        expect(
+          pinPeriodForWeek(state.header[H_WEEK] as number),
+          'this drive left week 0 — the demand ramp now reaches these figures and they must be re-measured',
+        ).toBe(PIN_PERIOD_TICKS)
+      }
       return out
     },
   }
+}
+
+/** The three destination-side quantities the week-1 window compares. Read, never derived. */
+function sumPins(rig: Rig): number {
+  let n = 0
+  const dc = rig.state.header[H_DEST_COUNT] as number
+  for (let d = 0; d < dc; d++) n += rig.state.destPins[d] as number
+  return n
+}
+
+function destinationsOverCap(rig: Rig): number {
+  let n = 0
+  const dc = rig.state.header[H_DEST_COUNT] as number
+  for (let d = 0; d < dc; d++) if (isOverCapacity(rig.state, d)) n++
+  return n
+}
+
+function peakMeter(rig: Rig): number {
+  let n = 0
+  const dc = rig.state.header[H_DEST_COUNT] as number
+  for (let d = 0; d < dc; d++) n = Math.max(n, rig.state.destOvercrowd[d] as number)
+  return n
 }
 
 function seededRig(): Rig {
@@ -767,6 +816,146 @@ describe('the demo layout is visibly congested, measured over 3,000 ticks', () =
     expect(asked).toBeGreaterThan(5000)
     expect(blocked).toBeGreaterThan(500)
     expect(free).toBeGreaterThan(500)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 4b. Past week 0 — the window nothing in this suite drove (M1e Task 8)
+// ---------------------------------------------------------------------------
+
+/**
+ * **M1e Task 6 left this open with Task 8 as the named recipient**, and the gap
+ * was bigger than the two prose figures Task 6 corrected. Every window in this
+ * file before now ends inside week 0: the congestion block drives 3,000 ticks,
+ * `drive()` asserts it never left, and the spawn window at the foot of the file
+ * crosses the boundary but measures §5.3.5 pushes rather than the board. So
+ * **since Task 5's spawner and Task 6's demand ramp landed, nothing had
+ * measured what `demoCity` DOES once the period drops.**
+ *
+ * This is a new window, not a longer one — deliberately. Lengthening the
+ * 3,000-tick block would have re-based four figures whose whole value is that
+ * they are a stable week-0 baseline, and it would have hidden the comparison
+ * this section exists to make inside a single aggregate.
+ *
+ * **The shape is a matched pair**: two adjacent 1,500-tick windows, one ending
+ * on the boundary and one starting from it, measured by the same rig on the
+ * same run. `pinPeriodForWeek` goes 518 -> 466, so week 1 asks for pins 11 %
+ * faster.
+ *
+ * **What that buys is nothing on the road and everything at the kerb**, which
+ * is the finding and is the opposite of what "the demand ramp makes the board
+ * busier" predicts:
+ *
+ * ```
+ *                        3,000..4,500   4,500..6,000
+ *   refusals                    1,816          1,622    -10.7 %
+ *   ticks with a block            843            738
+ *   trips                         101             99    flat
+ *   cars in flight, peak           24             24    saturated in both
+ *   longest queue                   6              7
+ *
+ *   at tick                     4,500          6,000
+ *   sum of destPins                29             40    +38 %
+ *   destinations at/over cap     1/18           2/18
+ *   peak overcrowd meter      469,656      1,937,000    18 % -> 73 % of fail
+ * ```
+ *
+ * **The fleet is the binding constraint, not the demand.** All 24 cars are in
+ * flight in both windows, so faster pin arrival cannot produce more journeys —
+ * it produces a longer queue at the destinations, and that is what ends the run
+ * at 6,703. The 3,000-tick window cannot see any of it: at tick 3,000 **no
+ * destination is over its cap and every meter reads 0**, so the milestone's
+ * headline mechanism is entirely inert over the only window this file used to
+ * drive.
+ *
+ * **Stated because it limits the claim: these two windows are adjacent in TIME,
+ * not a treatment and a control.** They cannot separate "week 1" from "later in
+ * the run" — a queue that has been building since tick 0 would grow across this
+ * boundary with no ramp at all. What the pair does establish is that the board's
+ * behaviour past week 0 is now measured rather than assumed, and that the
+ * quantity moving is backlog rather than throughput. Isolating the ramp itself
+ * needs `pinPeriodForWeek` neutralised, which is `sim`'s to expose and no test
+ * here can do.
+ */
+describe('the demo layout past week 0, in matched 1,500-tick windows', () => {
+  const WINDOW = 1500
+  const BOUNDARY = 4500
+  const END = BOUNDARY + WINDOW
+
+  it('keeps the far end of this window below the tick the board kills itself on', () => {
+    // 6,000 against 6,703: 703 ticks, 10 %. The tightest deliberate margin in
+    // this file, and it is the price of measuring week 1 at all — the board
+    // only lives 2,203 ticks past the boundary. The mechanical guard is the
+    // `isGameOver` read in the window below, which is structural; this is the
+    // arithmetic one beside it.
+    expect(END).toBeLessThan(DEMO_DEATH_TICK)
+    expect(DEMO_DEATH_TICK - END, 'margin, as a figure rather than an adjective').toBe(703)
+    expect(BOUNDARY, 'and the boundary really is inside the window').toBeLessThan(END)
+  })
+
+  it('moves BACKLOG rather than throughput: trips flat, refusals down, pins up 38 %', () => {
+    const rig = seededRig()
+    rig.drive(3000)
+    const before = rig.driveIntoWeek(WINDOW, 1)
+    expect(rig.state.header[H_TICK], 'the first window ends exactly on the boundary').toBe(BOUNDARY)
+    const pinsAtBoundary = sumPins(rig)
+    const overAtBoundary = destinationsOverCap(rig)
+    const meterAtBoundary = peakMeter(rig)
+
+    const after = rig.driveIntoWeek(WINDOW, 1)
+    expect(rig.state.header[H_TICK]).toBe(END)
+    // **Structural, and the only assertion here that cannot go stale**: the
+    // whole comparison is worthless if the sim froze part-way through the
+    // second window, because a frozen board reports zero of everything and
+    // "refusals went down" would be the freeze talking.
+    expect(isGameOver(rig.state), 'this window must measure a LIVE sim').toBe(false)
+
+    // The premise: week 1 really does ask faster. Read from `sim` rather than
+    // restated, so a ramp change moves this rather than the prose.
+    expect(pinPeriodForWeek(0)).toBe(PIN_PERIOD_TICKS)
+    expect(pinPeriodForWeek(1), 'week 1 asks for a pin 11 % sooner').toBeLessThan(
+      pinPeriodForWeek(0),
+    )
+
+    // Throughput does not follow it, because the fleet is already saturated.
+    expect(before.maxInFlight, 'every car is already out in week 0').toBe(24)
+    expect(after.maxInFlight, '...and there are no more to send').toBe(24)
+    expect(after.trips, 'trips are flat across the boundary, not up').toBeGreaterThan(
+      before.trips - 15,
+    )
+    expect(after.trips).toBeLessThan(before.trips + 15)
+    expect(after.refusals, 'and the road is not busier — it is slightly quieter').toBeLessThan(
+      before.refusals,
+    )
+    // Floors, in this file's idiom, so the two windows are not both measuring
+    // an idle board and agreeing about it.
+    expect(before.refusals).toBeGreaterThan(800)
+    expect(after.refusals).toBeGreaterThan(800)
+    expect(after.trips).toBeGreaterThan(50)
+
+    // The backlog is where the pressure goes, and this is the mechanism that
+    // ends the run 703 ticks later.
+    expect(sumPins(rig), 'the pin backlog grows across the boundary').toBeGreaterThan(pinsAtBoundary)
+    expect(destinationsOverCap(rig)).toBeGreaterThan(overAtBoundary)
+    expect(peakMeter(rig)).toBeGreaterThan(meterAtBoundary * 2)
+    expect(peakMeter(rig), 'and it is most of the way to the shutdown').toBeGreaterThan(
+      OVERCROWD_FAIL_MILLITICKS / 2,
+    )
+    expect(peakMeter(rig), 'but has not reached it — see the isGameOver read above').toBeLessThan(
+      OVERCROWD_FAIL_MILLITICKS,
+    )
+  })
+
+  it('is not vacuous: the 3,000-tick window this file already had sees NONE of it', () => {
+    // The reason a new window was needed rather than a longer one. Over the
+    // baseline window the overcrowd mechanism is completely inert — not "small",
+    // zero — so every figure the congestion block measures is a figure taken
+    // before §5.8 does anything at all.
+    const rig = seededRig()
+    rig.drive(3000)
+    expect(destinationsOverCap(rig), 'nothing is over its cap at tick 3,000').toBe(0)
+    expect(peakMeter(rig), 'so no meter has started').toBe(0)
+    expect(isGameOver(rig.state)).toBe(false)
   })
 })
 

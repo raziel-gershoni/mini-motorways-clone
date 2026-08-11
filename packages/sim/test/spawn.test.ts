@@ -7,6 +7,7 @@ import {
   HOUSES_PER_DESTINATION,
   HOUSE_SPAWN_PERIOD_TICKS,
   HOUSE_SPAWN_RETRY_TICKS,
+  PIN_CAP_SQUARE_TIMER,
   REVEALED_X0,
   REVEALED_Y0,
   REVEALED_W,
@@ -19,6 +20,7 @@ import {
 import {
   createState,
   hashState,
+  isGameOver,
   restore,
   snapshot,
   H_DEST_COUNT,
@@ -1226,9 +1228,17 @@ describe('spawned cars drive, over a long horizon, with occupancy sound every ti
     return out
   }
 
+  /**
+   * The pin count every connected destination is held at, **below the square
+   * trigger cap rather than far above it.** See the clamp's own comment inside
+   * the drive loop for why the difference decides whether this rig survives.
+   */
+  const SATURATED_PINS = PIN_CAP_SQUARE_TIMER - 1
+
   it('drives cars from SPAWNED houses for 20,000 ticks with assertOccupancySound on every one', () => {
     const r = longRig()
     const seededHouses = r.state.header[H_HOUSE_COUNT] as number
+    let maxMeter = 0
     step(r.state, r.world, r.fields, r.scratch, { actions: openingActions(r.world) })
 
     const RUN = 20000
@@ -1282,15 +1292,56 @@ describe('spawned cars drive, over a long horizon, with occupancy sound every ti
       // the whole run. That is M1d's own "service is 4.3x faster than arrival"
       // arithmetic reproduced by a spawner, and it is why this rig saturates
       // demand to reach the cars it exists to exercise.
+      //
+      // ---------------------------------------------------------------------
+      // **`PIN_CAP_SQUARE_TIMER - 1`, NOT 255, AND THE DIFFERENCE IS WHETHER
+      // THIS RIG CAN RUN AT ALL — M1e Task 8**
+      // ---------------------------------------------------------------------
+      //
+      // The original poke held every connected destination at **255** pins.
+      // Post-§5.8 that is not "saturated demand", it is *a board that must
+      // lose*: 255 is 42x the square trigger cap, so every destination is over
+      // capacity on every tick, the ramp saturates, and the meter completes on
+      // the 3,390th one. Measured with the old value, this rig **died at tick
+      // 3,392 on destination 0** — the seeded one, which is road-connected and
+      // still starved because destination 1 sits nearer the houses and wins
+      // every dispatch — leaving 6 houses, 3 destinations and 8 spawned flyers
+      // against the 20 this test exists to assert. The horizon, not the
+      // assertion, was the thing that broke.
+      //
+      // **A CLAMP rather than a top-up, and that is the load-bearing half.**
+      // `runDemand` adds pins of its own, so "top up when below N" lets the
+      // count drift up to the hard cap of 10 and over the trigger anyway —
+      // measured, a top-up to 5 still died, at tick 3,767 with 10 pins on the
+      // failing destination. Writing the value unconditionally every tick is
+      // what holds the board under the trigger. The meter's peak across all ten
+      // destinations over the whole run is then **0**, asserted below rather
+      // than described.
+      //
+      // 5 is a pin count `runDemand` can actually produce; 255 never was. The
+      // rig loses nothing by it — 21 houses, 10 destinations and 24 of the 38
+      // spawned car slots in motion, against 21 / 10 / 26 before, and the trip
+      // count nearly DOUBLES (339 -> 615) because a five-deep queue flows where
+      // a 255-deep one gridlocks.
       for (let d = 0; d < dests; d++) {
-        if ((r.state.destPins[d] as number) >= 60) continue
+        if ((r.state.destPins[d] as number) === SATURATED_PINS) continue
         const carpark = carparkCell(
           r.state.destCell[d] as number,
           (r.state.destMeta[d] as number) >> 4 & 0x3,
           r.world.w,
           r.world.h,
         )
-        if (carpark >= 0 && roadMask(r.state, carpark) !== 0) r.state.destPins[d] = 255
+        if (carpark >= 0 && roadMask(r.state, carpark) !== 0) {
+          r.state.destPins[d] = SATURATED_PINS
+        }
+      }
+      // The premise the horizon rests on, checked on every one of the 20,000
+      // ticks rather than once at the end: nothing may reach its trigger cap,
+      // so no meter can start and no tick can be a frozen no-op. A single
+      // over-capacity tick here is not fatal by itself — it takes 3,390 — so
+      // watching the METER is what makes this fail on the first one.
+      for (let d = 0; d < dests; d++) {
+        maxMeter = Math.max(maxMeter, r.state.destOvercrowd[d] as number)
       }
     }
 
@@ -1308,7 +1359,9 @@ describe('spawned cars drive, over a long horizon, with occupancy sound every ti
     // left their driveway. Without this the 20,000 ticks are another
     // placement-only sweep, which is precisely what `jamFixture`'s is.
     // Measured on this rig, this seed and this window: **21 houses, 10
-    // destinations, 339 trips and 26 of the 38 spawned car slots in motion.**
+    // destinations, 615 trips and 24 of the 38 spawned car slots in motion.**
+    // (339 and 26 before M1e Task 8 changed the demand clamp above; the
+    // population figures are identical and the throughput is higher.)
     // The threshold sits at roughly three quarters of that so ordinary drift
     // does not fail it and a collapse back to a placement-only sweep does — the
     // weaker rigs this replaced scored 1 and 4 on the same assertion.
@@ -1329,5 +1382,16 @@ describe('spawned cars drive, over a long horizon, with occupancy sound every ti
     for (let d = 0; d < dests; d++) {
       expect(r.state.destReserved[d] as number, `destReserved[${d}]`).toBeLessThan(255)
     }
+    // ---- and every one of those 20,000 ticks was LIVE (M1e Task 8) ---------
+    // Without this the horizon is a claim about the loop bound rather than
+    // about the sim: a frozen board is byte-identical from tick to tick, so
+    // `assertOccupancySound` passes trivially, no counter wraps, and every
+    // figure above is whatever it happened to be when the run ended. All three
+    // of this test's own vacuity guards — spawned flyers, seeded flyers, the
+    // score floor — are satisfied by a board that stopped early, which is
+    // exactly how the old 255 poke failed.
+    expect(maxMeter, 'a destination reached its trigger cap, so part of this run was frozen').toBe(0)
+    expect(isGameOver(r.state), 'this sweep must run 20,000 LIVE ticks').toBe(false)
+    expect(r.state.header[H_TICK], 'and the clock really did reach the end of the window').toBe(RUN)
   })
 })
