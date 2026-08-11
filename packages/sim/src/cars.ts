@@ -142,7 +142,7 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
  * every cell loses up to `speed - 1` units — a systematic slowdown of a
  * fraction of a tick per cell, small on any one crossing and compounding over
  * a run: the classic "diverges only after thousands of ticks" failure. Same
- * bug, same treatment, as `demand.ts`'s `acc -= PIN_PERIOD_TICKS`. It is
+ * bug, same treatment, as `demand.ts`'s `acc -= pinPeriodForWeek(H_WEEK)`. It is
  * observable at all only because `CAR_SPEED_UNITS_PER_TICK` divides neither
  * threshold (see that constant's own note, and `constants.test.ts`, which
  * asserts the indivisibility so a future speed change cannot silently disarm

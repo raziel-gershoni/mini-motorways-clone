@@ -76,15 +76,25 @@ import { destMetaColour, destMetaKind, DEST_KIND_CIRCLE } from './buildings'
  * `slotCount` that does not evenly divide the period drifts the
  * same way movement's per-edge progress would if a crossing dropped its
  * remainder (decision 3) — small at any one firing, compounding over the
- * run. `slotCount(c) <= 2 * maxDestinations <= 32 < P_w`
- * (518 at week 0, 172 at the cap), so at most one threshold crossing — one
- * fire — happens per colour per tick: an invariant with its own bound, stated
- * so nobody reaches for a `while` loop that is never actually exercised.
+ * run. `slotCount(c) <= 2 * maxDestinations`, which is **36** on the largest
+ * map this repo ships (`demoCity`: `maxDestinations` 18, and its own comment
+ * says "six rows of three, all circles, so 36 rotation slots"), and
+ * `36 < P_w` (518 at week 0, 172 at the cap), so at most one threshold
+ * crossing — one fire — happens per colour per tick: an invariant with its own
+ * bound, stated so nobody reaches for a `while` loop that is never actually
+ * exercised.
+ *
+ * **That figure was `<= 32` here for three milestones and it was wrong** — 32
+ * is `firstCity`'s 16 destinations mistaken for a repo-wide ceiling. Nothing
+ * downstream of it ever changed, but the number is now DERIVED from the shipped
+ * maps in `demand.test.ts` rather than written as a literal, because a
+ * derivation nobody can recompute is how a premise outlives the thing it was
+ * true of.
  *
  * **The bound is still ONE under M1e's weekly ramp, and the argument is
  * EXTENDED rather than replaced.** The tick-to-tick half above is untouched:
  * the smallest period the ramp can produce is `pinPeriodForWeek(19)` = 172 and
- * `32 < 172`. What the ramp adds is a second case the old argument did not
+ * `36 < 172`. What the ramp adds is a second case the old argument did not
  * cover — a period that SHRINKS between one tick and the next, which can leave
  * `acc` above the new threshold with nothing having been added to it. That case
  * is bounded too, over ADJACENT weeks:
@@ -93,8 +103,21 @@ import { destMetaColour, destMetaKind, DEST_KIND_CIRCLE } from './buildings'
  *     and every later drop is smaller (`pinPeriodForWeek` is convex in the
  *     week; `demand.test.ts` asserts the maximum is at week 1 over 40 weeks);
  *   - the most `acc` can carry into a boundary tick is `P_{w-1} - 1` = 517,
- *     plus at most `slotCount` = 32 added on the tick itself, so 549;
- *   - one fire leaves at most `549 - 466 = 83`, against a threshold of 466.
+ *     plus at most `slotCount` = 36 added on the tick itself, so 553;
+ *   - one fire leaves at most `553 - 466 = 87`, against a threshold of 466.
+ *
+ * **WHERE THE INVARIANT ACTUALLY ENDS, since "36 is comfortably under 466" is
+ * not a bound.** Two clauses, and the binding one is not the obvious one:
+ * within a week a second fire needs `slotCount >= P_w`, so `slotCount < 172`;
+ * at a week change it needs `P_{w-1} - 1 + slotCount - P_w >= P_w`, so
+ * `slotCount < 2*P_w - P_{w-1} + 1`, whose minimum over the ramp is **167** —
+ * at the **17 -> 18** boundary (180 -> 173), not at the 0 -> 1 one, which has
+ * the largest absolute drop but also the largest `P_w` to absorb it. So the
+ * boundary clause binds first and the largest slot count the one-fire
+ * invariant survives is **166** — `maxDestinations` 83, all circles, against 18
+ * today. `demand.test.ts` computes both clauses from `pinPeriodForWeek` and
+ * asserts the shipped maximum is under them, so a future map that crosses the
+ * line fails there.
  *
  * **So a `while`-drain spelling of the fire branch is an EQUIVALENT MUTANT**:
  * its second iteration is unreachable at every week and every slot count this
@@ -102,7 +125,9 @@ import { destMetaColour, destMetaKind, DEST_KIND_CIRCLE } from './buildings'
  * opposite mistakes it prevents — nobody should reach for a `while` (it would
  * be a loop that cannot iterate twice, i.e. an `if` with extra syntax), and
  * nobody should delete the `if` on the strength of a mutation surviving. The
- * bound is one; the `if` is what expresses it.
+ * bound is one; the `if` is what expresses it. **That label is only good while
+ * the headroom assertion above is green** — it is what stops this paragraph
+ * vouching for a mutant a future map has made non-equivalent.
  *
  * **Overflow** (decision 1): if the rotation's chosen destination is at its
  * hard cap (`PIN_CAP_SQUARE_HARD`/`PIN_CAP_CIRCLE_HARD`, [OURS]; the *timer*
@@ -188,7 +213,7 @@ function hasRoom(state: GameState, d: number): boolean {
  *
  * Throws if no eligible colour-matching destination exists. The only
  * caller, `fireColour`, is only reached from `advanceAccumulators` after
- * `acc[colour] >= PIN_PERIOD_TICKS`, which requires `slotCount(colour)` to
+ * `acc[colour] >= pinPeriodForWeek(H_WEEK)`, which requires `slotCount(colour)` to
  * have been > 0 — and `slotCount` only counts eligible destinations of that
  * colour, so at least one must exist. A throw here means that invariant
  * broke, not a reachable game state.

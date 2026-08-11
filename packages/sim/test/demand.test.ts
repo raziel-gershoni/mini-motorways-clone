@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   parseMap,
+  demoCity,
+  firstCity,
   PIN_PERIOD_TICKS,
   FIRST_PIN_DELAY_TICKS,
   PIN_CAP_SQUARE_HARD,
@@ -105,7 +107,8 @@ function tickN(state: GameState, scratch: Scratch, n: number): void {
  * Needed for the eligibility-gate witnesses below because NATURAL
  * accumulation cannot isolate them: with real accrual, a colour with any
  * eligible destination reaches threshold only after hundreds of ticks
- * (>= ceil(518/32) = 17 at the theoretical max slot count), by which time
+ * (>= ceil(518/36) = 15 at the largest slot count any shipped map can
+ * reach — see `SHIPPED_MAX_SLOT_COUNT`), by which time
  * an "ineligible" witness destination (delay 120 ticks) may have become
  * legitimately eligible anyway, destroying the fixture's premise. Forcing
  * the fire at `tickValue = 1` (or another precisely chosen value) keeps
@@ -118,6 +121,22 @@ function forceFireAtTick(state: GameState, scratch: Scratch, tickValue: number, 
   scratch.slotCounts[colour] = PIN_PERIOD_TICKS
   advanceAccumulators(state, scratch)
 }
+
+/**
+ * The largest per-colour slot count any map this repo SHIPS can produce — a
+ * circle carries two rotation slots and every destination could be one.
+ *
+ * **Derived from the maps rather than written as 32, because 32 is wrong.**
+ * `demoCity` is `maxDestinations` 18 and its own comment says "six rows of
+ * three, all circles, so 36 rotation slots", so `2 * maxDestinations` is 36;
+ * the 32 that `demand.ts` and this file carried for three milestones was
+ * `firstCity`'s 16 mistaken for a repo-wide ceiling. No conclusion ever
+ * depended on it — 87 is under 466 as comfortably as 83 is — but **a
+ * derivation is only checkable if the test can recompute it**, and one pinned
+ * to a literal it cannot re-derive is exactly how the `while`-drain
+ * equivalence label below could have outlived its own premise.
+ */
+const SHIPPED_MAX_SLOT_COUNT = 2 * Math.max(demoCity().maxDestinations, firstCity().maxDestinations)
 
 /**
  * A rig whose colour-0 `slotCount` is exactly 2, built from two REAL eligible
@@ -169,10 +188,26 @@ describe('the weekly demand ramp (spec §5.3)', () => {
   })
 
   it('week 0 leaves the pin period EXACTLY at PIN_PERIOD_TICKS', () => {
-    // This is what makes the ramp golden-neutral: every golden fixture in the
-    // repo that runs at all runs inside week 0 (the longest is 13,499 ticks
-    // with no destinations), so an implementation that scaled the accumulator
-    // instead would move three of them for nothing.
+    // This is what makes the ramp golden-neutral: an implementation that
+    // scaled the ACCUMULATOR instead — multiplying every stored `pinAccum` by
+    // 1,000 — would move three goldens for no gameplay reason, and scaling the
+    // threshold moves none.
+    //
+    // **The reason is NOT "every golden runs inside week 0", which is false and
+    // was written here anyway.** `determinism.test.ts`'s fixture runs
+    // `TICKS_PER_WEEK * 3 - 1` = 13,499 ticks, ends in **week 2**, and that
+    // file's own comment says it crosses the boundaries at 4,500 and 9,000 to
+    // take two tile grants. The demand golden in `loop.test.ts` runs into week 1
+    // by design. Both are immune for a different and much narrower reason:
+    // **neither has a destination whose colour accumulates** — 13,499 has no
+    // destinations at all, so every `slotCount` is 0, `pinAccum` never advances
+    // and no period can matter; and the demand golden was blessed under this
+    // ramp rather than before it.
+    //
+    // The distinction is load-bearing for the next person: a long-window golden
+    // WITH destinations gets no immunity from this test, and adding one on the
+    // strength of the old sentence would produce a fixture that quietly
+    // re-measures itself at every week boundary.
     expect(pinPeriodForWeek(0)).toBe(PIN_PERIOD_TICKS)
     expect(pinPeriodForWeek(1)).toBe(466)
     expect(pinPeriodForWeek(19)).toBe(172)
@@ -208,8 +243,8 @@ describe('the weekly demand ramp (spec §5.3)', () => {
     //
     // The real bound is over ADJACENT weeks. The largest adjacent drop is
     // 0 -> 1: 518 - 466 = 52, and every later drop is smaller. Carrying in at
-    // most `P_w - 1` = 517 plus `slotCount <= 32` gives 549; one fire leaves
-    // 549 - 466 = 83, far under 466. **So the bound is ONE, the same as every
+    // most `P_w - 1` = 517 plus `slotCount <= 36` gives 553; one fire leaves
+    // 553 - 466 = 87, far under 466. **So the bound is ONE, the same as every
     // other tick, and there is no backlog to drain.**
     //
     // Consequence, recorded rather than papered over: the `while`-drain mutant
@@ -232,6 +267,80 @@ describe('the weekly demand ramp (spec §5.3)', () => {
     // Vacuity: the carry must genuinely have survived the period change, or
     // this is a test about an accumulator that was reset.
     expect(state.pinAccum[0], 'the remainder carried').toBe(517 + 2 - 466 + 2 + 2 + 2)
+  })
+
+  it('the one-fire bound has real headroom over every shipped map, and this is where it ends', () => {
+    // **"36 is comfortably under 466" is a reassurance, not a bound, and the
+    // difference matters because `demand.ts` labels the `while`-drain spelling
+    // of the fire branch an EQUIVALENT MUTANT.** That label is a licence: it
+    // tells a future reader that a `while` there can never iterate twice. It
+    // stops being true at some slot count, and nothing computed where. This
+    // test computes it, so a map that crosses the line fails HERE rather than
+    // silently converting a documented equivalence into a live defect that
+    // mutation testing will keep reporting as equivalent.
+    //
+    // Two clauses, and the binding one is NOT the obvious one:
+    //
+    //   within a week — `acc < P_w` before the tick, so after one fire
+    //     `acc < slotCount`; a second fire needs `slotCount >= P_w`.
+    //     Safe while `slotCount < min P_w`.
+    //   at a week change — carry-in is at most `P_{w-1} - 1`, plus `slotCount`,
+    //     less one fire of `P_w`; a second fire needs that residue `>= P_w`.
+    //     Safe while `slotCount < min (2*P_w - P_{w-1} + 1)`.
+    //
+    // Computed from `pinPeriodForWeek` itself over the whole ramp and well
+    // past its cap, so this is an oracle over the production function's
+    // outputs rather than a second copy of it.
+    const WEEKS = 200
+    let tickClause = Infinity
+    let edgeClause = Infinity
+    let edgeWeek = -1
+    for (let w = 0; w <= WEEKS; w++) {
+      const p = pinPeriodForWeek(w) as number
+      if (p < tickClause) tickClause = p
+      if (w > 0) {
+        const e = 2 * p - (pinPeriodForWeek(w - 1) as number) + 1
+        if (e < edgeClause) {
+          edgeClause = e
+          edgeWeek = w
+        }
+      }
+    }
+    expect(tickClause, 'the within-a-week clause is the ramp`s shortest period').toBe(172)
+    expect(edgeClause).toBe(167)
+    expect(edgeClause, 'the BOUNDARY clause binds first — the obvious one does not').toBeLessThan(
+      tickClause,
+    )
+    // **Not at the 0 -> 1 drop, and not at the cap either — I predicted 19 and
+    // this assertion caught it.** The 0 -> 1 boundary has the largest absolute
+    // drop (52) but also the largest `P_w` to absorb it; the tightest ratio is
+    // the LAST drop before the cap, 180 -> 173 at the 17 -> 18 boundary, where
+    // `2*173 - 180 + 1` = 167. Week 19 drops only 173 -> 172 and gives 172.
+    expect(edgeWeek, 'the last drop before the cap is the tight one').toBe(18)
+    expect(pinPeriodForWeek(17)).toBe(180)
+    expect(pinPeriodForWeek(18)).toBe(173)
+    expect(2 * 173 - 180 + 1).toBe(edgeClause)
+
+    // The largest slot count the invariant survives, and the map size it
+    // corresponds to. Strict inequalities against an independently computed
+    // bound, not a restatement of the same number.
+    const largestSafeSlotCount = Math.min(tickClause, edgeClause) - 1
+    expect(largestSafeSlotCount).toBe(166)
+    expect(SHIPPED_MAX_SLOT_COUNT).toBe(36)
+    expect(SHIPPED_MAX_SLOT_COUNT, 'the shipped maps must stay under the bound').toBeLessThan(
+      largestSafeSlotCount,
+    )
+    // 4.6x of headroom today. Stated as a ratio so a map that eats most of it
+    // is visible here even while still technically safe.
+    expect(largestSafeSlotCount / SHIPPED_MAX_SLOT_COUNT).toBeGreaterThan(4)
+    // In map terms: `maxDestinations` may reach 83, all circles, against 18
+    // today. This is the line the `while`-equivalence label is good up to.
+    expect(Math.floor(largestSafeSlotCount / 2)).toBe(83)
+    expect(demoCity().maxDestinations).toBe(18)
+    expect(firstCity().maxDestinations).toBe(16)
+    // Vacuity: the bound is genuinely reachable arithmetic, not Infinity left
+    // over from an unentered loop.
+    expect(Number.isFinite(largestSafeSlotCount)).toBe(true)
   })
 
   it('carries the remainder ACROSS a period change, at a slot count that divides neither period', () => {
@@ -301,8 +410,9 @@ describe('the weekly demand ramp (spec §5.3)', () => {
     // The derivation the module comment and the boundary test both rest on,
     // asserted rather than asserted-about: if some later adjacent pair dropped
     // by more than 52, the residue argument would have to be redone at that
-    // pair instead. `slotCount <= 32` is `2 * maxDestinations` at the
-    // 16-destination maps this repo ships (demand.ts's own bound).
+    // pair instead. The slot-count ceiling is `2 * maxDestinations` over the
+    // maps this repo ships, which is 36 (`demoCity`, 18 destinations) and not
+    // the 32 this comment used to claim — see `SHIPPED_MAX_SLOT_COUNT`.
     let worstDrop = 0
     let worstWeek = -1
     for (let w = 1; w <= 40; w++) {
@@ -317,15 +427,15 @@ describe('the weekly demand ramp (spec §5.3)', () => {
     expect(worstDrop).toBe(52)
     // Maximal carry-in plus the maximal per-tick increment, less one fire, is
     // strictly under the smallest threshold that carry can meet.
-    const MAX_SLOT_COUNT = 32
-    const residue = (PIN_PERIOD_TICKS - 1) + MAX_SLOT_COUNT - (pinPeriodForWeek(1) as number)
-    expect(residue).toBe(83)
+    expect(SHIPPED_MAX_SLOT_COUNT, 'demoCity is 18 destinations, all circles').toBe(36)
+    const residue = (PIN_PERIOD_TICKS - 1) + SHIPPED_MAX_SLOT_COUNT - (pinPeriodForWeek(1) as number)
+    expect(residue).toBe(87)
     expect(residue).toBeLessThan(pinPeriodForWeek(1) as number)
     // And the same statement for every later boundary, since a smaller drop
     // makes the residue smaller: this is the "the bound stays one" claim over
     // the whole ramp rather than at its worst point only.
     for (let w = 1; w <= 40; w++) {
-      const carriedIn = (pinPeriodForWeek(w - 1) as number) - 1 + MAX_SLOT_COUNT
+      const carriedIn = (pinPeriodForWeek(w - 1) as number) - 1 + SHIPPED_MAX_SLOT_COUNT
       expect(carriedIn - (pinPeriodForWeek(w) as number), `week ${w}`).toBeLessThan(
         pinPeriodForWeek(w) as number,
       )
@@ -786,7 +896,7 @@ describe('overflow: capacity, the distinct-destination walk, skipping other colo
 })
 
 describe('at most one pin per colour per tick', () => {
-  it('holds even at the maximum possible slotCount (32), forced directly via scratch', () => {
+  it('holds even at the largest slot count any shipped map can reach (36), forced directly via scratch', () => {
     const { map, world } = fixture('one-per-tick', 40, 16, 5)
     const { state, scratch } = rig(map, world)
     const d = placeEligibleNow(state, world, 0, 0, 0, DEST_KIND_SQUARE)
@@ -794,10 +904,13 @@ describe('at most one pin per colour per tick', () => {
     let prevTotal = 0
     for (let i = 0; i < 50; i++) {
       state.header[H_TICK] = (state.header[H_TICK] as number) + 1
-      // Bypass computeSlotCounts: force the maximum realistic slotCount
-      // (2 * maxDestinations = 32) directly, per demand.ts's own stated
-      // bound, without needing 16 real circle destinations.
-      scratch.slotCounts[0] = 32
+      // Bypass computeSlotCounts: force the largest realistic slotCount
+      // (`SHIPPED_MAX_SLOT_COUNT` = 2 * demoCity's 18 = 36) directly, without
+      // needing 18 real circle destinations. **This read 32 until M1e Task 6's
+      // review** — `firstCity`'s ceiling, on a repo that also ships a bigger
+      // map — so the "maximum possible" in this test's name was 4 slots short
+      // of the real one.
+      scratch.slotCounts[0] = SHIPPED_MAX_SLOT_COUNT
       for (let c = 1; c < scratch.slotCounts.length; c++) scratch.slotCounts[c] = 0
       advanceAccumulators(state, scratch)
       const total = (state.destPins[d] as number) + (state.header[H_PINS_DROPPED] as number)

@@ -235,15 +235,34 @@ export const PIN_PERIOD_TICKS = 518
  * the fleet term is how the first draft of this plan came to claim a difficulty
  * curve it could not observe.
  *
- * **What a player can attribute to it in M1e: nothing, and that is measured
- * rather than conceded.** Task 5's spawner grows `slotCount` on the same board
- * at the same time, so on the board that ships the ramp and the spawner are
- * confounded and no observation separates them. The ramp's own effect is real
- * and it is isolated in `loop.test.ts`'s treatment/control arm — one 20x9 board
+ * **What a player can ATTRIBUTE to it in M1e: nothing. That is a claim about
+ * attribution, not about observability, and the two are not the same.** Task
+ * 5's spawner grows `slotCount` on the same board at the same time, so a player
+ * — who cannot toggle the ramp — sees one board getting busier and has no way
+ * to apportion it between the two causes.
+ *
+ * **A ramp-on/ramp-off contrast IS an observation and it separates them by a
+ * lot.** Measured on the shipped `demoCity` seeded rig, 20,000 ticks, no input,
+ * with `pinPeriodForWeek` neutralised to the bare `PIN_PERIOD_TICKS` as the
+ * control:
+ *
+ *   trips                     1,464 on / 1,330 off   (1.10x)
+ *   peak standing `destPins`    189 on /    52 off   (**3.63x**)
+ *
+ * So the shipped board is emphatically NOT ramp-insensitive, and an earlier
+ * version of this paragraph said "no observation separates them" with
+ * "measured" attached — a sentence made more specific in the wrong direction,
+ * and scoped to the shipped board on the strength of a measurement taken on a
+ * purpose-built 20x9 corridor. **Anything sizing a survivability or
+ * throughput gate must run past week 0**; scoping it to a week-0 window on the
+ * belief that this board is ramp-insensitive is wrong by 3.6x on backlog.
+ *
+ * The ramp's own effect, isolated from the spawner rather than merely
+ * contrasted, is in `loop.test.ts`'s treatment/control arm — one 20x9 board
  * where the spawner is STRUCTURALLY absent, one fleet, one road network, and
- * `H_WEEK` as the only difference between the two runs. See that test for the
- * measured figures; do not quote a difficulty claim without naming the board it
- * was measured on.
+ * `H_WEEK` as the only difference between the arms. That is where the
+ * difficulty curve is quantified per week; the two figures above are the
+ * shipped board and nothing else. Do not quote either without its board.
  */
 export const SPAWN_SCALE_BASE = 1000
 export const SPAWN_SCALE_PER_WEEK = 110
