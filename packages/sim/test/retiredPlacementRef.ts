@@ -8,6 +8,14 @@
  * module adds nothing to any public surface. **No logic was retyped**, which is
  * the point — a differential against a reimplementation proves nothing.
  *
+ * **Its comments are frozen too, and M1e Task 11's grep-driven comment sweep
+ * deliberately left them alone.** The doc comment below still says building
+ * placement is "an out-of-band call the M1e spawner will eventually drive",
+ * which stopped being true in Task 5 and is corrected at the live site
+ * (`src/buildings.ts`). Correcting it HERE would edit the artefact this file
+ * exists to preserve. If a future sweep finds an `M1e`/`M1f` in this file, that
+ * is the answer: it is a photograph, not a claim.
+ *
  * Its one consumer is `retiredPlacement.test.ts`, which compares the two
  * implementations' actual return values over ~35,000 (board, cell, orientation)
  * cases. The committed equivalence proof in `buildings.test.ts` covers the
