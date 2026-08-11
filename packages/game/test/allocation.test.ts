@@ -8,6 +8,7 @@ import {
   createScratch,
   createFlowFields,
   createFieldInputRanges,
+  isGameOver,
   snapshot,
   placeHouse,
   placeDestination,
@@ -18,6 +19,7 @@ import {
   PHASE_RETURNING,
   H_SCORE,
   eraseRoad,
+  type GameState,
   type TickAction,
 } from '@laneways/sim'
 import { createHudRects, fitCamera, hudRects, type RenderFrame } from '@laneways/render'
@@ -193,6 +195,23 @@ function assertScopeResolves(all: readonly Allocator[], scope: string): void {
  * The `HeapProfiler.*` domain resolves its callbacks synchronously, so the
  * whole measurement stays inside one vitest test with no timers and no awaits.
  */
+/**
+ * **Every profiled window in this file must be measuring a LIVE sim — M1e Task
+ * 8.** A frozen board is byte-identical from tick to tick, so it allocates
+ * nothing, and *every budget in this file passes over one*. None of the vacuity
+ * guards can see it either: crossings and completions are counted over the
+ * whole window, so a window that is a quarter dead still clears its floor.
+ *
+ * This is not hypothetical. `buildDenseTripRig` held `destPins[0]` at 255, the
+ * spawner filled its three spare destination slots with buildings no car can
+ * reach, and the run froze at tick 7,223 — 698 ticks before the per-trip
+ * profile's last window ended. The rig's `maxDestinations` is now 1 for that
+ * reason; this is the mechanism that says so if anything reopens it.
+ */
+function assertProfiledLive(state: GameState, where: string): void {
+  expect(isGameOver(state), `${where}: the sim froze inside a profiled window`).toBe(false)
+}
+
 function profileAllocations(body: () => void): Allocator[] {
   interface RawSession {
     post(method: string, cb?: (err: Error | null, result?: unknown) => void): void
@@ -1487,7 +1506,33 @@ function buildDenseTripRig(seed: string): DenseRig {
   const rows = Array.from({ length: DENSE_H }, () => '.'.repeat(DENSE_W))
   // groupCount 2, not 5: this rig triggers a rebuild on nearly every tick and
   // the Dijkstra cost is per colour.
-  const map = parseMap('dense-trip-rig', rows, 9999, 16, 4, 2)
+  //
+  // **`maxDestinations` is 1, not 4, and that is what keeps this rig ALIVE for
+  // its full 7,920 ticks — M1e Task 8.** This is a one-destination rig by
+  // design; the three extra slots let M1e Task 5's spawner fill them, and a
+  // spawned destination's carpark is road-free by construction on a board where
+  // nothing lays another road, so it is never a flow-field source and receives
+  // zero arrivals. `destPins[0]` is held at 255 here, so every scheduled pin
+  // past the hard cap OVERFLOWS onto the first spawned destination with room.
+  // Measured: it reaches the square trigger cap at tick **3,833**, and 3,390
+  // ticks later — tick **7,223** — its meter completes and §5.8 freezes the
+  // sim. Window 3 of the per-trip profile runs to tick 7,920, so **698 of its
+  // 2,600 ticks were being measured over a dead board**, and every guard in
+  // this file survived it: `completions > 400` still passed on the 475 the live
+  // part produced.
+  //
+  // Capping the slots removes the cause rather than shortening the window. The
+  // alternative measured at a 203-tick margin — 2.8 %, tighter than anything
+  // else in the repo — for no gain, since nothing here wants a second
+  // destination. `maxHouses` is left at 16 because the rig already fills it, so
+  // the house spawner short-circuits on its own.
+  //
+  // **The same tick, 7,223, ends `integration.test.ts`'s jam sweep**, and that
+  // is not a coincidence to be explained away: both boards pin a destination at
+  // 255, both overflow onto the spawner's first placement, and the spawn
+  // schedule is a global constant rather than a map property, so both reach the
+  // trigger cap on tick 3,833.
+  const map = parseMap('dense-trip-rig', rows, 9999, 16, 1, 2)
   const world = createWorld(map)
   const state = createState(seed, map)
   const scratch = createScratch(world.cells, map.groupCount, map.maxDestinations, createFieldInputRanges(map))
@@ -1664,6 +1709,7 @@ describe('the tick allocates nothing on the blocking path, measured', () => {
       profiles.push(
         profileAllocations(() => {
           window = rig.drive(PROFILED_TICKS)
+          assertProfiledLive(rig.state, 'tick rig window')
         }),
       )
       windows.push(window)
@@ -1806,6 +1852,7 @@ describe('the tick allocates nothing on the blocking path, measured', () => {
       const all = profileAllocations(() => {
         window = rig.drive(ARRIVAL_TICKS)
       })
+      assertProfiledLive(rig.state, `dense trip window ${w}`)
       completions.push(window.completions)
       crossings.push(window.crossings)
       perTrip.push(TASK2_TICK_FILES.map((f) => bytesIn(all, f) / window.completions))
@@ -2309,6 +2356,7 @@ describe('the tick allocates nothing on the JAM path, with every branch counted 
       const window = { crossings: 0, refusals: 0, valves: 0, dispatched: 0, trips: 0, pinMoves: 0 }
       const all = profileAllocations(() => {
         const o = rig.drive(JAM_WINDOW_TICKS)
+        assertProfiledLive(rig.state, 'jam window')
         // Copied field by field rather than spread: a spread inside the profiled
         // window allocates an object per window, in the harness rather than in
         // the code under test, and this file has already been bitten once by a
