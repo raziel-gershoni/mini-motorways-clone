@@ -71,6 +71,21 @@ import { longestQueue } from '../src/queueProbe'
 import { m1eInsertedRanges, spliceM1eInsertions } from '../../sim/test/m1eSplice'
 import { CITY_DEATH_TICK } from './deathTicks'
 import {
+  armCarpark as gateCarpark,
+  armCheapestPath as gateCheapestPath,
+  armGreedyActions as gateGreedyActions,
+  armPathActions as gatePathActions,
+  armRoadComponent as gateRoadComponent,
+  armTimerCap as gateTimerCap,
+  firesSoFar,
+  inAnyFootprint,
+  CITY_OPENING as GATE_OPENING,
+  CORRIDOR,
+  D2_LINK,
+  GREEDY_PERIOD_TICKS,
+  type CityArm,
+} from './cityArms'
+import {
   seedStartingCity,
   STARTING_DESTINATIONS,
   STARTING_HOUSES,
@@ -197,6 +212,12 @@ const OCCUPIED_CELLS: readonly number[] = [
 
 // --- The first trip: house 1 -> D0's carpark --------------------------------
 
+/*
+ * `CORRIDOR` and `D2_LINK` — the two strokes this file's opening draws — moved
+ * to `cityArms.ts` at M1e Task 12, unchanged, so `integration.test.ts` can draw
+ * the SAME opening on the production boot path. Imported above.
+ */
+
 /**
  * (8,13) -> (7,12) -> (7,11) -> (8,10). Four cells, three 8-adjacent
  * segments, deliberately NOT a straight line: it turns twice and two of its
@@ -226,11 +247,6 @@ const FIRST_SCORE_TICK = 435
 const TRIP_TICK_BOUND = 500
 
 // --- The not-nearest demonstration: the full corridor, drawn late -----------
-
-/** Column x=8 from y=10 to y=24: 15 cells, 14 segments, 15 tiles. */
-const CORRIDOR: readonly number[] = [
-  248, 272, 296, 320, 344, 368, 392, 416, 440, 464, 488, 512, 536, 560, 584,
-]
 
 const SECOND_PIN_TICK = 637 // FIRST_PIN_TICK + ceil(518 / 2)
 const CORRIDOR_TICK = 638
@@ -318,14 +334,6 @@ const DEMO_TICK_BOUND = 800
  * statement of that, so a future task lengthening either one finds out here
  * rather than by asserting over a corpse.
  */
-
-/**
- * The five cells that save D2: column x = 17 from its carpark (17, 14) down to
- * its own colour-1 house at (17, 18). Four `place` actions, five tiles.
- */
-const D2_LINK: readonly number[] = [
-  14 * 24 + 17, 15 * 24 + 17, 16 * 24 + 17, 17 * 24 + 17, 18 * 24 + 17,
-]
 
 /**
  * When the saveability tests draw. Any tick from 1 to **5,550** works — swept —
@@ -1199,18 +1207,12 @@ describe('a scored trip from the house that is NOT nearest to its own destinatio
 /** Twelve weeks, which is 54,000 ticks — long enough for every arm to end. */
 const GATE_WEEKS = 12
 
-/**
- * The tile prices Decision 13's opening pays, as the two strokes a player
- * draws: column 17 from D2's carpark down to its own colour-1 house (five
- * cells, four `place` actions) and column 8 down the colour-0 carparks (fifteen
- * cells, fourteen actions). 18 actions, 20 tiles of the 30 the board starts
- * with. **Both strokes are asserted accepted rather than assumed** — see the
- * first case in this block.
+/*
+ * `GATE_OPENING` and `GREEDY_PERIOD_TICKS` moved to `cityArms.ts` at M1e Task
+ * 12, as `CITY_OPENING` and under the same name — see that file's header for
+ * why the POLICY is shared and the two DRIVERS are not. **Both strokes are
+ * asserted accepted rather than assumed** — see the first case in this block.
  */
-const GATE_OPENING: readonly (readonly number[])[] = [D2_LINK, CORRIDOR]
-
-/** How often the greedy policy is allowed to act. One decision per 30 ticks — 1 s. */
-const GREEDY_PERIOD_TICKS = 30
 
 interface GateWeek {
   readonly week: number
@@ -1249,192 +1251,18 @@ interface GateRun {
   readonly outsideRect: number
 }
 
-/**
- * The number of times demand has FIRED, derived from the two writers of
- * `destPins` rather than counted by a second implementation of `fireColour`.
- *
- * `demand.ts` writes `destPins[recipient] + 1` on a fire that lands and
- * `H_PINS_DROPPED + 1` on one that does not; `trips.ts` writes `destPins[d] - 1`
- * on an arrival and `H_SCORE + 1` when that car gets home. So every fire is in
- * exactly one of four places — dropped, still standing on a destination, being
- * carried home by a returning car, or scored — and the sum is conserved by
- * construction:
- *
- * ```
- *   fires = H_PINS_DROPPED + sum(destPins) + #cars in PHASE_RETURNING + H_SCORE
- * ```
- *
- * **A structural oracle rather than a second integration, deliberately** — this
- * file's own catalogue records a milestone where two "independent" measurements
- * shared one wrong phase constant and agreed exactly. This derivation passes
- * through no phase constant it could get wrong except `PHASE_RETURNING`, and
- * that term is checked at both ends: on the no-input arm it is 0 for the whole
- * run and the identity still balances.
+/*
+ * `firesSoFar`, the timer-cap reader, the carpark reader, the footprint
+ * predicate, the road-component flood fill, the 0-1 cheapest-path search, the
+ * path-to-actions helper and the greedy policy itself all moved to
+ * `cityArms.ts` at M1e Task 12, byte-unchanged. Imported at the top of this
+ * file. The reason is in that file's header: `integration.test.ts` now drives
+ * the same three arms through `createGame`, and two drivers agreeing is
+ * evidence where one driver run twice is not.
  */
-function firesSoFar(state: GameState): number {
-  let n = (state.header[H_PINS_DROPPED] as number) + (state.header[H_SCORE] as number)
-  const destCount = state.header[H_DEST_COUNT] as number
-  for (let d = 0; d < destCount; d++) n += state.destPins[d] as number
-  for (let c = 0; c < state.carPhase.length; c++) {
-    if ((state.carPhase[c] as number) === PHASE_RETURNING) n++
-  }
-  return n
-}
 
-/** §5.8's trigger cap for destination `d` — the one `overcrowdTriggerCap` reads. */
-function gateTimerCap(state: GameState, d: number): number {
-  return destMetaKind(state.destMeta[d] as number) === DEST_KIND_CIRCLE
-    ? PIN_CAP_CIRCLE_TIMER
-    : PIN_CAP_SQUARE_TIMER
-}
-
-function gateCarpark(state: GameState, world: WorldData, d: number): number {
-  return carparkCell(
-    state.destCell[d] as number,
-    destMetaOrientation(state.destMeta[d] as number),
-    world.w,
-    world.h,
-  )
-}
-
-/** True iff `cell` is one of the six non-carpark footprint cells of a destination. */
-function inAnyFootprint(state: GameState, world: WorldData, cell: number): boolean {
-  const destCount = state.header[H_DEST_COUNT] as number
-  for (let d = 0; d < destCount; d++) {
-    const orientation = destMetaOrientation(state.destMeta[d] as number)
-    if (isFootprintCell(state.destCell[d] as number, orientation, world.w, cell)) return true
-  }
-  return false
-}
-
-/**
- * The set of cells reachable from `from` by following road bits.
- *
- * **Bits, not "both cells carry a road".** `graph.ts`'s `isConnected` already
- * makes that distinction for one pair and this is the transitive closure of the
- * same relation: two adjacent cells can each carry a road toward something else
- * and be in different components, and a policy that could not tell would
- * re-buy the same connection every 30 ticks forever.
- */
-function gateRoadComponent(state: GameState, world: WorldData, from: number): Set<number> {
-  const seen = new Set<number>([from])
-  const stack: number[] = [from]
-  while (stack.length > 0) {
-    const c = stack.pop() as number
-    const mask = roadMask(state, c)
-    for (let dir = 0; dir < 8; dir++) {
-      if ((mask & (1 << dir)) === 0) continue
-      const next = stepCell(c, dir, world.w, world.h)
-      if (next < 0 || seen.has(next)) continue
-      seen.add(next)
-      stack.push(next)
-    }
-  }
-  return seen
-}
-
-/**
- * The cheapest road a player could draw from `from` to any cell in `goals`, in
- * TILES, with the path.
- *
- * A 0-1 breadth-first search: entering a cell that already carries a road bit
- * costs nothing and entering bare ground costs one tile, which is exactly
- * `canPlaceRoad`'s own price — its cost is "how many of the two endpoints have
- * a zero mask", and a cell's mask stops being zero after the first segment that
- * touches it, so the sum over a stroke is the number of bare cells on it.
- *
- * Refuses the cells `canPlaceRoad` refuses: impassable terrain, and the six
- * non-carpark footprint cells of any destination. A carpark and a house cell
- * are both road-legal by design (M1c decision 5), which is what makes a
- * carpark-to-house path expressible at all.
- */
-function gateCheapestPath(
-  state: GameState,
-  world: WorldData,
-  from: number,
-  goals: ReadonlySet<number>,
-): { cost: number; path: number[] } | undefined {
-  const legal = (c: number): boolean =>
-    world.passable[c] === 1 && !inAnyFootprint(state, world, c)
-  if (!legal(from)) return undefined
-  const dist = new Int32Array(world.cells).fill(0x7fffffff)
-  const prev = new Int32Array(world.cells).fill(-1)
-  const buckets: number[][] = []
-  const push = (c: number, d: number): void => {
-    while (buckets.length <= d) buckets.push([])
-    ;(buckets[d] as number[]).push(c)
-  }
-  const startCost = roadMask(state, from) === 0 ? 1 : 0
-  dist[from] = startCost
-  push(from, startCost)
-  for (let d = 0; d < buckets.length; d++) {
-    const bucket = buckets[d] as number[]
-    for (let bi = 0; bi < bucket.length; bi++) {
-      const c = bucket[bi] as number
-      if ((dist[c] as number) !== d) continue
-      if (goals.has(c)) {
-        const path: number[] = []
-        for (let cur = c; cur !== -1; cur = prev[cur] as number) path.push(cur)
-        path.reverse()
-        return { cost: d, path }
-      }
-      for (let dir = 0; dir < 8; dir++) {
-        const next = stepCell(c, dir, world.w, world.h)
-        if (next < 0 || !legal(next)) continue
-        const nd = d + (roadMask(state, next) === 0 ? 1 : 0)
-        if (nd < (dist[next] as number)) {
-          dist[next] = nd
-          prev[next] = c
-          push(next, nd)
-        }
-      }
-    }
-  }
-  return undefined
-}
-
-/** One stroke's worth of `place` actions, exactly as a drag emits them. */
-function gatePathActions(path: readonly number[]): TickAction[] {
-  const out: TickAction[] = []
-  for (let i = 0; i + 1 < path.length; i++) {
-    out.push({ kind: 'place', a: path[i] as number, b: path[i + 1] as number })
-  }
-  return out
-}
-
-/** The greedy policy's decision for this tick, or nothing to do. */
-function gateGreedyActions(
-  state: GameState,
-  world: WorldData,
-  tally: { unaffordable: number },
-): TickAction[] | undefined {
-  const destCount = state.header[H_DEST_COUNT] as number
-  const houseCount = state.header[H_HOUSE_COUNT] as number
-  for (let d = 0; d < destCount; d++) {
-    const colour = destMetaColour(state.destMeta[d] as number)
-    const goals = new Set<number>()
-    for (let h = 0; h < houseCount; h++) {
-      if ((state.houseColour[h] as number) === colour) goals.add(state.houseCell[h] as number)
-    }
-    if (goals.size === 0) continue
-    const cp = gateCarpark(state, world, d)
-    if (cp < 0) continue
-    const component = gateRoadComponent(state, world, cp)
-    let joined = false
-    for (const g of goals) if (component.has(g)) joined = true
-    if (joined) continue
-    const found = gateCheapestPath(state, world, cp, goals)
-    if (found === undefined) continue
-    if (found.cost > tilesLeft(state)) {
-      tally.unaffordable++
-      continue
-    }
-    return gatePathActions(found.path)
-  }
-  return undefined
-}
-
-type GateArm = 'no-input' | 'opening' | 'greedy'
+/* `CityArm` is `CityArm`, imported above — the two drivers must not be able to
+ * disagree about which arms exist. */
 
 /**
  * Boots **through `DEFAULT_LAYOUT_ID`**, not through `firstCity()` directly.
@@ -1461,7 +1289,7 @@ function gateBoot(): Rig {
   return { map, world, state, scratch, fields }
 }
 
-function driveGate(arm: GateArm): GateRun {
+function driveGate(arm: CityArm): GateRun {
   const { state, world, fields, scratch } = gateBoot()
   const startTick = state.header[H_TICK] as number
   const endTick = startTick + GATE_WEEKS * TICKS_PER_WEEK
@@ -1640,8 +1468,8 @@ function gradientIndices(
  * `step` calls and each case below reads a different projection of the same
  * run. The sim is deterministic, so this is memoisation and not sampling.
  */
-const gateRuns = new Map<GateArm, GateRun>()
-function gateRun(arm: GateArm): GateRun {
+const gateRuns = new Map<CityArm, GateRun>()
+function gateRun(arm: CityArm): GateRun {
   const cached = gateRuns.get(arm)
   if (cached !== undefined) return cached
   const fresh = driveGate(arm)

@@ -30,8 +30,14 @@ import {
   assertOccupancySound,
   hashState,
   roadMask,
+  tilesLeft,
+  weekOfTick,
+  H_FAILED_DEST,
+  H_PINS_DROPPED,
+  H_ROUTES_REFUSED,
+  type TickAction,
 } from '@laneways/sim'
-import { MAX_BLOCKED_TICKS } from '@laneways/shared'
+import { MAX_BLOCKED_TICKS, TICKS_PER_WEEK } from '@laneways/shared'
 import { PALETTE, type AtlasContext, type AtlasSurface } from '@laneways/render'
 import {
   buildJamRig,
@@ -52,6 +58,17 @@ import { SizingOutcome } from '../src/shell'
 import { DEMO_WARM_START_TICKS } from '../src/demoLayout'
 import { CITY_LAYOUT_ID, DEMO_LAYOUT_ID, DEFAULT_LAYOUT_ID, LAYOUT_IDS } from '../src/layouts'
 import { CITY_DEATH_TICK, DEMO_DEATH_TICK } from './deathTicks'
+import {
+  armCarpark,
+  armGreedyActions,
+  armPathActions,
+  armTimerCap,
+  firesSoFar,
+  CITY_OPENING,
+  GREEDY_PERIOD_TICKS,
+  type CityArm,
+} from './cityArms'
+import { longestQueue } from '../src/queueProbe'
 import {
   BOOT_FAILURE_ELEMENT_ID,
   BOOT_FAILURE_STYLE,
@@ -3276,3 +3293,213 @@ describe('a boot that throws puts the reason on the screen', () => {
     expect(source).not.toContain('if (shouldAutoStart()) startGame()')
   })
 })
+
+// ---------------------------------------------------------------------------
+// M1e TASK 12 — THE RUN CAN BE LOST END TO END, ON THE PRODUCTION BOOT PATH
+// ---------------------------------------------------------------------------
+
+/**
+ * Task 10's three arms, driven through `createGame` and its `InputQueue`
+ * instead of by hand.
+ *
+ * **Why this is not a second copy of `startingCity.test.ts`'s gate.** That
+ * file's `driveGate` calls `layoutFor`, seeds, warm-starts and then calls
+ * `step` itself. This one boots the object `startGame` builds, pushes every
+ * road through `game.queue.enqueue` — the method `pointer.ts` calls and the
+ * only way a finger reaches the sim — and advances by handing the frame loop a
+ * timestamp. **Two independent drivers agreeing on a death tick, a killer and a
+ * per-week series is evidence; one driver run twice is not.** The POLICY is
+ * shared (`cityArms.ts`) precisely so that the only thing that can differ is
+ * the driver.
+ *
+ * The arms are also asserted as FIGURES with a stated tolerance rather than as
+ * inequalities. The first draft of this block's gate was *"survives strictly
+ * longer and scores strictly more"*, which is not a gate: `8,660 > 5,579` and
+ * `70 > 0` satisfy it, i.e. a build that is unwinnable after four minutes
+ * passes. Every number below is exact, and the two that are not — the delivery
+ * fractions — carry an explicit epsilon.
+ */
+interface ArmWeek {
+  readonly week: number
+  readonly dests: number
+  readonly houses: number
+  readonly trips: number
+  readonly fires: number
+  readonly maxInFlight: number
+  readonly longestQueue: number
+  readonly refusals: number
+  readonly blockedTicks: number
+  readonly peakDestPins: number
+  readonly peakOvercrowd: number
+  readonly tilesLeft: number
+}
+
+interface ArmRun {
+  readonly weeks: readonly ArmWeek[]
+  readonly deathTick: number
+  readonly deathWeek: number
+  readonly failedDest: number
+  readonly failedDestConnected: boolean
+  readonly trips: number
+  readonly fires: number
+  readonly maxInFlight: number
+  readonly maxBlockedTicks: number
+  readonly valveFirings: number
+  readonly unaffordable: number
+  /** Tiles actually spent by the opening, read off `H_TILES` across the one tick it lands on. */
+  readonly openingSpend: number
+}
+
+/** Twelve weeks, which is 54,000 ticks — long enough for every arm to end. */
+const ARM_WEEKS = 12
+
+/**
+ * Drives one arm to its death or to `ARM_WEEKS`, whichever comes first.
+ *
+ * `layoutId: undefined` reaches `createGame` with the property genuinely
+ * absent, so this is the board a player who taps the bot link with no
+ * parameters opens — not `city` named explicitly. `buildRig`'s own note
+ * explains why `in` rather than `??` is what makes that expressible.
+ */
+function driveArm(arm: CityArm): ArmRun {
+  const rig = buildRig({ layoutId: undefined })
+  const { state, world } = rig.game
+  const startTick = state.header[H_TICK] as number
+  const endTick = startTick + ARM_WEEKS * TICKS_PER_WEEK
+  const tally = { unaffordable: 0 }
+  const weeks: ArmWeek[] = []
+
+  const openingActions: TickAction[] = []
+  for (const stroke of CITY_OPENING) openingActions.push(...armPathActions(stroke))
+
+  let deathTick = -1
+  let maxInFlight = 0
+  let maxBlockedTicks = 0
+  let valveFirings = 0
+  let openingSpend = 0
+
+  let week = weekOfTick(startTick)
+  let weekTrips = state.header[H_SCORE] as number
+  let weekFires = firesSoFar(state)
+  let weekRefusals = state.header[H_ROUTES_REFUSED] as number
+  let wkInFlight = 0
+  let wkQueue = 0
+  let wkBlocked = 0
+  let wkPins = 0
+  let wkOvercrowd = 0
+
+  const closeWeek = (): void => {
+    const trips = (state.header[H_SCORE] as number) - weekTrips
+    weeks.push({
+      week,
+      dests: state.header[H_DEST_COUNT] as number,
+      houses: state.header[H_HOUSE_COUNT] as number,
+      trips,
+      fires: firesSoFar(state) - weekFires,
+      maxInFlight: wkInFlight,
+      longestQueue: wkQueue,
+      refusals: (state.header[H_ROUTES_REFUSED] as number) - weekRefusals,
+      blockedTicks: wkBlocked,
+      peakDestPins: wkPins,
+      peakOvercrowd: wkOvercrowd,
+      tilesLeft: tilesLeft(state),
+    })
+    weekTrips = state.header[H_SCORE] as number
+    weekFires = firesSoFar(state)
+    weekRefusals = state.header[H_ROUTES_REFUSED] as number
+    wkInFlight = 0
+    wkQueue = 0
+    wkBlocked = 0
+    wkPins = 0
+    wkOvercrowd = 0
+  }
+
+  for (let tick = startTick + 1; tick <= endTick; tick++) {
+    let actions: readonly TickAction[] | undefined
+    if (arm !== 'no-input' && tick === startTick + 1) actions = openingActions
+    else if (arm === 'greedy' && tick % GREEDY_PERIOD_TICKS === 0) {
+      actions = armGreedyActions(state, world, tally)
+    }
+    const tilesBefore = tilesLeft(state)
+    if (actions !== undefined) {
+      for (const a of actions) rig.game.queue.enqueue(a.kind, a.a, a.b)
+    }
+    // One frame, exactly one tick. The loop drains the queue and clears it, so
+    // nothing here can leak into the next tick.
+    const ran = rig.advance(TICK_MS)
+    if (ran !== 1) throw new Error(`driveArm: tick ${tick} ran ${ran} ticks, not 1`)
+    if (rig.game.queue.length !== 0) throw new Error(`driveArm: the queue was not drained on ${tick}`)
+    if (tick === startTick + 1 && arm !== 'no-input') openingSpend = tilesBefore - tilesLeft(state)
+
+    if (isGameOver(state)) {
+      deathTick = state.header[H_TICK] as number
+      closeWeek()
+      break
+    }
+
+    let inFlight = 0
+    let blocked = false
+    for (let c = 0; c < state.carPhase.length; c++) {
+      const phase = state.carPhase[c] as number
+      if (phase === PHASE_OUTBOUND || phase === PHASE_RETURNING) inFlight++
+      const bt = state.carBlockedTicks[c] as number
+      if (bt > 0) blocked = true
+      if (bt > maxBlockedTicks) maxBlockedTicks = bt
+      if (bt >= MAX_BLOCKED_TICKS) valveFirings++
+    }
+    if (inFlight > wkInFlight) wkInFlight = inFlight
+    if (inFlight > maxInFlight) maxInFlight = inFlight
+    if (blocked) wkBlocked++
+    // Sampled, not run every tick: `longestQueue` allocates a `Map` and a `Set`
+    // per call. Every tenth tick is the same cadence Task 10's driver used, so
+    // the two figures are comparable.
+    if (tick % 10 === 0) {
+      const q = longestQueue(state, world)
+      if (q > wkQueue) wkQueue = q
+    }
+
+    const destCount = state.header[H_DEST_COUNT] as number
+    for (let d = 0; d < destCount; d++) {
+      const pins = state.destPins[d] as number
+      if (pins > wkPins) wkPins = pins
+      const m = state.destOvercrowd[d] as number
+      if (m > wkOvercrowd) wkOvercrowd = m
+    }
+
+    const w = weekOfTick(tick)
+    if (w !== week) {
+      closeWeek()
+      week = w
+    }
+  }
+  if (deathTick < 0) closeWeek()
+
+  const failedDest = state.header[H_FAILED_DEST] as number
+  const failedCarpark =
+    deathTick > 0 && failedDest >= 0 && failedDest < (state.header[H_DEST_COUNT] as number)
+      ? armCarpark(state, world, failedDest)
+      : -1
+  return {
+    weeks,
+    deathTick,
+    deathWeek: deathTick < 0 ? -1 : weekOfTick(deathTick),
+    failedDest,
+    failedDestConnected: failedCarpark >= 0 && roadMask(state, failedCarpark) !== 0,
+    trips: state.header[H_SCORE] as number,
+    fires: firesSoFar(state),
+    maxInFlight,
+    maxBlockedTicks,
+    valveFirings,
+    unaffordable: tally.unaffordable,
+    openingSpend,
+  }
+}
+
+const armRuns = new Map<CityArm, ArmRun>()
+function armRun(arm: CityArm): ArmRun {
+  const cached = armRuns.get(arm)
+  if (cached !== undefined) return cached
+  const run = driveArm(arm)
+  armRuns.set(arm, run)
+  return run
+}
