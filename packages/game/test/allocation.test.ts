@@ -1536,21 +1536,30 @@ function bytesIn(all: readonly Allocator[], file: string): number {
  * `applyArrivalKnockback`, which lives in `overcrowd.ts` and is called from
  * `arriveAtDestination` in `trips.ts` once per completed trip — about 0.07
  * times per tick on the demo board. Measured: an escaping object injected into
- * it is caught by THIS per-trip arm at **40.12 B/trip floored over three
- * windows (draws 45.71 / 44.11 / 40.12), 5.0x the 8 B budget** — but charged to
- * **`trips.ts`**, because V8 inlined the callee into its caller. Inlining is
- * not a stable property, and the file's own module comment already says
- * function-level attribution is unstable; across a file boundary the same
- * instability moves the charge between two FILES, and only one of them was in
- * this list. The per-FRAME arm cannot cover the gap: at ~105 arrivals in a
- * 3,000-frame window a 40 B/arrival regression is ~1.4 B/frame, under the
- * measured 4 B noise floor by construction. So the file is named here, and both
- * landing sites are covered whichever way the inliner decides on the day.
+ * it is caught by THIS per-trip arm — but charged to **`trips.ts`**, because V8
+ * inlined the callee into its caller. Inlining is not a stable property, and
+ * the file's own module comment already says function-level attribution is
+ * unstable; across a file boundary the same instability moves the charge
+ * between two FILES, and only one of them was in this list. The per-FRAME arm
+ * cannot cover the gap: at ~105 arrivals in a 3,000-frame window a 40 B/arrival
+ * regression is ~1.4 B/frame, under the measured 4 B noise floor by
+ * construction. So the file is named here, and both landing sites are covered
+ * whichever way the inliner decides on the day.
+ *
+ * **The figures, over SIX draws rather than one** — an earlier version of this
+ * comment quoted a single draw of 40.12 and called it a bound, which is the
+ * catalogue's *"a sampling profiler's figures are a verdict, not a quantity"*
+ * with the quantity written down anyway:
+ *
+ *   charged to `trips.ts`      floors 32.64 / 34.29 / 36.86 / 38.34 / 39.20 /
+ *                              40.92 — **worst 32.64**, 4.08x the 8 B budget
+ *   charged to `overcrowd.ts`  floors 144.48 / 145.78 / 152.64 / 170.61 —
+ *                              **worst 144.48**, 18.1x
  *
  * `runOvercrowd` itself needs none of this — it runs every tick over every live
- * destination, and injecting into it charges `overcrowd.ts` **15.79-31.90
- * B/frame against a per-frame budget of 4** on the demo rig, red in all three
- * windows.
+ * destination, and injecting into it charges `overcrowd.ts` at **14.01-55.9
+ * B/frame against a per-frame budget of 4** on the demo rig (weakest draw
+ * 14.01, 3.5x), red in every window.
  */
 const TASK2_TICK_FILES = ['blocking.ts', 'cars.ts', 'trips.ts', 'overcrowd.ts'] as const
 
@@ -1815,17 +1824,26 @@ describe('the tick allocates nothing on the blocking path, measured', () => {
     // QUIETEST of the three positive controls — one escaping object per
     // completed trip in `completeTrip` — so this is the margin that matters.
     expect(COMPLETION_BUDGET_BYTES_PER_TRIP * 4).toBeLessThan(35)
-    // **M1e Task 7's own two signals on this same statistic, measured rather
-    // than sketched, because the file list it widened is only worth widening if
-    // the arm can see the thing.** An escaping object in
-    // `applyArrivalKnockback` floors at **40.12** B/trip when the inliner
-    // charges `trips.ts` (draws 45.71 / 44.11 / 40.12) and at **159.20** when
-    // it charges `overcrowd.ts` (160.00 / 159.20 / 171.94). 8 clears the weaker
-    // of the two by 5.0x. Asserted against the weaker one and with a strict
-    // inequality, so the two quantities can be told apart — a safety factor
-    // whose right-hand side came out of the same measurement as its left is a
-    // restatement, not a margin.
-    expect(COMPLETION_BUDGET_BYTES_PER_TRIP * 4, "Task 7's weaker landing site").toBeLessThan(40.12)
+    // **M1e Task 7's own two signals on this same statistic, over SIX draws.**
+    // An earlier version of this assertion used `* 4 < 40.12` — a SINGLE draw
+    // presented as a bound. Re-measured, the floor of the same injection ranges
+    // 32.64 to 40.92, so 40.12 encoded a margin 23 % larger than the data
+    // supports and left `8 * 4 = 32` clearing the true worst floor by **2 %**:
+    // exact equality wearing a margin's clothes, which is the specific defect
+    // the paragraph above this test exists to warn about.
+    //
+    //   into `applyArrivalKnockback`, charged to `trips.ts`:
+    //     floors 32.64 / 34.29 / 36.86 / 38.34 / 39.20 / 40.92  -> worst 32.64
+    //   into `runOvercrowd`, charged to `overcrowd.ts`:
+    //     floors 144.48 / 145.78 / 152.64 / 170.61              -> worst 144.48
+    //
+    // The real ratio against the weaker landing site is **4.08x**, so the
+    // assertion is written at 3x and clears by 36 % — outside the band in the
+    // right direction, rather than tight enough to read well and flake.
+    expect(
+      COMPLETION_BUDGET_BYTES_PER_TRIP * 3,
+      "Task 7's weakest measured draw, over six",
+    ).toBeLessThan(32.64)
   })
 
   it('DOES report a sim/src allocation on the same rig, same scope, same predicate — the guard can fail', () => {

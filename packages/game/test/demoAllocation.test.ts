@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { Session } from 'node:inspector'
-import { CT_REBUILDS, PHASE_OUTBOUND, PHASE_RETURNING } from '@laneways/sim'
+import { CT_REBUILDS, H_TICK, PHASE_OUTBOUND, PHASE_RETURNING } from '@laneways/sim'
 import type { AtlasContext, AtlasSurface } from '@laneways/render'
+import { DEMO_DEATH_TICK } from './deathTicks'
 import { createGame, type GameContext } from '../src/main'
 import { DEMO_LAYOUT_ID } from '../src/layouts'
 import { repoRelative } from './allocationPaths'
@@ -391,6 +392,19 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
         'the allocation it watches for was deleted in M1e Task 3 and a charge here is a regression',
     ).toBeLessThan(FLOWFIELD_BUDGET_BYTES_PER_CALL)
 
+    // **The dynamic half of the death-tick guard (M1e Task 7).** Read off the
+    // rig this test actually drove, so no model of the frame-to-tick mapping
+    // can go stale: if a future edit lengthens the windows past the tick the
+    // demo board dies on, every budget above is being measured over a sim that
+    // Task 8 will have frozen — and neither vacuity guard in this file would
+    // notice, because the "really drove 24 cars" check runs on a separate rig
+    // and the positive control is a delta between two profiles of the same one.
+    expect(
+      game.state.header[H_TICK],
+      'this rig drove past the demo board’s death tick — the budgets above were measured on a corpse',
+    ).toBeLessThan(DEMO_DEATH_TICK)
+    expect(game.state.header[H_TICK], 'and the measured end tick is 6,459').toBe(6459)
+
     const offenders = [...perFrameMin]
       .filter(([file, perFrame]) => perFrame > budgetFor(file))
       .map(([file, perFrame]) => `${file} at ${perFrame.toFixed(2)} B/frame`)
@@ -460,6 +474,51 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     expect(FLOWFIELD_BUDGET_BYTES_PER_CALL).toBeGreaterThan(1.34 * 4)
     expect(PROFILED_FRAMES).toBeGreaterThanOrEqual(3000)
     expect(WINDOW_COUNT).toBeGreaterThanOrEqual(3)
+
+    // -----------------------------------------------------------------------
+    // **AND AN UPPER BOUND, because the two lines above are lower bounds on the
+    // exact knobs that would drive this rig past the tick the board dies on.**
+    // -----------------------------------------------------------------------
+    //
+    // M1e Task 7 measured the demo board's overcrowd failure at tick **6,703**
+    // (`demoLayout.test.ts`'s `DEMO_DEATH_TICK`). Task 8 makes reaching it
+    // freeze the sim, after which every further tick is a byte-identical no-op.
+    // This rig ends at tick **6,459** — 244 ticks, 3.6 %, under it, the
+    // tightest margin in the repo — and **a fourth window would put it at
+    // ~7,962, i.e. 1,259 ticks past the freeze.** The file's own comments
+    // recommend more windows, so that is a likely edit and not a hypothetical.
+    //
+    // **Neither vacuity guard would notice**, which is what makes a mechanical
+    // bound necessary rather than tidy: the "really drove 24 cars" check runs on
+    // a separate rig, and the positive control measures a delta between two
+    // profiles of the SAME rig, so it fires identically on a frozen board. The
+    // budgets would then be measured over a sim that is not running, and report
+    // clean.
+    //
+    // **The authoritative guard is DYNAMIC and lives in the profiling test
+    // above**, which reads `H_TICK` off the rig it actually drove — an
+    // arithmetic model of the frame-to-tick mapping is exactly the kind of
+    // derivation that goes stale, and this one already did: a first draft
+    // assumed one tick per two frames and computed 5,250 against a measured
+    // 6,459, because it forgot the 1,200-tick warm start and the accumulator's
+    // 16.7/33.3 ratio.
+    //
+    // What is worth having HERE is a cheap ceiling on the two knobs, so the
+    // edit the file's own comments invite — "use more windows" — fails at the
+    // knob rather than 3,000 frames later. The rate is measured, not modelled:
+    // 10,500 frames carried the sim from its 1,200-tick warm start to tick
+    // 6,459, i.e. 0.5009 ticks per frame.
+    const framesDriven = WARMUP_FRAMES + WINDOW_COUNT * PROFILED_FRAMES
+    expect(framesDriven, 'the measured frame count behind the 6,459').toBe(10500)
+    const TICKS_PER_FRAME = (6459 - 1200) / 10500
+    const framesToDeath = (DEMO_DEATH_TICK - 1200) / TICKS_PER_FRAME
+    expect(
+      framesDriven,
+      'these knobs now drive the demo rig past its death tick — see DEMO_DEATH_TICK',
+    ).toBeLessThan(framesToDeath)
+    // A fourth window is the specific edit this guards, and it must be over the
+    // line rather than merely near it.
+    expect(WARMUP_FRAMES + 4 * PROFILED_FRAMES).toBeGreaterThan(framesToDeath)
     expect([...PROFILED_SCOPES].sort()).toEqual([
       'packages/game/src/',
       'packages/render/src/',

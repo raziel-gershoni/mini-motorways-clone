@@ -37,14 +37,24 @@ import { destMetaKind, DEST_KIND_CIRCLE } from './buildings'
  * below the 900,000 point where the 90,000 knockback cap binds. So **P <= 90
  * ticks survives forever and P > 90 dies, with nothing in between** — swept and
  * confirmed exactly at a 2,000,000-tick horizon (91 dies at 163,162; 92 at
- * 84,271; at P = 90 the meter's PEAK parks on 900,000 exactly). Neither shipped
- * board is anywhere near that boundary: both die of a destination that stops
- * being served ENTIRELY, at P = infinity. Measured on the real boot path at
- * M1e Task 7 by driving each board 40,000 ticks with no input, the demo board
- * dies at tick **6,703** (3 min 43 s) on D2 and `firstCity` at tick **5,580**
- * (3 min 06 s), also on D2 — and removing the knockback, removing the unwind,
- * or removing both leaves both ticks unchanged, measured by deleting the code
- * rather than by modelling it.
+ * 84,271; at P = 90 the meter's PEAK parks on 900,000 exactly). Measured on the
+ * real boot path at M1e Task 7 by driving each board 40,000 ticks with no
+ * input, the demo board dies at tick **6,703** (3 min 43 s) on D2 and
+ * `firstCity` at tick **5,580** (3 min 06 s), also on D2 — and removing the
+ * knockback, removing the unwind, or removing both leaves both ticks unchanged,
+ * measured by deleting the code rather than by modelling it.
+ *
+ * **Neither shipped board is anywhere near that boundary, but they are far from
+ * it for DIFFERENT reasons, and one word for both hides the difference.** On
+ * `firstCity`, D2 is **unreachable**: the board has no roads, it receives zero
+ * cars ever, and its arrival interval is literally infinite — a five-tile road
+ * to it removes the failure entirely (`startingCity.test.ts`). On the demo
+ * board, D2 is **reachable and deprioritised**: six cars do reach it, the last
+ * at tick 1,549, and it then loses every dispatch because cars route to the
+ * nearest unfilled pin of their colour. Both end up past P = 90 by an unbounded
+ * margin, so this model cannot distinguish them — but a lever that reaches one
+ * (lay a road) does nothing for the other, and Task 10's gate should not treat
+ * them as one case.
  *
  * **The meter reads `destPins`, not `destPins - destReserved`.** §5.8: "There
  * is no carpark immunity - a car metres from the bay does not save you. The

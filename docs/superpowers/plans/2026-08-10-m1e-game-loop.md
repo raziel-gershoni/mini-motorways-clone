@@ -202,7 +202,7 @@ Two more rules:
 
 | | largest surviving arrival interval | first lethal | first lethal inside 40,000 ticks |
 |---|---|---|---|
-| as shipped | **P = 90** (the meter parks at 900,000 forever) | 91, at tick 163,163 | 95 |
+| as shipped | **P = 90** (the meter's PEAK parks on 900,000; the trough is 811,000) | 91, at tick **163,162** [corrected at Task 7: this table said 163,163, contradicting Task 7's own Step 5 comment two sections down, which is right] | 95 |
 | with the deceleration | **P = 300** | 301, at tick 1,325,302 | 328 |
 
 A 3.33× widening, and it is exactly the widening the algebra predicts. It would turn "you are fine or you are dead" into "you fell behind and you can climb back", which is what §5.8's unwind and knockback are evidently for.

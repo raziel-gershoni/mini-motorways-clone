@@ -128,10 +128,13 @@ export const OVERCROWD_GRACE_MS = 2000
  * meter cannot be exact. The meter is denominated in ticks x `DENOM` —
  * milli-ticks — and every §5.8 constant converts once, here.
  *
- * **§5.8 is a FIVE-OF-EIGHT transcription of research dossier §1.10, and the
- * three that fell out fell out by transcription rather than by anyone's
- * decision.** The one that matters is `OvercrowdTimerCarArrivalDeceleration`
- * = 0.5; plan Decision 4 names it, measures what it would do (it widens the
+ * **EXACTLY ONE of research dossier §1.10's constants is genuinely absent from
+ * this file, and it is `OvercrowdTimerCarArrivalDeceleration` = 0.5.** The
+ * plan describes §5.8 as a "five-of-eight transcription", and an earlier
+ * version of this comment repeated that as "the three that fell out" — but
+ * that is a row-count artefact of how the dossier's table is laid out, not
+ * three missing behaviours. Counted as behaviours, one is missing and it is
+ * this one. Plan Decision 4 names it, measures what it would do (it widens the
  * survivable arrival interval from 90 ticks to 300, a 3.33x change), and hands
  * it to M1f with the reason. Do not add it here without reading that.
  */

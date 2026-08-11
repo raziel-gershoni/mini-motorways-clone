@@ -64,6 +64,7 @@ import {
   seedDemoLayout,
 } from '../src/demoLayout'
 import { seedStartingCity } from '../src/startingCity'
+import { DEMO_DEATH_TICK } from './deathTicks'
 import { NO_CROSSING, carAheadOf, longestQueue, travelDir } from '../src/queueProbe'
 
 /**
@@ -570,31 +571,53 @@ describe('the demo-layout golden', () => {
  * | Dies at tick | **6,703** — **3 min 43 s** at 30 Hz |
  * | Destination | **D2**, `DEMO_DESTINATIONS[2]`, grid (16, 9), `ORIENTATION_W`, colour 2 |
  * | Kind | **circle** — 2 rotation slots, trigger cap 8, hard cap 14 |
- * | Arrivals it received | **6**, against a median of **26** across the eighteen |
- * | Its last arrival | tick **1,274** — 74 ticks after the first frame a player sees |
- * | At or over its cap from | tick **3,314**, unbroken for 3,390 ticks |
+ * | Arrivals it received | **6**, against a median of **25.5** across the eighteen |
+ * | Its last arrival | tick **1,549** — **349 ticks, 11.6 s, of VISIBLE play** |
+ * | At or over its cap from | tick **3,314** — 70 s of visible play — unbroken for 3,390 ticks |
  * | Next longest at-cap run | **943** (D5, from 5,761); **0** for the other sixteen |
  * | With the knockback removed / the unwind removed / both | **6,703, unchanged, all three** |
  *
- * **It dies of STARVATION, not of a losing race, and that distinction is the
- * most important fact about this board.** D2's last arrival is tick 1,274 and
- * its pin count is monotone from there to the hard cap of 14, so no
- * knockback-side lever reaches it: removing the arrival knockback, removing the
- * unwind, or removing both leaves the death tick unmoved to the tick. Cars
- * route to the nearest unfilled pin of their colour (§5.4), D2 sits at the far
- * end of corridor C, and once the nearer colour-2 destinations are generating
- * pins it never wins a dispatch again.
+ * **It dies because it is DEPRIORITISED, not because it is unreachable — and
+ * that is a different mechanism from the city board's, which the word
+ * "starvation" hides.** D2 is connected and served: six cars reach it, the last
+ * at tick 1,549. It then loses every subsequent dispatch, because cars route to
+ * the nearest unfilled pin of their colour (§5.4) and D2 sits at the far end of
+ * corridor C. Its pin count is monotone from 1,549 to the hard cap of 14, so no
+ * knockback-side lever reaches it — removing the arrival knockback, the unwind,
+ * or both leaves the death tick unmoved to the tick. On `firstCity` the same
+ * word describes something else entirely: there D2 has **no road at all**, zero
+ * arrivals ever, and an arrival interval of literal infinity. Deprioritised and
+ * unreachable want different fixes, and Task 10's gate should not treat them as
+ * one case.
  *
- * **Three of the plan's secondary figures for this board are stale and the
- * primary ones are not.** The death tick, the destination, its kind and its six
- * arrivals all reproduce exactly. Its last arrival is **1,274** and not the
- * plan's 1,549; the median is **26** and not 24; D5's run is **943** and not
- * 272. All three moved because Tasks 5 and 6 landed between the plan's
- * measurement and this one — the §5.3.5 blocked-spawn push and the weekly
- * demand ramp both add pins to this board. The death tick did not move for
- * either, which is measured: with the ramp neutralised to the bare
- * `PIN_PERIOD_TICKS` and with `H_DEST_SPAWN_TIMER` parked past the window, this
- * board still dies on tick 6,703.
+ * ---------------------------------------------------------------------------
+ * **A CORRECTION, because this comment carried a fabricated one — read it
+ * before trusting any figure above.**
+ * ---------------------------------------------------------------------------
+ *
+ * An earlier version of this block said D2's last arrival was **1,274**, called
+ * the plan's 1,549 stale, and attributed the move to Tasks 5 and 6. **All three
+ * of those were wrong.** The 1,274 came from a measurement harness that
+ * hard-coded `PHASE_OUTBOUND = 1` and `PHASE_RETURNING = 2` when the real values
+ * are 2 and 3 — so it was detecting `IDLE -> OUTBOUND` and counting
+ * **dispatches, not arrivals**. Two "independent" integrations agreed with each
+ * other because both imported the same wrong constant from the same harness.
+ *
+ * Re-measured with the real constants and cross-checked against a second oracle
+ * that touches no phase constant at all — a decrement of `destPins`, which is
+ * written in exactly two places repo-wide (`demand.ts` adds, `trips.ts`
+ * subtracts) — and against direct instrumentation of `arriveAtDestination`. All
+ * three agree: D2's arrivals land on ticks **341, 384, 1,470, 1,498, 1,533,
+ * 1,549**, and 1,549 is the last one **in all four counterfactual arms and with
+ * the ramp neutralised**. The attribution was falsified under exactly the
+ * conditions it named.
+ *
+ * **What IS attributable to Tasks 5 and 6, measured by neutralising them:**
+ * the arrival median moved **24 -> 25.5** (the plan's 24 reproduces exactly with
+ * the ramp neutralised), and D5's longest at-cap run moved **267 -> 943** (the
+ * plan's 272 is within a handful of the 267 that the ramp-neutralised arm
+ * gives; the residue is Task 5's spawner). The death tick, the destination, its
+ * kind, its six arrivals and its last arrival are unmoved by either task.
  *
  * **And `demoLayout.ts`'s headline "1,324 trips over 20,000 ticks" is now
  * stale by the same two tasks.** On this tree the figure is **1,464**. Parking
@@ -602,8 +625,10 @@ describe('the demo-layout golden', () => {
  * both reproduces **1,324 exactly**, which is what says the harness that
  * produced every number in this comment is the real board and not something
  * else.
+ *
+ * The integer itself lives in `deathTicks.ts`, shared with the two other files
+ * that need it; everything above is this board's own derivation.
  */
-const DEMO_DEATH_TICK = 6703
 
 describe('the demo layout is visibly congested, measured over 3,000 ticks', () => {
   const TICKS = 3000

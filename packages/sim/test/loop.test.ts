@@ -371,8 +371,15 @@ function assertNoSpawnHappened(r: Rig, tick: number, houses: number, dests: numb
   // every fixture that reaches this function. They are zero because these
   // fixtures pre-pin at most **1** pin per destination, five short of
   // `PIN_CAP_SQUARE_TIMER`, so the under-capacity branch runs every tick — and
-  // the loop over the live prefix below says the meter is not merely BETWEEN
-  // excursions, which is the other way an all-zero meter can happen.
+  // the loop below says the meter is not merely BETWEEN excursions, which is
+  // the other way an all-zero meter can happen.
+  //
+  // **That loop is VACUITY, not evidence, and the distinction matters here.**
+  // It checks the premise with `isOverCapacity` — the function under test — so
+  // under a mutation of the trigger it agrees with the mutant and reports
+  // nothing. It is here to catch a FIXTURE that drifted into reaching a cap,
+  // which is a real and likely change; it is not a detector for the comparison
+  // itself, and `overcrowd.test.ts` owns that.
   // `H_GAME_OVER`/`H_FAILED_DEST` above are still posture; Task 8 owns them.
   for (let d = 0; d < (r.state.header[H_DEST_COUNT] as number); d++) {
     expect(isOverCapacity(r.state, d), `destination ${d} is over its timer cap`).toBe(false)
@@ -2479,9 +2486,22 @@ function assertDemandGoldenPosture(r: Rig, tick: number): void {
   // **1**, against `PIN_CAP_SQUARE_TIMER` = 6. `isOverCapacity` is therefore
   // false on all 5,250 ticks, the under-capacity branch runs every one of them,
   // and it writes `destOverTicks = 0` and unwinds a meter already floored at 0.
-  // So these two lines now DISCRIMINATE — they fail for a broken trigger
-  // comparison, a lost ramp reset or an unfloored unwind — on a fixture that
-  // never intended to reach a cap.
+  //
+  // **Exactly ONE mutation is discriminated here, and an earlier version of
+  // this comment claimed three. Measured, per mutation, over `packages/sim`:**
+  //
+  //   unfloored unwind          65 detectors, and `loop.test.ts` IS among them
+  //   trigger `>=` -> `>`       13 detectors, NONE in `loop.test.ts`
+  //   trigger -> the hard caps  14 detectors, NONE in `loop.test.ts`
+  //   no `destOverTicks` reset   2 detectors, NONE in `loop.test.ts`
+  //
+  // The comment's own derivation entails that, which is why the overclaim was
+  // careless rather than unlucky: a fixture whose peak `destPins` is five short
+  // of the trigger **cannot reach the over-capacity branch at all**, so it
+  // cannot see a trigger mutation or a ramp-reset mutation, and only the
+  // under-capacity branch — where the unwind's floor lives — is exercised.
+  // The conversion from posture to evidence is real and it is worth one third
+  // of what it was written as.
   //
   // `H_GAME_OVER` and `H_FAILED_DEST` are still genuinely posture: nothing in
   // the repo writes either, and Task 8 is the task that will.

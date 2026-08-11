@@ -205,11 +205,15 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  *   6. **THE CITY SHUTS DOWN AT 3 MINUTES 43 SECONDS, on tick 6,703, with no
  *      player error possible — measured at M1e Task 7 on this exact boot path.**
  *      D2, the colour-2 circle at grid (16, 9), receives its last car at tick
- *      1,274 and then sits at or over its trigger cap of 8 for 3,390
- *      consecutive ticks, which is exactly what §5.8's meter needs. It dies of
- *      STARVATION: it is at the far end of corridor C, cars route to the
- *      nearest unfilled pin of their colour, and once the nearer colour-2
- *      destinations are generating pins it never wins a dispatch again.
+ *      **1,549** — 349 ticks, 11.6 seconds, after the first frame a player sees
+ *      — and then sits at or over its trigger cap of 8 from tick 3,314 for
+ *      3,390 consecutive ticks, which is exactly what §5.8's meter needs. So a
+ *      watcher gets **70 seconds of visible play** before the timer even
+ *      starts, and about 113 more while it fills. It is DEPRIORITISED rather
+ *      than unreachable: it is connected and it is served six times, but it is
+ *      at the far end of corridor C, cars route to the nearest unfilled pin of
+ *      their colour, and once the nearer colour-2 destinations are generating
+ *      pins it never wins a dispatch again.
  *      Removing the arrival knockback, the unwind, or both moves the tick by
  *      **zero**. Plan Decision 7 accepts this deliberately — a board authored
  *      to be badly run should die in the milestone about badly-run cities

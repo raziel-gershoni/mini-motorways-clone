@@ -9,6 +9,7 @@ import {
   PIN_PERIOD_TICKS,
   FIRST_PIN_DELAY_TICKS,
   PIN_CAP_CIRCLE_TIMER,
+  OVERCROWD_FAIL_MILLITICKS,
   CARS_PER_HOUSE,
   type MapData,
 } from '@laneways/shared'
@@ -57,6 +58,7 @@ import { hashBytes } from '@laneways/sim'
 // deliberate: the alternative is a second copy of the splice, and two copies
 // of a proof drift in exactly the direction that makes the proof stop proving.
 import { m1eInsertedRanges, spliceM1eInsertions } from '../../sim/test/m1eSplice'
+import { CITY_DEATH_TICK } from './deathTicks'
 import {
   seedStartingCity,
   STARTING_DESTINATIONS,
@@ -256,6 +258,38 @@ const DEMO_TICK_BOUND = 800
  * 8th pin — its trigger cap — on tick `378 + 7 * 259` = **2,191**, the k-th
  * at-cap tick is `2,190 + k`, and `k = 3,390` gives 5,580.
  *
+ * ---------------------------------------------------------------------------
+ * **AND IT IS AVOIDABLE IN FIVE TILES. On this board, doing nothing IS doing
+ * something wrong.**
+ * ---------------------------------------------------------------------------
+ *
+ * D2's carpark is (17, 14) and its own colour-1 house is (17, 18). Column
+ * x = 17, y = 14..18 is **five cells, four `place` actions, five tiles** out of
+ * the 30 `firstCity` starts with. Measured on the same rig:
+ *
+ * | trace | first death | tiles | score @ 40,000 |
+ * |---|---|---|---|
+ * | no input | **5,580** (D2) | 0 | 0 |
+ * | the 5-tile D2 link | **6,330** (D0) | 5 | **527** |
+ *
+ * With the link, **D2's overcrowd meter peaks at 0** — it never reaches its
+ * trigger at any horizon, and the run then ends on D0 instead, 750 ticks later.
+ *
+ * **The window is not the 2,191 ticks it takes D2 to reach its cap.** Swept to
+ * the tick: the link still saves D2 drawn as late as tick **5,550** and fails
+ * at 5,551 — **30 ticks, one second, before the death it prevents.** A player
+ * can act from tick 259 (the warm start ends at 258), so the usable window is
+ * **5,292 of the run's 5,580 ticks**. It is not narrow; it is almost all of it.
+ *
+ * **Two things that are Task 9 / Task 10 design inputs rather than defects
+ * here.** Nothing in the shipped UI tells the player any of this — there is no
+ * ring yet (Task 9) and no failure yet (Task 8). And the "natural first road"
+ * that this file's own seed comment documents at `startingCity.ts` — the
+ * 15-tile colour-0 corridor down column x = 8 — **is the wrong move**: measured,
+ * it saves D0 and D1 (both peak at meter 0) and **the run still ends at 5,580
+ * on D2**, because it never touches colour 1. A player who follows the
+ * documentation dies on schedule.
+ *
  * **D2 dies before the lower-indexed SQUARE D0 despite the HIGHER trigger cap,
  * and the reason is the rotation, not the cap.** Colour 0 owns two squares
  * sharing `slotCount(0)` = 2, so each receives one pin per 518 ticks against
@@ -273,7 +307,20 @@ const DEMO_TICK_BOUND = 800
  * statement of that, so a future task lengthening either one finds out here
  * rather than by asserting over a corpse.
  */
-const CITY_DEATH_TICK = 5580
+
+/**
+ * The five cells that save D2: column x = 17 from its carpark (17, 14) down to
+ * its own colour-1 house at (17, 18). Four `place` actions, five tiles.
+ */
+const D2_LINK: readonly number[] = [
+  14 * 24 + 17, 15 * 24 + 17, 16 * 24 + 17, 17 * 24 + 17, 18 * 24 + 17,
+]
+
+/**
+ * When the saveability tests draw. Any tick from 1 to **5,550** works — swept —
+ * so this is an ordinary early draw and not a tuned one.
+ */
+const D2_LINK_TICK = 300
 
 const NO_ACTIONS: TickInputs = { actions: [] }
 
@@ -745,6 +792,77 @@ describe('a full scored trip on the seeded city, driven through step()', () => {
     expect(TRIP_MOVEMENT_TICKS).toBe(Math.ceil(TRIP_ROUND_TRIP_COST_UNITS / CAR_SPEED_UNITS_PER_TICK))
     expect(FIRST_SCORE_TICK).toBe(FIRST_PIN_TICK + TRIP_MOVEMENT_TICKS - 1)
     expect(TRIP_TICK_BOUND).toBeGreaterThan(FIRST_SCORE_TICK)
+  })
+
+  it('is SAVEABLE: five tiles to D2 and its meter never leaves zero', () => {
+    // **The load-bearing claim for Task 10's gate, as a test rather than as a
+    // comment** — an earlier version of this task's report asserted in prose
+    // that neither board's failure was reachable by a player's skill, and this
+    // board's is, in four `place` actions.
+    //
+    // Driven to just past the no-input death tick, so a regression that
+    // re-broke the link shows up as D2's meter climbing rather than as a
+    // distant tick moving.
+    const { state, world, fields, scratch } = seededRig()
+    const linkActions = pathActions(D2_LINK)
+    expect(linkActions.length, 'four segments, five cells, five tiles').toBe(4)
+    expect(linkActions.length + 1).toBeLessThanOrEqual(firstCity().startingTiles)
+
+    let d2Peak = 0
+    let d0Peak = 0
+    for (let t = 1; t <= CITY_DEATH_TICK + 20; t++) {
+      step(state, world, fields, scratch, t === D2_LINK_TICK ? { actions: linkActions } : NO_ACTIONS)
+      d2Peak = Math.max(d2Peak, state.destOvercrowd[2] as number)
+      d0Peak = Math.max(d0Peak, state.destOvercrowd[0] as number)
+    }
+
+    // Vacuity first: the link must actually have been laid and actually used,
+    // or "the meter stayed at 0" is satisfied by a board where nothing happened.
+    expect(state.header[H_SCORE], 'cars must really be serving D2').toBeGreaterThan(0)
+    expect(state.destPins[2] as number, 'and D2 must not be sitting at its cap').toBeLessThan(
+      PIN_CAP_CIRCLE_TIMER,
+    )
+    // The claim: D2's timer never starts at all.
+    expect(d2Peak, 'D2 never accrues a single milli-tick with the link drawn').toBe(0)
+    // And the contrast, on the same run: the UNLINKED colour-0 square does
+    // accrue, so a meter of 0 is a property of the link and not of the rig.
+    expect(d0Peak, 'D0 is still unlinked, and it is dying on schedule').toBeGreaterThan(0)
+  })
+
+  it('is not vacuous: WITHOUT the link, the same rig kills D2 on schedule', () => {
+    // The other side of the pair. Without this, the test above passes on a rig
+    // whose meter never moves for some unrelated reason.
+    const { state, world, fields, scratch } = seededRig()
+    let d2Peak = 0
+    for (let t = 1; t <= CITY_DEATH_TICK; t++) {
+      step(state, world, fields, scratch, NO_ACTIONS)
+      d2Peak = Math.max(d2Peak, state.destOvercrowd[2] as number)
+    }
+    expect(state.header[H_SCORE], 'no roads, so no trip is possible').toBe(0)
+    expect(d2Peak, 'and D2 reaches the failure threshold exactly on CITY_DEATH_TICK').toBe(
+      OVERCROWD_FAIL_MILLITICKS,
+    )
+  })
+
+  it('the DOCUMENTED first road is the wrong move: it saves D0 and D1 and D2 still dies', () => {
+    // `startingCity.ts` calls column x=8 "the natural first road the player
+    // draws". It is 15 tiles, it connects both colour-0 destinations to both
+    // colour-0 houses — and it never touches colour 1, so the run ends on
+    // schedule anyway. A player who follows the documentation dies at 5,580.
+    const { state, world, fields, scratch } = seededRig()
+    const corridorActions = pathActions(CORRIDOR)
+    let d2Peak = 0
+    let d0Peak = 0
+    for (let t = 1; t <= CITY_DEATH_TICK; t++) {
+      step(state, world, fields, scratch, t === D2_LINK_TICK ? { actions: corridorActions } : NO_ACTIONS)
+      d2Peak = Math.max(d2Peak, state.destOvercrowd[2] as number)
+      d0Peak = Math.max(d0Peak, state.destOvercrowd[0] as number)
+    }
+    expect(state.header[H_SCORE], 'vacuity: the corridor really is carrying traffic').toBeGreaterThan(0)
+    expect(d0Peak, 'the corridor DOES save the two colour-0 squares').toBe(0)
+    expect(d2Peak, 'and D2 dies anyway, on the same tick as with no road at all').toBe(
+      OVERCROWD_FAIL_MILLITICKS,
+    )
   })
 
   it('keeps every window in this file below the tick this board kills itself on', () => {
