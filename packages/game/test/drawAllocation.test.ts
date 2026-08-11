@@ -1,9 +1,16 @@
 import { describe, it, expect } from 'vitest'
 import { Session } from 'node:inspector'
-import { REVEALED_X0, REVEALED_Y0 } from '@laneways/shared'
-import type { AtlasContext, AtlasSurface } from '@laneways/render'
+import {
+  OVERCROWD_FAIL_MILLITICKS,
+  OVERCROWD_FULL_MILLITICKS,
+  REVEALED_X0,
+  REVEALED_Y0,
+} from '@laneways/shared'
+import { H_TICK, isGameOver } from '@laneways/sim'
+import { PALETTE, type AtlasContext, type AtlasSurface } from '@laneways/render'
 import { createGame, type GameContext } from '../src/main'
 import { CITY_LAYOUT_ID } from '../src/layouts'
+import { CITY_DEATH_TICK } from './deathTicks'
 import { repoRelative } from './allocationPaths'
 
 /**
@@ -238,6 +245,22 @@ interface DrawCounts {
   blits: number
   /** Blits from the GHOST atlas — the M1d Task 8 pass. */
   ghostBlits: number
+  /**
+   * Overcrowd rings — the M1e Task 9 pass, and a counter for the same reason
+   * `ghostBlits` is one: nothing else in this rig can see whether the pass ran.
+   * A budget measured over a window in which no ring was drawn is vacuous for
+   * that phase exactly as an idle input queue was for `inputs.ts`.
+   */
+  rings: number
+  /**
+   * Shutdown scrims. Classified by `fillStyle` identity, which is ONE pointer
+   * comparison per `fillRect` — deliberately not the geometry classification
+   * `:181` records as removed, because that meant real per-call work in the hot
+   * path to learn something `game.state` already knew. This one is not
+   * knowable from `game.state`: a frozen game whose scrim phase silently
+   * stopped running looks identical from the outside.
+   */
+  scrimFills: number
 }
 
 /**
@@ -252,24 +275,39 @@ interface DrawCounts {
  * this object is one of its arguments; nothing draws in between.
  */
 function countingContext(counts: DrawCounts, surfaces: { ghost: unknown }): GameContext {
-  return {
+  // Self-referential so `fillRect` can read the style the draw path just set.
+  // The `const` is initialised before any frame runs, so there is no TDZ here.
+  const ctx: GameContext = {
     fillStyle: '',
     strokeStyle: '',
+    // **A Smi, and it must stay one.** `canvas.ts` rounds the ring's stroke
+    // width to a whole CSS pixel precisely so this field never transitions to a
+    // Double representation — the fractional form boxed a `HeapNumber` per ring
+    // and charged this file 17-37 B/frame. See `RING_WIDTH_FRACTION`.
     lineWidth: 0,
     beginPath: () => undefined,
-    arc: () => undefined,
+    arc: () => {
+      counts.rings++
+    },
     stroke: () => undefined,
     font: '',
     textAlign: 'center',
     textBaseline: 'middle',
     setTransform: () => undefined,
-    fillRect: () => undefined,
+    fillRect: () => {
+      if (ctx.fillStyle === PALETTE.scrim) counts.scrimFills++
+    },
     fillText: () => undefined,
     drawImage: (image) => {
       if (image === surfaces.ghost) counts.ghostBlits++
       else counts.blits++
     },
   }
+  return ctx
+}
+
+function zeroCounts(): DrawCounts {
+  return { blits: 0, ghostBlits: 0, rings: 0, scrimFills: 0 }
 }
 
 function stubSurface(widthPx: number, heightPx: number): AtlasSurface {
@@ -334,10 +372,67 @@ function seedGhosts(game: ReturnType<typeof createGame>): void {
   }
 }
 
+/**
+ * Half of §5.8's FULL meter, so destination 0's ring is half-drawn on every
+ * profiled frame. Far below `OVERCROWD_FAIL_MILLITICKS`, so writing it can
+ * never end the run this rig is measuring.
+ */
+const RING_METER = OVERCROWD_FULL_MILLITICKS / 2
+
 interface Driven {
   readonly game: ReturnType<typeof createGame>
   readonly drive: (count: number) => void
   readonly counts: DrawCounts
+}
+
+/**
+ * The same board, **already dead at boot** — the only rig in this repo that
+ * profiles `drawShutdown`.
+ *
+ * A `warmStartTicks` past `CITY_DEATH_TICK` rather than a poked header, so the
+ * shutdown is reached through the production path: `runOvercrowd` sets the
+ * flag, `step` freezes, `createGame`'s own `if (isGameOver(state)) loop.end()`
+ * ends the loop — and the loop keeps DRAWING, which is the whole property the
+ * shutdown screen depends on and the thing this rig therefore measures.
+ *
+ * No pointer drag: `down()` on a dead board asks for a new run, and the
+ * injected `restart` throws so that a rig which accidentally taps says so. The
+ * ghosts are still seeded, so the workload is the live rig's minus the ticks.
+ */
+function deadGame(): Driven {
+  const counts = zeroCounts()
+  const surfaces: { ghost: unknown } = { ghost: null }
+  const game = createGame({
+    restart: () => {
+      throw new Error('the dead draw rig tapped the board — it must only DRAW')
+    },
+    layoutId: CITY_LAYOUT_ID,
+    warmStartTicks: CITY_DEATH_TICK,
+    canvas: {
+      width: 0,
+      height: 0,
+      style: { width: '', height: '' },
+      getBoundingClientRect: () => ({ left: 11, top: 7 }),
+    },
+    context: countingContext(counts, surfaces),
+    createSurface: stubSurface,
+    createFallback: () => null,
+    measure: () => M0_VIEW,
+    settle: (run) => {
+      run()
+    },
+  })
+  surfaces.ghost = game.atlases.ghost.surface
+  seedGhosts(game)
+
+  let now = 1000
+  const drive = (count: number): void => {
+    for (let i = 0; i < count; i++) {
+      now += 16.7
+      game.frame(now)
+    }
+  }
+  return { game, drive, counts }
 }
 
 /**
@@ -349,9 +444,15 @@ interface Driven {
  * frame and charges the harness's own noise to the profile it is taking.
  */
 function drivenGame(): Driven {
-  const counts: DrawCounts = { blits: 0, ghostBlits: 0 }
+  const counts = zeroCounts()
   const surfaces: { ghost: unknown } = { ghost: null }
   const game = createGame({
+    // Never called: this rig's board dies at tick 5,580 and the window ends at
+    // ~2,512. A throw rather than a counter, so a future rig that quietly
+    // outlived its board says so instead of profiling a restart.
+    restart: () => {
+      throw new Error('the live draw rig reached a shutdown tap — it is no longer measuring a live board')
+    },
     // **`city`, named rather than defaulted.** `PATH` below is a hand-drawn
     // stroke down `firstCity`'s clear column 8 and the ghost seeding erases
     // cells out of it; the default board is the demo, whose 71 seeded road
@@ -379,6 +480,22 @@ function drivenGame(): Driven {
   let now = 1000
   const drive = (count: number): void => {
     for (let i = 0; i < count; i++) {
+      // **The ring's meter, rewritten before every frame — `seedGhosts`' twin,
+      // and it exists for the same reason.**
+      //
+      // The meter is TRANSIENT by design: `runOvercrowd` integrates it while a
+      // destination is over its pin capacity and unwinds it at 2,000
+      // milli-ticks a tick while it is not, so a value written once is gone in
+      // a few hundred ticks. Measured on this rig without the write, the ring
+      // pass runs at **0.096 / 1.482 / 2.046 arcs per frame across the three
+      // windows** — and the budget is a MINIMUM over those windows, so the
+      // first one decides it and a ring allocation would be diluted twentyfold.
+      //
+      // One `Int32Array` store per frame, allocation-free, and inert to
+      // everything else in the sim: nothing but `runOvercrowd`'s own threshold
+      // test reads this region, and `RING_METER` is half of FULL, far below the
+      // value that would end the run.
+      game.state.destOvercrowd[0] = RING_METER
       now += 16.7
       game.frame(now)
     }
@@ -548,6 +665,106 @@ describe('the real draw path allocates nothing, measured', () => {
     }
     // Distinct masks across two atlas rows, so the pass reads more than one tile.
     expect(new Set(GHOST_CELLS.map(([, m]) => m)).size).toBe(GHOST_CELLS.length)
+
+    // ---- the overcrowd ring, M1e Task 9 ------------------------------------
+    //
+    // **Per frame, not merely non-zero, and the per-frame form is the whole
+    // point.** The budget is a minimum over three windows, so a ring drawn in
+    // two of them and not the third leaves the third deciding — and the third
+    // is the one with no ring in it. `>= frames` is what makes "the ring pass
+    // ran on every profiled frame" a red test rather than a quiet measurement
+    // of less.
+    expect(counts.rings, 'the ring pass never ran — the budget is vacuous').toBeGreaterThanOrEqual(
+      frames,
+    )
+    // ...and destination 0's meter really is the one holding it up, rather than
+    // the natural rings this board grows late in the run.
+    expect(frame.destOvercrowd[0] as number, 'the driven meter folds to a drawn ring').toBe(127)
+    expect(RING_METER).toBeLessThan(OVERCROWD_FAIL_MILLITICKS)
+    // This rig is LIVE, so the shutdown phase must never have run in it. Without
+    // this the scrim counter could be reading a board that quietly died.
+    expect(counts.scrimFills, 'the live rig must draw no scrim').toBe(0)
+    expect(frame.gameOver).toBe(false)
+    expect(game.loop.over).toBe(false)
+  })
+
+  it('charges no packages/render/src file beyond its budget on a board that is ALREADY DEAD', () => {
+    // **The shutdown phase's own budget, and the only place it is measured.**
+    // `drawShutdown` is gated on `frame.gameOver`, so every window above runs
+    // with it switched off — a conditional phase is unconstrained by every
+    // fixture that does not set its gate, which is exactly how a trial version
+    // of this scrim left the whole render suite green.
+    const { drive, counts } = deadGame()
+    drive(WARMUP_FRAMES)
+    const windows: Map<string, number>[] = []
+    const before = counts.scrimFills
+    for (let w = 0; w < WINDOW_COUNT; w++) {
+      windows.push(
+        profileBytesByFile(() => {
+          drive(PROFILED_FRAMES)
+        }),
+      )
+    }
+
+    // **This rig CANNOT use the live budget's liveness anchor, and the reason
+    // is the catalogue's worst polarity: that guard is satisfied by
+    // ALLOCATION — "every profile of a real frame contains allocation from
+    // `render`'s own module scope" — and a frozen board is allocation-free by
+    // construction. Measured: `packages/render/src/` appeared in some runs and
+    // not others, so the guard flaked green exactly when there was nothing to
+    // complain about.
+    //
+    // So the anchor here is the DRAW COUNTER, which cannot be absent: it says
+    // the profiled window really did run the shutdown phase, which is the risk
+    // this test exists for. The path arithmetic itself is pinned where it
+    // belongs — `allocationPaths.test.ts`, against synthetic roots including a
+    // worktree-shaped one — and the live budget above still carries the
+    // in-profile anchor.
+    expect(
+      counts.scrimFills - before,
+      'the profiled windows drew no shutdown at all — this budget measures nothing',
+    ).toBe(WINDOW_COUNT * PROFILED_FRAMES)
+
+    const resolved = [...new Set(windows.flatMap((w) => [...w.keys()]))]
+    const offenders: string[] = []
+    for (const file of resolved) {
+      if (!file.startsWith(RENDER_SRC)) continue
+      let min = Infinity
+      for (const window of windows) min = Math.min(min, (window.get(file) ?? 0) / PROFILED_FRAMES)
+      if (min > NOISE_FLOOR_BYTES_PER_FRAME) offenders.push(`${file} at ${min.toFixed(2)} B/frame`)
+    }
+    expect(offenders.sort()).toEqual([])
+  })
+
+  it('is not vacuous: the dead rig really is frozen, and really does draw the shutdown', () => {
+    // A green budget on a rig that stopped drawing is the catalogue's
+    // "instrument that reports clean while measuring nothing", and a frozen
+    // board is the easiest possible way to stop drawing.
+    const { game, drive, counts } = deadGame()
+    expect(isGameOver(game.state), 'the warm start must have killed it').toBe(true)
+    expect(game.state.header[H_TICK]).toBe(CITY_DEATH_TICK)
+    expect(game.loop.over, 'and createGame must have ended the loop').toBe(true)
+
+    const frames = WARMUP_FRAMES + PROFILED_FRAMES
+    drive(frames)
+
+    // Every frame, exactly one scrim. A shutdown screen drawn once and then
+    // dropped satisfies `> 0` while leaving every profiled window empty.
+    expect(counts.scrimFills, 'the scrim phase never ran — its budget is vacuous').toBe(frames)
+    // The board underneath is still being drawn, which is what makes the
+    // translucent scrim mean anything at all.
+    expect(counts.ghostBlits / frames).toBe(GHOST_CELLS.length)
+    // The killer's ring is drawn under the scrim on every frame — §5.8's hidden
+    // grace means it is at 249/255, never 255.
+    const frame = game.builder.frame
+    const failed = frame.failedDest
+    expect(failed, 'the frame must name the destination that did it').toBeGreaterThanOrEqual(0)
+    expect(frame.destOvercrowd[failed] as number).toBe(249)
+    expect(counts.rings, 'the ring under the scrim').toBeGreaterThanOrEqual(frames)
+    // Frozen: not one tick ran across 4,500 frames, so every byte above is the
+    // same byte it was at boot.
+    expect(game.state.header[H_TICK], 'a tick ran on a dead board').toBe(CITY_DEATH_TICK)
+    expect(game.loop.ticksLastFrame).toBe(0)
   })
 
   /**
