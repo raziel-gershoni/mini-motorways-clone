@@ -561,3 +561,42 @@ file it was going to delete anyway.
 
 Use this whenever a commit knowingly ships a bad intermediate state: encode the constraint as a red
 test keyed on something the fix must structurally change.
+
+## The change that made a budget non-vacuous is the change that hid the thing it was measuring
+
+M1e Task 9 reported an allocation regression in code it had just written — a fractional `lineWidth`
+charging 17–37 B/frame on 5 of 5 runs — and wrote the figures into two source comments as a property
+of the code shape. Re-measured by a reviewer, **both the fixed and the broken variant are clean 5/5.**
+
+The explanation is the interesting part, and the implementer found it. The cost is a **one-off field
+representation transition plus its deopt**, not a per-store box. On the rig as it stood when the
+figures were taken, the first ring appeared around tick 2,500 and that one-off landed **inside a
+profiled window**. The task then made the ring appear earlier so its budget would not be vacuous —
+and that same change moved the transition into the warmup, where `min`-over-three-windows discards
+it.
+
+So the instrument told the truth twice and meant different things, and the durable comment recorded
+the first reading as a permanent property. **A one-off cost is not a rate**, and a statistic built to
+reject strays (min-over-N) is built to reject one-off costs too — by construction, not by accident.
+
+Two rules. When a figure comes from a rig you are also changing, **re-measure after the last change
+to the rig**, not when you first saw it. And a comment claiming *the harness can see this class of
+defect* is a claim about the instrument that needs the same scrutiny as a claim about the code — this
+one was false, and nothing in the suite could have caught it.
+
+## Key a user-facing message to a fact the code can compute, not to history you would have to keep
+
+Task 9's shutdown screen said `OVERCROWDED` for a destination that died of **receiving nothing**.
+The controller proposed splitting the message on whether the meter had ever drained — correct, but it
+needs per-run history.
+
+The implementer keyed it instead on **whether any road reaches the carpark**, computed from data
+already on the render frame: no new state, no new field, no history. And it justified the deviation
+by measurement rather than by convenience — **both arms are reachable on the shipped boards**, where
+the drain-history split would have shipped a third arm (`OVERCROWDED`) that no shipped board can
+reach.
+
+That last check is the transferable part. When you split a message into cases, **measure which cases
+the shipped configuration can actually produce.** A branch no board reaches is dead copy that reads
+as coverage, and the version with fewer reachable arms is usually the one keyed to a fact rather than
+to a story about the past.
