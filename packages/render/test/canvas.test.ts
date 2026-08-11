@@ -2609,6 +2609,22 @@ function arcs(log: readonly Command[]): ArcCommand[] {
 }
 
 /**
+ * The one ring on the frame, **asserting the count before indexing**.
+ *
+ * `arcs(log)[0] as ArcCommand` reads fine and dies as
+ * `TypeError: Cannot read properties of undefined (reading 'startAngle')` the
+ * moment a mutation stops drawing the ring — measured, on the "index the meter
+ * by 0" mutant. A crash count reads exactly like a kill count, and a crash
+ * message says nothing about the behaviour, so the count is asserted first and
+ * the red names the rule.
+ */
+function onlyArc(log: readonly Command[]): ArcCommand {
+  const found = arcs(log)
+  expect(found.length, 'expected exactly one ring on this frame').toBe(1)
+  return found[0] as ArcCommand
+}
+
+/**
  * One live destination anchored at `(gx, gy)` with a part-filled meter, and
  * nothing else on the board. Returns how many rings were drawn.
  */
@@ -2673,10 +2689,18 @@ function liveFrame(): RenderFrame {
   return { ...frameB(), gameOver: false }
 }
 
-function scrimFill(log: readonly Command[]): FillRectCommand | undefined {
-  return log.find(
+/**
+ * The scrim fill, **asserting it exists before the caller reads a coordinate**.
+ * The `as FillRectCommand` form died as `TypeError: Cannot read properties of
+ * undefined (reading 'y')` under the "draw the text but not the scrim" mutant —
+ * a kill that names nothing. This one fails with the rule.
+ */
+function scrimFill(log: readonly Command[]): FillRectCommand {
+  const found = log.find(
     (c): c is FillRectCommand => c.op === 'fillRect' && c.fillStyle === PALETTE.scrim,
   )
+  expect(found, 'no scrim was drawn at all — the shutdown phase did not run').toBeDefined()
+  return found as FillRectCommand
 }
 
 /** The four corner cells of the revealed rect, in board coordinates. */
@@ -2723,9 +2747,7 @@ describe('the overcrowd ring', () => {
     // Two destinations, one at 0 and one part-filled, so "draws a ring" and
     // "draws it for the right one" are separable. A single-destination fixture
     // cannot tell them apart.
-    const found = arcs(drawWith(frameWithOvercrowd([0, 128])))
-    expect(found.length).toBe(1)
-    const arc = found[0] as ArcCommand
+    const arc = onlyArc(drawWith(frameWithOvercrowd([0, 128])))
     expect(arc.endAngle - arc.startAngle).toBeCloseTo((128 / 255) * Math.PI * 2, 5)
   })
 
@@ -2733,12 +2755,12 @@ describe('the overcrowd ring', () => {
     // The bug this catches is indexing the ring by draw order rather than by
     // destination index — which is what a second loop over "the destinations
     // that drew" would produce.
-    const arc = arcs(drawWith(frameWithOvercrowd([0, 200])))[0] as ArcCommand
+    const arc = onlyArc(drawWith(frameWithOvercrowd([0, 200])))
     expect(arc.x).toBeCloseTo(expectedCentreX(1), 5)
     expect(arc.y).toBeCloseTo(expectedCentreY(1), 5)
     // ...and the other way round, so neither centre is a constant that happens
     // to match one of them.
-    const other = arcs(drawWith(frameWithOvercrowd([200, 0])))[0] as ArcCommand
+    const other = onlyArc(drawWith(frameWithOvercrowd([200, 0])))
     expect(other.x).toBeCloseTo(expectedCentreX(0), 5)
     expect(other.y).toBeCloseTo(expectedCentreY(0), 5)
   })
@@ -2751,14 +2773,14 @@ describe('the overcrowd ring', () => {
       [64, 64 / 255],
       [255, 1],
     ] as const) {
-      const arc = arcs(drawWith(frameWithOvercrowd([0, meter])))[0] as ArcCommand
+      const arc = onlyArc(drawWith(frameWithOvercrowd([0, meter])))
       expect(arc.startAngle, `meter ${meter} starts at 12 o'clock`).toBeCloseTo(-Math.PI / 2, 9)
       expect(arc.endAngle - arc.startAngle, `meter ${meter}`).toBeCloseTo(turns * Math.PI * 2, 9)
     }
   })
 
   it('strokes it in the alarm colour, at a width derived from the tile, around the footprint', () => {
-    const arc = arcs(drawWith(frameWithOvercrowd([0, 128])))[0] as ArcCommand
+    const arc = onlyArc(drawWith(frameWithOvercrowd([0, 128])))
     expect(arc.strokeStyle).toBe(PALETTE.overcrowd)
     // 66 CSS px tile -> round(10.56) = 11. A hairline ring on a 29 px tile is
     // invisible on a phone and a fixed pixel width does not follow the three
@@ -2861,7 +2883,7 @@ describe('the shutdown screen', () => {
     // board is `[originY, hudTop)` and the HUD is BELOW it. A rect starting at
     // `hudTop + hudHeight` covers zero board pixels.
     const camera = cameraB()
-    const scrim = scrimFill(drawWith(gameOverFrame({ camera }))) as FillRectCommand
+    const scrim = scrimFill(drawWith(gameOverFrame({ camera })))
     const gridBottom = camera.originY + camera.rows * camera.tileSize
     expect(scrim.y, 'the scrim starts at or above the board top').toBeLessThanOrEqual(camera.originY)
     expect(scrim.y + scrim.h, 'the scrim covers the board bottom').toBeGreaterThanOrEqual(gridBottom)
@@ -2881,7 +2903,7 @@ describe('the shutdown screen', () => {
     // the wrong place on x. Point probes close that, and they are the idiom
     // this file already uses for the playfield fill.
     const camera = cameraB()
-    const scrim = scrimFill(drawWith(gameOverFrame({ camera }))) as FillRectCommand
+    const scrim = scrimFill(drawWith(gameOverFrame({ camera })))
     for (const [gx, gy] of fourBoardCorners(camera)) {
       expect(rectCoversGridCell(scrim, gx, gy), `corner ${gx},${gy}`).toBe(true)
     }
@@ -2984,9 +3006,7 @@ describe('the shutdown screen', () => {
     // on the board.
     const frame = frameWithOvercrowd([0, 249], true)
     const log = drawWith(frame)
-    const found = arcs(log)
-    expect(found.length).toBe(1)
-    expect((found[0] as ArcCommand).x).toBeCloseTo(expectedCentreX(1), 5)
+    expect(onlyArc(log).x).toBeCloseTo(expectedCentreX(1), 5)
     // Under the scrim, not over it: the dim applies to the ring too, so the
     // text is the brightest thing on the screen.
     const scrimIndex = log.findIndex((c) => c.op === 'fillRect' && c.fillStyle === PALETTE.scrim)
@@ -3036,12 +3056,19 @@ describe('the shutdown screen', () => {
 
 describe('failedText: the fourth single-slot cache in this file', () => {
   it('re-formats when the index changes, so the cache cannot go stale', () => {
-    // The staleness direction is the one that matters, and it is the one a
-    // sentinel of -1 gets wrong: -1 is the LIVE value, so a cache primed with
-    // it hits on the first shutdown frame and the screen names destination -1
-    // forever. Drawn live first, deliberately, so the cache has been asked the
-    // live question before the dead one.
-    drawWith(liveFrame())
+    // Staleness is the failure mode that matters: a cache that never
+    // invalidates names last run's destination forever.
+    //
+    // **What this does NOT pin is the -2 sentinel, and saying so is the point.**
+    // The sentinel would only matter on a FIRST call of `failedText(-1)`, and
+    // `drawShutdown` is gated on `frame.gameOver` while `failedDest` is -1 only
+    // when the run is live — so that call is unreachable through the frame.
+    // Measured: swapping the sentinel to -1 scores 0 detectors across the whole
+    // suite. The -1 case below is here because it is the widest key the memo
+    // can be asked for, not because it reaches the sentinel; the module cache
+    // has already been written by the tests above it, which is exactly why it
+    // cannot.
+    drawWith(gameOverFrame({ failedDest: 4 }))
     expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: -1 })))).toContain(
       'DESTINATION -1 OVERCROWDED',
     )

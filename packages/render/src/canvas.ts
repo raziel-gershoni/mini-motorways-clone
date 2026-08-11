@@ -422,11 +422,25 @@ function tilesText(tilesLeft: number): string {
  * once per run, so after the first shutdown frame this is one integer
  * comparison and nothing else, forever.
  *
- * **The sentinel is -2 rather than -1, and that is the whole of the cache's
- * correctness.** -1 is the LIVE value `failedDestination` returns, so a cache
- * primed with -1 would HIT on the first shutdown frame and the screen would
- * name destination -1 for the rest of the run. -2 is a value the frame cannot
- * carry, so the first shutdown frame always misses.
+ * **The sentinel is -2 rather than -1, and — measured — that choice is an
+ * EQUIVALENT MUTANT today. This paragraph says so rather than claiming a
+ * correctness it does not have.**
+ *
+ * The reasoning for -2 is real: -1 is the LIVE value `failedDestination`
+ * returns, and a cache primed with -1 would HIT on a first call of
+ * `failedText(-1)` and then name destination -1 for the rest of the run. But
+ * that call cannot happen. This function has one caller, `drawShutdown`, which
+ * runs only when `frame.gameOver` — and `frame.failedDest` is
+ * `failedDestination(state)`, which returns `-1` only when the flag is CLEAR.
+ * So `d` is always `>= 0` here, and both sentinels miss on the first shutdown
+ * frame.
+ *
+ * Swapping -2 for -1 was run through the whole suite and scored **0 detectors**
+ * — no crash, no collection loss, 1,804 of 1,804 passing. It is kept at -2
+ * because it costs nothing and because the day something draws this text on a
+ * live frame is the day -1 becomes wrong; it is recorded as unpinned so nobody
+ * reads its survival as a coverage hole, and nobody "simplifies" it thinking a
+ * test is watching.
  *
  * This is what makes `RenderFrame.failedDest` a field with a consumer. A field
  * nothing reads is dead weight in every frame's type and a false claim in
