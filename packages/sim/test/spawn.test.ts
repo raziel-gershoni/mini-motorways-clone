@@ -1345,6 +1345,23 @@ describe('spawned cars drive, over a long horizon, with occupancy sound every ti
       }
     }
 
+    // ---- FIRST: every one of those 20,000 ticks was LIVE (M1e Task 8) ------
+    // **Before the growth figures, not after, and the order is measured rather
+    // than tidy.** A frozen board is byte-identical from tick to tick, so
+    // `assertOccupancySound` passes trivially, no counter wraps, and every
+    // figure below is whatever it happened to be when the run ended. All three
+    // of this test's own vacuity guards — spawned flyers, seeded flyers, the
+    // score floor — are satisfied by a board that stopped early.
+    //
+    // With these lines at the FOOT of the test, reverting the clamp above to
+    // 255 failed on *"houses 6, destinations 3, score 115, spawned flyers 8:
+    // expected 8 to be greater than or equal to 20"* — which reads as a spawner
+    // that stopped working, not as a sim that froze at tick 3,392. Here it
+    // fails on the meter instead, which names the cause.
+    expect(maxMeter, 'a destination reached its trigger cap, so part of this run was frozen').toBe(0)
+    expect(isGameOver(r.state), 'this sweep must run 20,000 LIVE ticks').toBe(false)
+    expect(r.state.header[H_TICK], 'and the clock really did reach the end of the window').toBe(RUN)
+
     // ---- the board really grew, and the new cars really drove ---------------
     const houses = r.state.header[H_HOUSE_COUNT] as number
     const dests = r.state.header[H_DEST_COUNT] as number
@@ -1382,16 +1399,5 @@ describe('spawned cars drive, over a long horizon, with occupancy sound every ti
     for (let d = 0; d < dests; d++) {
       expect(r.state.destReserved[d] as number, `destReserved[${d}]`).toBeLessThan(255)
     }
-    // ---- and every one of those 20,000 ticks was LIVE (M1e Task 8) ---------
-    // Without this the horizon is a claim about the loop bound rather than
-    // about the sim: a frozen board is byte-identical from tick to tick, so
-    // `assertOccupancySound` passes trivially, no counter wraps, and every
-    // figure above is whatever it happened to be when the run ended. All three
-    // of this test's own vacuity guards — spawned flyers, seeded flyers, the
-    // score floor — are satisfied by a board that stopped early, which is
-    // exactly how the old 255 poke failed.
-    expect(maxMeter, 'a destination reached its trigger cap, so part of this run was frozen').toBe(0)
-    expect(isGameOver(r.state), 'this sweep must run 20,000 LIVE ticks').toBe(false)
-    expect(r.state.header[H_TICK], 'and the clock really did reach the end of the window').toBe(RUN)
   })
 })

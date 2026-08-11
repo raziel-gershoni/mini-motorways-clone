@@ -334,6 +334,43 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
       rebuildsPerWindow.push((game.scratch.counters[CT_REBUILDS] as number) - before)
     }
 
+    // ---------------------------------------------------------------------
+    // **THE LIVENESS GUARD RUNS FIRST, AND THE ORDER IS THE WHOLE POINT.**
+    // ---------------------------------------------------------------------
+    // These three were at the FOOT of this test and M1e Task 8 measured what
+    // that cost. `WINDOW_COUNT` 3 -> 4 — the exact edit they exist to refuse,
+    // and the one this file's own comments invite — failed instead on *"too few
+    // rebuilds per window for a per-call rate to mean anything: expected 81 to
+    // be greater than 300"*. That IS the freeze talking, but it reads as a
+    // board that stopped rebuilding, and a maintainer would go looking at the
+    // flow field. **An assertion placed above another can make the second
+    // unreachable**, and the one that explains a failure has to run first.
+    //
+    // Every number below this line is a claim about a running simulation, so
+    // "is it running" is the precondition, not the epilogue.
+    //
+    // **Proven to discriminate rather than asserted to**, which is the other
+    // half of that lesson: `WINDOW_COUNT` 3 -> 4 now fails on *"must profile a
+    // LIVE sim"*, while `PROFILED_FRAMES` 3000 -> 3100 — a knob change that
+    // stays alive — fails only on the identity pin, with *"the measured end
+    // tick is 6,459"*. Two edits, two different reds. If every edit produced
+    // the same red, the later assertions would be decoration.
+    //
+    // The FLAG is first of the three because it is the only structural one: the
+    // two `H_TICK` lines compare against a measured constant, so both go wrong
+    // together the day `DEMO_DEATH_TICK` goes stale, while this one reads the
+    // byte `step` actually branches on and survives someone changing the layout
+    // under this rig.
+    expect(
+      isGameOver(game.state),
+      'this window must profile a LIVE sim — every budget below was measured on a frozen board',
+    ).toBe(false)
+    expect(
+      game.state.header[H_TICK],
+      'this rig drove past the demo board’s death tick — the budgets below were measured on a corpse',
+    ).toBeLessThan(DEMO_DEATH_TICK)
+    expect(game.state.header[H_TICK], 'and the measured end tick is 6,459').toBe(6459)
+
     const files = new Set<string>()
     for (const window of windows) {
       for (const file of window.keys()) {
@@ -391,28 +428,6 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
         `(rebuilds/window: ${rebuildsPerWindow.join('/')}) — do NOT widen this budget; ` +
         'the allocation it watches for was deleted in M1e Task 3 and a charge here is a regression',
     ).toBeLessThan(FLOWFIELD_BUDGET_BYTES_PER_CALL)
-
-    // **The dynamic half of the death-tick guard (M1e Task 7).** Read off the
-    // rig this test actually drove, so no model of the frame-to-tick mapping
-    // can go stale: if a future edit lengthens the windows past the tick the
-    // demo board dies on, every budget above is being measured over a sim that
-    // Task 8 will have frozen — and neither vacuity guard in this file would
-    // notice, because the "really drove 24 cars" check runs on a separate rig
-    // and the positive control is a delta between two profiles of the same one.
-    expect(
-      game.state.header[H_TICK],
-      'this rig drove past the demo board’s death tick — the budgets above were measured on a corpse',
-    ).toBeLessThan(DEMO_DEATH_TICK)
-    expect(game.state.header[H_TICK], 'and the measured end tick is 6,459').toBe(6459)
-    // **And the flag itself, which is the only one of the three that is a
-    // STRUCTURAL oracle — M1e Task 8.** The two lines above compare `H_TICK`
-    // against a measured constant, so both are wrong together the day
-    // `DEMO_DEATH_TICK` goes stale; this one reads the byte `step` actually
-    // branches on and is right by construction whatever the board does. It is
-    // also the only one that survives someone changing the layout under this
-    // rig. Task 8 made the freeze real, so from here on a green budget over a
-    // dead sim is a reachable outcome rather than a hypothetical.
-    expect(isGameOver(game.state), 'this window must profile a LIVE sim').toBe(false)
 
     const offenders = [...perFrameMin]
       .filter(([file, perFrame]) => perFrame > budgetFor(file))
@@ -488,9 +503,6 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     expect(FLOWFIELD_BUDGET_BYTES_PER_CALL).toBe(8)
     expect(FLOWFIELD_BUDGET_BYTES_PER_CALL * 2.5).toBeLessThan(20.83)
     expect(FLOWFIELD_BUDGET_BYTES_PER_CALL).toBeGreaterThan(1.34 * 4)
-    expect(PROFILED_FRAMES).toBeGreaterThanOrEqual(3000)
-    expect(WINDOW_COUNT).toBeGreaterThanOrEqual(3)
-
     // -----------------------------------------------------------------------
     // **AND AN UPPER BOUND, because the two lines above are lower bounds on the
     // exact knobs that would drive this rig past the tick the board dies on.**
@@ -525,16 +537,28 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     // 10,500 frames carried the sim from its 1,200-tick warm start to tick
     // 6,459, i.e. 0.5009 ticks per frame.
     const framesDriven = WARMUP_FRAMES + WINDOW_COUNT * PROFILED_FRAMES
-    expect(framesDriven, 'the measured frame count behind the 6,459').toBe(10500)
     const TICKS_PER_FRAME = (6459 - 1200) / 10500
     const framesToDeath = (DEMO_DEATH_TICK - 1200) / TICKS_PER_FRAME
+    // **THE CEILING FIRST, THE IDENTITY PIN SECOND — M1e Task 8.** These two
+    // were the other way round and the pin made the ceiling unreachable:
+    // `toBe(10500)` fires for ANY knob change at all, so the bound it was
+    // guarding never ran and the failure named the frame count rather than the
+    // death tick. That is exactly the defect M1e Task 6 found in its own
+    // derived bound one file over, and it was found here the same way — by
+    // attacking it rather than by reading it.
     expect(
       framesDriven,
       'these knobs now drive the demo rig past its death tick — see DEMO_DEATH_TICK',
     ).toBeLessThan(framesToDeath)
+    expect(framesDriven, 'the measured frame count behind the 6,459').toBe(10500)
     // A fourth window is the specific edit this guards, and it must be over the
     // line rather than merely near it.
     expect(WARMUP_FRAMES + 4 * PROFILED_FRAMES).toBeGreaterThan(framesToDeath)
+    // The two LOWER bounds, last: they are the knobs the ceiling above is
+    // about, and a lower bound placed first fires for every widening edit and
+    // hides which direction went wrong.
+    expect(PROFILED_FRAMES).toBeGreaterThanOrEqual(3000)
+    expect(WINDOW_COUNT).toBeGreaterThanOrEqual(3)
     expect([...PROFILED_SCOPES].sort()).toEqual([
       'packages/game/src/',
       'packages/render/src/',

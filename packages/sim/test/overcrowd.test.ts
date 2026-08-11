@@ -308,7 +308,9 @@ describe('the city shuts down when a meter completes (§5.8)', () => {
     )
 
     runOvercrowd(state)
-    expect(isGameOver(state)).toBe(true)
+    expect(isGameOver(state), 'the 3,390th tick must end the run — a `>` here fires at 3,391').toBe(
+      true,
+    )
     expect(failedDestination(state)).toBe(0)
     // The raw slots too, not only the guarded readers: `failedDestination`
     // returns 0 for a live run's unset slot as well, so reading it alone cannot

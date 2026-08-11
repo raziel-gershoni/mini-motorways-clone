@@ -2037,6 +2037,20 @@ describe('20,000 drives on a deliberately bad network, which now LOSES at tick 7
       if (reserved !== outbound) reservationMismatches++
     }
 
+    // ---------------------------------------------------------------------
+    // **THE SHUTDOWN FIRST, because every figure below is measured over the
+    // LIVE PREFIX and the prefix's length is the thing most likely to move.**
+    // With these three lines at the foot of the test, a change to the pin
+    // cadence or the spawn schedule fails on `minCompletions` or `valves` —
+    // numbers that look like traffic and are really the horizon. Here it fails
+    // on the tick, which is the cause.
+    // ---------------------------------------------------------------------
+    expect(endedAt, 'the run must end, and on the tick Task 8 measured').toBe(LONG_RUN_DEATH_TICK)
+    expect(deadDest, 'on the first SPAWNED destination, which no car can reach').toBe(
+      LONG_RUN_DEATH_DEST,
+    )
+    expect(rig.state.header[H_TICK], 'and the clock stopped there').toBe(LONG_RUN_DEATH_TICK)
+
     expect(reservationMismatches, 'sum(destReserved) !== count(PHASE_OUTBOUND)').toBe(0)
 
     // No car starves. Asserted over the live set, and the minimum is reported
@@ -2169,11 +2183,6 @@ describe('20,000 drives on a deliberately bad network, which now LOSES at tick 7
     // stating the tick is what makes a future change to the pin cadence, the
     // trigger cap or the spawner move a number rather than pass quietly.
     // ---------------------------------------------------------------------
-    expect(endedAt, 'the run must end, and on the tick Task 8 measured').toBe(LONG_RUN_DEATH_TICK)
-    expect(deadDest, 'on the first SPAWNED destination, which no car can reach').toBe(
-      LONG_RUN_DEATH_DEST,
-    )
-    expect(rig.state.header[H_TICK], 'and the clock stopped there').toBe(LONG_RUN_DEATH_TICK)
     expect(LONG_RUN_TICKS, 'so 12,779 of the 20,000 drives are no-ops').toBeGreaterThan(
       LONG_RUN_DEATH_TICK,
     )
