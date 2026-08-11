@@ -361,3 +361,41 @@ NUMBER still has to be measured rather than sketched.**
 closed finding without measuring it.** Third time in one milestone that a claim gained confidence at
 each hop while gaining no evidence — see [a correction can repeat the exact error it is correcting].
 **A proposed fix is not a closed finding until someone has run the failing case and watched it fail.**
+
+## Coverage keyed to outcomes cannot pin statements, and the editor edits statements
+
+M1e Task 4 replaced allocating loops with frozen singletons and wrote in the source: *"Reverting any
+one `return` below to a literal turns exactly one identity assertion red."* Its case list enumerated
+the **15 distinct outcomes**. The file has **21 `return` statements** — several outcomes are returned
+from more than one place. Sweeping all 21 individually, **six were pinned by nothing**, and every one
+was a carpark line.
+
+**The unit of coverage has to match the unit of edit.** Nobody reverts an outcome; they revert a
+line. Two `return B_TERRAIN` statements are one outcome and two editable sites, and a case list keyed
+on the outcome pins whichever site the fixture happens to reach.
+
+Worse, the same task had already **named this class and closed it for a different property** —
+§6.3 found the carpark lines untested for *behaviour* and fixed them, in a commit whose own message
+invokes "name the class and search for its siblings," then left the same five lines unpinned for
+*allocation*, because the new sweep asserts with `toEqual`, which cannot see object identity. **One
+class, two properties, fixed for one.** Finding a class is not the same as enumerating what it
+applies to.
+
+The durable fix used here is worth copying: assert the case count against `grep -c 'return B_'`, with
+the grep command written into the comment, so adding a 22nd return site fails rather than silently
+widening the gap.
+
+## A margin that holds at exact equality is not a margin
+
+The same task pinned its allocation budget with `expect(BUDGET * 20).toBeLessThanOrEqual(40.0)` —
+true at **exact equality**, because both sides were literally the same number carried from the same
+measurement. It reads as a 20× safety factor and encodes none: any drift in either direction breaks
+it, and no drift in the wrong direction is caught.
+
+Re-measured against the statistic the budget is actually compared against, the real margin was
+**14.8×** — still ample, but the derivation was optimistic and the next task was going to copy it.
+
+Two rules. **Assert a margin with a strict inequality against an independently measured bound**, so
+the assertion can distinguish the two quantities. And **check whether your safety factor is a
+measurement or a restatement** — if the number on the right came out of the same run as the number on
+the left, it is the latter.
