@@ -1288,3 +1288,157 @@ describe('the demo board under M1e’s spawn phase', () => {
     )
   })
 })
+
+// ---------------------------------------------------------------------------
+// 8. The demo board is NOT SURVIVABLE, and that is why it is not the default
+// ---------------------------------------------------------------------------
+
+/**
+ * **M1e Task 10's other half, and it exists because `demoLayout.ts` makes this
+ * claim in prose and nothing checked it.**
+ *
+ * The flip back to the starting city rests on two findings: the city grows
+ * under a player's hands (`startingCity.test.ts` §8's gate), and this board
+ * does not. The second was asserted in the source with no artefact behind it —
+ * *"six traces were driven and the best of them equals the control"* — which is
+ * this project's most reliable predictor of a claim that turns out to be wrong.
+ * Two of the six are reproduced here, chosen as the two a player would actually
+ * try, together with the STRUCTURAL reason no trace can do better.
+ *
+ * The structural reason is the load-bearing half, because it holds for traces
+ * nobody ran: `H_HOUSE_COUNT` is already `maxHouses` at tick 0, so
+ * `attemptHouseSpawn` short-circuits before its scan; `H_DEST_COUNT` is already
+ * `maxDestinations`, so every attempt is `BOARD_FULL` and §5.3.5 pushes the
+ * demand into destinations that already have too much. The fleet is therefore
+ * fixed at 24 cars for the whole run while the weekly ramp shortens the pin
+ * period under it. **A road is the only lever a player has, and this board's
+ * problem is not a missing road** — every destination is already on a corridor.
+ * `demoLayout.test.ts` §7 asserts the two population halves directly.
+ */
+describe('no road a player can draw saves the demo board', () => {
+  /**
+   * Seven traces, measured here rather than asserted in prose. Rows 11, 14, 17,
+   * 20 and 23 are the five rows between destination rows, so an 8-cell stroke
+   * along one joins corridors A (column 8), B (13) and C (15) — the cross-link
+   * a player draws when they see cars queueing on one corridor while another is
+   * idle. Column 9 is a second lane beside the busiest corridor.
+   *
+   * ```
+   *   trace                       tiles   dies    trips
+   *   no input (the control)          0   6,703     420
+   *   parallel lane, column 9        20   6,703     418
+   *   cross-link row 11               5   7,221     463   <- the best found
+   *   cross-link row 14               5   6,142     339
+   *   cross-link row 17               5   7,221     426
+   *   cross-link row 20               5   5,639     186
+   *   cross-link row 23               5   6,185     187
+   *   all five cross-links           25   5,667     177   <- the worst found
+   * ```
+   *
+   * **Four of the seven are WORSE than doing nothing, more road is strictly
+   * worse than less, and the best buys 518 ticks — 17 seconds, 7.7 %.** Nothing
+   * survives. Compare the starting city on the same instrument: five tiles
+   * remove its death entirely, and a player who keeps connecting reaches 31,456
+   * against 5,580 — 4.6x, not 1.077x.
+   */
+  const CROSSLINK_ROWS: readonly number[] = [11, 14, 17, 20, 23]
+  const crosslink = (y: number): number[] => Array.from({ length: 8 }, (_, i) => cellAt(8 + i, y))
+  /** A second lane beside corridor A, column 9 from row 9 to the street. */
+  const PARALLEL_A: readonly number[] = Array.from({ length: 20 }, (_, i) => cellAt(9, 9 + i))
+
+  function pathActions(path: readonly number[]): TickAction[] {
+    const out: TickAction[] = []
+    for (let i = 0; i + 1 < path.length; i++) {
+      out.push({ kind: 'place', a: path[i] as number, b: path[i + 1] as number })
+    }
+    return out
+  }
+
+  /** Drives to the shutdown with every stroke laid on tick 1. */
+  function driveTrace(strokes: readonly (readonly number[])[]): { death: number; trips: number } {
+    const rig = seededRig()
+    const actions: TickAction[] = []
+    for (const stroke of strokes) actions.push(...pathActions(stroke))
+    for (let t = 1; t <= DEMO_DEATH_TICK + 4000; t++) {
+      rig.tick(t === 1 ? actions : NO_ACTIONS)
+      if (isGameOver(rig.state)) break
+    }
+    return {
+      death: isGameOver(rig.state) ? (rig.state.header[H_TICK] as number) : -1,
+      trips: rig.state.header[H_SCORE] as number,
+    }
+  }
+
+  it('no trace survives, and the best of seven buys 17 seconds', () => {
+    // **The artefact for `demoLayout.ts`'s "it is not survivable", and it
+    // exists because that sentence shipped without one.** Its first form said
+    // "six traces, and the best of them equals the control" — which the row-11
+    // cross-link below refutes: that trace beats the control by 518 ticks. The
+    // conclusion survives and the sentence did not, which is the whole reason a
+    // prose claim needs a test under it.
+    const control = driveTrace([])
+    expect(control.death, 'the control must reproduce the recorded death tick').toBe(DEMO_DEATH_TICK)
+    expect(control.trips, 'and it must be a live board, not a frozen one').toBeGreaterThan(300)
+
+    // A second lane beside the busiest corridor — the obvious move on a board
+    // whose visible symptom is cars queueing in corridor A. **Twenty tiles, and
+    // it does not move the death tick by one.** The killer is D2 at the top of
+    // corridor C, which this road does not touch, and there is no car to put in
+    // the new lane: the fleet is fixed at 24.
+    const parallel = driveTrace([PARALLEL_A])
+    expect(parallel.death, 'a parallel corridor buys ZERO ticks').toBe(control.death)
+
+    // The five cross-links, one at a time.
+    const deaths = CROSSLINK_ROWS.map((y) => driveTrace([crosslink(y)]))
+    for (const r of deaths) expect(r.death, 'every trace still dies').toBeGreaterThan(0)
+    const best = Math.max(...deaths.map((r) => r.death))
+    const worst = Math.min(...deaths.map((r) => r.death))
+    // **The best one helps, and by an amount that makes the point.** 518 ticks
+    // is 17 seconds on a 223-second run. The bound is loose enough not to pin a
+    // tick and tight enough that "a road saves this board" would break it.
+    expect(best, 'the best trace must beat the control, or this is measuring nothing').toBeGreaterThan(
+      control.death,
+    )
+    expect(best - control.death, 'and buy less than 20 s of a 223 s run').toBeLessThanOrEqual(600)
+    // **And most of them hurt.** Four of the seven traces in the table above
+    // die sooner than doing nothing, which is the thing that separates this
+    // board from the starting city: there, road is the lever; here it is noise.
+    expect(worst, 'some cross-links are worse than no road at all').toBeLessThan(control.death)
+    expect(
+      deaths.filter((r) => r.death < control.death).length,
+      'at least three of the five single strokes are worse than the control',
+    ).toBeGreaterThanOrEqual(3)
+
+    // **More road is strictly worse than less.** All five cross-links together
+    // is the worst trace measured — worse than any one of them alone and worse
+    // than nothing. On a board whose only lever is road, that is what "not
+    // survivable" means mechanically.
+    const all = driveTrace(CROSSLINK_ROWS.map((y) => crosslink(y)))
+    expect(all.death, 'five cross-links are worse than one').toBeLessThan(best)
+    expect(all.death, 'and worse than none').toBeLessThan(control.death)
+    expect(all.trips, 'throughput falls with them').toBeLessThan(control.trips)
+
+    // The comparison that decided the flip, in one line: the starting city's
+    // greedy arm reaches 31,456 (`startingCity.test.ts` §8) against this
+    // board's ceiling here.
+    expect(best, "the demo board's ceiling is below the starting city's OPENING alone").toBeLessThan(
+      8661,
+    )
+  })
+
+  it('the spawner cannot add anything here, which is why no trace can help', () => {
+    // The structural half, and the reason the seven traces above generalise to
+    // traces nobody ran. Both counts are AT their caps before the first tick,
+    // so `runSpawn` has nothing to place however the board is played — the
+    // fleet is 24 cars for the whole run against a weekly ramp that is not.
+    const map = demoCity()
+    const rig = seededRig()
+    expect(rig.state.header[H_HOUSE_COUNT], 'houses are at cap at tick 0').toBe(map.maxHouses)
+    expect(rig.state.header[H_DEST_COUNT], 'destinations too').toBe(map.maxDestinations)
+    expect(rig.state.carPhase.length).toBe(24)
+    for (let t = 0; t < 4000; t++) rig.tick(NO_ACTIONS)
+    expect(rig.state.header[H_HOUSE_COUNT]).toBe(map.maxHouses)
+    expect(rig.state.header[H_DEST_COUNT]).toBe(map.maxDestinations)
+    expect(rig.state.carPhase.length).toBe(24)
+  })
+})

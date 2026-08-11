@@ -1614,6 +1614,28 @@ function driveGate(arm: GateArm): GateRun {
 }
 
 /**
+ * Gate C's gradient predicate, over the per-week peaks: the index of an early
+ * week at exactly 1, of a strictly later week above 1 that reaches no cap, and
+ * of a strictly later week still that does. `-1` for "no such week".
+ *
+ * A function rather than three inline `findIndex` calls so that the synthetic
+ * series in `rejects a one-week jump...` exercise the SAME code Gate C runs,
+ * rather than a second copy of it that could agree with the comment while the
+ * gate disagrees with both.
+ */
+function gradientIndices(
+  weeks: readonly Pick<GateWeek, 'peakPinsConnected' | 'capReachedConnected'>[],
+): { flat: number; risen: number; capped: number } {
+  const flat = weeks.findIndex((w) => w.peakPinsConnected === 1)
+  const risen =
+    flat < 0
+      ? -1
+      : weeks.findIndex((w, i) => i > flat && w.peakPinsConnected >= 2 && !w.capReachedConnected)
+  const capped = risen < 0 ? -1 : weeks.findIndex((w, i) => i > risen && w.capReachedConnected)
+  return { flat, risen, capped }
+}
+
+/**
  * Driven once and shared, because three arms x twelve weeks is 100,000-odd
  * `step` calls and each case below reads a different projection of the same
  * run. The sim is deterministic, so this is memoisation and not sampling.
@@ -1634,6 +1656,14 @@ describe('the survivability gate the default board is flipped behind', () => {
     // cases down.** Everything below boots through `layoutFor`, so without this
     // the whole block would silently re-point at whatever board the default
     // names next.
+    //
+    // **"First" is REPORTING ORDER, not an interlock, and the difference
+    // matters.** The three arms are memoised at module scope and vitest runs
+    // the cases in file order, so this one reports first — but Gates A, B and C
+    // still execute if it fails, which is what happened under the frozen-ramp
+    // mutation. So it buys a legible failure, not a short circuit, and one
+    // `it.only` or one reorder takes even that away. If a real interlock is
+    // ever wanted, it has to be inside `driveGate`, not in a sibling case.
     expect(DEFAULT_LAYOUT_ID, 'the gate is about the board a plain load opens').toBe(
       CITY_LAYOUT_ID,
     )
@@ -1665,6 +1695,75 @@ describe('the survivability gate the default board is flipped behind', () => {
         expect(roadMask(state, cell), `opening cell ${cell} was refused`).not.toBe(0)
       }
     }
+  })
+
+  it("the river's two-cell land gap keeps the board connected without a bridge", () => {
+    // **Decision 13's second checkable fact, asserted rather than listed.**
+    // `layouts.ts` states it as one of the three facts behind the opening and,
+    // until the Task 10 review, nothing in the repo checked it — the one fact
+    // of the three with no artefact behind it, which is this project's most
+    // reliable predictor of a claim that turns out to be wrong.
+    //
+    // Two halves, and the second is the one that could actually fail. The
+    // river is column 12 and rows 18 and 19 are LAND; and the revealed rect's
+    // passable cells are ONE 8-connected component, so a player can reach the
+    // east bank from the west bank without a bridge, over land, using only the
+    // gap. `roads.ts` refuses a road on an impassable cell, so a component walk
+    // over `world.passable` is exactly the reachability a road can express.
+    const { world } = gateBoot()
+    const at = (x: number, y: number): number => y * GRID_W + x
+
+    // The gap itself, and the river either side of it — so "there is a gap" is
+    // a statement about a hole in something rather than about open ground.
+    expect(world.terrain[at(12, 18)], 'row 18 is the gap').toBe(TERRAIN.LAND)
+    expect(world.terrain[at(12, 19)], 'row 19 is the gap').toBe(TERRAIN.LAND)
+    let riverRows = 0
+    for (let y = REVEALED_Y0; y <= REVEALED_Y1; y++) {
+      if (y === 18 || y === 19) continue
+      expect(world.passable[at(12, y)], `column 12 row ${y} must be river`).toBe(0)
+      riverRows++
+    }
+    expect(riverRows, 'the river must actually run the height of the rect').toBe(20)
+
+    // One component over the rect's passable cells.
+    const inRect = (x: number, y: number): boolean =>
+      x >= REVEALED_X0 && x <= REVEALED_X1 && y >= REVEALED_Y0 && y <= REVEALED_Y1
+    const walk = (from: number): Set<number> => {
+      const seen = new Set<number>([from])
+      const stack = [from]
+      while (stack.length > 0) {
+        const c = stack.pop() as number
+        for (let dir = 0; dir < 8; dir++) {
+          const n = stepCell(c, dir, world.w, world.h)
+          if (n < 0 || seen.has(n)) continue
+          if (!inRect(n % GRID_W, (n / GRID_W) | 0)) continue
+          if (world.passable[n] !== 1) continue
+          seen.add(n)
+          stack.push(n)
+        }
+      }
+      return seen
+    }
+    // From D2's carpark on the east bank (17, 14) to D0's on the west (8, 10).
+    const east = walk(D2_CARPARK)
+    expect(east.has(D0_CARPARK), 'the two banks are not one component').toBe(true)
+    expect(east.has(H0_CELL), 'and every seeded building is in it').toBe(true)
+    let passableInRect = 0
+    for (let y = REVEALED_Y0; y <= REVEALED_Y1; y++) {
+      for (let x = REVEALED_X0; x <= REVEALED_X1; x++) {
+        if (world.passable[at(x, y)] === 1) passableInRect++
+      }
+    }
+    expect(east.size, 'the rect is one component, not two joined by a corner').toBe(passableInRect)
+
+    // **Non-vacuity, and it is the whole test:** fill the gap and the two banks
+    // separate. Without this, "one component" is satisfied by a board with no
+    // river at all. Mutating `world.passable` is safe — this rig is discarded.
+    world.passable[at(12, 18)] = 0
+    world.passable[at(12, 19)] = 0
+    const severed = walk(D2_CARPARK)
+    expect(severed.has(D0_CARPARK), 'with the gap closed the banks MUST separate').toBe(false)
+    expect(severed.size).toBeLessThan(east.size)
   })
 
   it('GATE A — trips and CARS IN MOTION, including cars the spawner put there', () => {
@@ -1704,7 +1803,18 @@ describe('the survivability gate the default board is flipped behind', () => {
     const last = greedy.weeks[greedy.weeks.length - 1] as GateWeek
     expect(last.houses, 'reported, not gated').toBeGreaterThan(3)
     expect(last.dests, 'reported, not gated').toBeGreaterThan(3)
-    // Nothing may ever spawn where the player cannot see it, over the whole run.
+    // Nothing may ever spawn where the player cannot see it — **and this is
+    // LABELLED NEAR-TAUTOLOGICAL rather than counted as coverage.** It is
+    // computed with `destinationFitsSpawnZone`, which is the same predicate
+    // `attemptDestinationSpawn` consults before placing, so for a SPAWNED
+    // destination the two agree by construction and no spawner bug can turn it
+    // red. What it does cover is the seeded board and any future path that
+    // places a destination without consulting that predicate. The real version
+    // — a sweep over every footprint cell and the carpark, in coordinates,
+    // against a packing rig that reaches the zone's far edges — is
+    // `spawn.test.ts`'s, and it is where a regression here would actually be
+    // caught. Kept because it costs nothing on a run that is happening anyway;
+    // do not read its passing as evidence about the spawner.
     expect(greedy.outsideRect, 'a building spawned outside the revealed rect').toBe(0)
     expect(idle.outsideRect).toBe(0)
   })
@@ -1773,20 +1883,41 @@ describe('the survivability gate the default board is flipped behind', () => {
     // and measured, exactly what plan Step 3's proposed spawner lever produces
     // (1 in every one of twelve weeks). A board that steps straight from 1 to
     // the cap has no difficulty curve either. What a curve looks like is a
-    // gradient, so that is what this asserts: an early week at 1, a later week
-    // above it, and a later week still at `PIN_CAP_*_TIMER` — the TIMER cap,
-    // because `overcrowdTriggerCap` is the thing the meter reads, not the hard
-    // cap `hasRoom` reads.
+    // gradient, so that is what this asserts — in THREE weeks, not two:
+    //
+    //   1. an early week whose peak over connected destinations is exactly 1;
+    //   2. a strictly later week that is **above 1 and still below every
+    //      connected destination's own timer cap** — the intermediate step;
+    //   3. a strictly later week still at or above one of those caps.
+    //
+    // `PIN_CAP_*_TIMER`, the TIMER cap, because `overcrowdTriggerCap` is what
+    // the meter reads — not the hard cap `hasRoom` reads. Clause 2 is expressed
+    // as "at least 2 pins AND no connected destination reached its own cap this
+    // week", which is the per-destination form of "strictly between": the cap
+    // is 6 for a square and 8 for a circle and the board carries both.
+    //
+    // **Clause 2 was missing until the Task 10 review, and its absence was the
+    // exact defect this comment claimed to guard against.** Run over synthetic
+    // series against a square cap of 6, the two-clause predicate PASSED
+    // `[1, 1, 1, 6, 6]` and `[1, 1, 1, 14, 14]` — a one-week jump from 1 to the
+    // cap, held one more week — while the comment above it said a step was
+    // rejected. With clause 2 both fail, and so do `[1, 1, 1, 10]` (no
+    // intermediate week) and `[1, 2, 2, 2, 2]` (never reaches a cap). The flat
+    // series the lever produces, `[1] * 13`, fails on clause 2 as it did on the
+    // old clause 2 — that half was always genuinely caught.
     //
     // Measured on the shipped seed: 1, 1, 1, 1, 2, 5, 10 across weeks 0-6,
-    // against a square timer cap of 6 and a hard cap of 10.
+    // against a square timer cap of 6 and a hard cap of 10. Clause 2 is
+    // satisfied twice over, at weeks 4 (peak 2) and 5 (peak 5), neither of
+    // which reaches a cap.
     const greedy = gateRun('greedy')
     const peaks = greedy.weeks.map((w) => w.peakPinsConnected)
-    const flat = peaks.findIndex((p) => p >= 1 && p <= 1)
+    const { flat, risen, capped } = gradientIndices(greedy.weeks)
     expect(flat, 'no week where a connected destination held exactly one pin').toBeGreaterThanOrEqual(0)
-    const risen = peaks.findIndex((p, i) => i > flat && p >= 2)
-    expect(risen, `no later week above 1 — peaks were ${peaks.join(', ')}`).toBeGreaterThan(flat)
-    const capped = greedy.weeks.findIndex((w, i) => i > risen && w.capReachedConnected)
+    expect(
+      risen,
+      `no later week strictly between 1 and the timer cap — peaks were ${peaks.join(', ')}`,
+    ).toBeGreaterThan(flat)
     expect(
       capped,
       `no connected destination ever reached its own timer cap — peaks were ${peaks.join(', ')}`,
@@ -1824,13 +1955,113 @@ describe('the survivability gate the default board is flipped behind', () => {
     )
   })
 
+  it('rejects a one-week jump from 1 to the cap, which the two-clause form did not', () => {
+    // **The artefact for the paragraph above, and it exists because the
+    // paragraph was WRONG before the Task 10 review.** Gate C's comment claimed
+    // a step straight from 1 to the cap was rejected; the predicate it
+    // described — a week at 1, a later week >= 2, a later week at the cap — is
+    // satisfied by exactly that step, because the capped week is also a week
+    // above 1. The reviewer found it by running synthetic series.
+    //
+    // These run `gradientIndices`, the SAME function Gate C runs, so the
+    // comment cannot drift away from the assertion the way it just did.
+    const series = (
+      peaks: readonly number[],
+      cap = PIN_CAP_SQUARE_TIMER,
+    ): { peakPinsConnected: number; capReachedConnected: boolean }[] =>
+      peaks.map((p) => ({ peakPinsConnected: p, capReachedConnected: p >= cap }))
+
+    const passes = (peaks: readonly number[]): boolean => {
+      const g = gradientIndices(series(peaks))
+      return g.flat >= 0 && g.risen > g.flat && g.capped > g.risen
+    }
+
+    // Rejected: a one-week jump, held for a second week. Both of these PASSED
+    // the two-clause form.
+    expect(passes([1, 1, 1, 6, 6]), 'a jump from 1 to the cap is not a gradient').toBe(false)
+    expect(passes([1, 1, 1, 14, 14]), 'nor is a jump straight past it').toBe(false)
+    // Rejected for the two reasons the old form did catch, so the new clause is
+    // an addition rather than a replacement.
+    expect(passes([1, 1, 1, 10]), 'no intermediate week at all').toBe(false)
+    expect(passes([1, 2, 2, 2, 2]), 'never reaches a cap').toBe(false)
+    expect(passes([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]), "the lever's flat 1").toBe(false)
+    // Accepted: the shape the shipped board actually produces, and the minimum
+    // shape that counts — so this is not a predicate that rejects everything.
+    expect(passes([1, 1, 1, 1, 2, 5, 10]), 'the measured series must still pass').toBe(true)
+    expect(passes([1, 2, 6]), 'three weeks is the smallest gradient there is').toBe(true)
+    // ...and the ORDER is load-bearing: the same three values out of order are
+    // not a curve.
+    expect(passes([6, 2, 1]), 'a falling series is not a difficulty curve').toBe(false)
+  })
+
   it('reports what the gate does NOT gate on, so the numbers outlive this task', () => {
     // **Survival in weeks is reported and not gated, and that is deliberate.**
-    // Across five seeds the baseline greedy arm survives 6, 12+, 7, 10 and 3
-    // weeks — a spread wide enough that a survival threshold at n = 1 would be
-    // a coin flip, and the shipped seed is not the median. The gate is on the
-    // shape (C) and on the absence of an unplayable failure (B), because those
-    // reproduced on every seed and survival did not.
+    //
+    // ---------------------------------------------------------------------
+    // THE FIVE COMPARISON RUNS, BY SEED — the enumeration, not the summary
+    // ---------------------------------------------------------------------
+    // Everything below was driven through THIS rig, greedy arm, twelve weeks,
+    // at M1e Task 10. The seed strings are written out because the catalogue's
+    // rule is "state the enumeration or drop the figure": without them, a
+    // future task that turns one of the assertions in this block red cannot
+    // tell "the game broke" from "that seed's dying week moved", because the
+    // comparison runs cannot be re-derived.
+    //
+    // ```
+    //   seed          dies    wk  killer  trips  cumFrac  inFl  drop  unaff  minTiles
+    //   laneways-m2   31,456   6  D6 (c)    747    0.975    11     0      0        37
+    //   gate-b        never   12+ —       1,916    0.994    10     0     75        40
+    //   gate-c        32,895   7  D10 (c)   829    0.933    16     6     75        40
+    //   gate-d        49,279  10  D11 (c) 1,376    0.932    17    16      0        38
+    //   gate-e        14,588   3  D2 (c)    150    0.694     9    13     75        40
+    //
+    //   peak destPins on connected destinations, per week:
+    //   laneways-m2   1 1 1 1 2 5 10
+    //   gate-b        1 4 1 1 1 1 1 1 1 1 1 2 2
+    //   gate-c        1 4 1 1 1 1 10 10
+    //   gate-d        1 1 1 1 1 1 1 1 1 2 10
+    //   gate-e        1 4 14 14
+    // ```
+    //
+    // `(c)` is "the killer's carpark was on the road network". Every seed dies
+    // on a connected destination or does not die at all. **`unaff` is the count
+    // of greedy decisions refused for budget, and all 75 on each of the three
+    // seeds that have any fall in the half-week straight after the 20-tile
+    // opening**, while the spend is being re-granted — never later, and never
+    // with the budget at 0.
+    //
+    // **What this block's own assertions would do on the other four seeds, so
+    // nobody reads them as universal:** Gate B's per-week `dropped === 0` and
+    // `unaffordable === 0` would FAIL on three of the five, and Gate C's
+    // strengthened gradient would fail on `gate-b` — the seed that never dies,
+    // so nothing ever reaches a cap inside the window. The gate is gated on the
+    // seed that SHIPS, which is the right scope for a claim about the board a
+    // plain load opens, and the spread is here so the scope is visible.
+    //
+    // A survival threshold on 6 / 12+ / 7 / 10 / 3 at n = 1 would be a coin
+    // flip, and the shipped seed is not the median. The gate is on the shape
+    // (C) and on the absence of an unplayable failure (B).
+    //
+    // ---------------------------------------------------------------------
+    // TWO OF PLAN STEP 5'S PASS NUMBERS WERE RELAXED, AND HERE IS WHICH
+    // ---------------------------------------------------------------------
+    // Plan Task 10 Step 5's Gate C required `maxInFlight >= 3` (**kept**, and
+    // raised to 6 in Gate A above), `longestQueue >= 4` and
+    // `blockedTicks > 10,000 by week 11`. Shipped: **>= 3** and **> 1,000**.
+    // Both were relaxed deliberately and neither quietly:
+    //
+    //   - the plan's 4 and 14,199 are measurements of the LEVER's build at week
+    //     11, and Task 10 measured that build to be unreproducible in every
+    //     other respect — on this tree the lever gives longest queue 1 and zero
+    //     blocked ticks, so its week-11 figures cannot be a floor for anything;
+    //   - the shipped board's greedy arm **ends in week 6**, so "by week 11"
+    //     names a week this board does not reach. A clause that can never be
+    //     evaluated is not a gate.
+    //
+    // Measured here: longest queue **4** against a floor of 3, and **1,920**
+    // blocked ticks against a floor of 1,000. The floors sit under the
+    // measurement rather than under the plan's number, and the plan's number is
+    // recorded above so the deviation is a decision rather than a drift.
     //
     // `refusals` is reported for the same reason and a different one: it stays
     // 0 on this board for the whole measured run, where the demo board scores

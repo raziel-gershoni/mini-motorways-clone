@@ -28,13 +28,40 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  * either direction: `demoCity.ts` and this file are untouched byte-for-byte,
  * the demo golden `3152640907` holds, and the board is one token away.
  *
- * **It is not survivable, and that is why it is not the default.** Six traces
- * were driven through the real pointer at M1e Task 10 and the best of them
- * equals the control: the board is over-subscribed on every colour, `maxHouses`
- * is already at cap so the spawner can add nothing, the fleet is fixed at 24
- * and the weekly demand ramp runs 3x against it. A board a player cannot
- * affect is a demonstration, not a game — which is exactly what this file is
- * for.
+ * **It is not survivable, and that is why it is not the default.** Seven traces
+ * were driven at M1e Task 10 and `demoLayout.test.ts` §8 is the detector:
+ *
+ * ```
+ *   trace                       tiles   dies    trips
+ *   no input (the control)          0   6,703     420
+ *   parallel lane, column 9        20   6,703     418
+ *   cross-link row 11               5   7,221     463   <- the best found
+ *   cross-link row 14               5   6,142     339
+ *   cross-link row 17               5   7,221     426
+ *   cross-link row 20               5   5,639     186
+ *   cross-link row 23               5   6,185     187
+ *   all five cross-links           25   5,667     177   <- the worst found
+ * ```
+ *
+ * **Nothing survives; four of the seven are worse than doing nothing; more road
+ * is strictly worse than less; and the best buys 518 ticks — 17 seconds on a
+ * 223-second run.** Twenty tiles beside the busiest corridor buy exactly zero.
+ *
+ * *(The first version of this paragraph claimed "six traces, and the best of
+ * them equals the control". The row-11 cross-link refutes it — it beats the
+ * control by 518 ticks. The conclusion held and the sentence did not, which is
+ * why the table now has a test under it rather than a source comment.)*
+ *
+ * The reason is structural rather than a property of the traces tried, which is
+ * what makes it generalise: `H_HOUSE_COUNT` and `H_DEST_COUNT` are already at
+ * `maxHouses` and `maxDestinations` at tick 0, so `runSpawn` can place nothing
+ * however the board is played; the fleet is fixed at **24** cars for the whole
+ * run; and every destination is already on a corridor, so a road is a lever
+ * with nothing on the end of it. Compare the starting city on the same
+ * instrument: five tiles remove its death entirely and a player who keeps
+ * connecting reaches 31,456 against 5,580 — 4.6x, not 1.077x. **A board a
+ * player cannot affect is a demonstration, not a game** — which is exactly what
+ * this file is for.
  *
  * ---------------------------------------------------------------------------
  * THE ARITHMETIC, AND THE DRAFT THAT FAILED IT
