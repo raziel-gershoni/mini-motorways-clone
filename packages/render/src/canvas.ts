@@ -133,10 +133,32 @@ export type DrawImageSource = AtlasSurface | CanvasImageSource
  */
 export interface DrawContext {
   fillStyle: string | CanvasGradient | CanvasPattern
+  /**
+   * **M1e Task 9: the overcrowd ring.** The union rather than `string`, for
+   * exactly the reason `fillStyle` above carries it — a real
+   * `CanvasRenderingContext2D.strokeStyle` is
+   * `string | CanvasGradient | CanvasPattern`, and a mutable property is checked
+   * by assignability of its type, so narrowing it here makes
+   * `_RealContextIsADrawContext` at the bottom of this file fail with
+   * `TS2344: Type 'false' does not satisfy the constraint 'true'`. Measured,
+   * not assumed: the narrow form was written first and `tsc --noEmit` refused
+   * it.
+   */
+  strokeStyle: string | CanvasGradient | CanvasPattern
+  lineWidth: number
   font: string
   textAlign: CanvasTextAlign
   textBaseline: CanvasTextBaseline
   fillRect(x: number, y: number, w: number, h: number): void
+  /**
+   * The other half of the ring. **`arc` alone paints nothing** — it appends to
+   * the current path — so the pair `beginPath`/`arc`/`stroke` arrives together
+   * or not at all. `clearRect` stays out; see rule 1 above, and note that
+   * nothing here ever clears.
+   */
+  beginPath(): void
+  arc(x: number, y: number, radius: number, startAngle: number, endAngle: number): void
+  stroke(): void
   /**
    * `maxWidth` is **required here though the DOM makes it optional**, so that a
    * caller cannot draw an unconstrained label by omission. See `fillCentred`:

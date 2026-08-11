@@ -220,6 +220,15 @@ interface DrawCounts {
 function countingContext(counts: DrawCounts): GameContext {
   return {
     fillStyle: '',
+    // M1e Task 9's five. The demo board is live for this whole window (it dies
+    // at 6,703 and the rig stops well short), so `arc` fires only for the ring
+    // and `stroke` follows it; both are counted through `fills` nowhere, which
+    // is deliberate — `drawAllocation.test.ts` owns the ring and scrim counters.
+    strokeStyle: '',
+    lineWidth: 0,
+    beginPath: () => undefined,
+    arc: () => undefined,
+    stroke: () => undefined,
     font: '',
     textAlign: 'center',
     textBaseline: 'middle',

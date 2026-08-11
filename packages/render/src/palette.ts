@@ -38,6 +38,35 @@ export const PALETTE: Palette = Object.freeze({
   roadEdge: '#33333a',
   uiText: '#2e2b28',
   /**
+   * The overcrowd ring. Deliberately outside the board's pastel range and
+   * outside every colour group — a destination's meter filling is the only
+   * warning the game gives, and a ring in a group colour reads as decoration
+   * belonging to that group. Checked distinct from all fourteen other entries
+   * by `interface.test.ts`.
+   */
+  overcrowd: '#e8412e',
+  /**
+   * The shutdown scrim: `uiText` at alpha `0xd8` (84.7 %). **Eight hex digits,
+   * and the only entry in this palette with alpha.**
+   *
+   * `#rrggbbaa` rather than `rgba(...)` because it is still one preallocated
+   * string with no parse-time concatenation, and it is CSS Color 4 — supported
+   * by every Safari and Chrome version a Telegram Mini App can run on.
+   *
+   * Translucent rather than opaque so the frozen board and the ring that
+   * killed it stay visible underneath: the screen has to answer *which
+   * destination*, and pointing at it is stronger than naming it. It is the same
+   * two colours `index.html` and `BOOT_FAILURE_STYLE` invert against each
+   * other, so the shutdown text draws in `land` over this and lands at ~10:1.
+   *
+   * **This is the one place the canvas is painted twice**, and plan Decision
+   * 4's "cover every pixel exactly once" is not violated by it: the five opaque
+   * fills still partition the canvas each frame, so nothing ghosts, and the
+   * extra source-over pass only ever runs on a frame where the sim is frozen
+   * and there is no tick budget to compete with.
+   */
+  scrim: '#2e2b28d8',
+  /**
    * Six, because spec §4.2's enumeration makes the group count per-map and
    * either 5 or 6 (`MAX_GROUP_COUNT` in `shared`). A palette of five hands
    * `undefined` to `fillStyle` on a six-group map, which paints black.

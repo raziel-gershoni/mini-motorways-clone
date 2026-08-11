@@ -173,7 +173,15 @@ interface TextCommand {
   readonly op: 'text'
   readonly text: string
 }
-type Command = FillCommand | BlitCommand | TextCommand
+/** M1e Task 9's overcrowd ring, recorded with its sweep rather than its endpoints. */
+interface ArcCommand {
+  readonly op: 'arc'
+  readonly x: number
+  readonly y: number
+  readonly radius: number
+  readonly sweep: number
+}
+type Command = FillCommand | BlitCommand | TextCommand | ArcCommand
 
 /**
  * The 2D context, recording. It satisfies `GameContext` structurally — the
@@ -183,6 +191,8 @@ type Command = FillCommand | BlitCommand | TextCommand
  */
 class RecordingContext {
   fillStyle: string | CanvasGradient | CanvasPattern = ''
+  strokeStyle: string | CanvasGradient | CanvasPattern = ''
+  lineWidth = 0
   font = ''
   textAlign: CanvasTextAlign = 'start'
   textBaseline: CanvasTextBaseline = 'alphabetic'
@@ -198,6 +208,12 @@ class RecordingContext {
   fillText(text: string): void {
     this.log.push({ op: 'text', text })
   }
+  beginPath(): void {}
+  /** M1e Task 9's overcrowd ring. Recorded, so end-to-end cases can count rings. */
+  arc(x: number, y: number, radius: number, startAngle: number, endAngle: number): void {
+    this.log.push({ op: 'arc', x, y, radius, sweep: endAngle - startAngle })
+  }
+  stroke(): void {}
   drawImage(
     _image: unknown,
     sx: number,

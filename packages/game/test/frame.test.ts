@@ -11,6 +11,7 @@ import {
   REVEALED_H,
   DENOM,
   OVERCROWD_FAIL_MILLITICKS,
+  OVERCROWD_FULL_MILLITICKS,
   OVERCROWD_RAMP_FULL_TICKS,
   PIN_CAP_SQUARE_TIMER,
   type MapData,
@@ -45,6 +46,8 @@ import {
   PHASE_OUTBOUND,
   PHASE_RETURNING,
   H_DEST_COUNT,
+  H_FAILED_DEST,
+  H_GAME_OVER,
   H_HOUSE_COUNT,
   H_SCORE,
   H_TICK,
@@ -669,6 +672,92 @@ describe('the HUD scalars', () => {
     expect(narrow.tileSize).not.toBe(r.camera.tileSize)
     expect(build(r, fb).camera).toBe(r.camera)
     expect(buildFrame(fb, r.state, r.world, narrow, 0, false).camera).toBe(narrow)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 4b. The overcrowd fold and the two shutdown scalars — M1e Task 9
+// ---------------------------------------------------------------------------
+
+describe('the overcrowd fold and the shutdown scalars', () => {
+  it('folds the meter against the FULL 90 s, not the 88 s that kills you', () => {
+    // §5.8's "hidden grace at the end": the ring is drawn against
+    // OVERCROWD_FULL_MILLITICKS while failure fires at
+    // OVERCROWD_FAIL_MILLITICKS, so it reads 97.8 % at the instant the city
+    // dies. Folding against the fail value instead would show a full ring two
+    // seconds early, every time, and delete the grace the spec asks for.
+    //
+    // TWO destinations, one at zero: a single-destination fixture cannot tell
+    // "folds the meter" from "writes 249 into slot 0".
+    const r = rig()
+    const fb = builderFor(r)
+    r.state.header[H_DEST_COUNT] = 2
+    r.state.destOvercrowd[0] = 0
+    r.state.destOvercrowd[1] = OVERCROWD_FAIL_MILLITICKS
+    const f = build(r, fb)
+    expect(f.destOvercrowd[0]).toBe(0)
+    expect(f.destOvercrowd[1]).toBe(249) // floor(2_640_000 * 255 / 2_700_000)
+    expect(f.destOvercrowd[1], 'the ring is not full when the run ends').toBeLessThan(255)
+  })
+
+  it('is not vacuous: the two constants really do differ, by §5.8’s 2 s grace', () => {
+    // If the two were equal the assertion above would pass on the mutant it
+    // exists to catch. Stated against the grace rather than against 249, so it
+    // fails for the right reason if the grace is ever retuned.
+    expect(OVERCROWD_FULL_MILLITICKS - OVERCROWD_FAIL_MILLITICKS).toBe(2 * 30 * DENOM)
+    expect(OVERCROWD_FAIL_MILLITICKS).toBeLessThan(OVERCROWD_FULL_MILLITICKS)
+  })
+
+  it('clamps a meter past FULL to 255 instead of wrapping the byte', () => {
+    // Unreachable through `sim` today — the meter's own bound is
+    // `OVERCROWD_FAIL_MILLITICKS + DENOM - 1`, which folds to 249 — so this is
+    // the guard on a value only a future retune (or a restore) can produce. A
+    // `Uint8Array` truncates modulo 256, so without the clamp a meter at
+    // 2 x FULL writes 254 and the ring reads *almost full* rather than full.
+    const r = rig()
+    const fb = builderFor(r)
+    r.state.header[H_DEST_COUNT] = 2
+    r.state.destOvercrowd[0] = OVERCROWD_FULL_MILLITICKS
+    r.state.destOvercrowd[1] = OVERCROWD_FULL_MILLITICKS * 2
+    const f = build(r, fb)
+    expect(f.destOvercrowd[0], 'exactly FULL is exactly full').toBe(255)
+    expect(f.destOvercrowd[1], 'twice FULL is still full, not 254').toBe(255)
+  })
+
+  it('reports game over and the destination that caused it, and -1 while live', () => {
+    const r = rig()
+    const fb = builderFor(r)
+    expect(build(r, fb).gameOver).toBe(false)
+    expect(build(r, fb).failedDest).toBe(-1)
+    r.state.header[H_GAME_OVER] = 1
+    r.state.header[H_FAILED_DEST] = 1
+    const f = build(r, fb)
+    expect(f.gameOver).toBe(true)
+    expect(f.failedDest).toBe(1)
+  })
+
+  it('reads the pair through sim’s own guards, so a live H_FAILED_DEST cannot leak', () => {
+    // `H_FAILED_DEST` is zero-initialised and `failedDestination` is the guard
+    // that stops a live run reporting "destination 0 killed you". Poking the
+    // slot without the flag must still read -1 — the mutation this kills is
+    // `frame.failedDest = state.header[H_FAILED_DEST]`, which is the obvious
+    // shorter spelling and is wrong on every live frame of every run.
+    const r = rig()
+    const fb = builderFor(r)
+    r.state.header[H_FAILED_DEST] = 3
+    const f = build(r, fb)
+    expect(f.gameOver).toBe(false)
+    expect(f.failedDest).toBe(-1)
+  })
+
+  it('keeps destOvercrowd preallocated and sized for every destination slot', () => {
+    const r = rig()
+    const fb = builderFor(r)
+    const a = build(r, fb)
+    const b = build(r, fb)
+    expect(b.destOvercrowd).toBe(a.destOvercrowd)
+    expect(a.destOvercrowd).toBeInstanceOf(Uint8Array)
+    expect(a.destOvercrowd.length).toBe(r.state.destCell.length)
   })
 })
 

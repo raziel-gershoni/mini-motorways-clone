@@ -1,10 +1,11 @@
-import { TERRAIN } from '@laneways/shared'
+import { OVERCROWD_FULL_MILLITICKS, TERRAIN } from '@laneways/shared'
 import {
   carparkCell,
   dayOfWeek,
   destMetaColour,
   destMetaKind,
   destMetaOrientation,
+  failedDestination,
   isGameOver,
   step,
   tilesLeft,
@@ -160,6 +161,7 @@ export function createFrameBuilder(state: GameState, world: WorldData, camera: C
     destOrientation: new Uint8Array(maxDest),
     destPins: new Uint8Array(maxDest),
     destCarpark: new Int32Array(maxDest),
+    destOvercrowd: new Uint8Array(maxDest),
     carCount: 0,
     carXY: new Float32Array(slots * 2),
     carColour: new Uint8Array(slots),
@@ -168,6 +170,8 @@ export function createFrameBuilder(state: GameState, world: WorldData, camera: C
     score: 0,
     tilesLeft: 0,
     paused: false,
+    gameOver: false,
+    failedDest: -1,
   }
   return { frame, snapshots: createCarSnapshots(slots) }
 }
@@ -207,6 +211,22 @@ export function buildFrame(
     frame.destOrientation[d] = orientation
     frame.destPins[d] = state.destPins[d] as number
     frame.destCarpark[d] = carparkCell(state.destCell[d] as number, orientation, world.w, world.h)
+    // §5.8's meter, folded to a byte for the ring. Against
+    // OVERCROWD_FULL_MILLITICKS (90 s) and not OVERCROWD_FAIL_MILLITICKS
+    // (88 s), which is what makes the spec's last two seconds a *hidden* grace:
+    // the ring reads 249/255 at the instant the city dies and a player never
+    // sees it close.
+    //
+    // Integer arithmetic is not required here — `game` is not `sim` — but it is
+    // used anyway so the fold cannot introduce a value `render` has to round
+    // differently on two engines. The meter's own ceiling is
+    // `OVERCROWD_FAIL_MILLITICKS + DENOM - 1` = 2,640,999, so the product is at
+    // most 673,454,745 and fits an Int32 with room to spare; the clamp below is
+    // for a value only a retune or a restore could produce, and without it a
+    // `Uint8Array` truncates modulo 256 and a doubly-full meter reads *almost
+    // empty*.
+    const scaled = (((state.destOvercrowd[d] as number) * 255) / OVERCROWD_FULL_MILLITICKS) | 0
+    frame.destOvercrowd[d] = scaled > 255 ? 255 : scaled
   }
   frame.destCount = destCount
 
@@ -232,6 +252,12 @@ export function buildFrame(
   frame.score = state.header[H_SCORE] as number
   frame.tilesLeft = tilesLeft(state)
   frame.paused = paused
+  // Through `sim`'s own guards, not off the header. `H_FAILED_DEST` is
+  // zero-initialised, so an unguarded read blames destination 0 on every live
+  // frame of every run; `failedDestination` is the function that exists to stop
+  // that and it returns -1 while the flag is clear.
+  frame.gameOver = isGameOver(state)
+  frame.failedDest = failedDestination(state)
 
   return frame
 }

@@ -231,6 +231,14 @@ function profileBytesByFile(body: () => void): Map<string, number> {
 function stubContext(): GameContext {
   return {
     fillStyle: '',
+    // M1e Task 9's five: `DrawContext` grew what a stroked arc needs. Inert
+    // here — this stub records nothing — but the five must EXIST or the package
+    // does not compile.
+    strokeStyle: '',
+    lineWidth: 0,
+    beginPath: () => undefined,
+    arc: () => undefined,
+    stroke: () => undefined,
     font: '',
     textAlign: 'center',
     textBaseline: 'middle',

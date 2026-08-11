@@ -107,6 +107,28 @@ interface ClearRectCommand {
   readonly h: number
 }
 
+/**
+ * The overcrowd ring (M1e Task 9). **The stroke state is captured on the `arc`
+ * rather than on the `stroke`**, so a colour or a width assertion can name the
+ * ring it belongs to; `arc` is the only command in this file that carries
+ * geometry AND stroke state, which is what makes "the ring is at the right
+ * destination, in the right colour, at the right sweep" one record.
+ */
+interface ArcCommand {
+  readonly op: 'arc'
+  readonly strokeStyle: string
+  readonly lineWidth: number
+  readonly x: number
+  readonly y: number
+  readonly radius: number
+  readonly startAngle: number
+  readonly endAngle: number
+}
+
+interface PathCommand {
+  readonly op: 'beginPath' | 'stroke'
+}
+
 interface SetCommand {
   readonly op: 'set'
   readonly prop: string
@@ -119,11 +141,15 @@ type Command =
   | DrawImageCommand
   | FillTextCommand
   | ClearRectCommand
+  | ArcCommand
+  | PathCommand
 
 class RecordingContext implements DrawContext {
   readonly log: Command[] = []
 
   #fillStyle: string | CanvasGradient | CanvasPattern = '#000000'
+  #strokeStyle: string | CanvasGradient | CanvasPattern = '#000000'
+  #lineWidth = 1
   #font = '10px sans-serif'
   #textAlign: CanvasTextAlign = 'start'
   #textBaseline: CanvasTextBaseline = 'alphabetic'
@@ -134,6 +160,22 @@ class RecordingContext implements DrawContext {
   set fillStyle(value: string | CanvasGradient | CanvasPattern) {
     this.#fillStyle = value
     this.log.push({ op: 'set', prop: 'fillStyle', value: String(value) })
+  }
+
+  get strokeStyle(): string | CanvasGradient | CanvasPattern {
+    return this.#strokeStyle
+  }
+  set strokeStyle(value: string | CanvasGradient | CanvasPattern) {
+    this.#strokeStyle = value
+    this.log.push({ op: 'set', prop: 'strokeStyle', value: String(value) })
+  }
+
+  get lineWidth(): number {
+    return this.#lineWidth
+  }
+  set lineWidth(value: number) {
+    this.#lineWidth = value
+    this.log.push({ op: 'set', prop: 'lineWidth', value: String(value) })
   }
 
   get font(): string {
@@ -190,6 +232,27 @@ class RecordingContext implements DrawContext {
     dh: number,
   ): void {
     this.log.push({ op: 'drawImage', image, sx, sy, sw, sh, dx, dy, dw, dh })
+  }
+
+  beginPath(): void {
+    this.log.push({ op: 'beginPath' })
+  }
+
+  arc(x: number, y: number, radius: number, startAngle: number, endAngle: number): void {
+    this.log.push({
+      op: 'arc',
+      strokeStyle: String(this.#strokeStyle),
+      lineWidth: this.#lineWidth,
+      x,
+      y,
+      radius,
+      startAngle,
+      endAngle,
+    })
+  }
+
+  stroke(): void {
+    this.log.push({ op: 'stroke' })
   }
 
   /**
@@ -315,6 +378,7 @@ function frameA(paused = false): RenderFrame {
     destOrientation: new Uint8Array(0),
     destPins: new Uint8Array(0),
     destCarpark: new Int32Array(0),
+    destOvercrowd: new Uint8Array(0),
     carCount: 1,
     carXY,
     carColour: new Uint8Array([3]),
@@ -323,6 +387,12 @@ function frameA(paused = false): RenderFrame {
     score: 0,
     tilesLeft: 40,
     paused,
+    // **Explicit, never absent.** A trial scrim phase gated on `frame.gameOver`
+    // left the whole render suite green because these two fixtures never set
+    // the flag and `undefined` is falsy — the phase simply never ran. See the
+    // shutdown describe at the bottom of this file.
+    gameOver: false,
+    failedDest: -1,
   }
 }
 
@@ -500,6 +570,9 @@ function frameB(paused = false): RenderFrame {
   const destOrientation = new Uint8Array([3, 1])
   const destPins = new Uint8Array([3, 5])
   const destCarpark = new Int32Array([1 * B_W + 3, 1 * B_W + 4])
+  // Both meters at zero, so the whole-log literal below stays a LIVE frame with
+  // no ring in it. `frameWithOvercrowd` is what gives this fixture a ring.
+  const destOvercrowd = new Uint8Array([0, 0])
 
   // Two live cars, six dead slots at (1, 1). Every coordinate is dyadic and so
   // exact in a Float32Array.
@@ -530,6 +603,7 @@ function frameB(paused = false): RenderFrame {
     destOrientation,
     destPins,
     destCarpark,
+    destOvercrowd,
     carCount: 2,
     carXY,
     carColour,
@@ -538,6 +612,8 @@ function frameB(paused = false): RenderFrame {
     score: 12,
     tilesLeft: 17,
     paused,
+    gameOver: false,
+    failedDest: -1,
   }
 }
 

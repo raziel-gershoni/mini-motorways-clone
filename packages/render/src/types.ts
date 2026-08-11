@@ -239,6 +239,19 @@ export interface Palette {
   readonly road: string
   readonly roadEdge: string
   readonly uiText: string
+  /**
+   * The overcrowd ring's stroke (M1e Task 9). In no colour group and unlike
+   * every terrain and furniture entry, because it is an alarm: a ring drawn in
+   * a colour the board already uses reads as art.
+   */
+  readonly overcrowd: string
+  /**
+   * The shutdown scrim (M1e Task 9). **The one entry in this palette that
+   * carries alpha**, as `#rrggbbaa` — it dims the frozen board rather than
+   * replacing it, so the player can still see the city they lost and the ring
+   * that killed it. `interface.test.ts` pins that it is the only one.
+   */
+  readonly scrim: string
   /** Per colour group. Length 6 — spec §4.2 allows 5 or 6 per map. */
   readonly groups: readonly string[]
 }
@@ -310,6 +323,22 @@ export interface RenderFrame {
   readonly destPins: Uint8Array
   /** `game`-computed via `carparkCell`, dense. */
   readonly destCarpark: Int32Array
+  /**
+   * Per destination, `0..255`, the overcrowd meter scaled against §5.8's FULL
+   * 90 s rather than the 88 s at which the run ends — so a full ring is
+   * unreachable and the spec's 2 s "hidden grace" is what the player does not
+   * see. `render` never learns the milli-tick figures; `game` folds them.
+   *
+   * **What a filling ring MEANS is not "this destination is busy".** The meter
+   * integrates while a destination is over its pin capacity and unwinds while
+   * it is not, so a served destination's ring rises and falls and an
+   * UNREACHABLE one's ring rises monotonically and never drains. That second
+   * shape is the dominant failure on the shipped boards — a spawned
+   * destination's carpark is road-free by construction, so it takes zero
+   * arrivals ever — and the ring is the only thing on screen that distinguishes
+   * the two.
+   */
+  readonly destOvercrowd: Uint8Array
   /** Live cars only. */
   readonly carCount: number
   /**
@@ -334,6 +363,15 @@ export interface RenderFrame {
   readonly score: number
   readonly tilesLeft: number
   readonly paused: boolean
+  /**
+   * True once a destination's timer completed (§5.8). The board behind the
+   * scrim is frozen — `sim`'s `step` is a byte-identical no-op past the
+   * failure and the loop stops draining — but the draw path keeps running at
+   * display rate, which is what lets a shutdown screen exist at all.
+   */
+  readonly gameOver: boolean
+  /** The destination that ended the run, or -1 while it is live. */
+  readonly failedDest: number
 }
 
 /**

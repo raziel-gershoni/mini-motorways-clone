@@ -254,6 +254,11 @@ interface DrawCounts {
 function countingContext(counts: DrawCounts, surfaces: { ghost: unknown }): GameContext {
   return {
     fillStyle: '',
+    strokeStyle: '',
+    lineWidth: 0,
+    beginPath: () => undefined,
+    arc: () => undefined,
+    stroke: () => undefined,
     font: '',
     textAlign: 'center',
     textBaseline: 'middle',

@@ -531,6 +531,7 @@ describe('the five matte fills tile the backing store the shell actually created
       destOrientation: new Uint8Array(0),
       destPins: new Uint8Array(0),
       destCarpark: new Int32Array(0),
+      destOvercrowd: new Uint8Array(0),
       carCount: 0,
       carXY: new Float32Array(0),
       carColour: new Uint8Array(0),
@@ -539,6 +540,12 @@ describe('the five matte fills tile the backing store the shell actually created
       score: 0,
       tilesLeft: 0,
       paused: false,
+      // **`false`, and it is load-bearing here rather than boilerplate.** The
+      // scrim is a sixth fill, so a game-over frame would break the exact
+      // five-fill tiling this whole describe asserts — and the tiling assertion
+      // is what would have caught it silently going to six.
+      gameOver: false,
+      failedDest: -1,
     }
   }
 
@@ -547,6 +554,13 @@ describe('the five matte fills tile the backing store the shell actually created
     const fills: Fill[] = []
     const ctx: DrawContext = {
       fillStyle: '',
+      // M1e Task 9's five. This rig is about the band FILLS, and the frame it
+      // draws is live, so no arc is ever issued through them.
+      strokeStyle: '',
+      lineWidth: 0,
+      beginPath: () => undefined,
+      arc: () => undefined,
+      stroke: () => undefined,
       font: '',
       textAlign: 'center',
       textBaseline: 'middle',

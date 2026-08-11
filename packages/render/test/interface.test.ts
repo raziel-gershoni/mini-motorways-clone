@@ -86,6 +86,12 @@ function handBuiltFrame(): RenderFrame {
   const destOrientation = new Uint8Array([0, 2, 0])
   const destPins = new Uint8Array([3, 0, 0])
   const destCarpark = new Int32Array([1 * W + 4, 3 * W + 2, 2 * W + 2])
+  // The seventh parallel dense array (M1e Task 9), extended with the dead slot
+  // for the same reason as the other six. Live slot 0 carries a PART-FILLED
+  // meter rather than 0, so "a ring is drawn for a non-zero meter" has a live
+  // instance in this fixture too and the length check below is not the only
+  // thing holding the array in place.
+  const destOvercrowd = new Uint8Array([128, 0, 255])
 
   // Eight car slots allocated, two live; the tail holds a stale in-bounds
   // position rather than (0, 0).
@@ -119,6 +125,7 @@ function handBuiltFrame(): RenderFrame {
     destOrientation,
     destPins,
     destCarpark,
+    destOvercrowd,
     carCount: 2,
     carXY,
     carColour,
@@ -127,6 +134,8 @@ function handBuiltFrame(): RenderFrame {
     score: 12,
     tilesLeft: 17,
     paused: false,
+    gameOver: false,
+    failedDest: -1,
   }
 }
 
@@ -167,20 +176,31 @@ describe('RenderFrame is constructible from plain typed arrays and scalars alone
     expect(frame.carCount).toBe(2)
   })
 
-  it('keeps all six destination arrays the same length, so one slot index addresses all of them', () => {
+  it('keeps all seven destination arrays the same length, so one slot index addresses all of them', () => {
     // `render` reads destCell/destColour/destKind/destOrientation/destPins/
-    // destCarpark by the same slot number. A short array hands `undefined` to
-    // a fillStyle or a coordinate on the last live destination — and under
-    // `noUncheckedIndexedAccess` that is a type error in `render` but not in a
-    // hand-built fixture, so the fixture is where it has to be caught.
+    // destCarpark/destOvercrowd by the same slot number. A short array hands
+    // `undefined` to a fillStyle, a coordinate or a ring sweep on the last live
+    // destination — and under `noUncheckedIndexedAccess` that is a type error in
+    // `render` but not in a hand-built fixture, so the fixture is where it has
+    // to be caught.
+    //
+    // **Seven since M1e Task 9.** The count is asserted against the frame's own
+    // key list rather than written out, so an eighth parallel array added
+    // without a length check here fails rather than silently widening the gap:
+    //   grep -c "^  readonly dest" packages/render/src/types.ts
     const frame = handBuiltFrame()
     const n = frame.destCell.length
     expect(n).toBe(3)
-    expect(frame.destColour.length).toBe(n)
-    expect(frame.destKind.length).toBe(n)
-    expect(frame.destOrientation.length).toBe(n)
-    expect(frame.destPins.length).toBe(n)
-    expect(frame.destCarpark.length).toBe(n)
+    const parallel = [
+      frame.destColour,
+      frame.destKind,
+      frame.destOrientation,
+      frame.destPins,
+      frame.destCarpark,
+      frame.destOvercrowd,
+    ]
+    expect(parallel.length, 'seven dest-indexed arrays, destCell included').toBe(6)
+    for (const array of parallel) expect(array.length).toBe(n)
   })
 
   it('places every dead slot INSIDE the drawn region, not on cell 0', () => {
@@ -306,13 +326,19 @@ describe('the palette — spec 7.1\'s theme object, plus tree, minus shadow', ()
     // M2 ships no shadows of any kind, and a palette entry for one is an
     // invitation to reintroduce a full-canvas layer that costs twice what the
     // road bake M0 deleted did.
+    //
+    // **Eleven since M1e Task 9**: `overcrowd` (the ring) and `scrim` (the
+    // shutdown dim). Both are `render`-side entries with no spec §7.1 row,
+    // exactly as `tree` is.
     expect(Object.keys(PALETTE).sort()).toEqual([
       'background',
       'groups',
       'land',
       'mountain',
+      'overcrowd',
       'road',
       'roadEdge',
+      'scrim',
       'tree',
       'uiText',
       'water',
@@ -320,18 +346,34 @@ describe('the palette — spec 7.1\'s theme object, plus tree, minus shadow', ()
     expect('shadow' in PALETTE).toBe(false)
   })
 
-  it('is every colour a preallocated #rrggbb string', () => {
+  it('is every colour a preallocated hex string, and only the scrim carries alpha', () => {
     // Plan Decision 3 / Task 3: the strings are preallocated because
     // `ctx.fillStyle = '#' + something` allocates a string INSIDE the frame
     // loop, which the plan's Global Constraints forbid.
-    const hex = /^#[0-9a-f]{6}$/
+    //
+    // **`#rrggbbaa` is admitted, for exactly one entry, and which one is
+    // asserted.** Widening the pattern alone would let any future entry go
+    // translucent unnoticed — and a translucent terrain or group colour is a
+    // double-coverage bug that reads as a palette choice, since plan Decision
+    // 4's five opaque fills stop covering the canvas the moment one of them is
+    // not opaque.
+    const opaque = /^#[0-9a-f]{6}$/
+    const translucent = /^#[0-9a-f]{6}[0-9a-f]{2}$/
+    const withAlpha: string[] = []
     for (const [name, value] of Object.entries(PALETTE)) {
       if (name === 'groups') continue
       expect(typeof value, `${name} is not a string`).toBe('string')
-      expect(value as string, `${name} is not a #rrggbb literal`).toMatch(hex)
+      const hex = value as string
+      if (translucent.test(hex)) withAlpha.push(name)
+      else expect(hex, `${name} is not a #rrggbb literal`).toMatch(opaque)
     }
+    expect(withAlpha, 'exactly one palette entry may carry alpha').toEqual(['scrim'])
+    // ...and it really is translucent rather than `#rrggbbff`, which would be
+    // opaque wearing eight digits and would dim nothing at all.
+    expect(PALETTE.scrim.slice(7)).not.toBe('ff')
+    expect(parseInt(PALETTE.scrim.slice(7), 16)).toBeGreaterThan(0)
     for (let i = 0; i < PALETTE.groups.length; i++) {
-      expect(PALETTE.groups[i] as string, `group ${i}`).toMatch(hex)
+      expect(PALETTE.groups[i] as string, `group ${i}`).toMatch(opaque)
     }
   })
 
@@ -342,18 +384,21 @@ describe('the palette — spec 7.1\'s theme object, plus tree, minus shadow', ()
   })
 
   it('makes every colour in the palette distinct, groups included', () => {
-    const all = [
-      PALETTE.background,
-      PALETTE.land,
-      PALETTE.water,
-      PALETTE.mountain,
-      PALETTE.tree,
-      PALETTE.road,
-      PALETTE.roadEdge,
-      PALETTE.uiText,
-      ...PALETTE.groups,
-    ]
+    // Read off `Object.entries` rather than written out, because the
+    // hand-written list is the copy nobody extends: adding `overcrowd` and
+    // `scrim` to the palette while leaving a nine-name literal here would have
+    // shipped a ring in a group colour with this test still green.
+    const all = Object.entries(PALETTE)
+      .filter(([name]) => name !== 'groups')
+      .map(([, value]) => value as string)
+      .concat(PALETTE.groups)
+    expect(all.length, 'ten scalar entries plus six groups').toBe(16)
     expect(new Set(all).size).toBe(all.length)
+    // Non-vacuous on the two new entries specifically, since `overcrowd` is an
+    // alarm red and the six groups include a deep red.
+    expect(PALETTE.groups).not.toContain(PALETTE.overcrowd)
+    expect(all).toContain(PALETTE.overcrowd)
+    expect(all).toContain(PALETTE.scrim)
   })
 
   it('separates the group colours on LIGHTNESS as well as hue', () => {
