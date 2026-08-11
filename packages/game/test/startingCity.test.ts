@@ -1677,12 +1677,19 @@ describe('the survivability gate the default board is flipped behind', () => {
     const greedy = gateRun('greedy')
     // Measured: 747 trips, 11 cars in flight at once, 9 of them from spawned
     // houses, 25 houses and 12 destinations by week 6.
-    expect(greedy.trips, 'completed trips').toBeGreaterThanOrEqual(400)
-    expect(greedy.maxInFlight, 'peak cars in motion — M1d measured 1').toBeGreaterThanOrEqual(6)
+    //
+    // **Ordered narrowest-first, deliberately.** `trips` moves for almost any
+    // regression in the sim, so a broad bound above a specific one would make
+    // the specific one dead and hand the maintainer the wrong diagnosis —
+    // measured: with the house spawner disabled, this case reported *"completed
+    // trips: expected 339 to be >= 400"* while the assertion that actually
+    // names the cause sat below it and never ran.
     expect(
       greedy.maxSpawnedInFlight,
       'peak cars in motion from SPAWNER-placed houses — Task 5 measured 1',
     ).toBeGreaterThanOrEqual(4)
+    expect(greedy.maxInFlight, 'peak cars in motion — M1d measured 1').toBeGreaterThanOrEqual(6)
+    expect(greedy.trips, 'completed trips').toBeGreaterThanOrEqual(400)
 
     // **The discrimination, on the same board and the same boot.** Every
     // threshold above is satisfiable by a busier fixture; none of them is
@@ -1706,10 +1713,19 @@ describe('the survivability gate the default board is flipped behind', () => {
     // **`trips / fires`, and the two arms say different things on purpose.**
     //
     // The gated half is the FIXED network: a player who draws the 20-tile
-    // opening and then stops. Demand ramps (`pinPeriodForWeek` shortens every
-    // week) against a road network that does not, and one number says so.
-    // Measured: 32/38 = 0.842 in week 0, 39/55 = 0.709 in week 1 — the same
-    // shape the demo board's corridor gives (0.82 falling to 0.39 by week 19).
+    // opening and then stops. Demand grows against a road network that does
+    // not, and one number says so. Measured: 32/38 = 0.842 in week 0, 39/55 =
+    // 0.709 in week 1 — the same shape the demo board's corridor gives (0.82
+    // falling to 0.39 by week 19).
+    //
+    // **Which term of "demand grows" this actually catches was measured rather
+    // than assumed, and it is not the one the sentence above would suggest.**
+    // Freezing the weekly ramp (`pinPeriodForWeek(0)`) leaves this case GREEN;
+    // freezing the destination spawner takes week 1 to **1.05** and turns it
+    // red. So the fall is dominated by the rotation slots each new destination
+    // adds, with §5.3's ramp as a second, smaller term — and the detector this
+    // case really owns is *"demand outgrew a network the player stopped
+    // growing"*, whichever half of demand did the growing.
     const opening = gateRun('opening')
     expect(opening.weeks.length, 'the opening arm must reach a second week').toBeGreaterThanOrEqual(2)
     const w0 = opening.weeks[0] as GateWeek
