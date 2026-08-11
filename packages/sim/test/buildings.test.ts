@@ -568,6 +568,78 @@ describe('destination placement validity', () => {
   })
 
   /**
+   * **The carpark's participation in EVERY cell pass, as a class rather than
+   * one case at a time.**
+   *
+   * `canPlaceDestination` walks seven cells four times over — terrain, tree,
+   * road, house-overlap — and the carpark is the seventh cell in all four. The
+   * retired implementation got that for free: `allSevenCells` put the carpark
+   * at index 6 and every pass was one loop over the array. The rewrite gives
+   * each pass its own explicit `carpark` line, which is faster and clearer and
+   * means **four separate lines can now be deleted independently**.
+   *
+   * This task's mutation battery deleted all four. `road` was killed by the
+   * pre-existing test two blocks up; `building` by the test above, which this
+   * task added. **`terrain` and `tree` both SURVIVED all 1,663 tests**, and
+   * neither is a wrong reason code — the placement is accepted, and a
+   * destination is built with its carpark on open water or under a standing
+   * tree. Note that `passable` is 1 for TREE, so the terrain pass cannot stand
+   * in for the tree pass or vice versa.
+   *
+   * Deliberately overlapping with the two single-case tests, and that is the
+   * point: the catalogue's "when you fix an instance, name the class and search
+   * for its siblings". The single cases document their own defect history; this
+   * one fails if a FIFTH pass is ever added without carpark coverage. Do not
+   * delete either on the strength of the other.
+   */
+  it('checks the CARPARK cell in every pass, not only the footprint — terrain, tree, road, building', () => {
+    const origin = destCellFor(3, 1) // N: footprint x{3,4} y{1,2,3}
+    const cp = destCellFor(3, 0)
+    expect(carparkCell(origin, ORIENTATION_N, W, H), 'the fixture geometry').toBe(cp)
+    const holed = (id: string, ch: string) => {
+      const out: string[] = ROWS.map((r) => r as string)
+      out[0] = (out[0] as string).slice(0, 3) + ch + (out[0] as string).slice(4)
+      const map = parseMap(id, out, 50, 40, 16, 5)
+      const world = createWorld(map)
+      return { world, state: createState('s', map) }
+    }
+
+    const water = holed('carpark-pass-terrain', '~')
+    expect(water.world.passable[cp], 'the carpark really is impassable').toBe(0)
+    expect(canPlaceDestination(water.state, water.world, origin, ORIENTATION_N)).toEqual({
+      ok: false,
+      reason: 'terrain',
+    })
+
+    const tree = holed('carpark-pass-tree', 'T')
+    // The discriminator against "the terrain pass already covers it": a TREE
+    // cell is passable, so `world.passable[carpark]` is 1 here and only the
+    // tree pass can reject this.
+    expect(tree.world.passable[cp], 'a tree cell is PASSABLE').toBe(1)
+    expect(hasTree(tree.state, tree.world, cp)).toBe(true)
+    expect(canPlaceDestination(tree.state, tree.world, origin, ORIENTATION_N)).toEqual({ ok: false, reason: 'tree' })
+
+    const road = fixture('carpark-pass-road')
+    const roadState = createState('s', road.map)
+    expect(placeRoad(roadState, road.world, cp, cp + 1)).toBe(true)
+    expect(canPlaceDestination(roadState, road.world, origin, ORIENTATION_N)).toEqual({ ok: false, reason: 'road' })
+
+    const house = fixture('carpark-pass-building')
+    const houseState = createState('s', house.map)
+    expect(placeHouse(houseState, house.world, cp, 0)).toBe(true)
+    expect(canPlaceDestination(houseState, house.world, origin, ORIENTATION_N)).toEqual({
+      ok: false,
+      reason: 'building',
+    })
+
+    // Vacuity: with the carpark clear and nothing else changed, the SAME origin
+    // is accepted — so each rejection above is the carpark cell talking and not
+    // some property of the fixture.
+    const clean = fixture('carpark-pass-control')
+    expect(canPlaceDestination(createState('s', clean.map), clean.world, origin, ORIENTATION_N)).toEqual({ ok: true })
+  })
+
+  /**
    * **The rejection ORDER, pinned where two reasons hold at once — which is the
    * only place it is observable.**
    *
