@@ -67,7 +67,7 @@ import {
   seedDemoLayout,
 } from '../src/demoLayout'
 import { seedStartingCity } from '../src/startingCity'
-import { DEMO_DEATH_TICK } from './deathTicks'
+import { CITY_DEATH_TICK, DEMO_DEATH_TICK } from './deathTicks'
 import { NO_CROSSING, carAheadOf, longestQueue, travelDir } from '../src/queueProbe'
 
 /**
@@ -1339,7 +1339,9 @@ describe('no road a player can draw saves the demo board', () => {
    * worse than less, and the best buys 518 ticks — 17 seconds, 7.7 %.** Nothing
    * survives. Compare the starting city on the same instrument: five tiles
    * remove its death entirely, and a player who keeps connecting reaches 31,456
-   * against 5,580 — 4.6x, not 1.077x.
+   * against 5,580 — **5.64x, not 1.077x**. (4.6 is the EXCESS and 1.077 is a
+   * RATIO; both sides of a comparison have to be the same quantity. See
+   * `demoLayout.ts`. Asserted below rather than left as prose.)
    */
   const CROSSLINK_ROWS: readonly number[] = [11, 14, 17, 20, 23]
   const crosslink = (y: number): number[] => Array.from({ length: 8 }, (_, i) => cellAt(8 + i, y))
@@ -1424,6 +1426,13 @@ describe('no road a player can draw saves the demo board', () => {
     expect(best, "the demo board's ceiling is below the starting city's OPENING alone").toBeLessThan(
       8661,
     )
+
+    // **Both sides of the headline comparison, as RATIOS, so the units cannot
+    // drift apart again — M1e's closing sweep.** The comment above quoted 5.64x
+    // for the city and 1.077x for this board; the first of those read 4.6x for
+    // three commits, which is the same measurement expressed as an excess.
+    expect(best / control.death, "this board's own best trace, as a ratio").toBeCloseTo(1.077, 3)
+    expect(31456 / CITY_DEATH_TICK, "and the starting city's greedy arm").toBeCloseTo(5.637, 3)
   })
 
   it('the spawner cannot add anything here, which is why no trace can help', () => {

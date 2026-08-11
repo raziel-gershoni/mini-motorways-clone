@@ -127,11 +127,27 @@ export interface Loop {
    * tap on the HUD clock. Until M1e Task 8 that tap resumed rAF on a dead sim:
    * the frame driver kept snapshotting and drawing at 30 Hz, `frame.paused`
    * flipped false so the pause bars vanished, and `HitRegion.GRID` re-opened —
-   * it is refused *while paused* (`REFUSED_PAUSED`) and by nothing else — so
-   * the player drew roads that never appeared, spent no tiles and got no
-   * message. `advance` guards on `!wasOver`, so `onGameOver` never re-fires and
-   * nothing re-pauses. Guarding the one caller that exists is a guard that
+   * board input was refused *while paused* (`REFUSED_PAUSED`) and by nothing
+   * else — so the player drew roads that never appeared, spent no tiles and got
+   * no message. `advance` guards on `!wasOver`, so `onGameOver` never re-fires
+   * and nothing re-pauses. Guarding the one caller that exists is a guard that
    * re-opens with the next one, so this is a property of the loop.
+   *
+   * **"and by nothing else" was true when this was written and is not now —
+   * M1e's closing sweep measured what is left of the argument.** Task 9 made
+   * `if (host.gameOver()) { host.restart() }` the FIRST statement of `down()`,
+   * and `gameOver` is `over`, which only `end()` sets. So a tap on a dead board
+   * is `RESTART_REQUESTED` (9) and never `REFUSED_PAUSED` (7), and the GRID no
+   * longer depends on stickiness at all: a resume that got past this guard would
+   * still find `over` true and still be sent to a restart.
+   *
+   * **What stickiness still owns is the other two halves, and neither has
+   * another guard.** A HUD-clock tap that cleared `paused` would put the drain
+   * back on a frozen buffer at 30 Hz, and would clear `frame.paused`, so the
+   * pause bars vanish and the shutdown scrim is drawn over a board that reads as
+   * live. Keep it sticky for those, not for the grid — and note that this is the
+   * catalogue's *independently sufficient structures* shape arriving by accident:
+   * the grid now has two guards, so neither can have a detector of its own.
    *
    * **Note what this does NOT do: rAF is never cancelled.** `wireGame`'s
    * `onFrame` re-arms `requestAnimationFrame` unconditionally and pause is a

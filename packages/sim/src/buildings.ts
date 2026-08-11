@@ -339,12 +339,25 @@ export type PlaceCheck = { readonly ok: true } | { readonly ok: false; readonly 
  * Every `canPlaceDestination`/`canPlaceHouse` outcome is a module-scope frozen
  * singleton, exactly as `canPlaceRoad`'s are (`roads.ts:303-319`) and for the
  * same measured reason: the object literal these functions used to return
- * ESCAPES — both are far too large for V8 to inline, so scalar replacement
- * cannot delete it — and M1d measured the identical literal in `canPlaceRoad`
- * at 40.6-44.3 B per call, which is why that function carried a `'roads.ts':
- * 128` known-violation budget until it was fixed this way. **Measured here
- * before the fix: `canPlaceHouse` 40.0 B/call**, the same literal at the same
- * price, on the demo board.
+ * ESCAPES, so scalar replacement cannot delete it. M1d measured the identical
+ * literal in `canPlaceRoad` at 40.6-44.3 B per call, which is why that function
+ * carried a `'roads.ts': 128` known-violation budget until it was fixed this
+ * way. **Measured here before the fix: `canPlaceHouse` 40.0 B/call**, the same
+ * literal at the same price, on the demo board.
+ *
+ * **This paragraph used to attribute the escape to "both are far too large for
+ * V8 to inline", and that is HALF FALSE — M1e's closing sweep measured it.**
+ * Under `--trace-turbo-inlining`, hot-looping both functions three times:
+ * `canPlaceDestination` is refused every time, *"exceeds bytecode limit"*, so
+ * the claim holds for it; **`canPlaceHouse` is INLINED every time**, at a
+ * bytecode size of 175. Its literal escaped anyway — 40.0 B/call is the direct
+ * evidence, and inlining is a precondition for scalar replacement rather than a
+ * guarantee of it — so the fix and the figure are both right and only the
+ * reason was wrong. Two lessons, both already in this repo's catalogue: **a
+ * claim about the TOOLCHAIN needs the same scrutiny as a claim about the code**,
+ * and it is more dangerous here because the measurement it explains is correct,
+ * so nothing ever goes red to question it. Do not restore the old sentence, and
+ * do not weaken these singletons on the strength of the half that is true.
  *
  * M1e Task 5 puts BOTH of these on a per-tick path at up to
  * `SPAWN_CANDIDATE_LIMIT * ORIENTATION_COUNT` = 96 calls per destination

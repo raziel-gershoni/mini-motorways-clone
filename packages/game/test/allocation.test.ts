@@ -1561,12 +1561,23 @@ function buildDenseTripRig(seed: string): DenseRig {
   // nothing lays another road, so it is never a flow-field source and receives
   // zero arrivals. `destPins[0]` is held at 255 here, so every scheduled pin
   // past the hard cap OVERFLOWS onto the first spawned destination with room.
-  // Measured: it reaches the square trigger cap at tick **3,833**, and 3,390
-  // ticks later — tick **7,223** — its meter completes and §5.8 freezes the
-  // sim. Window 3 of the per-trip profile runs to tick 7,920, so **698 of its
-  // 2,600 ticks were being measured over a dead board**, and every guard in
-  // this file survived it: `completions > 400` still passed on the 475 the live
-  // part produced.
+  // Measured: it reaches the square trigger cap on `H_TICK` **3,834**, and the
+  // **3,390th** at-cap tick is `H_TICK` **7,223**, where its meter completes and
+  // §5.8 freezes the sim. Window 3 of the per-trip profile ends 698 ticks later,
+  // so **698 of its 2,600 ticks were being measured over a dead board**, and
+  // every guard in this file survived it: `completions > 400` still passed on
+  // the 475 the live part produced.
+  //
+  // **The cap tick read 3,833 here until M1e's closing sweep, and the error was
+  // a change of units mid-sentence.** This rig's setup `step` costs one tick, so
+  // drive index `i` is `H_TICK` `i + 1`; 3,833 is the drive index and 7,223 is
+  // the `H_TICK`, and *"3,390 ticks later"* joined them by an off-by-one that
+  // cancelled. The repo's convention is `startingCity.test.ts`'s — the cap tick
+  // IS the first at-cap tick, so the death tick is `capTick + 3,389` — and on
+  // that convention both numbers here are `H_TICK`s: `7,223 - 3,834 + 1 = 3,390`.
+  // Re-measured on a faithful replica of this rig with `maxDestinations` put
+  // back to 4: death `H_TICK` 7,223 reproduces exactly, and the first at-cap
+  // tick is 3,834. (698 is unaffected — the offset cancels in a difference.)
   //
   // Capping the slots removes the cause rather than shortening the window. The
   // alternative measured at a 203-tick margin — 2.8 %, tighter than anything
@@ -1578,7 +1589,7 @@ function buildDenseTripRig(seed: string): DenseRig {
   // is not a coincidence to be explained away: both boards pin a destination at
   // 255, both overflow onto the spawner's first placement, and the spawn
   // schedule is a global constant rather than a map property, so both reach the
-  // trigger cap on tick 3,833.
+  // trigger cap on `H_TICK` 3,834.
   const map = parseMap('dense-trip-rig', rows, 9999, 16, 1, 2)
   const world = createWorld(map)
   const state = createState(seed, map)

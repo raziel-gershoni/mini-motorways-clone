@@ -380,11 +380,41 @@ export function createGame(deps: GameDeps): Game {
   //
   // `advance` reads `wasOver` before the step, deliberately — that is what stops
   // it re-announcing 30 times a second on a frozen buffer. The cost is that a
-  // state which was terminal before the first `advance` never announces at all:
-  // `loop.paused` stays false, and `pointer.ts` refuses board input *while
-  // paused and by nothing else*, so the player draws roads that never appear,
-  // spends no tiles and gets no message. That is exactly the failure `end()`'s
-  // own doc comment exists to prevent, reached through a different door.
+  // state which was terminal before the first `advance` never announces at all,
+  // so **without this line the board is open and the player draws roads that
+  // never appear, spends no tiles and gets no message.** That is exactly the
+  // failure `end()`'s own doc comment exists to prevent, reached through a
+  // different door.
+  //
+  // ---------------------------------------------------------------------------
+  // **THIS LINE IS LOAD-BEARING, AND IT ARMS TWO GUARDS RATHER THAN ONE — M1e's
+  // closing sweep measured it after a review argued the opposite.**
+  // ---------------------------------------------------------------------------
+  //
+  // The old wording said `pointer.ts` refuses board input *"while paused and by
+  // nothing else"*. That absolute is **false since M1e Task 9** — `down()`'s
+  // FIRST statement is `if (host.gameOver()) { host.restart() }` — and a review
+  // reasonably concluded from its falsity that the argument above had died with
+  // it. **It has not, and the reason is the wiring:** `gameOver` is
+  // `() => loop.over`, and `over` is set by `end()` and by nothing else. So
+  // `end()` is the single switch that arms BOTH refusals, and removing it
+  // disarms both at once.
+  //
+  // Measured, by deleting this line and booting a rig whose warm start already
+  // killed it:
+  //
+  // ```
+  //   with    loop.over=true   paused=true    down -> RESTART_REQUESTED (9)
+  //                                           restarts 1   queued 0
+  //   without loop.over=false  paused=false   down -> DRAG_START (2)
+  //                                           move -> DRAW (3)
+  //                                           restarts 0   QUEUED 2
+  // ```
+  //
+  // Two road actions reached the sim on a dead board — the failure named above,
+  // reproduced end to end. And the second consequence is worse than the first:
+  // with the line gone the player has **no way out**, because Task 9's restart
+  // is reached through the same `gameOver()` that this line is what makes true.
   //
   // **Unreachable from the two shipped layouts today** — their warm starts are
   // 1,200 and 258 ticks against deaths at 6,703 and 5,580, and `layouts.test.ts`

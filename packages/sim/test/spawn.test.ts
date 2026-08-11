@@ -406,10 +406,29 @@ describe('destinationFitsSpawnZone', () => {
     // reachable — drop `REVEALED_X0` to 1 and this test's own `disagree` count
     // becomes non-zero, which is the moment `destinationFitsSpawnZone`'s
     // coordinate form starts earning its keep.
+    //
+    // **The ranges are `spawn.ts`'s stated enumeration, exactly, and M1e's
+    // closing sweep is why.** This loop used to run `w` in [6, 26] and `h` in
+    // [10, 34] step 3 — 46,284 distinct cases — under a comment claiming
+    // 430,122, and the only size assertion was `checked > 20000`, which a range
+    // could shrink by three quarters without failing. Now the loop IS the
+    // enumeration the comment quotes and the count is asserted exactly, so the
+    // two cannot drift apart again. Cost of the widening, measured: 57 ms to
+    // 488 ms.
+    //
+    // **`wrapped` is the vacuity guard, and it is the one this test was missing.**
+    // The whole argument is about a composed index running off the right edge of
+    // a row; a range in which `x1 >= w` never happens produces "the two forms
+    // agree" as a statement about nothing. Measured, the wrap is constructible
+    // on exactly the fifteen widths 6-20 (`x1 <= x0 + 2` and `x0 < w`, so
+    // `x1 >= w` needs `w <= 20`) and on no wider board, which is also why the
+    // widths the old sweep missed — 27-40 — were never the blind spot.
     let checked = 0
     let disagree = 0
-    for (let w = 6; w <= 26; w++) {
-      for (let h = 10; h <= 34; h += 3) {
+    let wrapped = 0
+    const wrapWidths = new Set<number>()
+    for (let w = 6; w <= 40; w++) {
+      for (let h = 10; h <= 44; h++) {
         const world = createWorld(testMap(w, h))
         for (let zi = 0; zi < spawnZoneCells(world); zi++) {
           const cell = spawnZoneCellAt(zi, world)
@@ -420,6 +439,10 @@ describe('destinationFitsSpawnZone', () => {
             const fh = o === ORIENTATION_E || o === ORIENTATION_W ? 2 : 3
             const x1 = x0 + fw - 1
             const y1 = y0 + fh - 1
+            if (x1 >= w) {
+              wrapped++
+              wrapWidths.add(w)
+            }
             const naive = inSpawnZone(y1 * w + x1, world)
             const coord =
               x1 >= REVEALED_X0 &&
@@ -432,15 +455,26 @@ describe('destinationFitsSpawnZone', () => {
         }
       }
     }
-    expect(checked, 'the sweep must actually sweep something').toBeGreaterThan(20000)
+    // **Exactly, not `> 20000`.** 430,122 distinct (w, h, zone cell, footprint
+    // shape) cases, each reached twice because two orientations produce each
+    // shape. This is the number `spawn.ts`'s module comment quotes, and it is
+    // asserted here so the comment cannot outlive the sweep under it.
+    expect(checked, "the sweep must be spawn.ts's stated enumeration, exactly").toBe(430122 * 2)
     expect(disagree, 'the composed and coordinate forms must agree on every reachable case').toBe(0)
+    // Vacuity: a sweep that never builds a right-edge wrap cannot say anything
+    // about a right-edge wrap, however many cases it counts.
+    expect(wrapped, 'no case in the sweep actually wraps — the agreement is vacuous').toBeGreaterThan(0)
+    expect(
+      [...wrapWidths].sort((a, b) => a - b),
+      'the wrap is constructible on exactly these widths and no wider board',
+    ).toEqual([6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20])
     // The property that MAKES them agree, stated separately so a reader does not
     // have to rediscover the arithmetic: the clipped zone is a subset of the
     // board on both axes, on every shape above.
-    for (let w = 6; w <= 26; w++) {
+    for (let w = 6; w <= 40; w++) {
       expect(REVEALED_X0 + spawnZoneW(w), `zone right edge on w=${w}`).toBeLessThanOrEqual(w)
     }
-    for (let h = 10; h <= 34; h++) {
+    for (let h = 10; h <= 44; h++) {
       expect(REVEALED_Y0 + spawnZoneH(h), `zone bottom edge on h=${h}`).toBeLessThanOrEqual(h)
     }
     // ...and the overhang a footprint can add is 2, strictly below `REVEALED_X0`,
@@ -559,8 +593,11 @@ describe('the spawn phase inside step', () => {
 
   it('a destination is INELIGIBLE on its own spawn tick, which is why 4 <-> 5 is inert', () => {
     // **This test was written as "the detector for transposing phases 4 and 5"
-    // and it is not one — the transposition scores 0 detectors across the whole
-    // 1,693-test suite, measured.** Rather than rename it and move on, it now
+    // and it is not one — the transposition scores 0 detectors, measured three
+    // times at three suite sizes: 1,693 when Task 5 first ran it, 1,843 in Task
+    // 12's complete pairwise sweep, and 1,843 again in M1e's closing sweep,
+    // which re-applied it alone over the canonical invocation.** Rather than
+    // rename it and move on, it now
     // pins the property that MAKES the pair commute, so the day that property
     // stops holding this is the test that says so.
     //

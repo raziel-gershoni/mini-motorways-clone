@@ -2884,13 +2884,20 @@ describe('the demo board stops dead, and stays a still image', () => {
     // ---------------------------------------------------------------------
     // **And the whole reason `end()` is sticky: the grid is shut.**
     // ---------------------------------------------------------------------
-    // `pointer.ts` refuses board input while paused and by nothing else, so a
-    // resume would re-open `HitRegion.GRID` on a dead sim and the player would
-    // draw roads that never appear, spend no tiles and get no message. This is
-    // the end-to-end consequence of `loop.end()` rather than a restatement of
-    // it: a real `pointerdown` on a real board cell, through the real pointer
-    // machine, after a real shutdown — and it is refused for the RIGHT reason,
-    // named by the outcome code rather than inferred from an empty queue.
+    // `loop.end()` shuts the grid, and this is its end-to-end consequence rather
+    // than a restatement of it: a real `pointerdown` on a real board cell,
+    // through the real pointer machine, after a real shutdown — refused for the
+    // RIGHT reason, named by the outcome code rather than inferred from an empty
+    // queue.
+    //
+    // **This comment said "refuses board input while paused and by nothing
+    // else" until M1e's closing sweep, and the test three lines down had been
+    // contradicting it since Task 9.** `down()`'s first statement is the
+    // `gameOver` arm, so the outcome here is `RESTART_REQUESTED` (9) and
+    // `REFUSED_PAUSED` (7) is unreachable from a dead board — which is exactly
+    // what the assertion below has been checking. Both arms hang off `end()`
+    // (`gameOver` is `loop.over`), so the sentence's conclusion survives its
+    // premise; see `loop.ts`'s `end` for which half stickiness still owns.
     // ---------------------------------------------------------------------
     // **The grid is shut, and there is now a way out — M1e Task 9.**
     // ---------------------------------------------------------------------
@@ -3194,11 +3201,21 @@ describe('the demo board stops dead, and stays a still image', () => {
   it('a game whose state is ALREADY over at boot ends its loop too', () => {
     // **`onGameOver` fires on an EDGE, and a state that was terminal before the
     // first `advance` has no edge to fire on.** Without `createGame`'s own
-    // `if (isGameOver(state)) loop.end()`, `loop.paused` stays false — and
-    // `pointer.ts` refuses board input while paused and by NOTHING ELSE, so the
-    // player draws roads that never appear, spends no tiles and gets no
-    // message. The same failure `end()` exists to prevent, through a different
-    // door.
+    // `if (isGameOver(state)) loop.end()` neither `loop.paused` nor `loop.over`
+    // is ever set, so the player draws roads that never appear, spends no tiles
+    // and gets no message. The same failure `end()` exists to prevent, through
+    // a different door.
+    //
+    // **Both of `down()`'s refusals hang off that one line, which M1e's closing
+    // sweep measured by deleting it.** `pointer.ts` refuses board input while
+    // paused, and since Task 9 it intercepts `gameOver` FIRST — but `gameOver`
+    // is `loop.over`, and `over` is set by `end()` and by nothing else. With
+    // the line gone: `over` false, `paused` false, `down` returns `DRAG_START`,
+    // `move` returns `DRAW`, and **two road actions reach the queue** on a dead
+    // board, with no restart offered. This comment named only the `paused` arm
+    // until the sweep; the conclusion was right and the mechanism was half
+    // stated, which is the shape that let a review read the whole argument as
+    // dead.
     //
     // Unreachable from the shipped layouts — `layouts.test.ts` drives every
     // registered layout's own warm start and asserts it survives it — and it
@@ -3851,10 +3868,25 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     //
     //   The k-th at-cap tick is 2,190 + k, so k = 3,390 lands on **5,580**.
     //
-    // **The lower-indexed square D0 would die at 6,357, and saying which of the
+    // **The lower-indexed square D0 would die at 6,330, and saying which of the
     // two dies is what makes this a derivation rather than a recorded number.**
-    // D0's pins are at 378, 896, 1414, 1932, 2450 and 2968; its square trigger
-    // cap is 6, so its first at-cap tick is 2,968 and 2,967 + 3,390 = 6,357.
+    // D0 reaches its square trigger cap of 6 on tick **2,941**, and the k-th
+    // at-cap tick is `2,940 + k`, so `k = 3,390` lands on 6,330 — the same
+    // arithmetic as D2's, one destination over. Measured on this tree by
+    // recording the first tick `destPins[0] >= PIN_CAP_SQUARE_TIMER`.
+    //
+    // **This comment said 6,357 until M1e's closing sweep, and 6,357 is the
+    // PRE-SPAWNER number.** Its derivation — pins at 378, 896, 1414, 1932, 2450
+    // and 2968, first at-cap tick 2,968, `2,967 + 3,390` — is the one that holds
+    // when `H_DEST_SPAWN_TIMER` is parked, and `startingCity.test.ts` reproduces
+    // it exactly that way. On the live tree Task 5's spawner adds a THIRD
+    // colour-0 destination, which changes `slotCount(0)` and moves D0's cap tick
+    // from 2,968 to 2,941. Note where the contradiction sat: eight lines below,
+    // this same block says *"this run ends with five, not the three it was
+    // seeded with"* — the spawner it had already accounted for is the spawner
+    // the 6,357 assumed away. `da63dc2` corrected the figure once; the final
+    // commit reintroduced it here in a new comment.
+    //
     // **The higher cap does not save the circle**: 8 pins at one per 259 ticks
     // arrive sooner than 6 at one per 518, and §5.8's dial is the ratio of the
     // two, not the cap alone. That asymmetry is the one thing M1e discovered

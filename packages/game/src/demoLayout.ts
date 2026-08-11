@@ -59,7 +59,12 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  * run; and every destination is already on a corridor, so a road is a lever
  * with nothing on the end of it. Compare the starting city on the same
  * instrument: five tiles remove its death entirely and a player who keeps
- * connecting reaches 31,456 against 5,580 — 4.6x, not 1.077x. **A board a
+ * connecting reaches 31,456 against 5,580 — **5.64x, not 1.077x**. (It read
+ * 4.6x until M1e's closing sweep. 4.6 is the EXCESS, `31,456 / 5,580 - 1`, set
+ * against 1.077 which is a plain RATIO — two different quantities compared as
+ * if they were one, and the comparison is the whole point of the sentence.
+ * 31,456/5,580 = 5.637; the demo board's own best is 7,221/6,703 = 1.077.) **A
+ * board a
  * player cannot affect is a demonstration, not a game** — which is exactly what
  * this file is for.
  *

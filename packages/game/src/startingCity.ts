@@ -99,7 +99,17 @@ import {
  *     player that column 17 is the move. Task 9's overcrowd ring says *which*
  *     destination is dying and its shutdown line says *connect it*, and both
  *     arrive **on the board, after the fact** rather than before it: on the
- *     no-input default the ring first appears at 1:56 and the run ends at 3:06.
+ *     no-input default the ring first appears at **1:19** (tick 2,369) and the
+ *     run ends at 3:06 (tick 5,580). Both are `tick / 30` from tick 0; on a
+ *     stopwatch started when the board appears, subtract the 258-tick warm
+ *     start and read 1:10 and 2:57. **This said 1:56 until M1e's closing
+ *     sweep, and 1:56 is the DEMO board's ring** (tick 3,492) — a figure from
+ *     the other layout, on a line about this one. Measured here by stepping the
+ *     no-input city and taking the first tick `frame.destOvercrowd[d]` is
+ *     non-zero, which is `canvas.ts`'s own draw condition: D2 reaches its
+ *     trigger cap at 2,191, and the meter needs 178 more ticks to scale to 1
+ *     against `OVERCROWD_FULL_MILLITICKS`, so the cap tick is not the visible
+ *     tick and quoting it as one overstates the warning by six seconds.
  *     A player who has not read this comment gets a warning about the right
  *     destination and no hint about direction. This is the same open question
  *     Task 9 left and Task 10 restated; it is a design gap, not a bug, and it

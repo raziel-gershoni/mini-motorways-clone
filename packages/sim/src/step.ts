@@ -196,10 +196,20 @@ export interface TickInputs {
  * What ends that is a write, not a distance — see the scheduled failure below.
  *
  * **And the insertion ADDED a second checked no-op rather than only removing
- * one. `4 <-> 5` — spawn versus demand — is also 0-detector, measured over the
- * whole 1,693-test suite, and Task 5's brief predicted it would have a
- * detector.** Of the two new adjacent pairs, only `3 <-> 4` (inputs versus
- * spawn) has one: `spawn.test.ts`'s paving test, 1 detector.
+ * one. `4 <-> 5` — spawn versus demand — is also 0-detector, and Task 5's brief
+ * predicted it would have a detector.** Of the two new adjacent pairs, only
+ * `3 <-> 4` (inputs versus spawn) has one: `spawn.test.ts`'s paving test, 1
+ * detector.
+ *
+ * **Three measurements of `4 <-> 5`, at three suite sizes, all zero.** Task 5
+ * measured it over the suite as it stood at **1,693** tests; Task 12's complete
+ * pairwise sweep re-ran it over **1,843** against four fresh baselines (the
+ * table below); and M1e's closing sweep re-applied the transposition alone over
+ * the canonical invocation at **1,843** — green, five packages, no crash-screen
+ * match, and the collection count unchanged, so the mutant ran. The suite size
+ * is quoted because a bare *"the whole suite"* in a durable comment reads as
+ * *"the suite you have"*, and this one has grown by 150 tests since the
+ * sentence was written.
  *
  * **`4 <-> 5` has no business commuting and does anyway, for TWO reasons, both
  * needed.** Spawn writes `destCell`, `destMeta`, `destSpawnTick`,

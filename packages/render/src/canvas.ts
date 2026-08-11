@@ -453,7 +453,7 @@ function tilesText(tilesLeft: number): string {
  * that is the opposite of what happens: on the demo board the destination that
  * ends the run has **zero draining frames** — its meter climbs from tick 3,492
  * to the end and never once falls, i.e. it is never served at all — and on the
- * starting city all four rings behave the same way. A player who reads
+ * starting city **all five** rings behave the same way. A player who reads
  * "overcrowded" concludes the roads are congested and draws fewer of them. The
  * sharpest evidence that this matters: the 15-tile column-8 road that
  * `startingCity.ts` calls *"the natural first road the player draws"* buys
@@ -465,8 +465,15 @@ function tilesText(tilesLeft: number): string {
  * - **`NO ROAD REACHES DESTINATION n`** when the destination's carpark carries
  *   no road bit. A car drives *onto* the carpark and the flow field relaxes over
  *   the road graph, so a bare carpark is a destination nothing can ever serve —
- *   which is the shape a spawned building has by construction, and the shape all
- *   four of the starting city's have. The remedy is literally a road.
+ *   which is the shape a spawned building has by construction, and the shape
+ *   **all five** of the starting city's have. The remedy is literally a road.
+ *   (Both counts in this comment read *"four"* until M1e's closing sweep.
+ *   Measured on the no-input city driven to its 5,580: **three** seeded, a
+ *   fourth spawned at tick 2,250 and a fifth at 4,500, so **five** at the death
+ *   tick — five bare carparks, five meters that climb and not one that ever
+ *   drains. *"Four"* is the count for the 2,250 ticks between those two spawns
+ *   and for no part of the run this comment is about; the spawner had been live
+ *   for thirty commits when the sentence was written.)
  * - **`DESTINATION n WENT UNSERVED`** otherwise. Not "overcrowded": the meter
  *   integrates time spent over pin capacity, so what it measures is demand that
  *   went unmet, in the congested case as much as in the abandoned one. This is

@@ -338,9 +338,29 @@ export function attemptHouseSpawn(state: GameState, world: WorldData, colour: nu
  * perfectly legal in-zone cell. **That guard is a no-op and the wrap cannot
  * reach the zone**: `x1 <= x0 + 2`, and `x0 < world.w`, so a wrapped `x1 - w`
  * is 0 or 1 — always below `REVEALED_X0` = 5, so `inSpawnZone` refuses it
- * anyway. Checked exhaustively rather than argued: over **430,122** cases
- * (`w` in [6, 40] x `h` in [10, 44] x every zone cell x both footprint shapes)
- * the composed-index form and the coordinate form agree on **all** of them.
+ * anyway. Checked exhaustively rather than argued, and **the sweep that says
+ * so is the one that ships**: `spawn.test.ts` runs `w` in [6, 40] x `h` in
+ * [10, 44] x every zone cell x both footprint shapes — **430,122 distinct
+ * cases, reached twice each through the four orientations, so 860,244 checks
+ * and 0 disagreements.** The test asserts that count exactly, so narrowing a
+ * range fails rather than quietly shrinking the claim this comment makes.
+ *
+ * **Until M1e's closing sweep the two did not match**, and this is the
+ * catalogue's *durable artefact that states more than the measurement* in its
+ * cheapest form: the comment quoted 430,122 while the shipped tripwire swept
+ * `w` in [6, 26] and `h` in [10, 34] step 3 — 46,284 distinct cases, a ninth of
+ * it — and asserted only `checked > 20000`, which cannot notice a range
+ * narrowing by any amount short of 78 %.
+ *
+ * **The wrap regime is `w <= 20` and nothing above it, which is the fact the
+ * argument above actually turns on.** `x1 <= x0 + 2` and `x0 < w`, so `x1 >= w`
+ * needs `w <= 20`; measured over the full sweep, the composed index wraps on
+ * exactly the fifteen widths 6-20 and on no wider board. The old sweep did
+ * cover all fifteen — the widths it missed, 27-40, are the ones where no wrap
+ * can be constructed at all — so the tripwire was never blind to the regime,
+ * only to the size of its own claim. The sweep counts the wraps it builds and
+ * asserts there is at least one, because *"the two forms agree"* over a range
+ * that constructs no wrap is a statement about nothing.
  *
  * So rather than keep a guard no test can distinguish from its own deletion,
  * this composes no index at all. The row-seam class is then *unconstructible*

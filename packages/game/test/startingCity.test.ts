@@ -47,6 +47,7 @@ import {
   PHASE_OUTBOUND,
   PHASE_RETURNING,
   H_DEST_COUNT,
+  H_DEST_SPAWN_TIMER,
   H_FAILED_DEST,
   H_HOUSE_COUNT,
   H_PINS_DROPPED,
@@ -322,10 +323,17 @@ const DEMO_TICK_BOUND = 800
  * D0's counterfactual death tick, measured on the same run, is **6,330** — it
  * reaches its cap of 6 on tick 2,941. **Note the figure the plan carried was
  * 6,357, and both are right for their own tree**: 6,357 is the pre-Task-5
- * number, reproduced exactly here by parking `H_DEST_SPAWN_TIMER`, and the
- * spawner's third colour-0 destination is what moves D0's cap tick from 2,968
- * to 2,941. **D2's own 2,191 is spawner-invariant**, so the death tick this
- * comment is about is the same either way.
+ * number, reproduced by parking `H_DEST_SPAWN_TIMER`, and the spawner's third
+ * colour-0 destination is what moves D0's cap tick from 2,968 to 2,941. **D2's
+ * own 2,191 is spawner-invariant**, so the death tick this comment is about is
+ * the same either way.
+ *
+ * **Both arms are asserted, in *"is not vacuous: WITHOUT the link"* below** —
+ * 2,941/6,330 live and 2,968/6,357 parked, on the same rig. Until M1e's closing
+ * sweep neither was: this comment claimed the parked arm was *"reproduced
+ * exactly here"* and no test in this file parked anything, and 6,357 was
+ * meanwhile sitting in `integration.test.ts` as the live figure, three commits
+ * after `da63dc2` retired it. A number nothing runs is a number that comes back.
  *
  * The two windows above are both far below it and this is the mechanical
  * statement of that, so a future task lengthening either one finds out here
@@ -850,14 +858,57 @@ describe('a full scored trip on the seeded city, driven through step()', () => {
     // whose meter never moves for some unrelated reason.
     const { state, world, fields, scratch } = seededRig()
     let d2Peak = 0
+    // D0's first at-cap tick, recorded on the same run — see below.
+    let d0CapTick = -1
     for (let t = 1; t <= CITY_DEATH_TICK; t++) {
       step(state, world, fields, scratch, NO_ACTIONS)
       d2Peak = Math.max(d2Peak, state.destOvercrowd[2] as number)
+      if (d0CapTick < 0 && (state.destPins[0] as number) >= PIN_CAP_SQUARE_TIMER) d0CapTick = t
     }
     expect(state.header[H_SCORE], 'no roads, so no trip is possible').toBe(0)
     expect(d2Peak, 'and D2 reaches the failure threshold exactly on CITY_DEATH_TICK').toBe(
       OVERCROWD_FAIL_MILLITICKS,
     )
+
+    // **D0's COUNTERFACTUAL, pinned rather than described — M1e's closing sweep.**
+    //
+    // Three files carry "the lower-indexed square D0 would die at N" as the
+    // sentence that makes 5,580 a derivation rather than a recorded number, and
+    // until now not one of them had an assertion under it. Two different values
+    // were in the tree at once: 6,330 here and in `startingCity.ts`, 6,357 in
+    // `integration.test.ts`. **6,357 is the number this board produces with the
+    // spawner parked** — D0's pins at 378, 896, 1414, 1932, 2450, 2968, first
+    // at-cap tick 2,968. On the live tree Task 5's spawner adds a third colour-0
+    // destination, `slotCount(0)` changes, and the cap tick moves to 2,941.
+    //
+    // A prose figure with no tripwire is how 6,357 came back three commits after
+    // it was corrected, so the derivation is asserted in both halves: the cap
+    // tick the run actually produces, and the meter arithmetic applied to it.
+    expect(d0CapTick, "D0 reaches its square trigger cap here, with the spawner live").toBe(2941)
+    expect(d0CapTick - 1 + 3390, "so D0's counterfactual death tick is 6,330").toBe(6330)
+
+    // **And the other arm, because "both are right for their own tree" was a
+    // claim with nothing under it.** This file's header comment said 6,357 was
+    // *"reproduced exactly here by parking `H_DEST_SPAWN_TIMER`"*; no test in
+    // this file parked anything. The parking was an ad-hoc measurement in
+    // `da63dc2` that never became an artefact — which is exactly why the number
+    // it retired could reappear elsewhere three commits later and look correct.
+    const parked = seededRig()
+    let parkedCapTick = -1
+    for (let t = 1; t <= CITY_DEATH_TICK; t++) {
+      parked.state.header[H_DEST_SPAWN_TIMER] = 1_000_000
+      step(parked.state, parked.world, parked.fields, parked.scratch, NO_ACTIONS)
+      if (parkedCapTick < 0 && (parked.state.destPins[0] as number) >= PIN_CAP_SQUARE_TIMER) {
+        parkedCapTick = t
+      }
+    }
+    expect(
+      parked.state.header[H_DEST_COUNT] as number,
+      'vacuity: parking the timer must really stop the destination spawner',
+    ).toBe(3)
+    expect(parkedCapTick, 'parked, D0 reaches its cap on the pre-spawner tick').toBe(2968)
+    expect(parkedCapTick - 1 + 3390, 'which is where 6,357 comes from').toBe(6357)
+    expect(d0CapTick, 'and the two trees genuinely disagree').not.toBe(parkedCapTick)
   })
 
   it('the DOCUMENTED first road is the wrong move: it saves D0 and D1 and D2 still dies', () => {
