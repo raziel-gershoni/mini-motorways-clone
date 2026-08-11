@@ -43,6 +43,7 @@ import {
   type GameState,
 } from '../src/state'
 import { spawnZoneCells } from '../src/spawn'
+import { isOverCapacity } from '../src/overcrowd'
 import { createWorld, type WorldData } from '../src/world'
 import { createFieldInputRanges } from '../src/regions'
 import { createScratch, createFlowFields, type FlowField, type Scratch } from '../src/scratch'
@@ -365,6 +366,17 @@ function assertNoSpawnHappened(r: Rig, tick: number, houses: number, dests: numb
   expect(r.state.header[H_DEST_COUNT], 'the spawner placed a destination').toBe(dests)
   expect(r.state.header[H_GAME_OVER]).toBe(0)
   expect(r.state.header[H_FAILED_DEST]).toBe(0)
+  // **The two overcrowd regions stopped being posture at M1e Task 7**, which
+  // wired `runOvercrowd` as phase 10: both are now written on every tick of
+  // every fixture that reaches this function. They are zero because these
+  // fixtures pre-pin at most **1** pin per destination, five short of
+  // `PIN_CAP_SQUARE_TIMER`, so the under-capacity branch runs every tick — and
+  // the loop over the live prefix below says the meter is not merely BETWEEN
+  // excursions, which is the other way an all-zero meter can happen.
+  // `H_GAME_OVER`/`H_FAILED_DEST` above are still posture; Task 8 owns them.
+  for (let d = 0; d < (r.state.header[H_DEST_COUNT] as number); d++) {
+    expect(isOverCapacity(r.state, d), `destination ${d} is over its timer cap`).toBe(false)
+  }
   expect(r.state.destOvercrowd.every((v) => v === 0)).toBe(true)
   expect(r.state.destOverTicks.every((v) => v === 0)).toBe(true)
 }
@@ -2453,12 +2465,26 @@ function assertDemandGoldenPosture(r: Rig, tick: number): void {
   // a clock one — the zone has no cells for a building to go in.
   expect(r.state.header[H_DEST_COUNT], 'the spawner placed a destination').toBe(1)
   expect(r.state.header[H_HOUSE_COUNT], 'the spawner placed a house').toBe(1)
-  // Task 3's two regions and Task 8's two header slots. **Labelled as posture,
-  // not as evidence**: nothing in the repo writes `destOvercrowd`,
-  // `destOverTicks`, `H_GAME_OVER` or `H_FAILED_DEST` yet — the overcrowd
-  // timer is a later task — so these four hold for a fixture that never
-  // reaches a cap AND for one that does. They become discriminating the day
-  // that task lands, and this golden will move then.
+  // Task 3's two regions and Task 8's two header slots.
+  //
+  // **Two of the four have stopped being posture, and Task 6's prediction about
+  // this golden was WRONG — measured, at Task 7.** That task wired
+  // `runOvercrowd` as phase 10, so `destOvercrowd` and `destOverTicks` are now
+  // written on EVERY tick of this run, 5,250 times each. Task 6 wrote "this
+  // golden will move then". **It did not**: `DG_GOLDEN` is unchanged at
+  // 894844668, because both regions are written to ZERO every tick.
+  //
+  // That is derivable rather than lucky, and the assertion in the test body is
+  // what turns it from posture into evidence: this board's peak `destPins` is
+  // **1**, against `PIN_CAP_SQUARE_TIMER` = 6. `isOverCapacity` is therefore
+  // false on all 5,250 ticks, the under-capacity branch runs every one of them,
+  // and it writes `destOverTicks = 0` and unwinds a meter already floored at 0.
+  // So these two lines now DISCRIMINATE — they fail for a broken trigger
+  // comparison, a lost ramp reset or an unfloored unwind — on a fixture that
+  // never intended to reach a cap.
+  //
+  // `H_GAME_OVER` and `H_FAILED_DEST` are still genuinely posture: nothing in
+  // the repo writes either, and Task 8 is the task that will.
   expect(r.state.header[H_GAME_OVER]).toBe(0)
   expect(r.state.header[H_FAILED_DEST]).toBe(0)
   expect(r.state.destOvercrowd.every((v) => v === 0)).toBe(true)
@@ -2572,6 +2598,18 @@ describe('golden replay: pins produced by the demand timer, across a week bounda
     // contributing to the digest.
     expect(r.state.ghostMask.every((b) => b === 0), 'this fixture erases nothing').toBe(true)
     expect(r.state.ghostCommitted.every((b) => b === 0)).toBe(true)
+
+    // **The premise the two overcrowd assertions in the posture rest on**, and
+    // the reason this golden did NOT move when M1e Task 7 wired phase 10.
+    // `pinsHeldAfterTick` is the sum over the live prefix, and this board has
+    // exactly one destination, so it IS `destPins[0]`. One is five short of the
+    // square trigger, so the meter's over-capacity branch is never taken.
+    const peakPins = Math.max(...obs.pinsHeldAfterTick)
+    expect(peakPins, 'the corridor never backs up at this cadence').toBe(1)
+    expect(peakPins, 'so the overcrowd trigger is never reached').toBeLessThan(
+      PIN_CAP_SQUARE_TIMER,
+    )
+    expect(r.state.header[H_DEST_COUNT], 'and the sum IS destPins[0], because there is one').toBe(1)
 
     assertDemandGoldenPosture(r, DG_RUN_TICKS)
 

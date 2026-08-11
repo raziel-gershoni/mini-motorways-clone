@@ -9,6 +9,8 @@ import {
   MAX_BLOCKED_TICKS,
   MAX_OVERCROWD_TIME_MS, OVERCROWD_RAMP, OVERCROWD_RETURN_MUL,
   ARRIVAL_KNOCKBACK_PCT, ARRIVAL_KNOCKBACK_MAX_MS, OVERCROWD_GRACE_MS,
+  OVERCROWD_FULL_MILLITICKS, OVERCROWD_GRACE_MILLITICKS, OVERCROWD_FAIL_MILLITICKS,
+  OVERCROWD_RAMP_FULL_TICKS, ARRIVAL_KNOCKBACK_MAX_MILLITICKS,
   PIN_CAP_SQUARE_TIMER, PIN_CAP_SQUARE_HARD, PIN_CAP_CIRCLE_TIMER, PIN_CAP_CIRCLE_HARD,
   GRID_W, GRID_H, GROUP_COUNT_DEFAULT, CARS_PER_HOUSE, MOTORWAY_CAP,
   REVEALED_X0, REVEALED_Y0, REVEALED_W, REVEALED_H,
@@ -221,6 +223,72 @@ describe('rule constants', () => {
     expect(ARRIVAL_KNOCKBACK_PCT).toBe(100)
     expect(ARRIVAL_KNOCKBACK_MAX_MS).toBe(3000)
     expect(OVERCROWD_GRACE_MS).toBe(2000)
+  })
+
+  it('converts every §5.8 constant to MILLI-TICKS exactly once, and the products are exact integers', () => {
+    // M1e Task 7. A tick is 1000/30 ms, so a millisecond-denominated meter
+    // cannot be exact; the meter is denominated in ticks x DENOM and the
+    // conversion happens here and nowhere else. The `ALL` registry above
+    // already covers integrality and non-negativity for every numeric export
+    // automatically — what it cannot see is the VALUES, which is what makes
+    // the spec's "~113 s" land on an integer.
+    expect(OVERCROWD_FULL_MILLITICKS).toBe(2700000)
+    expect(OVERCROWD_GRACE_MILLITICKS).toBe(60000)
+    expect(OVERCROWD_FAIL_MILLITICKS).toBe(2640000)
+    expect(OVERCROWD_RAMP_FULL_TICKS).toBe(1500)
+    expect(ARRIVAL_KNOCKBACK_MAX_MILLITICKS).toBe(90000)
+
+    // Read back through the clock, so a change to TICKS_PER_SECOND or DENOM
+    // fails here rather than silently rescaling the whole failure model.
+    expect(OVERCROWD_FULL_MILLITICKS / DENOM / TICKS_PER_SECOND).toBe(90)
+    expect(OVERCROWD_GRACE_MILLITICKS / DENOM / TICKS_PER_SECOND).toBe(2)
+    expect(OVERCROWD_FAIL_MILLITICKS / DENOM / TICKS_PER_SECOND).toBe(88)
+    expect(ARRIVAL_KNOCKBACK_MAX_MILLITICKS / DENOM / TICKS_PER_SECOND).toBe(3)
+    expect(OVERCROWD_RAMP_FULL_TICKS / TICKS_PER_SECOND).toBe(50)
+
+    // **The derived death time, which is the number this milestone turns on.**
+    // The ramp phase sums to 750,000 milli-ticks (hand-derived in
+    // `sim/test/overcrowd.test.ts`), and the remainder accrues at DENOM per
+    // tick. 1,500 + 1,890 = 3,390 ticks = 113.0 s exactly.
+    const afterRamp = (OVERCROWD_FAIL_MILLITICKS - 750000) / DENOM
+    expect(afterRamp).toBe(1890)
+    expect(OVERCROWD_RAMP_FULL_TICKS + afterRamp).toBe(3390)
+    expect((OVERCROWD_RAMP_FULL_TICKS + afterRamp) / TICKS_PER_SECOND).toBe(113)
+
+    // The grace is what makes the ring lie: it is BELOW the full meter, so the
+    // displayed fraction at the moment of death is 97.8 % and not 100 %.
+    expect(OVERCROWD_FAIL_MILLITICKS).toBeLessThan(OVERCROWD_FULL_MILLITICKS)
+    expect(
+      Math.round((OVERCROWD_FAIL_MILLITICKS / OVERCROWD_FULL_MILLITICKS) * 1000) / 10,
+    ).toBe(97.8)
+
+    // The arrival knockback's cap binds at a meter of exactly 900,000, which is
+    // why `overcrowd.test.ts` probes 899,990 and 910,000 rather than 900,000 —
+    // at 900,000 a `>` and a `>=` clamp return the same number and the probe is
+    // a measured 0-detector.
+    expect((ARRIVAL_KNOCKBACK_MAX_MILLITICKS * DENOM) / ARRIVAL_KNOCKBACK_PCT).toBe(900000)
+  })
+
+  it('derives the milli-tick constants from the clock rather than storing the products', () => {
+    // Same idiom as the MAX_BLOCKED_TICKS and spawn-cadence scans above: every
+    // `toBe(2700000)` in the test one up is satisfied by a bare literal just as
+    // happily, and the whole point of Decision 4 is that the conversion is
+    // written once, in terms of the clock.
+    const src = readFileSync(new URL('../src/constants.ts', import.meta.url), 'utf8')
+    expect(src).toMatch(
+      /export const OVERCROWD_FULL_MILLITICKS =\s*\n?\s*\(MAX_OVERCROWD_TIME_MS \/ MS_PER_SECOND\) \* TICKS_PER_SECOND \* DENOM/,
+    )
+    expect(src).toMatch(
+      /export const OVERCROWD_RAMP_FULL_TICKS = \(DENOM \/ OVERCROWD_RAMP\) \* TICKS_PER_SECOND/,
+    )
+    expect(src).toMatch(
+      /export const OVERCROWD_FAIL_MILLITICKS = OVERCROWD_FULL_MILLITICKS - OVERCROWD_GRACE_MILLITICKS/,
+    )
+    expect(src).not.toMatch(/export const OVERCROWD_FULL_MILLITICKS = 2700000/)
+    expect(src).not.toMatch(/export const OVERCROWD_RAMP_FULL_TICKS = 1500/)
+    expect(src).not.toMatch(/export const OVERCROWD_FAIL_MILLITICKS = 2640000/)
+    // Vacuity: the scan is reading the real file, not an empty string.
+    expect(src).toMatch(/export const OVERCROWD_RAMP = 20/)
   })
 
   it('keeps the overcrowd ramp consistent with the derived time-to-death', () => {

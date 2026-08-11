@@ -8,6 +8,7 @@ import {
   CAR_SPEED_UNITS_PER_TICK,
   PIN_PERIOD_TICKS,
   FIRST_PIN_DELAY_TICKS,
+  PIN_CAP_CIRCLE_TIMER,
   CARS_PER_HOUSE,
   type MapData,
 } from '@laneways/shared'
@@ -224,6 +225,55 @@ const NEAREST_SCORE_TICK = 683 // 638 + ceil(6 * 2500 / 330) - 1 = 638 + 46 - 1
 const NOT_NEAREST_SCORE_TICK = 728 // 638 + ceil(12 * 2500 / 330) - 1 = 638 + 91 - 1
 const SINGLE_SOURCE_TICK = 661 // the first tick on which D1's carpark is colour 0's only source
 const DEMO_TICK_BOUND = 800
+
+// ---------------------------------------------------------------------------
+// THE TICK THIS BOARD KILLS ITSELF ON — measured at M1e Task 7
+// ---------------------------------------------------------------------------
+
+/**
+ * **`firstCity`, booted exactly as `createGame` boots it and given NO player
+ * input at all, reaches the overcrowd failure threshold on tick 5,580 — three
+ * minutes and six seconds in.** Task 7 measures it; Task 8 is what makes
+ * reaching it end the run. Until then nothing here can observe it, which is
+ * precisely why the number is written down before it becomes fatal.
+ *
+ * Measured on the real boot path (`firstCity()` + `seedStartingCity` +
+ * `createState('laneways-m2')` + the 258-tick warm start), driven 40,000 ticks:
+ *
+ * | | |
+ * |---|---|
+ * | Dies at tick | **5,580** — **3 min 06 s** at 30 Hz |
+ * | Destination | **D2**, `STARTING_DESTINATIONS[2]`, grid (14, 14), colour 1 |
+ * | Kind | **circle** — 2 rotation slots, trigger cap 8, hard cap 14 |
+ * | Arrivals it received | **0**, against a median of **0**: this board has no roads |
+ * | Its last arrival | **never** |
+ * | At or over its cap from | tick **2,191**, unbroken for 3,390 ticks |
+ * | Completed trips by tick 20,000 | **0** |
+ *
+ * **Derive the 5,580 rather than trusting it.** Colour 1 owns exactly one
+ * destination and it is a circle, so `slotCount(1)` is 2 and the accumulator
+ * fires every `ceil(518 / 2)` = 259 ticks from tick 378. D2 therefore holds its
+ * 8th pin — its trigger cap — on tick `378 + 7 * 259` = **2,191**, the k-th
+ * at-cap tick is `2,190 + k`, and `k = 3,390` gives 5,580.
+ *
+ * **D2 dies before the lower-indexed SQUARE D0 despite the HIGHER trigger cap,
+ * and the reason is the rotation, not the cap.** Colour 0 owns two squares
+ * sharing `slotCount(0)` = 2, so each receives one pin per 518 ticks against
+ * D2's one per 259: a circle is served twice as often and therefore fills more
+ * than twice as fast, and the 8-against-6 cap does not make up the difference.
+ * D0's counterfactual death tick, measured on the same run, is **6,330** — it
+ * reaches its cap of 6 on tick 2,941. **Note the figure the plan carried was
+ * 6,357, and both are right for their own tree**: 6,357 is the pre-Task-5
+ * number, reproduced exactly here by parking `H_DEST_SPAWN_TIMER`, and the
+ * spawner's third colour-0 destination is what moves D0's cap tick from 2,968
+ * to 2,941. **D2's own 2,191 is spawner-invariant**, so the death tick this
+ * comment is about is the same either way.
+ *
+ * The two windows above are both far below it and this is the mechanical
+ * statement of that, so a future task lengthening either one finds out here
+ * rather than by asserting over a corpse.
+ */
+const CITY_DEATH_TICK = 5580
 
 const NO_ACTIONS: TickInputs = { actions: [] }
 
@@ -695,6 +745,34 @@ describe('a full scored trip on the seeded city, driven through step()', () => {
     expect(TRIP_MOVEMENT_TICKS).toBe(Math.ceil(TRIP_ROUND_TRIP_COST_UNITS / CAR_SPEED_UNITS_PER_TICK))
     expect(FIRST_SCORE_TICK).toBe(FIRST_PIN_TICK + TRIP_MOVEMENT_TICKS - 1)
     expect(TRIP_TICK_BOUND).toBeGreaterThan(FIRST_SCORE_TICK)
+  })
+
+  it('keeps every window in this file below the tick this board kills itself on', () => {
+    // M1e Task 7, and see `CITY_DEATH_TICK`'s own comment for the measurement.
+    // Nothing here can observe the shutdown yet — Task 8 wires it — so this is
+    // the mechanism that stops a later task lengthening a window into a frozen
+    // sim and asserting over a corpse. It is a STRICT inequality against a
+    // measured number, not a restatement of one: 5,580 came off a 40,000-tick
+    // drive of the real boot path, and the two bounds came off the pin ladder.
+    expect(CITY_DEATH_TICK).toBe(5580)
+    expect(TRIP_TICK_BOUND, 'the trip window has 91 % margin').toBeLessThan(CITY_DEATH_TICK)
+    expect(DEMO_TICK_BOUND, 'the not-nearest window has 86 % margin').toBeLessThan(CITY_DEATH_TICK)
+    // The margins, as the figures the sentences above claim — so a reader can
+    // check the adjective rather than take it.
+    expect(Math.round((1 - TRIP_TICK_BOUND / CITY_DEATH_TICK) * 100)).toBe(91)
+    expect(Math.round((1 - DEMO_TICK_BOUND / CITY_DEATH_TICK) * 100)).toBe(86)
+    // And the derivation, so a change to the pin cadence or the trigger cap
+    // moves this constant loudly rather than leaving it a stale literal:
+    // colour 1's lone CIRCLE fires every ceil(518 / 2) = 259 ticks from 378, so
+    // its 8th pin lands on 2,191 and the 3,390th at-cap tick after that is
+    // 5,580.
+    const capTick = FIRST_PIN_TICK + (PIN_CAP_CIRCLE_TIMER - 1) * Math.ceil(PIN_PERIOD_TICKS / 2)
+    expect(capTick, 'D2 reaches its trigger cap here').toBe(2191)
+    // 3,390 is not re-derived here — `sim/test/overcrowd.test.ts` derives it
+    // from the ramp sum and `shared/test/constants.test.ts` derives it from the
+    // constants. This asserts the RELATION between the three numbers, which is
+    // what would break if the pin cadence or the trigger cap moved.
+    expect(CITY_DEATH_TICK - capTick + 1, 'and dies 3,390 at-cap ticks later').toBe(3390)
   })
 
   it('scores exactly once, at tick 435, without reaching the bound', () => {

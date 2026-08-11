@@ -122,6 +122,46 @@ export const ARRIVAL_KNOCKBACK_PCT = 100  // 10% x DENOM
 export const ARRIVAL_KNOCKBACK_MAX_MS = 3000
 export const OVERCROWD_GRACE_MS = 2000
 
+// --- Overcrowd, in MILLI-TICKS (spec §5.8, M1e Task 7) ---
+/**
+ * A tick is 1000/30 ms, which is not an integer, so a millisecond-denominated
+ * meter cannot be exact. The meter is denominated in ticks x `DENOM` —
+ * milli-ticks — and every §5.8 constant converts once, here.
+ *
+ * **§5.8 is a FIVE-OF-EIGHT transcription of research dossier §1.10, and the
+ * three that fell out fell out by transcription rather than by anyone's
+ * decision.** The one that matters is `OvercrowdTimerCarArrivalDeceleration`
+ * = 0.5; plan Decision 4 names it, measures what it would do (it widens the
+ * survivable arrival interval from 90 ticks to 300, a 3.33x change), and hands
+ * it to M1f with the reason. Do not add it here without reading that.
+ */
+export const OVERCROWD_FULL_MILLITICKS =
+  (MAX_OVERCROWD_TIME_MS / MS_PER_SECOND) * TICKS_PER_SECOND * DENOM
+export const OVERCROWD_GRACE_MILLITICKS =
+  (OVERCROWD_GRACE_MS / MS_PER_SECOND) * TICKS_PER_SECOND * DENOM
+/**
+ * The meter value that ends the run: 90 s minus §5.8's 2 s "hidden grace at the
+ * end", so 88 s = 2,640,000 milli-ticks. The RING is drawn against
+ * `OVERCROWD_FULL_MILLITICKS`, which is what makes the grace hidden — it reads
+ * 97.8 % at the instant the city dies.
+ *
+ * **Nothing ends a run at M1e Task 7.** `runOvercrowd` integrates the meter and
+ * this constant is the threshold `overcrowd.test.ts` measures against; Task 8
+ * is what makes reaching it fatal.
+ */
+export const OVERCROWD_FAIL_MILLITICKS = OVERCROWD_FULL_MILLITICKS - OVERCROWD_GRACE_MILLITICKS
+/**
+ * Where §5.8's `s(t) = min(1, 0.02t)` reaches full: `1 / 0.02` = 50 s = 1,500
+ * ticks. `destOverTicks` SATURATES here rather than growing without bound, so
+ * no width question can arise at any run length — the construction
+ * `carBlockedTicks` already uses against `MAX_BLOCKED_TICKS`. The saturation
+ * ceiling and the ramp's full point are deliberately the SAME number: a ceiling
+ * below it makes the ramp unreachable, one above it is bytes nothing reads.
+ */
+export const OVERCROWD_RAMP_FULL_TICKS = (DENOM / OVERCROWD_RAMP) * TICKS_PER_SECOND
+export const ARRIVAL_KNOCKBACK_MAX_MILLITICKS =
+  (ARRIVAL_KNOCKBACK_MAX_MS / MS_PER_SECOND) * TICKS_PER_SECOND * DENOM
+
 // --- Pin capacities (spec §5.8, [OURS]) ---
 export const PIN_CAP_SQUARE_TIMER = 6
 export const PIN_CAP_SQUARE_HARD = 10

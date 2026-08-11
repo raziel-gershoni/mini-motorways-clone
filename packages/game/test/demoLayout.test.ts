@@ -553,8 +553,72 @@ describe('the demo-layout golden', () => {
 // 4. The observability claim, measured
 // ---------------------------------------------------------------------------
 
+/**
+ * **The tick this board kills itself on — MEASURED at M1e Task 7, not predicted.**
+ *
+ * Booted exactly as `createGame` boots it (`demoCity()` + `seedDemoLayout` +
+ * `createState('laneways-demo')` + the 1,200-tick warm start) and given NO
+ * player input at all, the demo board reaches the overcrowd failure threshold
+ * on tick **6,703** — three minutes and forty-three seconds in. Task 7
+ * integrates the meter and Task 8 is what makes reaching it end the run, so
+ * nothing in this file can observe the shutdown yet. Plan Decision 7 accepts
+ * this deliberately: the demo board is an intentionally overloaded city, and a
+ * milestone whose headline is "an overloaded city dies" should kill it.
+ *
+ * | | |
+ * |---|---|
+ * | Dies at tick | **6,703** — **3 min 43 s** at 30 Hz |
+ * | Destination | **D2**, `DEMO_DESTINATIONS[2]`, grid (16, 9), `ORIENTATION_W`, colour 2 |
+ * | Kind | **circle** — 2 rotation slots, trigger cap 8, hard cap 14 |
+ * | Arrivals it received | **6**, against a median of **26** across the eighteen |
+ * | Its last arrival | tick **1,274** — 74 ticks after the first frame a player sees |
+ * | At or over its cap from | tick **3,314**, unbroken for 3,390 ticks |
+ * | Next longest at-cap run | **943** (D5, from 5,761); **0** for the other sixteen |
+ * | With the knockback removed / the unwind removed / both | **6,703, unchanged, all three** |
+ *
+ * **It dies of STARVATION, not of a losing race, and that distinction is the
+ * most important fact about this board.** D2's last arrival is tick 1,274 and
+ * its pin count is monotone from there to the hard cap of 14, so no
+ * knockback-side lever reaches it: removing the arrival knockback, removing the
+ * unwind, or removing both leaves the death tick unmoved to the tick. Cars
+ * route to the nearest unfilled pin of their colour (§5.4), D2 sits at the far
+ * end of corridor C, and once the nearer colour-2 destinations are generating
+ * pins it never wins a dispatch again.
+ *
+ * **Three of the plan's secondary figures for this board are stale and the
+ * primary ones are not.** The death tick, the destination, its kind and its six
+ * arrivals all reproduce exactly. Its last arrival is **1,274** and not the
+ * plan's 1,549; the median is **26** and not 24; D5's run is **943** and not
+ * 272. All three moved because Tasks 5 and 6 landed between the plan's
+ * measurement and this one — the §5.3.5 blocked-spawn push and the weekly
+ * demand ramp both add pins to this board. The death tick did not move for
+ * either, which is measured: with the ramp neutralised to the bare
+ * `PIN_PERIOD_TICKS` and with `H_DEST_SPAWN_TIMER` parked past the window, this
+ * board still dies on tick 6,703.
+ *
+ * **And `demoLayout.ts`'s headline "1,324 trips over 20,000 ticks" is now
+ * stale by the same two tasks.** On this tree the figure is **1,464**. Parking
+ * the spawner alone gives 1,460; neutralising the ramp alone gives 1,330; doing
+ * both reproduces **1,324 exactly**, which is what says the harness that
+ * produced every number in this comment is the real board and not something
+ * else.
+ */
+const DEMO_DEATH_TICK = 6703
+
 describe('the demo layout is visibly congested, measured over 3,000 ticks', () => {
   const TICKS = 3000
+
+  it('keeps this window below the tick the board kills itself on', () => {
+    // See `DEMO_DEATH_TICK`. Nothing here can observe the shutdown until Task 8
+    // wires it, so this is the mechanism that stops a later task lengthening
+    // the window into a frozen sim and asserting over a corpse. A strict
+    // inequality against an independently measured number: 6,703 came off a
+    // 40,000-tick drive of the real boot path, and 3,000 is this file's own
+    // choice.
+    expect(DEMO_DEATH_TICK).toBe(6703)
+    expect(TICKS).toBeLessThan(DEMO_DEATH_TICK)
+    expect(Math.round((1 - TICKS / DEMO_DEATH_TICK) * 100), 'margin, as a figure').toBe(55)
+  })
 
   it('queues continuously: thousands of refusals, over half of all ticks blocked', () => {
     const measured = seededRig().drive(TICKS)
@@ -911,10 +975,13 @@ describe('the demo board under M1e’s spawn phase', () => {
     const live = seededRig()
     const control = seededRig()
     // The window is capped BELOW this board's death tick with the margin
-    // stated: Decision 7 puts it at 6,703 under Tasks 7+8, and a frozen sim is
-    // byte-identical from tick to tick, so a longer window would assert over a
-    // corpse. 5,000 leaves 1,703 ticks (25 %) of margin.
+    // stated: **6,703, now MEASURED at M1e Task 7 rather than predicted by
+    // Decision 7** — see `DEMO_DEATH_TICK` — and a frozen sim is byte-identical
+    // from tick to tick, so a longer window would assert over a corpse. 5,000
+    // leaves 1,703 ticks (25 %) of margin.
     const WINDOW = 5000
+    expect(WINDOW, 'and the cap is mechanical, not a comment').toBeLessThan(DEMO_DEATH_TICK)
+    expect(DEMO_DEATH_TICK - WINDOW).toBe(1703)
     for (let i = 0; i < WINDOW; i++) {
       live.tick(NO_ACTIONS)
       control.state.header[H_DEST_SPAWN_TIMER] = WINDOW + 2

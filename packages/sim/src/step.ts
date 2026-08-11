@@ -11,6 +11,7 @@ import { runSpawn } from './spawn'
 import { assembleSources, runDispatch } from './dispatch'
 import { runMovement } from './cars'
 import { runArrivals } from './trips'
+import { runOvercrowd } from './overcrowd'
 
 /**
  * A single road edit applied on one tick. `a`/`b` are the same cell-index
@@ -47,9 +48,10 @@ export interface TickInputs {
  * replaying 2*(N/2) ticks run this exact function the same number of times
  * either way.
  *
- * **The nine phases — seven until M1e Task 2 inserted the week boundary at
- * position 2, and eight until M1e Task 5 inserted the spawn phase at position
- * 4. Most positions are forced by a constraint; ONE ADJACENT SWAP STILL IS NOT,
+ * **The ten phases — seven until M1e Task 2 inserted the week boundary at
+ * position 2, eight until M1e Task 5 inserted the spawn phase at position 4,
+ * and nine until M1e Task 7 APPENDED the overcrowd meter at position 10. Most
+ * positions are forced by a constraint; ONE ADJACENT SWAP STILL IS NOT,
  * and this comment says which** (M1c, "The tick order,
  * derived"). An earlier version opened "each justified by the constraint that
  * forces its position rather than by preference — the order is derived; do not
@@ -59,7 +61,8 @@ export interface TickInputs {
  * were 0-detector no-ops**, re-measured at the close of M1d over the complete
  * pairwise set C(7,2) = 21 with the same answer. In the eight-phase numbering
  * those two pairs were `1 <-> 3` and `3 <-> 4`, and only the second was still
- * inert. **In today's NINE-phase numbering there are TWO inert pairs, not one:
+ * inert. **In the NINE-phase numbering — which phases 1..9 still carry, since
+ * Task 7 appended rather than inserted — there are TWO inert pairs, not one:
  * `3 <-> 5` (inputs versus demand, inherited) and `4 <-> 5` (spawn versus
  * demand, new in Task 5 and predicted by its brief to have a detector).**
  * `3 <-> 4` now names *inputs versus spawn*, which is a different pair and does
@@ -124,13 +127,35 @@ export interface TickInputs {
  *      on tick T; the alternative costs every trip one tick and every
  *      exact-tick assertion inherits it.
  *   9. Arrivals — consume the pin, release the reservation, credit the score,
- *      free the car. Mutates `destPins` AFTER the sync, so it must be last.
- *      **Stated residual: the fields are stale from here until the next
+ *      free the car, and apply §5.8's arrival KNOCKBACK to the overcrowd meter.
+ *      Mutates `destPins` AFTER the sync, so it must be the last phase that
+ *      does. **Stated residual: the fields are stale from here until the next
  *      tick's sync.** Nothing may call `fieldFor` in that window — not a
  *      renderer, not a debug hash, not a test helper. Under decision 2 the
  *      only in-tick reader is phase 7, so this binds external callers only,
- *      and `loop.test.ts` asserts the throw rather than assuming it.
+ *      and `loop.test.ts` asserts the throw rather than assuming it. Phase 10
+ *      below sits inside that window and is allowed to, because it reads no
+ *      field.
+ *  10. Overcrowd (`overcrowd.ts`, M1e Task 7, spec §5.8) — integrate each
+ *      destination's meter against its timer capacity. AFTER phase 9, and that
+ *      is a real constraint rather than a tail position: the meter reads
+ *      `destPins`, so running it first charges a destination for the tick a car
+ *      had already earned back, and a player who cleared a queue on tick T
+ *      would still take T's damage. `trips.test.ts`'s brink fixture is the
+ *      detector. It reads `destPins`/`destMeta` and writes only
+ *      `destOvercrowd`/`destOverTicks`, both `FIELD_IRRELEVANT`
+ *      (`regions.ts`), so it cannot stale a field and nothing after it needs
+ *      re-syncing. **It does not end the run** — Task 8 is what reads
+ *      `OVERCROWD_FAIL_MILLITICKS` and shuts the city down.
  *   — `H_EPOCH <- 0` on successful exit.
+ *
+ * **The phase count went 9 -> 10 at M1e Task 7 and phases 1..9 kept their
+ * numbers, so every `n <-> m` recorded below still names the pair it named.**
+ * The complete pairwise set is now C(10,2) = 45 and Task 7 did not re-run it;
+ * what it did measure is the one new ADJACENT pair, `9 <-> 10`, which is
+ * non-zero — see the M1e Task 7 block at the foot of this comment. Read the
+ * two inert pairs below as "still inert as of the nine-phase sweep", not as a
+ * claim about the ten-phase set.
  *
  * **The one remaining checked no-op, disclosed in `cars.ts`'s idiom for exactly
  * this shape — and the reason recorded for it for three milestones was the
@@ -420,6 +445,8 @@ export function step(
   runMovement(s, world)
 
   runArrivals(s)
+
+  runOvercrowd(s)
 
   s.header[H_EPOCH] = 0
 }

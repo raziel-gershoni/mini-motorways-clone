@@ -67,9 +67,19 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  * two; the only shared road is the house street. Same 24 cars, same 18
  * destinations:
  *
+ * **Both columns below were measured before M1e Tasks 5 and 6 and the
+ * right-hand `trips` figure is now STALE — corrected here at Task 7 rather than
+ * left to be rediscovered.** On today's tree this board scores **1,464** trips
+ * over 20,000 ticks, not 1,324. Task 5's §5.3.5 blocked-spawn push accounts for
+ * 6 of the difference and Task 6's weekly demand ramp for the other 134: with
+ * `H_DEST_SPAWN_TIMER` parked the figure is 1,460, with the ramp neutralised to
+ * the bare `PIN_PERIOD_TICKS` it is 1,330, and with both it reproduces **1,324
+ * exactly**. The rest of the table is a comparison against a layout that no
+ * longer exists and nothing re-measures it; read it as the design record it is.
+ *
  * | over 20,000 ticks      | one shared trunk | three corridors |
  * |------------------------|------------------|-----------------|
- * | trips                  | 47               | **1,324**       |
+ * | trips                  | 47               | **1,324** (1,464 today) |
  * | refusals               | 446,569          | 23,092          |
  * | refusals per tick      | 22.3             | **1.15**        |
  * | ticks with a blocked car | 19,560 (98 %)  | **10,464 (52 %)** |
@@ -192,7 +202,22 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  *      names M1e's traffic lights and roundabouts as the work. Showing it
  *      silently, on a board built to demonstrate that cars block each other, is
  *      the misleading option; naming it is not.
- *   6. **NOT the anti-deadlock valve**, by design. It fires at 1,350 consecutive
+ *   6. **THE CITY SHUTS DOWN AT 3 MINUTES 43 SECONDS, on tick 6,703, with no
+ *      player error possible — measured at M1e Task 7 on this exact boot path.**
+ *      D2, the colour-2 circle at grid (16, 9), receives its last car at tick
+ *      1,274 and then sits at or over its trigger cap of 8 for 3,390
+ *      consecutive ticks, which is exactly what §5.8's meter needs. It dies of
+ *      STARVATION: it is at the far end of corridor C, cars route to the
+ *      nearest unfilled pin of their colour, and once the nearer colour-2
+ *      destinations are generating pins it never wins a dispatch again.
+ *      Removing the arrival knockback, the unwind, or both moves the tick by
+ *      **zero**. Plan Decision 7 accepts this deliberately — a board authored
+ *      to be badly run should die in the milestone about badly-run cities
+ *      dying — and Task 8 is what turns the meter reaching its threshold into
+ *      an actual shutdown. **Until Task 8 lands, nothing visible happens at
+ *      6,703 and the board keeps running.** Task 9 draws the ring that makes
+ *      the last two minutes of it legible.
+ *   7. **NOT the anti-deadlock valve**, by design. It fires at 1,350 consecutive
  *      blocked ticks — 45 seconds of one car being refused every single tick —
  *      and on this layout it never fires at all over 20,000 ticks. That is the
  *      correct outcome: see the table above for what a board that DOES fire it

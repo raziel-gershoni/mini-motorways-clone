@@ -3,12 +3,21 @@ import { H_SCORE } from './state'
 import { PHASE_IDLE, PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
 import { releaseCell } from './blocking'
 import { noteGhostDeparture } from './roads'
+import { applyArrivalKnockback } from './overcrowd'
 import { ROUTE_BYTES } from './dispatch'
 
 /**
  * Trips: arrival, pin consumption, reservation release, scoring, and the
- * trip-end slot reset — phase 7 of the tick order, the LAST phase, and the
- * only one that mutates `destPins` after the field sync.
+ * trip-end slot reset — **phase 9 of ten**, and the only phase that mutates
+ * `destPins` after the field sync.
+ *
+ * **It stopped being the LAST phase at M1e Task 7**, and the sentence that said
+ * so is corrected rather than deleted because the reasoning under it is still
+ * live: arrivals must come after the sync's last source-mutating phase, and
+ * phase 10 (`overcrowd.ts`) is allowed to follow them precisely because it only
+ * READS `destPins` and calls no field. The "why arrivals are last" paragraph
+ * below is therefore now "why arrivals are last among the phases that mutate
+ * the source set".
  *
  * **The signature is the primary defence, exactly as it is in `cars.ts`.**
  * `runArrivals` takes `state` and nothing else — no `world`, no `fields`, no
@@ -135,6 +144,17 @@ import { ROUTE_BYTES } from './dispatch'
  * `ghostCommitted` in `roads.ts`. Task 9 verifies at the end of the milestone
  * that no fourth appeared.
  *
+ * **M1e Task 7 added a decrement path and it is NOT a fourth member, which was
+ * checked by reading rather than assumed.** `applyArrivalKnockback`
+ * (`overcrowd.ts`), called from `arriveAtDestination` below, lowers
+ * `destOvercrowd` — an `Int32Array`, so the wrap class does not apply to it at
+ * all. Re-swept at that task by enumerating every write to every one of the ten
+ * `Uint8` regions in `packages/sim/src`, the same method Task 9 used rather
+ * than a grep for `--`: `overcrowd.ts` writes no `Uint8` region (it reads
+ * `destPins` and `destMeta` and writes only the two `Int32` overcrowd
+ * regions), and nothing else in the milestone's Task 7 diff touches one. The
+ * set is still THREE.
+ *
  * Parameterised rather than closing over `state`, on the precedent of
  * `assertBucketCountExceedsEveryEdgeCost` (scratch.ts), `assertDispatchProgress`
  * (dispatch.ts) and `assertSingleCrossing` (cars.ts): the failure path is then
@@ -189,6 +209,19 @@ function arriveAtDestination(state: GameState, i: number): void {
   assertArrivalHonoured(pins, reserved, d, i)
   state.destPins[d] = pins - 1
   state.destReserved[d] = reserved - 1
+  // §5.8's arrival knockback (M1e Task 7). Here and not in phase 10, because it
+  // is an EVENT — one car arriving — and phase 10 is a per-tick integration.
+  // Placed after the pin decrement so a destination that just dropped back
+  // under capacity gets the knockback AND the unwind on the same tick, which is
+  // the whole relief a player feels when a queue finally clears.
+  //
+  // **It is NOT a `Uint8Array` decrement**, which is the question the block
+  // above obliges anyone adding a decrement here to answer: `destOvercrowd` is
+  // `Int32Array`, so the wrap class does not apply. It is clamped at 0 anyway,
+  // by `assertOvercrowdNonNegative`, for the different reason `overcrowd.ts`
+  // gives — a negative meter is a silent lie about how close the player is to
+  // losing.
+  applyArrivalKnockback(state, d)
   state.carPhase[i] = PHASE_RETURNING
 }
 

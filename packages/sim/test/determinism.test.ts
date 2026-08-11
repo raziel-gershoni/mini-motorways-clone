@@ -369,6 +369,11 @@ describe('sim source obeys the determinism rules', () => {
       'sim/src/hash.ts',
       'sim/src/index.ts',
       'sim/src/layout.ts',
+      // M1e Task 7: the per-destination overcrowd meter, `step` phase 10. Named
+      // here for the same reason every other entry is — a new source file must
+      // be added deliberately, and a module that skips this scan skips every
+      // determinism rule below it.
+      'sim/src/overcrowd.ts',
       'sim/src/regions.ts',
       'sim/src/rng.ts',
       'sim/src/roads.ts',
@@ -690,11 +695,19 @@ describe('golden replay', () => {
       expect(s.houseSpawnTimer[c], `colour ${c}`).toBe(HOUSE_SPAWN_RETRY_TICKS - (ticks - lastAttempt))
       expect(s.houseSpawnTimer[c], `colour ${c}`).toBe(1)
     }
-    // The two M1e header slots this task does not touch, asserted so the
-    // re-bless below cannot absorb a stray write to either.
+    // The two M1e header slots nothing writes yet, asserted so the re-bless
+    // below cannot absorb a stray write to either. Task 8 owns both.
     expect(s.header[H_GAME_OVER]).toBe(0)
     expect(s.header[H_FAILED_DEST]).toBe(0)
-    expect(s.destOvercrowd.every((v) => v === 0), 'Task 3 owns this region, not Task 5').toBe(true)
+    // **The two overcrowd regions are a STRUCTURAL zero on this board and the
+    // label that said "Task 3 owns this region, not Task 5" is no longer the
+    // reason.** Task 7 wired `runOvercrowd` as phase 10, so it runs on all
+    // 13,499 ticks here — over a live prefix of **zero** destinations, because
+    // this 4x4 golden map places none. The loop body is never entered, which is
+    // a stronger statement than "no destination reached a cap", and it is
+    // asserted rather than read off the map.
+    expect(s.header[H_DEST_COUNT], 'the golden board has no destination at all').toBe(0)
+    expect(s.destOvercrowd.every((v) => v === 0), 'so phase 10 writes nothing here').toBe(true)
     expect(s.destOverTicks.every((v) => v === 0)).toBe(true)
     const m1e = m1eInsertedRanges(GOLDEN_MAP)
     expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 404, 444])

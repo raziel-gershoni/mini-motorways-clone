@@ -1,20 +1,36 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, it, expect } from 'vitest'
-import { parseMap, CARS_PER_HOUSE, type MapData } from '@laneways/shared'
+import {
+  parseMap,
+  CARS_PER_HOUSE,
+  FIRST_PIN_DELAY_TICKS,
+  PIN_CAP_SQUARE_TIMER,
+  type MapData,
+} from '@laneways/shared'
 import { createState, H_SCORE, H_DEST_COUNT, type GameState } from '../src/state'
 import { createWorld, type WorldData } from '../src/world'
 import { packRouteStep, ROUTE_BYTES } from '../src/dispatch'
 import {
+  placeDestination,
   placeHouse,
+  DEST_KIND_SQUARE,
+  ORIENTATION_E,
   PHASE_IDLE,
   PHASE_NONE,
   PHASE_OUTBOUND,
   PHASE_RETURNING,
 } from '../src/buildings'
 import { runArrivals, assertArrivalHonoured } from '../src/trips'
+import { isOverCapacity } from '../src/overcrowd'
+import { spawnZoneCells } from '../src/spawn'
+import { step, type TickInputs } from '../src/step'
+import { createScratch, createFlowFields, type Scratch, type FlowField } from '../src/scratch'
+import { createFieldInputRanges } from '../src/regions'
 import { tilesLeft, ghostMaskOf, ghostCommittedOf } from '../src/roads'
 import { claimCell, occupantOf, FREE } from '../src/blocking'
+
+const NO_INPUT: TickInputs = Object.freeze({ actions: Object.freeze([]) })
 
 /**
  * Unit coverage for phase 7 — arrival, pin consumption, reservation release,
@@ -708,5 +724,170 @@ describe('a trip ending on a ghost cell decrements it (M1d Task 5)', () => {
     expect(state.carPhase[0], 'vacuity: it really did arrive').toBe(PHASE_RETURNING)
     expect(ghostCommittedOf(state, CARPARK), 'the car is still standing on it').toBe(1)
     expect(tilesLeft(state)).toBe(tiles)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// §5.8's arrival knockback — M1e Task 7
+// ---------------------------------------------------------------------------
+
+/**
+ * The knockback lives here rather than in phase 10 because it is an EVENT — one
+ * car arriving — while phase 10 is a per-tick integration. These are the tests
+ * for the WIRING; the arithmetic is `overcrowd.test.ts`'s.
+ */
+describe('the arrival knockback, wired into arrival', () => {
+  it('knocks 10 % off the arriving destination’s meter, and nothing else’s', () => {
+    const { state } = rig('knockback-wiring')
+    expect(placeHouse(state, rig('unused').world, 10, 0)).toBe(true)
+    state.header[H_DEST_COUNT] = 2
+    state.destPins[0] = 3
+    state.destReserved[0] = 2
+    state.destOvercrowd[0] = 500000
+    state.destOvercrowd[1] = 500000
+    outboundExhausted(state, 0, 0, [E, E], 12, 1400)
+
+    runArrivals(state)
+
+    expect(state.carPhase[0], 'vacuity: the arrival really happened').toBe(PHASE_RETURNING)
+    expect(state.destOvercrowd[0]).toBe(450000)
+    expect(state.destOvercrowd[1], 'a different destination is untouched').toBe(500000)
+  })
+
+  it('compounds: two cars arriving at one destination on one tick knock back twice', () => {
+    // The knockback is inside `arriveAtDestination`, so it is per ARRIVAL and
+    // not per tick. A mutant that hoisted it to `runArrivals` and applied it
+    // once would pass the single-arrival test above.
+    const { state } = rig('knockback-compound')
+    state.header[H_DEST_COUNT] = 1
+    state.destPins[0] = 4
+    state.destReserved[0] = 2
+    state.destOvercrowd[0] = 500000
+    outboundExhausted(state, 0, 0, [E, E], 12, 1400)
+    outboundExhausted(state, 1, 0, [E, E], 12, 1400)
+
+    runArrivals(state)
+
+    expect(state.carPhase[0]).toBe(PHASE_RETURNING)
+    expect(state.carPhase[1], 'vacuity: BOTH cars arrived').toBe(PHASE_RETURNING)
+    // 500,000 -> 450,000 -> 405,000. Once would leave 450,000.
+    expect(state.destOvercrowd[0]).toBe(405000)
+  })
+
+  it('does not touch the meter when no car arrives', () => {
+    // The negative half, with the other mechanism that produces the same
+    // observation disabled: this car is RETURNING with an exhausted cursor, so
+    // it is collected by the other branch and `arriveAtDestination` is never
+    // reached — the meter is unchanged because THIS event did not happen, not
+    // because nothing happened.
+    const { state } = rig('knockback-none')
+    state.header[H_DEST_COUNT] = 1
+    state.destOvercrowd[0] = 500000
+    returnExhausted(state, 0, 0, [E, E], 12, 1400)
+
+    runArrivals(state)
+
+    expect(state.carPhase[0], 'vacuity: the trip really did END').toBe(PHASE_IDLE)
+    expect(state.destOvercrowd[0]).toBe(500000)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 9 before phase 10 — M1e Task 7
+// ---------------------------------------------------------------------------
+
+/** The brink destination's index. One destination on the board, so it is 0. */
+const D_BRINK = 0
+
+/**
+ * A whole `step` on a board where a car arrives on the exact tick the
+ * destination would otherwise be AT its timer capacity.
+ *
+ * **This is the only fixture in the repo that can tell phases 9 and 10 apart**,
+ * and every other mechanism that could produce `destOverTicks === 0` is
+ * disabled by construction rather than by luck:
+ *
+ *   - the board is 8 x 6, so `REVEALED_Y0` = 9 clips the spawn zone to nothing
+ *     and phase 4 is structurally absent — no spawn can add a pin;
+ *   - the destination is placed on tick 0 and the step runs tick 1, which is
+ *     inside `FIRST_PIN_DELAY_TICKS`, so `computeSlotCounts` returns 0 and
+ *     phase 5 cannot fire either;
+ *   - there are no roads, so phase 7 can commit nothing and phase 8 moves
+ *     nobody.
+ *
+ * So the ONLY thing that moves `destPins` on this tick is the arrival, which is
+ * what makes `destOverTicks` a clean read on the phase order.
+ */
+function arrivalOnTheBrinkRig(): {
+  state: GameState
+  world: WorldData
+  fields: readonly FlowField[]
+  scratch: Scratch
+} {
+  const { map, world } = fixture('brink')
+  const state = createState('brink', map)
+  const scratch = createScratch(
+    world.cells,
+    map.groupCount,
+    map.maxDestinations,
+    createFieldInputRanges(map),
+  )
+  const fields = createFlowFields(map.groupCount, world.cells)
+  // Origin (2, 1) opening EAST: footprint (2..4, 1..2), carpark (5, 1) = cell 13.
+  expect(placeDestination(state, world, 1 * W + 2, ORIENTATION_E, 0, DEST_KIND_SQUARE)).toBe(true)
+  expect(placeHouse(state, world, 4 * W + 1, 0)).toBe(true)
+  state.destPins[D_BRINK] = PIN_CAP_SQUARE_TIMER
+  state.destReserved[D_BRINK] = 1
+  outboundExhausted(state, 0, D_BRINK, [E, E], 1 * W + 5, 1400)
+  return { state, world, fields, scratch }
+}
+
+describe('the tick order: arrivals before the overcrowd meter', () => {
+  it('integrates the meter AFTER arrivals, so a serviced destination is not charged for the tick it cleared', () => {
+    // The detector for transposing phases 9 and 10. The fixture is built so a
+    // car arrives on the exact tick the destination would otherwise be at
+    // capacity: with arrivals first the pin count drops below the trigger and
+    // `destOverTicks` stays 0; with overcrowd first it charges a tick the
+    // player had already earned back.
+    const r = arrivalOnTheBrinkRig()
+    // The premise, asserted rather than assumed: the destination really is ON
+    // the brink going in, so 0 afterwards is the arrival's doing.
+    expect(r.state.destPins[D_BRINK]).toBe(PIN_CAP_SQUARE_TIMER)
+    expect(isOverCapacity(r.state, D_BRINK), 'it is over capacity BEFORE the tick').toBe(true)
+
+    step(r.state, r.world, r.fields, r.scratch, NO_INPUT)
+
+    expect(r.state.destPins[D_BRINK], 'vacuity: the arrival must have happened').toBe(
+      PIN_CAP_SQUARE_TIMER - 1,
+    )
+    expect(r.state.destOverTicks[D_BRINK]).toBe(0)
+    expect(r.state.destOvercrowd[D_BRINK], 'and nothing accrued').toBe(0)
+    expect(isOverCapacity(r.state, D_BRINK), 'and it is under capacity coming out').toBe(false)
+  })
+
+  it('is not vacuous: with no arrival, the SAME board charges the tick', () => {
+    // Without this the test above is satisfied by a `runOvercrowd` that never
+    // runs at all — which is exactly what "delete the call from `step`" looks
+    // like. Same rig, same tick, one car put back in its garage.
+    const r = arrivalOnTheBrinkRig()
+    r.state.carPhase[0] = PHASE_IDLE
+    r.state.destReserved[D_BRINK] = 0
+
+    step(r.state, r.world, r.fields, r.scratch, NO_INPUT)
+
+    expect(r.state.destPins[D_BRINK], 'nobody arrived').toBe(PIN_CAP_SQUARE_TIMER)
+    expect(r.state.destOverTicks[D_BRINK], 'so the tick IS charged').toBe(1)
+    expect(r.state.destOvercrowd[D_BRINK]).toBe(0) // floor(2*1/3) = 0
+  })
+
+  it('is not vacuous: nothing but the arrival can move destPins on this tick', () => {
+    // The three disabling conditions the rig's comment claims, asserted. A
+    // fixture that quietly gained a spawn zone or an eligible destination would
+    // make both tests above pass for the wrong reason.
+    const r = arrivalOnTheBrinkRig()
+    expect(spawnZoneCells(r.world), 'an 8 x 6 board clips the revealed rect to nothing').toBe(0)
+    expect(r.state.destSpawnTick[D_BRINK]).toBe(0)
+    expect(1 - (r.state.destSpawnTick[D_BRINK] as number)).toBeLessThan(FIRST_PIN_DELAY_TICKS)
+    expect(tilesLeft(r.state), 'and no road was ever laid').toBe(99)
   })
 })
