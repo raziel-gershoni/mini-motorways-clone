@@ -36,12 +36,15 @@ import { destMetaKind, DEST_KIND_CIRCLE } from './buildings'
  * every P ticks: the meter's fixed point is `10,000 * P`, which exists only
  * below the 900,000 point where the 90,000 knockback cap binds. So **P <= 90
  * ticks survives forever and P > 90 dies, with nothing in between** — swept and
- * confirmed exactly at a 2,000,000-tick horizon (91 dies at 163,163; 92 at
- * 84,272). Neither shipped board is anywhere near that boundary: both die of a
- * destination that stops being served ENTIRELY, at P = infinity. Measured on
- * the real boot path at M1e Task 7, the demo board dies at tick **6,703** on
- * D2 and `firstCity` at tick **5,580**, also on D2, and removing the knockback,
- * the unwind or both changes neither by a single tick.
+ * confirmed exactly at a 2,000,000-tick horizon (91 dies at 163,162; 92 at
+ * 84,271; at P = 90 the meter's PEAK parks on 900,000 exactly). Neither shipped
+ * board is anywhere near that boundary: both die of a destination that stops
+ * being served ENTIRELY, at P = infinity. Measured on the real boot path at
+ * M1e Task 7 by driving each board 40,000 ticks with no input, the demo board
+ * dies at tick **6,703** (3 min 43 s) on D2 and `firstCity` at tick **5,580**
+ * (3 min 06 s), also on D2 — and removing the knockback, removing the unwind,
+ * or removing both leaves both ticks unchanged, measured by deleting the code
+ * rather than by modelling it.
  *
  * **The meter reads `destPins`, not `destPins - destReserved`.** §5.8: "There
  * is no carpark immunity - a car metres from the bay does not save you. The
@@ -84,7 +87,21 @@ export function isOverCapacity(state: GameState, d: number): boolean {
   return (state.destPins[d] as number) >= overcrowdTriggerCap(state, d)
 }
 
-/** §5.8's `s(t) = min(1, 0.02t)`, in milli-ticks per tick. */
+/**
+ * §5.8's `s(t) = min(1, 0.02t)`, in milli-ticks per tick.
+ *
+ * **The `> DENOM` clamp is UNREACHABLE from `runOvercrowd` today, measured, and
+ * it must not be deleted on the strength of that.** `destOverTicks` saturates
+ * at `OVERCROWD_RAMP_FULL_TICKS` and `overcrowdRampSpeed(1500)` is exactly
+ * `DENOM`, so the comparison is false on every tick the game can produce:
+ * dropping the clamp scores **1** detector across the whole suite, and it is
+ * the direct table in `overcrowd.test.ts` at 15,000 ticks — not the 3,390 test,
+ * which the brief predicted would catch it, and not any golden. That is the
+ * catalogue's independently-sufficient shape: the saturation is what holds the
+ * bound today, and the clamp is what holds it for any direct caller and for the
+ * moment somebody raises the ceiling. Do not read either guard as dead code on
+ * the strength of its own survival; dropping the saturation instead scores 2.
+ */
 export function overcrowdRampSpeed(overTicks: number): number {
   const s = ((OVERCROWD_RAMP * overTicks) / TICKS_PER_SECOND) | 0
   return s > DENOM ? DENOM : s
@@ -120,10 +137,20 @@ export function assertOvercrowdNonNegative(value: number, d: number): void {
  * because the assertion below looks like dead code otherwise.** The knockback
  * is `floor(m/10)` capped at 90,000, and `floor(m/10) <= m` for every
  * non-negative `m`, so `m - arrivalKnockback(m)` cannot go negative from a
- * non-negative meter. The assertion therefore fires only if the meter was
- * ALREADY negative — i.e. if something other than this file and `runOvercrowd`
- * has written the region — which is exactly the case a silent lie about how
- * close the player is to losing would come from.
+ * non-negative meter. The assertion therefore fires only when the meter was
+ * ALREADY negative going in.
+ *
+ * **Which is not the unreachable case an earlier draft of this comment called
+ * it — `runOvercrowd` produces it, and that is this assertion's real job.**
+ * Measured: removing the unwind's own `m > 0 ? m : 0` floor drives the meter
+ * negative on every under-capacity tick, and this assertion is what notices —
+ * **65 detectors, naming the invariant** ("destination 0 reached a meter of
+ * -41400"), including `carSmoothing.test.ts` and `integration.test.ts`, which
+ * fail at COLLECTION because their rigs drive a real board. Dropping the
+ * assertion while the floor stands scores **0**, which is the expected
+ * equivalence rather than a coverage hole: the floor alone upholds the
+ * invariant, and the assertion exists to say so out loud the day the floor
+ * goes. Neither is dead code and neither can observe its own deletion.
  */
 export function applyArrivalKnockback(state: GameState, d: number): void {
   const m = state.destOvercrowd[d] as number

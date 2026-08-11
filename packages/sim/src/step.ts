@@ -394,6 +394,44 @@ export interface TickInputs {
  * because that check is the only thing that separates the two. Run the control
  * as many times as the mutant, every time.
  *
+ * ---------------------------------------------------------------------------
+ * M1e TASK 7 — THE PHASE COUNT WENT 9 -> 10, BY APPENDING
+ * ---------------------------------------------------------------------------
+ *
+ * **Phase 10 (`runOvercrowd`) was APPENDED, not inserted, so every index above
+ * is unchanged and every `n <-> m` recorded above still names its own pair.**
+ * Task 7 did not re-run the complete pairwise set — which is now C(10,2) = 45 —
+ * and says so rather than implying it did. What it measured is the one new
+ * ADJACENT pair plus the deletion, over the canonical whole-suite invocation
+ * (1,739 tests: shared 49, render 223, eslint-rules 69, sim 838, game 560),
+ * against **three** unmutated baselines run in the same battery:
+ *
+ * ```
+ *   baselines            0, 0, 0   <- no flake in this round, unlike M1d's and
+ *                                     Task 2's; the allocation windows were quiet
+ *   9<->10  adj    1   predicted non-zero   the meter charges a tick the arrival cleared
+ *   delete 10      1   predicted non-zero   nothing integrates the meter at all
+ * ```
+ *
+ * Every mutant collected exactly 1,739 tests, so neither is a crash count
+ * wearing a kill count's clothes, and the crash screen matched nothing.
+ *
+ * **One detector each, and the two are DIFFERENT tests with different messages
+ * — checked, because a pair of assertions that both fire on every mutation is
+ * decoration.** The transposition dies in `trips.test.ts`'s *"integrates the
+ * meter AFTER arrivals"* with `expected 1 to be +0`; the deletion dies in its
+ * sibling *"is not vacuous: with no arrival, the SAME board charges the tick"*
+ * with `so the tick IS charged: expected +0 to be 1`. Neither mutant touches
+ * the other's test.
+ *
+ * **No golden sees either**, and that is derivable rather than surprising:
+ * every golden fixture in the repo holds at most one pin per destination, five
+ * short of the square trigger, so phase 10 writes zeroes on every tick of every
+ * one of them whichever side of phase 9 it runs. That pair of tests is
+ * therefore the only thing standing between this ordering and a silent
+ * regression, which is why they are written as a pair rather than as one test
+ * with two assertions.
+ *
  * Pure in the sense that matters: the result depends only on the contents of
  * `s.buffer`, `world`, `fields`/`scratch` (both re-derivable from `s.buffer`
  * and `world` per design decision 3), and `inputs`. Nothing is read from
