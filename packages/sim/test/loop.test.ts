@@ -5,12 +5,17 @@ import {
   parseMap,
   CARS_PER_HOUSE,
   DEST_SPAWN_PERIOD_TICKS,
+  DEST_SPAWN_RETRY_TICKS,
   HOUSE_SPAWN_PERIOD_TICKS,
+  HOUSE_SPAWN_RETRY_TICKS,
   MAX_BLOCKED_TICKS,
   MAX_PATH_LEN,
+  PIN_CAP_SQUARE_TIMER,
   PIN_PERIOD_TICKS,
   FIRST_PIN_DELAY_TICKS,
   ORTHO_COST,
+  TICKS_PER_WEEK,
+  WEEKLY_TILE_GRANT,
   type MapData,
 } from '@laneways/shared'
 import {
@@ -29,7 +34,10 @@ import {
   H_SCORE,
   H_SPAWN_COLOUR_CURSOR,
   H_TICK,
+  H_TILES,
+  H_WEEK,
   HEADER_LENGTH,
+  isGameOver,
   type GameState,
 } from '../src/state'
 import { spawnZoneCells } from '../src/spawn'
@@ -58,6 +66,7 @@ import {
 } from '../src/buildings'
 import { ROUTE_BYTES, routeStep } from '../src/dispatch'
 import { step, type TickAction, type TickInputs } from '../src/step'
+import { pinPeriodForWeek } from '../src/demand'
 import { hashBytes } from '../src/hash'
 import { m1eInsertedRanges, spliceM1eInsertions } from './m1eSplice'
 
@@ -459,6 +468,26 @@ interface Observations {
    * over somebody.
    */
   readonly completeChecked: number[]
+  /**
+   * M1e Task 6. Every tick on which demand's accumulator crossed its
+   * threshold, one entry per fire.
+   *
+   * **Counted by CONSERVATION, not by watching `destPins` rise.** One tick can
+   * carry both a fire (phase 5, `destPins` +1 or `H_PINS_DROPPED` +1) and an
+   * arrival (phase 9, `destPins` -1), and the net delta on such a tick is zero
+   * — so a rising-edge detector would silently drop that fire, which is
+   * precisely the failure a fire LADDER exists to catch. `delivered + consumed
+   * + dropped` is exact whatever order the two land in, and the demand golden
+   * below cross-checks the total against the end state independently.
+   */
+  readonly fireTicks: number[]
+  /**
+   * M1e Task 6. `sum(destPins)` after every tick — the standing backlog, which
+   * is what "the network stops coping" is a statement about. A peak read off
+   * the END state cannot see it: a board that saturated and then drained looks
+   * identical to one that never filled.
+   */
+  readonly pinsHeldAfterTick: number[]
 }
 
 function newObservations(): Observations {
@@ -472,6 +501,8 @@ function newObservations(): Observations {
     refusals: [],
     sharedCells: [],
     completeChecked: [],
+    fireTicks: [],
+    pinsHeldAfterTick: [],
   }
 }
 
@@ -552,8 +583,21 @@ function runScripted(r: Rig, from: number, to: number, obs: Observations, script
     beforeCell.set(r.state.carCell)
     beforePins.set(r.state.destPins)
     const targetBefore = Array.from(r.state.carTargetDest)
+    const droppedBefore = r.state.header[H_PINS_DROPPED] as number
+    let consumedThisTick = 0
 
     step(r.state, r.world, r.fields, r.scratch, script.actions(tick))
+    // Read the pin ledger's two step-side terms BEFORE `script.pins` runs, so
+    // `fireTicks` means "the demand module fired" on every fixture in this
+    // file rather than "the demand module fired, or the test wrote a pin".
+    // The loop fixture's script writes two pin waves by hand; counting those
+    // as fires would make this observation mean something different on each
+    // of the three fixtures that share this runner.
+    let deliveredByStep = 0
+    for (let d = 0; d < (r.state.header[H_DEST_COUNT] as number); d++) {
+      deliveredByStep += (r.state.destPins[d] as number) - (beforePins[d] as number)
+    }
+    const droppedByStep = (r.state.header[H_PINS_DROPPED] as number) - droppedBefore
     script.pins(r.state, tick)
 
     obs.completeChecked.push(assertOccupancyConsistent(r.state, r.world))
@@ -585,6 +629,7 @@ function runScripted(r: Rig, from: number, to: number, obs: Observations, script
         )
       }
       if (wasPhase === PHASE_OUTBOUND && nowPhase === PHASE_RETURNING) {
+        consumedThisTick++
         // Read the target from BEFORE the tick as well as after: arrivals must
         // not clear it (only trip end does), and reading only the post-tick
         // value would not notice if they did.
@@ -629,6 +674,16 @@ function runScripted(r: Rig, from: number, to: number, obs: Observations, script
         obs.violations.push(`tick ${tick}: destPins[${d}] fell by ${drop}, not 0 or 1`)
       }
     }
+
+    // M1e Task 6's fire ledger, by conservation — see `Observations.fireTicks`.
+    const firesThisTick = deliveredByStep + consumedThisTick + droppedByStep
+    for (let f = 0; f < firesThisTick; f++) obs.fireTicks.push(tick)
+
+    let held = 0
+    for (let d = 0; d < (r.state.header[H_DEST_COUNT] as number); d++) {
+      held += r.state.destPins[d] as number
+    }
+    obs.pinsHeldAfterTick.push(held)
 
     const score = r.state.header[H_SCORE] as number
     if (score < previousScore) obs.violations.push(`tick ${tick}: score went backwards`)
@@ -2188,5 +2243,409 @@ describe('golden replay: a jammed same-direction queue', () => {
     expect(m1e.totalBytes).toBe(8232)
     expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(294084758)
     expect(hashState(r.state)).toBe(307910575)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The demand golden — new in M1e Task 6. The first fixture in the repo whose
+// `destPins` the TIMER produces.
+// ---------------------------------------------------------------------------
+
+/**
+ * **The gap this closes, carried forward twice since M1c**: *"no golden covers
+ * demand-produced pins. The loop golden's fixture pre-pins to keep `destPins`
+ * stable under assertion, so the pin timer is frozen."* Both fixtures above
+ * write their pins by hand (`applyScriptedPins`, `queueScriptedPins`) precisely
+ * so that the demand accumulator cannot move under their exact-tick ladders.
+ * M1e's weekly ramp is the first change that makes the pin cadence a function
+ * of the week, so the timer's own output is now worth a digest.
+ *
+ * **A SECOND fixture, not an edit to the first.** Forcing the loop fixture to
+ * run past its 150 ticks would retire the four-route cost matrix its leading
+ * vacuity test protects, and would move the loop golden for a fourth time.
+ *
+ * ---------------------------------------------------------------------------
+ * THE MAP IS 20x9 AND THAT IS A REQUIREMENT, NOT A CONVENIENCE
+ * ---------------------------------------------------------------------------
+ *
+ * `REVEALED_Y0` is 9, so `spawnZoneH(9)` is `min(9 + 22, 9) > 9 ? ... : 0` =
+ * **0** and the clipped spawn zone is EMPTY: Task 5's spawner is structurally
+ * absent from this board, not merely refused by the clock. That is what makes
+ * the fire ladder below derivable from `pinPeriodForWeek(0)` and `(1)` alone.
+ *
+ * On the 20x12 shape the two fixtures above use, the clipped zone is 14x3 = 42
+ * cells and the spawner is live: a destination spawns inside 5,000 ticks,
+ * `slotCount(0)` goes 2 -> 3, and the cadence changes before the week boundary
+ * — at which point `DG_EXPECTED_FIRE_TICKS` is not derivable at all and this
+ * golden would be a digest with a story attached. `assertDemandGoldenPosture`
+ * asserts the zero, BEFORE the run; it does not assume it.
+ *
+ * ---------------------------------------------------------------------------
+ * THE FIXTURE
+ * ---------------------------------------------------------------------------
+ *
+ * All-land 20 x 9 board, so `cell = y * 20 + x`. One colour-0 square
+ * destination in the top-left, one colour-0 house eight cells east of its
+ * carpark, and one straight road corridor between them along row 3:
+ *
+ *      x:   2  3                              10
+ *   row 0:  [][]                                       origin (2,0) = cell 2
+ *   row 1:  [][]                                       orientation S
+ *   row 2:  [][]
+ *   row 3:  C---------------------------------H        C = 62, H = 70
+ *
+ *   d0: origin (2,0) orientation S, carpark (2,3) = 62, dest index 0
+ *   H0: (10,3) = 70, house index 0 -> cars 0 and 1
+ *
+ * Every step is orthogonal and every corridor cell has degree <= 2, so no turn
+ * and no intersection multiplier applies and the movement arithmetic is the
+ * same `rel_k = ceil(k * 2500 / 330)` ladder this file's header derives.
+ * `rel_8` = 61 and `rel_16` = 122, so with `abs = dispatchTick + rel_k - 1` a
+ * car dispatched on tick T reaches the carpark on T + 60 and is home on
+ * T + 121.
+ *
+ * ---------------------------------------------------------------------------
+ * THE FIRE LADDER, DERIVED FROM THE TWO PERIODS AND NEVER READ BACK
+ * ---------------------------------------------------------------------------
+ *
+ * One square of colour 0 is `slotCount(0)` = 1, and it is 0 until the
+ * destination clears its own `FIRST_PIN_DELAY_TICKS` = 120 (it is placed at
+ * tick 0, so it is eligible from tick 120 inclusive). So for t >= 120 the
+ * accumulator is `acc(t) = (t - 119) - (periods already subtracted)`, and a
+ * fire happens on the tick `acc` first reaches the current week's threshold.
+ *
+ *   week 0, `pinPeriodForWeek(0)` = 518:
+ *     637 = 119 + 518        1155 = 637 + 518       1673 = 1155 + 518
+ *    2191 = 1673 + 518       2709 = 2191 + 518      3227 = 2709 + 518
+ *    3745 = 3227 + 518       4263 = 3745 + 518
+ *
+ *   tick 4500 opens week 1 and the threshold becomes
+ *   `pinPeriodForWeek(1)` = 466. `acc` is 0 straight after the 4263 fire and
+ *   237 on tick 4500 — under BOTH thresholds, so the boundary itself fires
+ *   nothing and the gap that straddles it is measured against the SHORTER one:
+ *
+ *   week 1, 466:
+ *    4729 = 4263 + 466       5195 = 4729 + 466
+ *
+ * The observable difference the ramp makes on this board is exactly that: the
+ * gap between pins goes 518, 518, ..., 518, **466**, 466. Both cadences are
+ * inside the run, which is what `DG_RUN_TICKS` = 5,250 is chosen for.
+ *
+ * Service is far faster than arrival here (a 121-tick round trip against a
+ * 466-tick gap at the tightest), so the corridor never queues and `destPins`
+ * never exceeds 1. That is deliberate: this golden is about the TIMER, and a
+ * fixture whose destination sat at its hard cap would be a golden over the
+ * overflow walk instead. The ramp's effect on a network that CANNOT keep up is
+ * measured separately, below, as a treatment/control.
+ */
+
+const DG_W = 20
+const DG_H = 9
+const DG_DEST_ORIGIN = 2 // (2,0)
+const DG_CARPARK = 62 // (2,3)
+const DG_HOUSE = 70 // (10,3)
+/** 9 cells of corridor, 62..70 inclusive: one tile per newly-occupied cell. */
+const DG_ROAD_CELLS = 9
+const DG_RUN_TICKS = 5250
+/**
+ * Inside week 0, 37 ticks past the eighth fire, with car 0 outbound mid-edge on
+ * a live reservation — so the resumed segment must carry a part-filled
+ * accumulator ACROSS the week boundary and change cadence on the far side.
+ */
+const DG_SNAPSHOT_TICK = 4300
+
+/** Blessed for the first time in M1e Task 6. See the golden's own comment. */
+const DG_GOLDEN = 894844668
+
+/** Hand-derived above from `pinPeriodForWeek(0)` = 518 and `(1)` = 466. */
+const DG_EXPECTED_FIRE_TICKS: readonly number[] = [
+  637, 1155, 1673, 2191, 2709, 3227, 3745, 4263, // week 0, every 518
+  4729, 5195, // week 1, every 466
+]
+
+function buildDemandGoldenRig(): Rig {
+  const r = makeRig('demand-golden', allLandRows(DG_W, DG_H), STARTING_TILES)
+  expect(placeDestination(r.state, r.world, DG_DEST_ORIGIN, ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+  expect(placeHouse(r.state, r.world, DG_HOUSE, 0)).toBe(true)
+  expect(r.state.header[H_DEST_COUNT]).toBe(1)
+  expect(r.state.header[H_HOUSE_COUNT]).toBe(1)
+  return r
+}
+
+/** The corridor, as `step` input actions: 62-63, 63-64, ... 69-70. */
+function demandGoldenActions(tick: number): TickInputs {
+  if (tick !== 1) return NO_ACTIONS
+  const out: TickAction[] = []
+  for (let cell = DG_CARPARK; cell < DG_HOUSE; cell++) out.push({ kind: 'place', a: cell, b: cell + 1 })
+  return { actions: out }
+}
+
+/**
+ * **The whole point of this fixture, expressed as a function that does
+ * nothing.** Both other scripts in this file write `destPins` by hand; this one
+ * must not, or the golden is a digest over the test's own arithmetic. Named
+ * rather than written inline as `() => {}` so that a future edit adding a pin
+ * write here has to delete this comment first.
+ */
+function noScriptedPins(): void {
+  /* deliberately empty — see above */
+}
+
+const DEMAND_GOLDEN_SCRIPT: Script = { actions: demandGoldenActions, pins: noScriptedPins }
+
+/**
+ * The spawn posture for a fixture that runs PAST the first attempt, which
+ * `assertNoSpawnHappened` above refuses to describe (its guard is
+ * `tick < HOUSE_SPAWN_PERIOD_TICKS`).
+ *
+ * **Carry 1 of this task's brief, and it is the lesson Task 5 paid for.** The
+ * plan predicted that two goldens could not move in Task 5 because *"nothing
+ * can spawn inside their window"*; both moved, because `H_DEST_SPAWN_TIMER` and
+ * `houseSpawnTimer` are COUNTDOWNS that tick from tick 1 whether an attempt
+ * fires or not, and a whole-buffer digest asks whether any BYTE moved rather
+ * than whether anything spawned. This fixture inherits that property at a much
+ * larger scale — the destination countdown has cycled six times and each house
+ * countdown eighty-three — so every slot the cycling touches is pinned here by
+ * a hand-computed literal, and the digest is never the only evidence.
+ *
+ * The arithmetic, for `tick` = `DG_RUN_TICKS` = 5,250:
+ *
+ *   - destination attempts at 2,250 + 600k (k = 0..5, the last ON tick 5,250);
+ *     the timer is re-armed to `DEST_SPAWN_RETRY_TICKS` = 600 on each, because
+ *     `attemptDestinationSpawn` returns `ZONE_EMPTY` on this board and only
+ *     `PLACED`/`BOARD_FULL` re-arm to the schedule.
+ *     600 - ((5250 - 2250) mod 600) = 600 - 0 = **600**.
+ *   - house attempts at 300 + 60k (k = 0..82); 5,250 is 30 ticks past the 82nd,
+ *     so 60 - ((5250 - 300) mod 60) = 60 - 30 = **30**, for every colour.
+ *   - the colour cursor is **1**, not 0: every destination attempt CHOSE colour
+ *     0 (the only colour holding a house) and advanced past it before hitting
+ *     the empty zone. Unlike the two fixtures above — where the cursor's 0 is
+ *     evidence that no attempt fired — here a moved cursor is the evidence that
+ *     six of them did, and were refused for the structural reason rather than
+ *     the clock.
+ */
+function assertDemandGoldenPosture(r: Rig, tick: number): void {
+  expect(r.state.header[H_TICK], 'the fixture did not reach the tick this posture is stated at').toBe(tick)
+  expect(spawnZoneCells(r.world), 'a 20x9 board clips the revealed rect to nothing').toBe(0)
+  // Vacuity, in the direction `assertNoSpawnHappened` cannot claim: both
+  // countdowns have genuinely cycled past their first attempt, so the literals
+  // below are describing the retry cadence and not the initial arming.
+  expect(tick).toBeGreaterThan(DEST_SPAWN_PERIOD_TICKS)
+  expect(tick).toBeGreaterThan(HOUSE_SPAWN_PERIOD_TICKS + HOUSE_SPAWN_RETRY_TICKS)
+  expect(r.state.header[H_DEST_SPAWN_TIMER], 'the destination countdown, re-armed to the RETRY').toBe(600)
+  expect(DEST_SPAWN_RETRY_TICKS, 'and 600 is that retry, not a coincidence').toBe(600)
+  for (let c = 0; c < r.map.groupCount; c++) {
+    expect(r.state.houseSpawnTimer[c], `colour ${c}'s house countdown`).toBe(30)
+  }
+  expect(HOUSE_SPAWN_RETRY_TICKS).toBe(60)
+  expect(r.state.header[H_SPAWN_COLOUR_CURSOR], 'six attempts chose colour 0 and advanced past it').toBe(1)
+  // Nothing was placed, which on THIS board is a structural claim rather than
+  // a clock one — the zone has no cells for a building to go in.
+  expect(r.state.header[H_DEST_COUNT], 'the spawner placed a destination').toBe(1)
+  expect(r.state.header[H_HOUSE_COUNT], 'the spawner placed a house').toBe(1)
+  // Task 3's two regions and Task 8's two header slots. **Labelled as posture,
+  // not as evidence**: nothing in the repo writes `destOvercrowd`,
+  // `destOverTicks`, `H_GAME_OVER` or `H_FAILED_DEST` yet — the overcrowd
+  // timer is a later task — so these four hold for a fixture that never
+  // reaches a cap AND for one that does. They become discriminating the day
+  // that task lands, and this golden will move then.
+  expect(r.state.header[H_GAME_OVER]).toBe(0)
+  expect(r.state.header[H_FAILED_DEST]).toBe(0)
+  expect(r.state.destOvercrowd.every((v) => v === 0)).toBe(true)
+  expect(r.state.destOverTicks.every((v) => v === 0)).toBe(true)
+}
+
+describe('golden replay: pins produced by the demand timer, across a week boundary', () => {
+  it('produces pins from the timer alone, across a week boundary, and pins the digest', () => {
+    const r = buildDemandGoldenRig()
+    // Posture, asserted BEFORE the run: this board cannot spawn, so the fire
+    // ladder is a function of the two periods and nothing else.
+    expect(spawnZoneCells(r.world), 'a 20x9 board clips the revealed rect to nothing').toBe(0)
+    const destsBefore = r.state.header[H_DEST_COUNT] as number
+    const housesBefore = r.state.header[H_HOUSE_COUNT] as number
+
+    const obs = newObservations()
+    runScripted(r, 0, DG_RUN_TICKS, obs, DEMAND_GOLDEN_SCRIPT)
+    expect(obs.violations).toEqual([])
+
+    expect(r.state.header[H_DEST_COUNT], 'nothing spawned').toBe(destsBefore)
+    expect(r.state.header[H_HOUSE_COUNT], 'nothing spawned').toBe(housesBefore)
+    // **Trivially true today and kept anyway, labelled.** No task in the repo
+    // writes `H_GAME_OVER`; the overcrowd timer that will is a later task. This
+    // says "the sim is live at the digest" and it will start being able to fail
+    // the day that lands.
+    expect(isGameOver(r.state), 'and the sim is still live at the digest').toBe(false)
+
+    // ---------------------------------------------------------------------
+    // The ladder. Hand-derived in this section's header from
+    // `pinPeriodForWeek(0)` and `(1)`, never read back from a run.
+    // ---------------------------------------------------------------------
+    expect(obs.fireTicks).toEqual(DG_EXPECTED_FIRE_TICKS)
+    // Vacuity: the timer must genuinely have fired, and it must have fired at
+    // BOTH cadences, or this is a week-0 fixture wearing a ramp's name.
+    expect(obs.fireTicks.some((t) => t < TICKS_PER_WEEK)).toBe(true)
+    expect(obs.fireTicks.some((t) => t >= TICKS_PER_WEEK)).toBe(true)
+    // And the CADENCE changed, which is the ramp itself and the one thing a
+    // week-0-only fixture cannot show. Stated as the two gap sets rather than
+    // as "some gap is 466": a run that fired 466 apart everywhere would satisfy
+    // that and would mean the ramp had reached week 0.
+    const gaps = DG_EXPECTED_FIRE_TICKS.slice(1).map(
+      (t, i) => t - (DG_EXPECTED_FIRE_TICKS[i] as number),
+    )
+    expect(gaps).toEqual([518, 518, 518, 518, 518, 518, 518, 466, 466])
+    expect(new Set(gaps.slice(0, 7)).size, 'week 0 is one cadence').toBe(1)
+    expect(gaps[0]).toBe(pinPeriodForWeek(0))
+    expect(gaps[gaps.length - 1]).toBe(pinPeriodForWeek(1))
+    expect(DG_EXPECTED_FIRE_TICKS[0], 'the first fire is the delay plus one whole week-0 period').toBe(
+      FIRST_PIN_DELAY_TICKS - 1 + PIN_PERIOD_TICKS,
+    )
+
+    // The ledger, closed independently of the accumulator: every fire either
+    // stands on a destination, was consumed by an arriving car, or was dropped.
+    // If a fire had been hidden by an arrival landing on the same tick, the
+    // ladder above would be one short and this identity would not close.
+    expect(
+      (r.state.destPins[0] as number) +
+        obs.pinsConsumed.length +
+        (r.state.header[H_PINS_DROPPED] as number),
+    ).toBe(DG_EXPECTED_FIRE_TICKS.length)
+    expect(r.state.header[H_PINS_DROPPED], 'nothing was dropped: this board never reaches a cap').toBe(0)
+    expect(r.state.destPins[0], 'the tenth pin is still standing, reserved by the in-flight car').toBe(1)
+    expect(r.state.destReserved[0]).toBe(1)
+    expect(r.state.destPins[0]).toBeLessThan(PIN_CAP_SQUARE_TIMER)
+
+    // ---------------------------------------------------------------------
+    // The fixture genuinely ran the loop, and these assertions come BEFORE the
+    // hash — a golden over a fixture that does nothing re-blesses just as
+    // smoothly as a real one.
+    // ---------------------------------------------------------------------
+    expect(roadMask(r.state, DG_CARPARK)).not.toBe(0)
+    expect(roadMask(r.state, DG_HOUSE)).not.toBe(0)
+    // **The week boundary is in the digest twice over: through the ramp, and
+    // through §5.10's grant** — which is why the loop fixtures' `tilesLeft <
+    // STARTING_TILES` guard is the WRONG shape here and is not used. This
+    // fixture ends with MORE tiles than it started with (999 - 9 + 30 =
+    // 1,020), so a `<` would fail on a perfectly healthy run; the exact ledger
+    // is the assertion that both proves the corridor was paid for and witnesses
+    // the boundary independently of the pin cadence.
+    expect(tilesLeft(r.state)).toBe(STARTING_TILES - DG_ROAD_CELLS + WEEKLY_TILE_GRANT)
+    expect(tilesLeft(r.state)).toBe(1020)
+    expect(r.state.header[H_WEEK]).toBe(1)
+    expect(r.state.header[H_TICK]).toBe(DG_RUN_TICKS)
+
+    // Nine of the ten pins became a completed trip; the tenth is mid-flight.
+    // Dispatched on 5,195, the carpark is 60 ticks away and home 121, so at
+    // 5,250 car 0 is outbound with carried progress and a live route.
+    expect(r.state.header[H_SCORE]).toBe(9)
+    expect(obs.dispatches.length).toBe(10)
+    expect(obs.pinsConsumed.length).toBe(9)
+    expect(r.state.carPhase[0]).toBe(PHASE_OUTBOUND)
+    expect(r.state.carProgress[0]).not.toBe(0)
+    expect(routeBytesOf(r.state, 0).some((b) => b !== 0)).toBe(true)
+    // Car 1 never left home: one pin at a time and a 121-tick round trip means
+    // the house's lowest idle car is always free. Asserted so that "the loop
+    // ran" cannot be satisfied by a fleet churning for the wrong reason.
+    expect(r.state.carPhase[1]).toBe(PHASE_IDLE)
+    expect(r.state.carCell[1]).toBe(DG_HOUSE)
+    expect(obs.refusals, 'the corridor never queues at this cadence').toEqual([])
+    expect(r.state.header[H_ROUTES_REFUSED]).toBe(0)
+
+    // The accumulator's own residue, hand-computed: the 5,195 fire left it at
+    // 0 and 55 eligible ticks have passed since.
+    expect(r.state.pinAccum[0]).toBe(DG_RUN_TICKS - 5195)
+    expect(r.state.pinAccum[0]).toBe(55)
+    for (let c = 1; c < r.map.groupCount; c++) {
+      expect(r.state.pinAccum[c], `colour ${c} has no destination and cannot accumulate`).toBe(0)
+    }
+
+    // No road is ever erased, so both ghost regions are all-zero and cannot be
+    // contributing to the digest.
+    expect(r.state.ghostMask.every((b) => b === 0), 'this fixture erases nothing').toBe(true)
+    expect(r.state.ghostCommitted.every((b) => b === 0)).toBe(true)
+
+    assertDemandGoldenPosture(r, DG_RUN_TICKS)
+
+    // ---------------------------------------------------------------------
+    // **A NEW golden, blessed for the FIRST time in M1e Task 6. This is not a
+    // re-bless of anything**, and it carries no splice proof for the same
+    // reason: this fixture did not exist before M1e, so there is no pre-M1e
+    // digest for a splice to reproduce. The buffer shape settled in Task 1 and
+    // nothing after it moves the shape, which is why a new golden can be
+    // blessed from Task 2 onward at all.
+    //
+    // What it covers that no other golden does: `destPins` written by
+    // `runDemand` rather than by the test, a `pinAccum` residue produced by
+    // real accrual over 5,250 ticks, and a pin CADENCE that changes at a week
+    // boundary. It moves for a change anywhere in `spawnScale`,
+    // `pinPeriodForWeek`, the accumulator's carry, the eligibility delay, the
+    // week clock, the weekly grant, or the spawn countdowns.
+    // ---------------------------------------------------------------------
+    expect(hashState(r.state)).toBe(DG_GOLDEN)
+  })
+
+  it('replays byte-identically ACROSS the week boundary, from a cold Worker and from a fresh run', () => {
+    // **The non-negotiable this task's change makes non-trivial.** The ramp
+    // reads `H_WEEK` inside the tick, so the pin cadence is now a function of
+    // the clock; a replay that resumed with the wrong week would produce the
+    // same bytes for 237 ticks and then diverge silently at the next fire.
+    // Both arms below therefore cross tick 4,500 rather than stopping short of
+    // it, and both are compared on the WHOLE buffer.
+    const r = buildDemandGoldenRig()
+    const obs = newObservations()
+    runScripted(r, 0, DG_SNAPSHOT_TICK, obs, DEMAND_GOLDEN_SCRIPT)
+
+    // Vacuity BEFORE the snapshot: it is taken inside week 0, with a car
+    // mid-edge on a live reservation, and with the accumulator part-way to its
+    // next threshold. A snapshot on an idle board in week 1 would make every
+    // claim below vacuous.
+    expect(r.state.header[H_WEEK], 'the snapshot is taken INSIDE week 0').toBe(0)
+    expect(DG_SNAPSHOT_TICK).toBeLessThan(TICKS_PER_WEEK)
+    expect(r.state.carPhase[0]).toBe(PHASE_OUTBOUND)
+    expect(r.state.carProgress[0]).not.toBe(0)
+    expect(r.state.destReserved[0]).toBe(1)
+    expect(r.state.pinAccum[0], 'part-way to the next threshold, not sitting on 0').toBe(
+      DG_SNAPSHOT_TICK - 4263,
+    )
+    expect(r.state.pinAccum[0]).toBeGreaterThan(0)
+    expect(r.state.pinAccum[0]).toBeLessThan(pinPeriodForWeek(1) as number)
+    const snap = snapshot(r.state)
+    const firesBeforeSnapshot = obs.fireTicks.length
+
+    runScripted(r, DG_SNAPSHOT_TICK, DG_RUN_TICKS, obs, DEMAND_GOLDEN_SCRIPT)
+    expect(obs.violations).toEqual([])
+    expect(hashState(r.state), 'the original timeline lands on the blessed digest').toBe(DG_GOLDEN)
+
+    // A Worker cold-starts with fresh derived state: no fields, no scratch,
+    // just the buffer and the input log.
+    const coldDerived = freshDerived(r.map, r.world)
+    const cold: Rig = {
+      state: restore(snap, r.world),
+      world: r.world,
+      map: r.map,
+      scratch: coldDerived.scratch,
+      fields: coldDerived.fields,
+    }
+    const coldObs = newObservations()
+    runScripted(cold, DG_SNAPSHOT_TICK, DG_RUN_TICKS, coldObs, DEMAND_GOLDEN_SCRIPT)
+    expect(coldObs.violations).toEqual([])
+    expect(hashState(cold.state)).toBe(DG_GOLDEN)
+    // ...and it is the same RUN, not merely the same final bytes: the two fires
+    // the resumed segment still owes are the two on the far side of the
+    // boundary, at the SHORTER cadence.
+    expect(coldObs.fireTicks).toEqual(DG_EXPECTED_FIRE_TICKS.slice(firesBeforeSnapshot))
+    expect(coldObs.fireTicks).toEqual([4729, 5195])
+    expect(coldObs.fireTicks.every((t) => t >= TICKS_PER_WEEK)).toBe(true)
+    expect(cold.state.header[H_WEEK], 'the replay genuinely crossed into week 1').toBe(1)
+
+    // And a completely independent run from tick 0 — new buffer, new world, new
+    // fields, new scratch — lands on the same digest. This is the arm that
+    // would catch a period cached in module scope, which the resumed arm above
+    // shares with the original.
+    const again = buildDemandGoldenRig()
+    const againObs = newObservations()
+    runScripted(again, 0, DG_RUN_TICKS, againObs, DEMAND_GOLDEN_SCRIPT)
+    expect(againObs.violations).toEqual([])
+    expect(againObs.fireTicks).toEqual(DG_EXPECTED_FIRE_TICKS)
+    expect(hashState(again.state)).toBe(DG_GOLDEN)
   })
 })
