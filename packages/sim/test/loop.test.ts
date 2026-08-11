@@ -482,6 +482,13 @@ interface Observations {
    * precisely the failure a fire LADDER exists to catch. `delivered + consumed
    * + dropped` is exact whatever order the two land in, and the demand golden
    * below cross-checks the total against the end state independently.
+   *
+   * **The `consumed` term has a witness, because without one it is decoration
+   * that reads as defence.** Measured: dropping it from the sum leaves all
+   * 1,710 tests green on the fixtures that existed when it was written — no
+   * tick in the demand golden or in the first four coping arms carries both
+   * events. The week-10 arm does, twice, and it is in the arm list for that
+   * reason and asserts it by name.
    */
   readonly fireTicks: number[]
   /**
@@ -2580,8 +2587,18 @@ describe('golden replay: pins produced by the demand timer, across a week bounda
     // `runDemand` rather than by the test, a `pinAccum` residue produced by
     // real accrual over 5,250 ticks, and a pin CADENCE that changes at a week
     // boundary. It moves for a change anywhere in `spawnScale`,
-    // `pinPeriodForWeek`, the accumulator's carry, the eligibility delay, the
-    // week clock, the weekly grant, or the spawn countdowns.
+    // `pinPeriodForWeek`, the eligibility delay, the week clock, the weekly
+    // grant, or the spawn countdowns.
+    //
+    // **What it is BLIND to, labelled because the task brief predicted the
+    // opposite and a reader would otherwise assume the coverage.** It cannot
+    // see `acc -= period` become `acc = 0`: `slotCount` here is 1, so the
+    // accumulator lands exactly on 518 and exactly on 466 and the two writes
+    // are the same write. Measured, not reasoned: that mutation scores 0
+    // detectors in this file. The detectors for it are
+    // `demand.test.ts`'s pre-existing carry test and its
+    // "carries the remainder ACROSS a period change" test, which uses
+    // `slotCount` 3 precisely because 3 divides neither period.
     // ---------------------------------------------------------------------
     expect(hashState(r.state)).toBe(DG_GOLDEN)
   })
@@ -2727,6 +2744,7 @@ describe('golden replay: pins produced by the demand timer, across a week bounda
  *      3  1.33x      389             2     12        0
  *      8  1.88x      275             7     12        0
  *      9  1.99x      260             8     12        0     <- the timer cap
+ *     10  2.10x      246             9     13        0
  *     19  3.00x      172            14     13        5     <- the hard cap
  *
  * **The ramp is real iff a connected destination reaches its timer cap by week
@@ -2750,6 +2768,13 @@ const CP_HOUSE = 92 // (12,4)
 const CP_TICKS = 3000
 /** Measured on this board, both arms: 50 crossings plus two right-angle cells. */
 const CP_ROUND_TRIP = 394
+
+/** The leading `tick=N` of an observation line, as a number. Throws on a line without one. */
+function tickOf(line: string): number {
+  const m = /^tick=(\d+)/.exec(line)
+  if (m === null) throw new Error(`tickOf: no leading tick= in "${line}"`)
+  return Number(m[1])
+}
 
 /** The corridor: row 3 east to the wall, one step south, row 4 back west to the house. */
 function copingCorridor(): TickAction[] {
@@ -2811,8 +2836,11 @@ describe('the demand ramp, given an observable of its own: one board, one fleet,
     const w3 = runCopingArm(3)
     const w8 = runCopingArm(8)
     const w9 = runCopingArm(9)
+    // Week 10 is in this list for a second, unrelated reason — see the
+    // collision witness at the bottom of this test.
+    const w10 = runCopingArm(10)
     const w19 = runCopingArm(19)
-    const arms = [w0, w3, w8, w9, w19]
+    const arms = [w0, w3, w8, w9, w10, w19]
 
     // -------------------------------------------------------------------
     // The control: everything except the week is the same, before and after.
@@ -2868,7 +2896,7 @@ describe('the demand ramp, given an observable of its own: one board, one fleet,
     // The backlog is monotone in the week over the five arms — a ramp, not a
     // step at the cap.
     const peaks = arms.map((a) => a.peakBacklog)
-    expect(peaks).toEqual([1, 2, 7, 8, 14])
+    expect(peaks).toEqual([1, 2, 7, 8, 9, 14])
     for (let i = 1; i < peaks.length; i++) {
       expect(peaks[i], `arm ${i}`).toBeGreaterThan(peaks[i - 1] as number)
     }
@@ -2891,5 +2919,24 @@ describe('the demand ramp, given an observable of its own: one board, one fleet,
         (a.rig.state.destPins[0] as number) + a.obs.pinsConsumed.length + a.dropped,
       ).toBe(a.fires)
     }
+
+    // -------------------------------------------------------------------
+    // The witness for `fireTicks`' conservation term, which is otherwise
+    // decoration that reads as defence.
+    // -------------------------------------------------------------------
+    // `fireTicks` counts a fire as `delivered + consumed + dropped` rather
+    // than as a rise in `destPins`, because phase 5 and phase 9 can both touch
+    // `destPins` on one tick and cancel. **Dropping the `consumed` term from
+    // that sum leaves every other fixture in this file green — measured, 0
+    // detectors** — because no tick in the demand golden or in the other four
+    // arms carries both events. Week 10 carries two, so this is where the term
+    // earns its place; without this arm the instrument would be untested and
+    // would quietly lose a fire the day a fixture collided.
+    const arrivalTicks = new Set(w10.obs.pinsConsumed.map(tickOf))
+    const collisions = w10.obs.fireTicks.filter((t) => arrivalTicks.has(t))
+    expect(collisions.length, 'week 10 is the arm that exercises the ledger').toBe(2)
+    // ...and it is genuinely a property of this arm and not of all of them.
+    const w0Arrivals = new Set(w0.obs.pinsConsumed.map(tickOf))
+    expect(w0.obs.fireTicks.filter((t) => w0Arrivals.has(t))).toEqual([])
   })
 })

@@ -234,6 +234,69 @@ describe('the weekly demand ramp (spec §5.3)', () => {
     expect(state.pinAccum[0], 'the remainder carried').toBe(517 + 2 - 466 + 2 + 2 + 2)
   })
 
+  it('carries the remainder ACROSS a period change, at a slot count that divides neither period', () => {
+    // **The demand golden in `loop.test.ts` cannot see this, and this test is
+    // why that is acceptable.** That fixture has one square, so its
+    // `slotCount` is 1 and the accumulator lands EXACTLY on 518 and exactly on
+    // 466 — `acc -= period` and `acc = 0` are the same write there, and
+    // mutating one into the other leaves the golden green (measured: 0
+    // detectors in `loop.test.ts`). A golden is not a substitute for a fixture
+    // built to separate two models.
+    //
+    // 3 divides neither 518 (2 * 7 * 37) nor 466 (2 * 233), so the residue is
+    // non-zero at every fire and the models separate:
+    //
+    //   week 0, period 518, slotCount 3:
+    //     fire 1, tick 173: acc 519 -> 1
+    //     fire 2, tick 346: acc 1 + 519 = 520 -> 2
+    //   the period changes to 466, carrying acc = 2:
+    //     fire 3, tick 501: acc 2 + 465 = 467 -> 1
+    //
+    // A reset-to-0 accumulator fires its third at 346 + ceil(466/3) = 502 with
+    // acc 0. Both the TICK and the RESIDUE discriminate, and the discriminating
+    // fire is on the far side of a period change — the case the ramp adds and
+    // the pre-existing carry test (which never changes week) cannot reach.
+    const SLOTS = 3
+    expect(PIN_PERIOD_TICKS % SLOTS, 'week 0 must not divide evenly, or this test is blind').not.toBe(0)
+    expect((pinPeriodForWeek(1) as number) % SLOTS, 'nor week 1').not.toBe(0)
+
+    const { map, world } = fixture('carry-across-a-period-change')
+    const { state, scratch } = rig(map, world)
+    placeEligibleNow(state, world, 0, 0, 0, DEST_KIND_SQUARE)
+    const CHANGE_TICK = 347 // one tick after fire 2, so the carry must survive it
+    const WINDOW = 520
+    const fires: number[] = []
+    let prev = 0
+    state.header[H_WEEK] = 0
+    for (let n = 1; n <= WINDOW; n++) {
+      state.header[H_TICK] = n
+      if (n === CHANGE_TICK) state.header[H_WEEK] = 1
+      for (let c = 0; c < scratch.slotCounts.length; c++) scratch.slotCounts[c] = 0
+      scratch.slotCounts[0] = SLOTS
+      advanceAccumulators(state, scratch)
+      const total = sumPins(state)
+      if (total !== prev) {
+        fires.push(n)
+        prev = total
+      }
+    }
+
+    expect(fires).toEqual([173, 346, 501])
+    // The reset model's third fire, computed independently of the run.
+    const resetThird = 346 + Math.ceil((pinPeriodForWeek(1) as number) / SLOTS)
+    expect(resetThird).toBe(502)
+    expect(fires[2], 'the carry moves the post-boundary fire one tick earlier').not.toBe(resetThird)
+    // ...and the residue after it is 1, not 0 — the second discriminator, and
+    // the one a run that happened to fire on the right tick would still fail.
+    expect(state.pinAccum[0]).toBe(1 + SLOTS * (WINDOW - 501))
+    expect(state.pinAccum[0]).toBe(58)
+    // Vacuity: the period genuinely changed inside the window, and the third
+    // fire is genuinely on the far side of it.
+    expect(state.header[H_WEEK]).toBe(1)
+    expect(fires[2]).toBeGreaterThan(CHANGE_TICK)
+    expect(fires[1]).toBeLessThan(CHANGE_TICK)
+  })
+
   it('the largest ADJACENT period drop is 0 -> 1, which is what makes the bound one', () => {
     // The derivation the module comment and the boundary test both rest on,
     // asserted rather than asserted-about: if some later adjacent pair dropped
