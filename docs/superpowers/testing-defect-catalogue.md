@@ -675,3 +675,24 @@ That is the durable form of this document's [two independent measurements that s
 constant] entry, applied preventively: where a rule is stated twice — once as prose, once as code —
 a test written against the prose does not test the code. **One predicate, one caller for the
 production path and one for the table of cases.**
+
+## A restore guarded by `&&` and reported by `;` prints success over a dirty tree
+
+Task 11's teeth-check restored with `git checkout -- packages && git status --porcelain`, run from
+inside `packages/sim`. The checkout failed on the path, the `&&` short-circuited — and the
+`(restored clean)` message printed anyway, from an unconditional `;` later in the line. **A mutated
+constant sat in the tree behind a success message.** Caught by re-verifying from the repo root.
+
+This is the fourth distinct harness-restore failure in one milestone, and it defeats the remedy the
+earlier three produced. That remedy was *print `git status --porcelain` after every restore*. It is
+still right, and it is insufficient as stated:
+
+**The report of a restore must be unreachable when the restore did not run.** Chain the print to the
+same success the restore needs — one `&&` chain, not a `;` — or better, make the check assert rather
+than print, so a dirty tree fails loudly instead of scrolling past. A self-check whose success
+message can be reached on the failure path converts *I did not check* into *I checked*.
+
+Related: [a mutation harness's restore step is untested code]. Each occurrence has been a different
+mechanism — a wrong command, a destroyed symlink tree, a stale script, and now a shell operator — and
+none was caught by the suite. Every one was caught by looking at `git status` with human eyes. Assume
+the next one is also a mechanism nobody has seen.
