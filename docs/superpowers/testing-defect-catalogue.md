@@ -399,3 +399,41 @@ Two rules. **Assert a margin with a strict inequality against an independently m
 the assertion can distinguish the two quantities. And **check whether your safety factor is a
 measurement or a restatement** — if the number on the right came out of the same run as the number on
 the left, it is the latter.
+
+## A durable artefact that states the opposite of the measurement is the milestone's dominant defect
+
+By Task 5, M1e's per-task reviews had found almost no wrong code. What they kept finding was **wrong
+prose in places where prose is the mechanism**: a tripwire comment naming the wrong phases after a
+renumber, a source comment promising coverage the sweep did not have, a commit message claiming a
+transposition had detectors when the same task's own report said SURVIVES.
+
+The commit-message case is the sharpest, because of *how* it happened. The brief's template sentence
+was vague — "two more positions that now have detectors." The implementer **measured the truth,
+found only one of the two had a detector, renamed a test to say so, wrote SURVIVES in its report —
+and then sharpened the vague sentence into a specific false claim in the commit message.** Precision
+was added after the evidence and pointed away from it.
+
+`git log` is the artefact a future task reads when deciding whether a phase order is safe to change.
+A comment can be corrected in place; a commit message can only be corrected by another commit that
+someone has to find.
+
+The rule: **when a task's report and its commit message disagree, the report is usually right and the
+commit message is what ships.** Check the durable artefacts against the measurements last, deliberately,
+as a step — not as a side effect of writing them.
+
+## Growth in the entity count is not growth in the behaviour you wanted
+
+M1e's spawner made the city grow: 22 houses, 10 destinations, 184 trips over 20,000 ticks. It also
+produced **exactly one spawned car in motion.**
+
+Two independent reasons, both invisible from the counts. A spawned house **cannot drive at all on its
+own** — placement refuses a road cell and the flow field relaxes over the road graph, so a house with
+no road adjacent has `dist = INF` forever; no longer run fixes it, the rig has to lay road reactively
+the way a player does. And on the natural schedule the **seeded** houses absorb every dispatch, which
+is the same "service is 4.3× faster than arrival" that made the previous milestone invisible,
+reproduced by the mechanism meant to fix it.
+
+So an acceptance gate reading "the board reaches N houses and M destinations" is satisfied by a board
+where nothing new ever moves. **Gate on the behaviour, not on the population** — cars in motion, trips
+completed, queues formed — because the population is the input to the thing you care about, not
+evidence of it.
