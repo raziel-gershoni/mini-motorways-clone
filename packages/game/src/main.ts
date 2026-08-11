@@ -895,8 +895,9 @@ const LAYOUT_TOKEN = /^[\w-]{1,512}$/
  * milestone's documented recovery hatch for "MainButton reported but never
  * rendered" — is therefore unreachable inside Telegram today unless somebody
  * edits the BotFather URL by hand. A `startapp` link is a message the player
- * sends themselves and taps, one line per layout, and `?startapp=fallback`
- * would revive that hatch for free if a future task wires it.
+ * sends themselves and taps, one line per layout, and **`?startapp=fallback`
+ * now revives that hatch** — M1e Task 12, wired in `launchOptions` below, which
+ * is also where the reason it costs two lines rather than one is written.
  *
  * **`''` means the default and an unknown-but-well-formed token means a
  * THROW**, and the difference is deliberate: a value outside the charset is
@@ -911,6 +912,33 @@ export function layoutToken(hash: string, search: string, fromInitData: string |
     ''
   return LAYOUT_TOKEN.test(raw) ? raw : ''
 }
+
+/**
+ * The `startapp` value that means *"the DOM erase pill, not the MainButton"*.
+ *
+ * **This revives a hatch that was documented and unreachable.** `?fallback=1`
+ * is this project's recovery path for *"a client reports a `MainButton` and
+ * never renders one"*, and without it the player has no way to erase and no way
+ * to say so. It is a QUERY parameter, and a Telegram webview has no address bar
+ * — the SDK reads `location.hash` and never `location.search` — so on a phone
+ * the hatch could only be reached by somebody editing the BotFather URL by
+ * hand. `layoutToken` already reads `tgWebAppStartParam` out of the fragment,
+ * which is a link the player can send themselves and tap
+ * (`t.me/<bot>/<app>?startapp=fallback`), so the hatch costs the two lines in
+ * `launchOptions` below.
+ *
+ * It deliberately shares the layout token's namespace rather than getting a
+ * parameter of its own: Telegram gives a Mini App exactly one `startapp`
+ * string, so `fallback` and a layout id cannot both be asked for in one link.
+ * That is a real limitation and it is the right trade — the hatch exists for a
+ * board that is already open and broken, and the board it opens is the default.
+ *
+ * **`layouts.ts` must never define a layout with this id.** `layoutToken`
+ * returns it, `launchOptions` intercepts it before `layoutFor` sees it, and a
+ * layout by that name would become unreachable with no error anywhere.
+ * `integration.test.ts` asserts `LAYOUT_IDS` does not contain it.
+ */
+export const FALLBACK_TOKEN = 'fallback'
 
 /** The two `location` members the launch options are derived from. */
 export interface LaunchUrl {
@@ -946,9 +974,19 @@ export interface LaunchOptions {
  * the idiom `prefersFallback` and `layoutToken` already use.
  */
 export function launchOptions(url: LaunchUrl, startParamValue: string | null): LaunchOptions {
+  const token = layoutToken(url.hash, url.search, startParamValue)
   return {
-    preferFallback: prefersFallback(url.search),
-    layoutId: layoutToken(url.hash, url.search, startParamValue),
+    preferFallback: prefersFallback(url.search) || token === FALLBACK_TOKEN,
+    // **Not one line, two — and the second is what makes the hatch a hatch
+    // rather than a boot failure.** `fallback` is not a layout id, so leaving
+    // it in `layoutId` sends it to `layoutFor`, which throws by design ("the
+    // layouts that exist are city, demo") and puts the boot-failure panel on
+    // the screen. A recovery hatch that bricks the boot is worse than no hatch:
+    // the player who reaches for it is already looking at a game they cannot
+    // erase in, and they would end up looking at a stack trace instead.
+    // `integration.test.ts` asserts BOTH halves, because a test that only
+    // checked the flag would pass on exactly that build.
+    layoutId: token === FALLBACK_TOKEN ? '' : token,
   }
 }
 

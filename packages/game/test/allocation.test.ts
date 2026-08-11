@@ -1,7 +1,19 @@
 import { describe, it, expect } from 'vitest'
 import { Session } from 'node:inspector'
 import { readFileSync } from 'node:fs'
-import { firstCity, parseMap, REVEALED_X0, REVEALED_Y0, REVEALED_W, REVEALED_H } from '@laneways/shared'
+import {
+  firstCity,
+  parseMap,
+  DEST_SPAWN_PERIOD_TICKS,
+  DEST_SPAWN_RETRY_TICKS,
+  HOUSE_SPAWN_PERIOD_TICKS,
+  SPAWN_CANDIDATE_LIMIT,
+  TICKS_PER_WEEK,
+  REVEALED_X0,
+  REVEALED_Y0,
+  REVEALED_W,
+  REVEALED_H,
+} from '@laneways/shared'
 import {
   createState,
   createWorld,
@@ -19,8 +31,17 @@ import {
   PHASE_RETURNING,
   H_SCORE,
   eraseRoad,
+  isOverCapacity,
+  CT_REBUILDS,
+  CT_BLOCKED_PUSH_DISCARDED,
+  H_DEST_COUNT,
+  H_DEST_SPAWN_TIMER,
+  H_PINS_DROPPED,
+  H_TICK,
   type GameState,
+  type Scratch,
   type TickAction,
+  type WorldData,
 } from '@laneways/sim'
 import { createHudRects, fitCamera, hudRects, type RenderFrame } from '@laneways/render'
 import { seedStartingCity } from '../src/startingCity'
@@ -36,6 +57,8 @@ import {
   JAM_STARVED_FIRST_HOUSE_Y,
   JAM_STARVED_HOUSE_COUNT,
 } from './jamFixture'
+import { DEFAULT_LAYOUT_ID, layoutFor } from '../src/layouts'
+import { armGreedyActions, armPathActions, CITY_OPENING, GREEDY_PERIOD_TICKS } from './cityArms'
 import { PointerOutcome, createPointerInput, type PointerInput } from '../src/pointer'
 import { SizingOutcome, bootShell, type ScalableContext, type Shell, type SizableCanvas } from '../src/shell'
 import { EraseControlSurface, createEraseControl, type EraseControl } from '../src/eraseControl'
@@ -212,7 +235,7 @@ function assertProfiledLive(state: GameState, where: string): void {
   expect(isGameOver(state), `${where}: the sim froze inside a profiled window`).toBe(false)
 }
 
-function profileAllocations(body: () => void): Allocator[] {
+function profileAllocations(body: () => void, intervalBytes: number = SAMPLING_INTERVAL_BYTES): Allocator[] {
   interface RawSession {
     post(method: string, cb?: (err: Error | null, result?: unknown) => void): void
     post(method: string, params: object, cb?: (err: Error | null, result?: unknown) => void): void
@@ -227,7 +250,7 @@ function profileAllocations(body: () => void): Allocator[] {
   raw.post(
     'HeapProfiler.startSampling',
     {
-      samplingInterval: SAMPLING_INTERVAL_BYTES,
+      samplingInterval: intervalBytes,
       includeObjectsCollectedByMinorGC: true,
       includeObjectsCollectedByMajorGC: true,
     },
@@ -2439,5 +2462,534 @@ describe('the tick allocates nothing on the JAM path, with every branch counted 
     // escaping object per refusal in `noteEntryRefused`; the assertion is
     // written against 40 so it does not depend on the last decimal place.
     expect(JAM_BUDGET_BYTES_PER_REFUSAL * 8).toBeLessThan(40)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The tick-side profile over the THREE PHASES M1e ADDED — Task 12
+// ---------------------------------------------------------------------------
+
+/**
+ * **The harness's scope has failed to follow the code four times in two
+ * milestones**, and M1e adds three phases to the tick: the week boundary
+ * (Task 2), the spawner (Task 5) and the overcrowd meter (Task 7). Every window
+ * above predates all three — the clean window's corridor rig has one
+ * destination and no spawn success, the dense rig none, the jam rig
+ * `maxDestinations: 1`. So each of those phases is, in the existing windows,
+ * indistinguishable from dead code.
+ *
+ * ---------------------------------------------------------------------------
+ * THE RIG IS THE SHIPPED BOARD, AND THE WINDOWS ARE PLACED BY MEASUREMENT
+ * ---------------------------------------------------------------------------
+ *
+ * `layoutFor(DEFAULT_LAYOUT_ID)` under the greedy connector, which is the only
+ * arm on which this board grows: 5 destinations become 12 and 8 houses become
+ * 25. The action log is RECORDED outside the profiled window and replayed
+ * inside it, so the connector's own `Int32Array`s never run under the profiler
+ * — the policy is a measurement rig, not a frame path.
+ *
+ * The three windows are 14,059..18,658, 18,659..23,258 and 23,259..27,858, and
+ * that placement is measured rather than convenient. **The first tick on which
+ * any destination is over its pin capacity is 27,320**, so a window set that
+ * stopped earlier would report `overCapacityTicks = 0` and phase 10 would be
+ * uncovered — which is the whole shape this block exists to prevent.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT THE INSTRUMENT CAN AND CANNOT PRICE HERE, STATED BEFORE THE NUMBERS
+ * ---------------------------------------------------------------------------
+ *
+ * A destination-spawn ATTEMPT happens 14 times across the three windows. At
+ * 512 B sampling, one 40 B object per attempt is 560 B total — one sample, or
+ * none. **A per-tick or per-attempt budget on that alone would be a guaranteed
+ * pass that reads as rigour**, which is this repo's worst-named defect.
+ *
+ * What makes it measurable is the SHAPE of the path rather than its rate: a
+ * failing attempt runs up to `SPAWN_CANDIDATE_LIMIT * ORIENTATION_COUNT` = **96**
+ * `canPlaceDestination` calls, so the two allocations M1e Task 4 removed fired
+ * up to 96 times per attempt, not once. Reinstated as positive controls (below,
+ * and in the task report), the harness charges both loudly. The budget is
+ * therefore **per destination-spawn attempt** and it is set from the measured
+ * separation, not from taste.
+ *
+ * The HOUSE spawner is the opposite case and needs no such argument: it
+ * attempts ~370 times a window.
+ */
+/**
+ * Long enough for at least two destination-spawn attempts on a full board.
+ * BOARD_FULL resets the timer to `DEST_SPAWN_PERIOD_TICKS` (2,250) rather than
+ * to the retry, which `spawn.ts` explains: a board at `maxDestinations` is not
+ * going to become un-full in 20 seconds, and resetting to the retry would make
+ * §5.3.5's redistribution fire 7.5 times a week against a schedule of two.
+ */
+const BOARD_FULL_TICKS = 12000
+
+/**
+ * 64 bytes, not this file's shipped 512, and the choice was MEASURED at both
+ * ends against the two allocations M1e Task 4 removed — reinstated here one at
+ * a time as positive controls and then removed again.
+ *
+ * ```
+ *                                       512 B sampling      64 B sampling
+ *   clean                               green 3 of 3        green 3 of 3
+ *   `allSevenCells` array reinstated    RED 2 of 3          RED 3 of 3
+ *     per-window B/tick, red draws      11.6/30.6/19.5      7.2/29.2/20.9
+ *                                        7.1/20.0/21.0      7.3/23.6/14.2
+ *   one fresh `{ ok, reason }` literal  RED 1 of 3          green 3 of 3
+ *     per-window B/tick, red draw       10.3/8.3/5.6        (never over 4)
+ * ```
+ *
+ * **The finer interval is strictly better and the literal is still invisible,
+ * and BOTH halves of that are the point.** At 512 the array's detection was a
+ * coin flip and the literal's red draw was noise standing in for signal —
+ * 10.3 / 8.3 / 5.6 against a true rate the finer instrument puts UNDER the
+ * floor. At 64 the array is caught every time and the literal is honestly
+ * reported as unseen.
+ *
+ * **Why the literal cannot be seen here, as arithmetic rather than as a
+ * shrug.** `canPlaceDestination` runs at most 96 times per failing attempt and
+ * there are 2-7 attempts a window, so ~480 calls in 4,600 ticks. One 32-byte
+ * object per call is `480 * 32 / 4600` = **3.3 B/tick**, and the floor is 4.
+ * That is not a defect in the floor: 4 B/tick is 2x above a single stray sample
+ * and 9x below one escaping object per TICK, which is what a per-tick budget
+ * is for. A 32-byte object on a path that runs a tenth as often as the tick is
+ * gated work, and the carry-forward's entry says plainly that bytes-per-frame
+ * structurally cannot see gated work and that changing the denominator does not
+ * fix it.
+ *
+ * **The guard that DOES own that question is `placementAllocation.test.ts`**,
+ * whose windows drive a SATURATED board where every attempt fails and the
+ * attempt rate is orders higher, and which prices `spawn.ts` per attempt. This
+ * block's job is the three PHASES on the board that ships; that block's job is
+ * the placement predicate. Neither substitutes for the other, and this
+ * paragraph exists so nobody reads the green above as covering both.
+ */
+/**
+ * The one file this window does NOT guard, and it is excluded on a measurement
+ * rather than on a shrug.
+ *
+ * ```
+ *   min over the three windows, B/tick charged to sim/src/buildings.ts
+ *   clean, canonical whole-suite invocation      <= 4.00 in 6 of 6 runs
+ *   clean, under a mutation battery              5.16 in 1 of ~12 observations
+ *                                                (windows 5.21 / 5.16 / 5.52)
+ *   `allSevenCells` reinstated (control A)       7.21, 11.63, 7.30 over 3 draws
+ * ```
+ *
+ * **The worst noise is 5.16 and the weakest real signal is 7.21, so every
+ * candidate threshold sits inside one band or the other.** A budget of 6 clears
+ * the noise by 1.16x and the signal by 1.20x, which is the catalogue's
+ * "threshold set inside the noise band" wearing a safety factor — the instrument
+ * cannot separate them here and pretending otherwise buys a flaky red that a
+ * future reader will widen until it means nothing.
+ *
+ * **So this window does not guard `buildings.ts`, and the guard that does is
+ * named.** `placementAllocation.test.ts` prices the same file on a SATURATED
+ * board where every destination attempt fails, at roughly a hundred times the
+ * attempt rate — which is the condition that makes the same instrument
+ * decisive there and indecisive here. The assertion below checks that owner
+ * still exists, so deleting it turns this exclusion red rather than leaving an
+ * orphan.
+ */
+const M1E_UNGUARDED_FILE = 'buildings.ts'
+
+const M1E_SAMPLING_INTERVAL_BYTES = 64
+const M1E_WINDOWS = 3
+const M1E_WINDOW_TICKS = 4600
+/** Measured: the first window starts here so that the third contains tick 27,320. */
+const M1E_FIRST_WINDOW_START = 14059
+/** The last profiled tick. */
+const M1E_END_TICK = M1E_FIRST_WINDOW_START + M1E_WINDOWS * M1E_WINDOW_TICKS - 1
+/** Where this board's greedy arm actually dies (`integration.test.ts` asserts it). */
+const M1E_DEATH_TICK = 31456
+/** The first tick on which any destination stands at or over its pin capacity. */
+const M1E_FIRST_OVER_CAPACITY_TICK = 27320
+
+/**
+ * One counter per branch the driver claims to enter, in `DragCounters`' style
+ * and for its reason: **a fixture that stops spawning must turn the harness RED,
+ * not quietly measure less.** Every one is asserted non-zero.
+ */
+interface SpawnBranchCounters {
+  weeksCrossed: number
+  destAttempts: number
+  destPlaced: number
+  destScanExhausted: number
+  houseAttempts: number
+  housePlaced: number
+  /** Flow-field rebuilds charged on a tick a destination was placed. Decision 6 prices this at `groupCount`. */
+  rebuildsOnDestSpawnTick: number
+  overCapacityTicks: number
+  knockbacks: number
+}
+
+function newSpawnCounters(): SpawnBranchCounters {
+  return {
+    weeksCrossed: 0,
+    destAttempts: 0,
+    destPlaced: 0,
+    destScanExhausted: 0,
+    houseAttempts: 0,
+    housePlaced: 0,
+    rebuildsOnDestSpawnTick: 0,
+    overCapacityTicks: 0,
+    knockbacks: 0,
+  }
+}
+
+interface SpawnRig {
+  readonly state: GameState
+  readonly world: WorldData
+  readonly scratch: Scratch
+  /** Drives `n` ticks, replaying `log` and folding every branch counter into `c`. */
+  readonly drive: (
+    n: number,
+    log: ReadonlyMap<number, readonly TickAction[]>,
+    c: SpawnBranchCounters | null,
+  ) => void
+}
+
+function buildSpawnRig(): SpawnRig {
+  const layout = layoutFor(DEFAULT_LAYOUT_ID)
+  const map = layout.map()
+  const world = createWorld(map)
+  const state = createState(layout.runSeed, map)
+  const scratch = createScratch(
+    world.cells,
+    map.groupCount,
+    map.maxDestinations,
+    createFieldInputRanges(map),
+  )
+  const fields = createFlowFields(map.groupCount, world.cells)
+  layout.seed(state, world)
+  // Reassigned, never mutated in place, so the driver allocates nothing.
+  const oneTick: { actions: readonly TickAction[] } = { actions: NO_TICK_ACTIONS }
+  for (let t = 0; t < layout.warmStartTicks; t++) {
+    oneTick.actions = NO_TICK_ACTIONS
+    step(state, world, fields, scratch, oneTick)
+  }
+  const prevPhase = new Int32Array(state.carPhase.length)
+  const prevHouseTimer = new Int32Array(state.houseSpawnTimer.length)
+  return {
+    state,
+    world,
+    scratch,
+    drive(n, log, c) {
+      for (let i = 0; i < n; i++) {
+        const tick = (state.header[H_TICK] as number) + 1
+        const destTimerBefore = state.header[H_DEST_SPAWN_TIMER] as number
+        const destCountBefore = state.header[H_DEST_COUNT] as number
+        const rebuildsBefore = scratch.counters[CT_REBUILDS] as number
+        for (let g = 0; g < prevHouseTimer.length; g++) {
+          prevHouseTimer[g] = state.houseSpawnTimer[g] as number
+        }
+        for (let p = 0; p < prevPhase.length; p++) prevPhase[p] = state.carPhase[p] as number
+        oneTick.actions = log.get(tick) ?? NO_TICK_ACTIONS
+        step(state, world, fields, scratch, oneTick)
+        if (c === null) continue
+
+        if (tick % TICKS_PER_WEEK === 0) c.weeksCrossed++
+        const destCountAfter = state.header[H_DEST_COUNT] as number
+        if (destTimerBefore <= 1) {
+          c.destAttempts++
+          if (destCountAfter > destCountBefore) {
+            c.destPlaced++
+            c.rebuildsOnDestSpawnTick += (scratch.counters[CT_REBUILDS] as number) - rebuildsBefore
+          } else if ((state.header[H_DEST_SPAWN_TIMER] as number) === DEST_SPAWN_RETRY_TICKS) {
+            // The bounded scan found nothing and the board may still have room —
+            // `SpawnOutcome.SCAN_EXHAUSTED`, which is the 96-call path.
+            c.destScanExhausted++
+          }
+        }
+        for (let g = 0; g < prevHouseTimer.length; g++) {
+          if ((prevHouseTimer[g] as number) <= 1) {
+            c.houseAttempts++
+            if ((state.houseSpawnTimer[g] as number) === HOUSE_SPAWN_PERIOD_TICKS) c.housePlaced++
+          }
+        }
+        for (let d = 0; d < destCountAfter; d++) {
+          if (isOverCapacity(state, d)) {
+            c.overCapacityTicks++
+            break
+          }
+        }
+        for (let p = 0; p < prevPhase.length; p++) {
+          if (
+            (prevPhase[p] as number) === PHASE_OUTBOUND &&
+            (state.carPhase[p] as number) === PHASE_RETURNING
+          ) {
+            // An arrival, which is exactly where `applyArrivalKnockback` runs.
+            c.knockbacks++
+          }
+        }
+      }
+    },
+  }
+}
+
+/**
+ * The greedy arm's action log, recorded once by driving a THROWAWAY rig.
+ *
+ * Recorded rather than computed live for one reason: `armGreedyActions` runs a
+ * flood fill and a 0-1 BFS over 528 cells, allocating two `Int32Array`s and a
+ * `Set` every 30 ticks. Running it inside a profiled window would put a
+ * measurement rig's allocations on the tick under test.
+ */
+function recordGreedyLog(untilTick: number): Map<number, readonly TickAction[]> {
+  const rig = buildSpawnRig()
+  const log = new Map<number, readonly TickAction[]>()
+  const tally = { unaffordable: 0 }
+  const start = rig.state.header[H_TICK] as number
+  const opening: TickAction[] = []
+  for (const stroke of CITY_OPENING) opening.push(...armPathActions(stroke))
+  log.set(start + 1, opening)
+  for (let tick = start + 1; tick <= untilTick; tick++) {
+    if (tick !== start + 1 && tick % GREEDY_PERIOD_TICKS === 0) {
+      const actions = armGreedyActions(rig.state, rig.world, tally)
+      if (actions !== undefined) log.set(tick, actions)
+    }
+    // Replay what has been recorded so far, one tick at a time, so the policy
+    // sees exactly the board the profiled replay will see.
+    rig.drive(1, log, null)
+  }
+  return log
+}
+
+describe('the tick allocates nothing on the SPAWN, WEEK and OVERCROWD phases (Task 12)', () => {
+  it('enters all nine counted branches and charges no sim/src file over 4,600 ticks x 3', () => {
+    const log = recordGreedyLog(M1E_END_TICK)
+    const rig = buildSpawnRig()
+    const counters = newSpawnCounters()
+    const start = rig.state.header[H_TICK] as number
+    rig.drive(M1E_FIRST_WINDOW_START - 1 - start, log, null)
+    expect(rig.state.header[H_TICK], 'the pre-window drive lands one tick short').toBe(
+      M1E_FIRST_WINDOW_START - 1,
+    )
+
+    const attemptsPerWindow: number[] = []
+    const profiles: Allocator[][] = []
+    for (let w = 0; w < M1E_WINDOWS; w++) {
+      const before = counters.destAttempts
+      const all = profileAllocations(() => {
+        rig.drive(M1E_WINDOW_TICKS, log, counters)
+      }, M1E_SAMPLING_INTERVAL_BYTES)
+      assertProfiledLive(rig.state, `spawn window ${w}`)
+      profiles.push(all)
+      attemptsPerWindow.push(counters.destAttempts - before)
+    }
+
+    // -----------------------------------------------------------------------
+    // **THE COUNTERS FIRST.** Every figure below this line is "no allocation
+    // was charged", which a driver that entered none of these branches
+    // satisfies perfectly. Nine branches, nine assertions, each naming the
+    // phase it belongs to.
+    // -----------------------------------------------------------------------
+    expect(counters.weeksCrossed, 'PHASE 2 — no week boundary was crossed').toBe(M1E_WINDOWS)
+    expect(counters.destAttempts, 'PHASE 4 — the destination spawner never ran').toBeGreaterThan(0)
+    expect(counters.destPlaced, 'PHASE 4 — no destination was ever PLACED').toBeGreaterThan(0)
+    expect(
+      counters.destScanExhausted,
+      'PHASE 4 — the 96-call failing scan was never entered, so the expensive path is unmeasured',
+    ).toBeGreaterThan(0)
+    expect(counters.houseAttempts, 'PHASE 4 — the house spawner never ran').toBeGreaterThan(0)
+    expect(counters.housePlaced, 'PHASE 4 — no house was ever PLACED').toBeGreaterThan(0)
+    expect(
+      counters.rebuildsOnDestSpawnTick,
+      'DECISION 6 — a spawn tick rebuilt no field, so the price was accepted rather than measured',
+    ).toBeGreaterThan(0)
+    expect(counters.overCapacityTicks, 'PHASE 10 — no destination was ever over capacity').toBeGreaterThan(
+      0,
+    )
+    expect(counters.knockbacks, '§5.8 — no arrival knockback was ever applied').toBeGreaterThan(0)
+
+    // **Decision 6's price, checked rather than accepted.** `destCell` and
+    // `destMeta` are both FIELD_INPUT and the staleness stamp is one global
+    // byte hash, so placing ANY destination invalidates EVERY colour's field.
+    // The city has five groups, so a spawn tick costs five rebuilds, and this
+    // is where that is measured instead of asserted in prose.
+    expect(counters.rebuildsOnDestSpawnTick % counters.destPlaced, 'a whole number per spawn').toBe(0)
+    expect(
+      counters.rebuildsOnDestSpawnTick / counters.destPlaced,
+      'Decision 6: groupCount rebuilds per destination spawn, and firstCity has five groups',
+    ).toBe(5)
+
+    // The window placement is load-bearing and says so: the third window is the
+    // only one that reaches the first over-capacity tick.
+    expect(M1E_FIRST_OVER_CAPACITY_TICK).toBeGreaterThan(
+      M1E_FIRST_WINDOW_START + 2 * M1E_WINDOW_TICKS,
+    )
+    expect(M1E_FIRST_OVER_CAPACITY_TICK).toBeLessThan(M1E_END_TICK)
+
+    // -----------------------------------------------------------------------
+    // The measurement. Per destination-spawn ATTEMPT, floored over the three
+    // windows — the file's standing statistic for a bimodal sampler.
+    // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // **A PER-ATTEMPT BUDGET WAS TRIED HERE AND IS THE WRONG STATISTIC. It is
+    // recorded rather than silently dropped, because the next person will reach
+    // for it for the same reason I did.**
+    //
+    // Destination-spawn attempts land at 2 / 7 / 5 per window. Dividing this
+    // scope's bytes by that gives, for `buildings.ts`, draws of
+    // **33,256 / 1,392 / 236.8 B per attempt** on a tick that allocates
+    // nothing — and the same three windows attribute those bytes to
+    // `spacingViolated`, `footprintWidth`, `inSpawnZone` and `overcrowdRampSpeed`,
+    // every one of which is pure integer arithmetic over typed arrays and
+    // cannot allocate at all. It is the stray-sample artefact this file already
+    // documents, divided by a denominator of five.
+    //
+    // **The carry-forward states the arithmetic: dividing by the event count
+    // divides the signal and the stray-sample noise by the SAME denominator, so
+    // the signal-to-noise ratio is unchanged. It is a change of units.** A
+    // per-event rate works on the jam window because a refusal happens
+    // thousands of times per window; it cannot work on an event that happens
+    // five times.
+    //
+    // So the statistic is per TICK, over 4,600 ticks, intersected across three
+    // windows — and the positive controls below are what prove that predicate
+    // can still SEE the destination-spawn path. It can, loudly, because a
+    // failing attempt runs up to 96 `canPlaceDestination` calls: the two
+    // allocations Task 4 removed are ~96x per attempt, not 1x.
+    // -----------------------------------------------------------------------
+    expect(attemptsPerWindow.every((n) => n > 0), 'every window must contain an attempt').toBe(true)
+
+    // The broad predicate over the whole of `packages/sim/src`, per tick, so
+    // a regression in any file — named or not — is caught. **One file is
+    // excluded and the exclusion is measured; see M1E_UNGUARDED_FILE.**
+    const perWindow = profiles.map((p) =>
+      offenders(p, M1E_WINDOW_TICKS, SIM_SRC, BUDGETS).filter(
+        (line) => !line.includes(`/${M1E_UNGUARDED_FILE} at `),
+      ),
+    )
+    const fileOf = (line: string): string => line.slice(0, line.indexOf(' at '))
+    const everyWindow = (perWindow[0] as string[])
+      .map(fileOf)
+      .filter((f) => perWindow.every((list) => list.some((line) => fileOf(line) === f)))
+    expect(
+      everyWindow.join('\n'),
+      `over budget in all ${M1E_WINDOWS} windows; per-window lists were ` +
+        perWindow.map((l) => `[${l.join('; ')}]`).join(' '),
+    ).toBe('')
+
+    // -----------------------------------------------------------------------
+    // **THE MARGIN GUARD.** Every figure above is measured over a LIVE sim, and
+    // this board loses. State the end tick and the margin rather than only the
+    // flag, so a fixture change that eats the margin is legible before it eats
+    // the window.
+    // -----------------------------------------------------------------------
+    // The excluded file's owner must still exist. A handoff to a named recipient
+    // is only worth anything while the recipient is there.
+    const owner = readFileSync(
+      new URL('./placementAllocation.test.ts', import.meta.url),
+      'utf8',
+    )
+    expect(
+      owner,
+      'placementAllocation.test.ts no longer holds the scope-wide check M1E_UNGUARDED_FILE hands off to',
+    ).toContain('charges NOTHING anywhere under packages/')
+
+    expect(isGameOver(rig.state), 'the profiled windows ran over a FROZEN buffer').toBe(false)
+    expect(rig.state.header[H_TICK]).toBe(M1E_END_TICK)
+    expect(
+      M1E_DEATH_TICK - M1E_END_TICK,
+      'ticks of margin between the last profiled tick and this board’s death',
+    ).toBe(3598)
+  })
+
+  it('DOES report a sim/src allocation on the same rig, same scope, same predicate', () => {
+    // The liveness proof for the window above, in this file's delta idiom: the
+    // same rig, the same `offenders` predicate, the same `SIM_SRC` scope, plus
+    // one `snapshot()` per tick — a real `sim/src` allocator on a real
+    // production seam. `assertScopeResolves` is the wrong check here for the
+    // reason the clean tick window already states: a genuinely allocation-free
+    // tick resolves nothing under `packages/` at all, so it would fire on
+    // success.
+    const log = recordGreedyLog(M1E_FIRST_WINDOW_START + M1E_WINDOW_TICKS - 1)
+    const rig = buildSpawnRig()
+    const start = rig.state.header[H_TICK] as number
+    rig.drive(M1E_FIRST_WINDOW_START - 1 - start, log, null)
+    const all = profileAllocations(() => {
+      for (let i = 0; i < M1E_WINDOW_TICKS; i++) {
+        rig.drive(1, log, null)
+        snapshot(rig.state)
+      }
+    })
+    assertProfiledLive(rig.state, 'spawn control window')
+    const bad = offenders(all, M1E_WINDOW_TICKS, SIM_SRC, BUDGETS)
+    expect(bad.join('\n')).toMatch(/packages\/sim\/src\/state\.ts at \d/)
+  })
+
+  it('reaches BOARD_FULL and the blocked-spawn push — which the SHIPPED board cannot', () => {
+    // ---------------------------------------------------------------------
+    // **The shipped board cannot enter either branch, and that is a finding
+    // rather than a gap in the rig above.** `attemptDestinationSpawn` returns
+    // BOARD_FULL only when `H_DEST_COUNT >= maxDestinations` or when the scan
+    // covered the WHOLE zone. On `firstCity` the clipped spawn zone is **308**
+    // cells against a `SPAWN_CANDIDATE_LIMIT` of **24**, so a failing scan is
+    // always SCAN_EXHAUSTED; and `maxDestinations` is 16 against a board that
+    // dies at 13. §5.3.5's redistribution therefore never fires on the board
+    // that ships — measured over the whole greedy arm, 0 pushes in 31,456
+    // ticks.
+    //
+    // So the branch is entered where it IS reachable: `jamFixture`'s
+    // `maxDestinations: 1`, where every destination-spawn attempt is BOARD_FULL
+    // and every one of them pushes. The push is DISCARDED there (destPins[0] is
+    // pinned at 255, so `hasRoom` is false), which is the counter's own name.
+    // ---------------------------------------------------------------------
+    expect(SPAWN_CANDIDATE_LIMIT, 'if this ever exceeds the city’s zone the comment above is stale').toBeLessThan(
+      308,
+    )
+    const rig = buildJamRig('spawn-full', JAM_STARVED_FIRST_HOUSE_Y, JAM_STARVED_HOUSE_COUNT)
+    const before = rig.state.header[H_DEST_COUNT] as number
+    let attempts = 0
+    let boardFull = 0
+    let pushesLanded = 0
+    let pushesDiscarded = 0
+    let lastTimer = rig.state.header[H_DEST_SPAWN_TIMER] as number
+    let lastDropped = rig.state.header[H_PINS_DROPPED] as number
+    let lastDiscarded = rig.scratchCounters[CT_BLOCKED_PUSH_DISCARDED] as number
+    for (let t = 0; t < BOARD_FULL_TICKS; t++) {
+      rig.drive(1)
+      const timer = rig.state.header[H_DEST_SPAWN_TIMER] as number
+      const dropped = rig.state.header[H_PINS_DROPPED] as number
+      const discarded = rig.scratchCounters[CT_BLOCKED_PUSH_DISCARDED] as number
+      if (lastTimer <= 1) {
+        attempts++
+        if (timer === DEST_SPAWN_PERIOD_TICKS) {
+          boardFull++
+          // **The push, observed by its effect rather than by a counter.**
+          // `pushBlockedSpawnDemand` reaches `destPins` through `fireColour`,
+          // and this rig pins `destPins[0]` at 255 — far over the square hard
+          // cap — so `hasRoom` is false and the fire lands in
+          // `H_PINS_DROPPED` instead. A scheduled colour-0 pin fires once per
+          // `PIN_PERIOD_TICKS` here, so on any GIVEN tick the odds of the
+          // counter moving for the other reason are about 1 in 518; requiring
+          // it on EVERY BOARD_FULL tick is what makes this a detector.
+          if (dropped > lastDropped) pushesLanded++
+          if (discarded > lastDiscarded) pushesDiscarded++
+        }
+      }
+      lastTimer = timer
+      lastDropped = dropped
+      lastDiscarded = discarded
+    }
+    expect(rig.state.header[H_DEST_COUNT], 'the board is full, so nothing was placed').toBe(before)
+    expect(attempts, 'the destination spawner never ran').toBeGreaterThan(0)
+    expect(boardFull, 'SpawnOutcome.BOARD_FULL was never returned').toBe(attempts)
+    // **BOTH arms of the push fire on this fixture, which was measured rather
+    // than assumed** — the first draft of this case asserted every push lands
+    // and got 3 of 5. `attemptDestinationSpawn` rotates its colour cursor over
+    // every colour that is unlocked AND has a house, and the HOUSE spawner is
+    // still live here: once it places a colour-1 house, colour 1 becomes a
+    // spawn candidate, and colour 1 has no destination at all — so those
+    // pushes take `hasEligibleDestinationOfColour`'s discard arm. Landed:
+    // 3. Discarded: 2. Every BOARD_FULL takes exactly one of the two, and that
+    // total is what the assertion is on, because it is the claim §5.3.5 makes.
+    expect(
+      pushesLanded + pushesDiscarded,
+      '§5.3.5’s redistribution never fired — every BOARD_FULL must push, on one arm or the other',
+    ).toBe(boardFull)
+    expect(pushesLanded, 'the LANDING arm was never taken').toBeGreaterThan(0)
+    expect(pushesDiscarded, 'the DISCARD arm was never taken').toBeGreaterThan(0)
+    expect(isGameOver(rig.state), 'measured over a live sim').toBe(false)
   })
 })

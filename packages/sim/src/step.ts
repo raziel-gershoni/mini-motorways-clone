@@ -151,11 +151,12 @@ export interface TickInputs {
  *
  * **The phase count went 9 -> 10 at M1e Task 7 and phases 1..9 kept their
  * numbers, so every `n <-> m` recorded below still names the pair it named.**
- * The complete pairwise set is now C(10,2) = 45 and Task 7 did not re-run it;
- * what it did measure is the one new ADJACENT pair, `9 <-> 10`, which is
- * non-zero — see the M1e Task 7 block at the foot of this comment. Read the
- * two inert pairs below as "still inert as of the nine-phase sweep", not as a
- * claim about the ten-phase set.
+ * The complete pairwise set is C(10,2) = 45 and **M1e Task 12 ran all of it**
+ * — the table is at the foot of this comment and it supersedes every earlier
+ * count. **One pair is 0-detector and it is `4 <-> 5`. `3 <-> 5` is NOT, any
+ * more, and the reason is positional rather than a change in the code**; the
+ * Task 12 block says exactly what changed and the paragraph below carries the
+ * correction.
  *
  * **The one remaining checked no-op, disclosed in `cars.ts`'s idiom for exactly
  * this shape — and the reason recorded for it for three milestones was the
@@ -172,8 +173,27 @@ export interface TickInputs {
  * reader between two phases whose only relationship was the clock. Phase 4 sits
  * between inputs and demand, so `3 <-> 5` is no longer an ADJACENT
  * transposition — but the pair still commutes for the disjointness reason
- * below, and a transposition of two commuting phases is inert however many
- * phases sit between them.
+ * below.
+ *
+ * **AND THE SENTENCE THAT USED TO FOLLOW WAS WRONG. It read: *"a transposition
+ * of two commuting phases is inert however many phases sit between them."*
+ * M1e Task 12's full pairwise sweep measured `3 <-> 5` at 1 detector, stably, in
+ * 4 of 4 rounds against 4 clean baselines.**
+ *
+ * Nothing about the code changed; the sentence was false as written. **A
+ * POSITIONAL transposition of phases `i` and `j` with `j > i + 1` is not a swap
+ * of two adjacent items** — it also reverses phase `i` against everything
+ * between them, and everything between them against phase `j`. Transposing
+ * positions 3 and 5 yields `clock, grant, DEMAND, spawn, INPUTS, sync, ...`, so
+ * the player's road is now applied AFTER the spawner has run: `spawn.test.ts`'s
+ * *"will not spawn on a road the player laid this tick"* dies with *"a paved
+ * cell must refuse a destination: expected 4 to be 3"*. That is `3 <-> 4`'s
+ * detector firing inside `3 <-> 5`'s mutant, exactly as it should.
+ *
+ * **So the claim that survives is narrower and still true: phases 3 and 5
+ * commute WITH EACH OTHER**, which is why the pair was inert while they were
+ * adjacent and why swapping them still cannot produce a pin-accumulation error.
+ * What ends that is a write, not a distance — see the scheduled failure below.
  *
  * **And the insertion ADDED a second checked no-op rather than only removing
  * one. `4 <-> 5` — spawn versus demand — is also 0-detector, measured over the
@@ -431,6 +451,113 @@ export interface TickInputs {
  * therefore the only thing standing between this ordering and a silent
  * regression, which is why they are written as a pair rather than as one test
  * with two assertions.
+ *
+ * ---------------------------------------------------------------------------
+ * THE RE-MEASUREMENT, AT THE CLOSE OF M1e — TASK 12, AT THE FINAL PHASE COUNT
+ * ---------------------------------------------------------------------------
+ *
+ * **The complete pairwise set over TEN phases, C(10,2) = 45, stated as an
+ * enumeration so it reproduces from this sentence: every unordered pair
+ * `{i, j}` with `1 <= i < j <= 10`, applied as a POSITIONAL transposition of
+ * the two statement blocks, with the poison check, `const tick`, the `H_EPOCH`
+ * write and the `H_EPOCH` clear excluded as prologue and epilogue exactly as
+ * M1d's sweep excluded them.**
+ *
+ * Canonical whole-suite invocation, 1,843 tests (shared 49, render 252,
+ * eslint-rules 69, sim 852, game 621), against **four** unmutated baselines run
+ * in the same battery. Baselines: `0, 0, 0, 0` — no flake in this round.
+ *
+ * ```
+ *          j=2   j=3   j=4   j=5   j=6*  j=7*  j=8   j=9   j=10
+ *   i=1      6     6    12    39    84*  129*   80    64    41
+ *   i=2            1     2     1    79*  123*   57    34    17
+ *   i=3                  1     2#   79*  124*   61    39    23
+ *   i=4                        0    74*  129*   58    36    18
+ *   i=5                             73*  134*   57    38    28
+ *   i=6                                  135*  135*  135*  135*
+ *   i=7                                         56    97*   97*
+ *   i=8                                                36    37
+ *   i=9                                                       2
+ * ```
+ *
+ * **`#` marks the one cell whose sweep value is NOT its stable value.**
+ * `3 <-> 5` reads 2 here and is **1**: re-run four times against four fresh
+ * baselines it scored `1, 1, 1, 1`, always `spawn.test.ts`'s paving test, and
+ * the sweep's second detector was `allocation.test.ts`'s Task 12 window — a
+ * sampling artefact in a file the mutant cannot reach. The raw figure is left
+ * in the table and corrected here rather than quietly replaced, because a
+ * table that has been edited to agree with its prose is not a measurement.
+ *
+ * **`*` marks the sixteen rows that collected a SHORT suite — 1,751 tests
+ * rather than 1,843.** Those reorderings make `step` throw during test
+ * COLLECTION, so `carSmoothing.test.ts` (27 tests) and `integration.test.ts`
+ * (65 tests) never ran at all: 92 tests missing, in exactly the sixteen rows
+ * marked. **Their counts are lower bounds on a partly-unrun suite, not clean
+ * kill counts**, and a reader comparing 135 against 56 should know the two were
+ * not measured over the same suite. Every unmarked row collected the full
+ * 1,843. All sixteen involve phase 6 or 7 — the sync and the dispatch — which
+ * is the pair that makes `fieldFor` throw *"colour 0 field is stale"* out of a
+ * rig's module scope.
+ *
+ * **The crash screen matched nothing, and its FALSE POSITIVE is recorded rather
+ * than swallowed.** Screening for the error-class names anywhere on a line
+ * matched one line in ten of the runs — and it was a vitest PASS line whose
+ * test NAME contains the word `TypeError` (`syncFields throws ... rather than a
+ * raw TypeError from inside hashSources`). That is this repo's own catalogued
+ * false positive, reproduced. Re-screened on lines that are not vitest result
+ * lines, **0 matches on all 45**, so no mutant failed at module load and every
+ * non-zero row above is a kill count rather than a crash count.
+ *
+ * **The six pairs with a NAMED detector, predicted non-zero BEFORE the battery
+ * ran, and all six held:**
+ *
+ * ```
+ *   1<->2    6   clock vs week grant   step.test x1, week.test x2, integration x3
+ *   1<->3    6   clock vs inputs       the SAME three files, same counts
+ *   1<->4   12   clock vs spawn        + spawn.test x4 (Task 5's destSpawnTick stamp)
+ *                                       (one of the 12 is allocation.test.ts and is NOT
+ *                                        discounted: this mutant moves the spawn phase,
+ *                                        which that window profiles, so a causal path
+ *                                        exists and "flake" would be a guess)
+ *   2<->3    1   grant vs inputs       week.test x1 (Task 2 Step 1's third test)
+ *   3<->4    1   inputs vs spawn       spawn.test x1 (Task 5 Step 9's paving test)
+ *   9<->10   2   arrivals vs overcrowd trips.test x1 + integration x1
+ * ```
+ *
+ * **`1 <-> 2` and `1 <-> 3` produce the identical detector SET again**, three
+ * files and the same counts in each, which is the same non-coincidence recorded
+ * for the eight-phase sweep: both orderings put the grant in front of the
+ * advance, so the grant reads `tick - 1` either way.
+ *
+ * **`9 <-> 10` gained a second detector in this milestone.** Task 7 measured it
+ * at 1 (`trips.test.ts`'s brink pair). Task 12's end-to-end arm adds the other:
+ * transposing the two moves the greedy arm's death from 31,456 to **31,457**,
+ * and `integration.test.ts` fails with `expected 31457 to be 31456`. A
+ * one-tick error in the meter is now visible as a one-tick error in the run.
+ *
+ * **ONE 0-detector row, and it is `4 <-> 5`** — spawn versus demand, the pair
+ * Task 5's brief predicted would have a detector and which has never had one.
+ * Re-run **four times against four fresh baselines**: `0, 0, 0` and one round
+ * at **1**, which was `allocation.test.ts`'s own Task 12 window charging
+ * `sim/src/buildings.ts` 5.16-5.52 B/tick against a 4 B floor — a sampling
+ * artefact in a file the mutant cannot reach, discounted with the reason and
+ * recorded here because M1d's sweep was misled by exactly this and its lesson
+ * is *run the control as many times as the mutant*. The four baselines in that
+ * battery scored 0, as did all four in the main sweep, and six clean canonical
+ * runs at head scored 0 — so the flake rate on that window is under 1 in 10 and
+ * it is stated rather than hidden.
+ *
+ * **`3 <-> 5` is no longer inert and the code did not change.** 1 detector,
+ * stably, in 4 of 4 rounds — `spawn.test.ts`'s paving test, for the positional
+ * reason set out at length above. The two phases still commute with each other.
+ *
+ * **The two rows that were inert in the nine-phase numbering are therefore now
+ * ONE.** Do not read that as progress: `3 <-> 5` acquired a detector for a
+ * reason that has nothing to do with the property it was inert about, and
+ * `demand.ts`'s scheduled failure — M1f adding a `destPins` write to
+ * `placeRoad`/`eraseRoad` — is still a real one-tick pin-accumulation error
+ * with no detector for the pair that matters. `step.test.ts`'s disjointness
+ * scan is still the only tripwire for it.
  *
  * Pure in the sense that matters: the result depends only on the contents of
  * `s.buffer`, `world`, `fields`/`scratch` (both re-derivable from `s.buffer`

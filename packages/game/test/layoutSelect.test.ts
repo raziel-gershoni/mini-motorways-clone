@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { hashParams, launchOptions, layoutToken, prefersFallback } from '../src/main'
+import { FALLBACK_TOKEN, hashParams, launchOptions, layoutToken, prefersFallback } from '../src/main'
+import { DEFAULT_LAYOUT_ID, LAYOUT_IDS, layoutFor } from '../src/layouts'
 import { startParam } from '../src/telegram'
 
 /**
@@ -236,6 +237,53 @@ describe('launchOptions', () => {
     // the check that the composition did not cross them.
     expect(launchOptions({ hash: '', search: '?layout=1' }, null).preferFallback).toBe(false)
     expect(launchOptions({ hash: '', search: '?fallback=1' }, null).layoutId).toBe('')
+  })
+
+  it('?startapp=fallback reaches the flag AND does not reach layoutFor — M1e Task 12', () => {
+    // **The recovery hatch, revived.** `?fallback=1` is a QUERY parameter and a
+    // Telegram webview has no address bar, so on a phone the hatch was
+    // unreachable unless somebody edited the BotFather URL by hand. The
+    // fragment is reachable — a `t.me/<bot>/<app>?startapp=fallback` link is a
+    // message the player sends themselves and taps.
+    expect(launchOptions({ hash: '#tgWebAppStartParam=fallback', search: '' }, null)).toEqual({
+      preferFallback: true,
+      layoutId: '',
+    })
+    // The SDK-parsed source too, since a client may sign `start_param` into the
+    // payload without mirroring it into the fragment.
+    expect(launchOptions({ hash: '', search: '' }, FALLBACK_TOKEN)).toEqual({
+      preferFallback: true,
+      layoutId: '',
+    })
+    // And `?layout=fallback`, which is the only one that works under `pnpm dev`.
+    expect(launchOptions({ hash: '', search: '?layout=fallback' }, null)).toEqual({
+      preferFallback: true,
+      layoutId: '',
+    })
+
+    // ---------------------------------------------------------------------
+    // **THE SECOND HALF, WHICH IS WHAT MAKES IT A HATCH AND NOT A BRICK.**
+    // `fallback` is not a layout id. Left in `layoutId` it reaches `layoutFor`,
+    // which throws by design and puts the boot-failure panel on the screen —
+    // so a player already unable to erase would get a stack trace instead of a
+    // pill. A test that only checked `preferFallback` would pass on exactly
+    // that build, which is why this assertion is here and why the wiring is
+    // two lines rather than the one the brief costed it at.
+    // ---------------------------------------------------------------------
+    expect(LAYOUT_IDS, 'if this ever becomes a layout id the hatch silently eats it').not.toContain(
+      FALLBACK_TOKEN,
+    )
+    expect(() => layoutFor(FALLBACK_TOKEN), 'which is exactly what the intercept prevents').toThrow()
+    expect(() =>
+      layoutFor(launchOptions({ hash: '#tgWebAppStartParam=fallback', search: '' }, null).layoutId),
+    ).not.toThrow()
+
+    // The hatch does not change the board: it opens whatever a plain link
+    // opens. Telegram gives a Mini App one `startapp` string, so a link cannot
+    // ask for both — stated in `main.ts` as the trade it is.
+    expect(
+      layoutFor(launchOptions({ hash: '#tgWebAppStartParam=fallback', search: '' }, null).layoutId).id,
+    ).toBe(DEFAULT_LAYOUT_ID)
   })
 
   it('is actually SPREAD into startGame’s createGame call — the source says so', () => {

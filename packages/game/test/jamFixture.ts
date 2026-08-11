@@ -179,7 +179,9 @@ export interface JamRig {
   /** The corridor's cells, carpark first. */
   readonly corridor: readonly number[]
   /** Advances `n` ticks. Allocates nothing per tick; returns what happened. */
-  drive(n: number): JamObservation
+  drive(n: number, first?: readonly TickAction[]): JamObservation
+  /** The rig's `scratch.counters`, so a test can read CT_REBUILDS / CT_BLOCKED_PUSH_DISCARDED. */
+  readonly scratchCounters: Int32Array
   /** One tick with a caller-supplied action list. */
   tick(actions: readonly TickAction[]): void
 }
@@ -275,11 +277,22 @@ export function buildJamRig(
     world,
     houses,
     corridor,
+    scratchCounters: scratch.counters,
     tick(actions: readonly TickAction[]) {
       oneTick.actions = actions
       step(state, world, fields, scratch, oneTick)
     },
-    drive(n: number): JamObservation {
+    /**
+     * Drives `n` ticks with no input, unless `first` is given — in which case
+     * those actions are applied on the FIRST of them and nothing after.
+     *
+     * **The parameter exists so the erase/re-place cycle keeps the observation
+     * machinery** (M1e Task 12). The alternative is calling `tick()` on the
+     * cycle ticks, which silently drops that tick's valve, refusal and crossing
+     * counts and the `destPins` top-up — 72 of 25,200 ticks measured under a
+     * different rig from the other 25,128, with nothing saying so.
+     */
+    drive(n: number, first?: readonly TickAction[]): JamObservation {
       obs.crossings = 0
       obs.refusals = 0
       obs.valves = 0
@@ -292,7 +305,7 @@ export function buildJamRig(
           state.destPins[0] = 255
           lastPins = 255
         }
-        oneTick.actions = NO_ACTIONS
+        oneTick.actions = t === 0 && first !== undefined ? first : NO_ACTIONS
         step(state, world, fields, scratch, oneTick)
         for (let c = 0; c < carCount; c++) {
           const cell = state.carCell[c] as number

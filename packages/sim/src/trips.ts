@@ -158,6 +158,49 @@ import { ROUTE_BYTES } from './dispatch'
  * regions), and nothing else in the milestone's Task 7 diff touches one. The
  * set is still THREE.
  *
+ * ---------------------------------------------------------------------------
+ * THE CLOSE-OF-M1e SWEEP — TASK 12. THE SET IS STILL THREE.
+ * ---------------------------------------------------------------------------
+ *
+ * Re-run at the end of the milestone against the finished source, by the same
+ * method: **enumerate every write to every `Uint8` region, do not grep for
+ * `--`.** The grep is what would have missed `noteGhostDeparture`'s
+ * `const left = committed - 1`, and it would miss the next one the same way.
+ * The enumeration below is the complete set of assignment sites in
+ * `packages/sim/src`, checked also for ALIASES (`const x = state.destPins`
+ * followed by `x[i] = ...`), of which there are none — every write goes through
+ * `state.<region>[...]` or a `.fill` on it.
+ *
+ * ```
+ *   roads            roads.ts:469,470  |= bit          roads.ts:671,672  = newMask
+ *   cleared          roads.ts:472,473  = 1
+ *   houseColour      buildings.ts:462  = colour
+ *   destMeta         buildings.ts:590  = packDestMeta(...)
+ *   destPins         demand.ts:348     = pins + 1      trips.ts:213      = pins - 1     <-- 1
+ *   destReserved     dispatch.ts:652   = r + 1         trips.ts:214      = reserved - 1 <-- 2
+ *   carPhase         buildings.ts:470, dispatch.ts:648, trips.ts:228,264  = a constant
+ *   carRoute         dispatch.ts:101   = nibble        dispatch.ts:230 / trips.ts:308  .fill(0)
+ *   ghostMask        roads.ts:573      = 0             roads.ts:622      = bit
+ *   ghostCommitted   roads.ts:574 = 0, roads.ts:623 = committed, roads.ts:601 = left    <-- 3
+ * ```
+ *
+ * **Three, unchanged.** `roads.ts:671/672` lowers a value and is still not a
+ * member: `& ~bit` on a BITMASK cannot underflow, and the wrap class is about
+ * counters. `ghostMask`/`ghostCommitted`'s `= 0` are resets, not decrements.
+ *
+ * **M1e's two new decrements are both on `Int32` regions and both floored**, so
+ * neither joins this set: `runOvercrowd`'s unwind (`overcrowd.ts:231-232`,
+ * `m > 0 ? m : 0`) and `applyArrivalKnockback` (`overcrowd.ts:171-176`), whose
+ * floor is STRUCTURAL rather than clamped — `floor(m/10) <= m` for every
+ * non-negative `m` — with `assertOvercrowdNonNegative` saying so out loud.
+ *
+ * **And the one new `Uint8` WRITER M1e adds only ever increments.** §5.3.5's
+ * blocked-spawn redistribution reaches `destPins` through
+ * `pushBlockedSpawnDemand` (`demand.ts`), whose whole body is a `fireColour`
+ * call — so it lands on `demand.ts:348`'s `+ 1` and nowhere else. That is the
+ * same one-line-body property `step.ts`'s `4 <-> 5` commutativity argument
+ * leans on, and it is load-bearing twice for the same reason.
+ *
  * Parameterised rather than closing over `state`, on the precedent of
  * `assertBucketCountExceedsEveryEdgeCost` (scratch.ts), `assertDispatchProgress`
  * (dispatch.ts) and `assertSingleCrossing` (cars.ts): the failure path is then

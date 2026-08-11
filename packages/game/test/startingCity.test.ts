@@ -72,13 +72,10 @@ import { m1eInsertedRanges, spliceM1eInsertions } from '../../sim/test/m1eSplice
 import { CITY_DEATH_TICK } from './deathTicks'
 import {
   armCarpark as gateCarpark,
-  armCheapestPath as gateCheapestPath,
   armGreedyActions as gateGreedyActions,
   armPathActions as gatePathActions,
-  armRoadComponent as gateRoadComponent,
   armTimerCap as gateTimerCap,
   firesSoFar,
-  inAnyFootprint,
   CITY_OPENING as GATE_OPENING,
   CORRIDOR,
   D2_LINK,

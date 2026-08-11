@@ -6,8 +6,11 @@ import {
   COST_UNIT_SCALE,
   DIAG_COST,
   FIRST_PIN_DELAY_TICKS,
+  DENOM,
   OVERCROWD_FAIL_MILLITICKS,
+  PIN_CAP_CIRCLE_HARD,
   PIN_PERIOD_TICKS,
+  WEEKLY_TILE_GRANT,
 } from '@laneways/shared'
 import {
   H_DEST_COUNT,
@@ -27,13 +30,13 @@ import {
   isGameOver,
   occupantOf,
   packRouteStep,
+  assertOccupancyComplete,
   assertOccupancySound,
   hashState,
   roadMask,
   tilesLeft,
   weekOfTick,
   H_FAILED_DEST,
-  H_PINS_DROPPED,
   H_ROUTES_REFUSED,
   type TickAction,
 } from '@laneways/sim'
@@ -43,6 +46,8 @@ import {
   buildJamRig,
   jamGhostCells,
   jamQueueLength,
+  JAM_W,
+  JAM_X,
   JAM_CARPARK_CAPACITY_TRIPS,
   JAM_FIRST_HOUSE_Y,
   JAM_STARVED_FIRST_HOUSE_Y,
@@ -62,7 +67,6 @@ import {
   armCarpark,
   armGreedyActions,
   armPathActions,
-  armTimerCap,
   firesSoFar,
   CITY_OPENING,
   GREEDY_PERIOD_TICKS,
@@ -1941,6 +1945,86 @@ describe('a bottleneck jams: throughput collapses below the hand-computed unbloc
 /** The plan's floor is 20,000 ticks. Measured cost of the whole block: ~1.0 s. */
 const LONG_RUN_TICKS = 20000
 
+// --- M1e Task 12's erase/re-place sweep, on the same fixture ---------------
+
+/**
+ * 25,200 = 700 x 36. The brief's floor is 25,000 and the period is 700; a
+ * horizon that is not a whole number of periods would end mid-cycle, leaving
+ * the last erase unrefunded and the ledger's final value dependent on where the
+ * horizon happened to stop.
+ */
+const ERASE_RUN_TICKS = 25200
+const ERASE_PERIOD_TICKS = 700
+/**
+ * How long the corridor stays broken. 60 ticks = 2 s, which is long enough for
+ * every committed car to cross off the ghosted cells and the refund to land,
+ * and short enough that the destination's meter — which climbs at 1,000
+ * milliticks a tick while nothing arrives — gains only ~60,000 against a
+ * threshold of 2,640,000.
+ */
+const ERASE_HOLD_TICKS = 60
+
+/**
+ * The last tick on which `assertOccupancyComplete` can be asserted here.
+ *
+ * **Measured, and the measurement is the point of the constant.** Completeness'
+ * exception set has exactly one live member on this fixture — a car displaced
+ * by the anti-deadlock valve stays unnamed by its cell's slots until IT crosses
+ * again — and the natural reading of "skip the ticks where the valve fired" is
+ * far too narrow: swept over the whole 25,200, the assertion throws on **22,980
+ * of them**, and the longest gap between a firing and the tick the assertion
+ * recovers on is **1,006 ticks**. The valve fires 1,417 ticks in and this
+ * fixture never really gets a quiet stretch again.
+ *
+ * What is clean is everything **before the first firing**: fails before the
+ * first valve tick are **0 of 1,417**. So completeness is asserted over exactly
+ * that prefix, which is what `blocking.ts` says out loud — *"this half is
+ * asserted only on fixtures where the valve has not fired"* — applied to a
+ * prefix of a run rather than to a whole fixture.
+ *
+ * **The prefix is not a formality: it contains two complete erase/re-place
+ * cycles and the third's erase** (ticks 2, 702 and 1,402), so the ghost path is
+ * inside the window rather than beyond it. That is the whole reason this
+ * constant is 1,417 and not, say, 500.
+ */
+const ERASE_FIRST_VALVE_TICK = 1419
+const ERASE_COMPLETE_UNTIL = ERASE_FIRST_VALVE_TICK - 1
+
+/**
+ * The five-cell stroke, in the middle of the starved corridor: column 8, rows
+ * 8..12. A drag samples adjacent pairs, so a stroke over N cells takes both
+ * bits off only the N - 2 in the middle — three cells here, which is what
+ * `peakGhostCells` asserts.
+ */
+const ERASE_STROKE: readonly TickAction[] = Object.freeze(
+  [8, 9, 10, 11].map((y) =>
+    Object.freeze({ kind: 'erase' as const, a: y * JAM_W + JAM_X, b: (y + 1) * JAM_W + JAM_X }),
+  ),
+)
+const REPLACE_STROKE: readonly TickAction[] = Object.freeze(
+  ERASE_STROKE.map((a) => Object.freeze({ kind: 'place' as const, a: a.a, b: a.b })),
+)
+
+/** Road cells the starved rig builds before tick 1: the corridor, y = 4..16. */
+const INITIAL_ROAD_CELLS = 13
+
+function eraseRunRoadCells(state: Game['state'], world: Game['world']): number {
+  let n = 0
+  for (let c = 0; c < world.cells; c++) if ((state.roads[c] as number) !== 0) n++
+  return n
+}
+
+function eraseRunGhostCells(state: Game['state']): number {
+  let n = 0
+  for (let c = 0; c < state.ghostMask.length; c++) if ((state.ghostMask[c] as number) !== 0) n++
+  return n
+}
+
+/** `tiles + roadCells + ghostCells` — the quantity M1d's review found constant. */
+function ledgerOf(state: Game['state'], world: Game['world']): number {
+  return tilesLeft(state) + eraseRunRoadCells(state, world) + eraseRunGhostCells(state)
+}
+
 /**
  * **20,000 drives on a deliberately bad network, with every invariant checked on
  * every tick — and two identical runs agreeing on `hashState`.**
@@ -2215,6 +2299,197 @@ describe('20,000 LIVE drives on a deliberately bad network', () => {
     // state of the same shape, or `toBe` would pass on a run that never ran.
     const fresh = buildJamRig('long-run', JAM_STARVED_FIRST_HOUSE_Y, JAM_STARVED_HOUSE_COUNT)
     expect(hashState(rig.state)).not.toBe(hashState(fresh.state))
+  })
+
+  // -------------------------------------------------------------------------
+  // M1e TASK 12 — THE SAME FIXTURE, LONGER, AND NOW IT ERASES
+  // -------------------------------------------------------------------------
+  //
+  // Carried forward from the whole-milestone review: *"The shipped long-run
+  // test never erases a road, so the ghost path has no long-horizon coverage in
+  // the suite — the 25,000-tick evidence lives in a review, not in a test. A
+  // finding whose only carrier is a report is the shape this project keeps
+  // getting bitten by."*
+  //
+  // **A SECOND case rather than an extension of the one above, and the reason
+  // is a measurement, not tidiness.** The case above ends in five figures —
+  // `valves` 98, `minCompletions` 2, `maxReserved` 24, `maxBlocked` at the
+  // threshold, `destPins[0]` 85 — that exist to prove *"this fixture is the one
+  // M1d's numbers were derived on and not a new board wearing its name"*.
+  // Lengthening its horizon and breaking its corridor 36 times moves every one
+  // of them, so folding would have deleted the anchor to add the coverage. This
+  // case is a strict superset in both horizon and invariants; the one above is
+  // the anchor. Together they cost ~2.4 s.
+  it('holds the tile ledger, the meter bound and both occupancy halves across 25,200 ticks of erase and re-place', () => {
+    const rig = buildJamRig('erase-run', JAM_STARVED_FIRST_HOUSE_Y, JAM_STARVED_HOUSE_COUNT)
+    expect(rig.state.header[H_TICK], 'the rig arrives one tick in').toBe(1)
+
+    // The ledger's constant term, read off the fixture at tick 1 rather than
+    // written as a literal — `parseMap('jam-rig', …, 9999, …)` is where 9,999
+    // comes from, and a fixture that changed its starting tiles should move this
+    // number rather than fail against a copy of it.
+    const LEDGER_TOTAL = ledgerOf(rig.state, rig.world)
+    expect(LEDGER_TOTAL, "9,999 starting tiles, and the corridor's cells are already paid for").toBe(
+      9999,
+    )
+    expect(weekOfTick(rig.state.header[H_TICK] as number), 'no grant has landed yet').toBe(0)
+
+    let valves = 0
+    let peakMeter = 0
+    let ghostTicks = 0
+    let peakGhostCells = 0
+    let erases = 0
+    let replaces = 0
+    let completeChecked = 0
+    let completeTicks = 0
+    let lastValveTick = -1
+    let firstValveTick = -1
+    let refunded = 0
+
+    for (let t = 0; t < ERASE_RUN_TICKS; t++) {
+      const tick = t + 2 // the rig arrives at tick 1, so drive `t` lands on `t + 2`
+      const phase = t % ERASE_PERIOD_TICKS
+      let actions: readonly TickAction[] | undefined
+      if (phase === 0) {
+        actions = ERASE_STROKE
+        erases++
+      } else if (phase === ERASE_HOLD_TICKS) {
+        actions = REPLACE_STROKE
+        replaces++
+      }
+      const obs = rig.drive(1, actions)
+      valves += obs.valves
+      if (obs.valves > 0) {
+        lastValveTick = tick
+        if (firstValveTick < 0) firstValveTick = tick
+      }
+
+      // ---------------------------------------------------------------------
+      // **The refund ledger is BUDGET-EXACT, and from M1e it is a conservation
+      // law WITH A SOURCE TERM.** The whole-milestone review measured
+      // `tiles + roadCells + ghostCells` constant at 9,999 across 25,000 ticks;
+      // Task 2's `runWeekBoundary` now injects WEEKLY_TILE_GRANT at each
+      // boundary, so the identity gains a term rather than a tolerance.
+      //
+      // Written as an explicit term and NOT as a loosened range, because the
+      // point of the invariant is that place/erase/refund CONSERVE — a range
+      // wide enough to absorb a grant is wide enough to absorb a leaking
+      // refund. `grantsSoFar` comes from the clock, never from a counter the
+      // grant itself writes, or the assertion would be checking the grant
+      // against itself.
+      // ---------------------------------------------------------------------
+      const grantsSoFar = weekOfTick(rig.state.header[H_TICK] as number)
+      expect(ledgerOf(rig.state, rig.world)).toBe(LEDGER_TOTAL + WEEKLY_TILE_GRANT * grantsSoFar)
+
+      assertOccupancySound(rig.state, rig.world)
+
+      // **Completeness only where the valve cannot have left a gap.** Its
+      // exception set is real — a car displaced by the valve stays unnamed
+      // until it crosses again — so asserting it unconditionally would be
+      // asserting something known false. See ERASE_COMPLETE_UNTIL: the window
+      // is the prefix before the first firing, it is 1,417 ticks long, and it
+      // contains two whole erase/re-place cycles.
+      if (tick <= ERASE_COMPLETE_UNTIL) {
+        if (lastValveTick >= 0) {
+          throw new Error(
+            `the valve fired on tick ${lastValveTick}, inside the window completeness is asserted over`,
+          )
+        }
+        completeChecked += assertOccupancyComplete(rig.state, rig.world)
+        completeTicks++
+      }
+
+      let outbound = 0
+      for (let c = 0; c < rig.state.carPhase.length; c++) {
+        if ((rig.state.carPhase[c] as number) === PHASE_OUTBOUND) outbound++
+        const blocked = rig.state.carBlockedTicks[c] as number
+        if (blocked < 0) throw new Error(`carBlockedTicks[${c}] wrapped to ${blocked} on tick ${tick}`)
+      }
+      let reserved = 0
+      for (let d = 0; d < rig.state.destReserved.length; d++) {
+        const r = rig.state.destReserved[d] as number
+        if (r > 255 || r < 0) throw new Error(`destReserved[${d}] is ${r} on tick ${tick}`)
+        reserved += r
+      }
+      expect(reserved, `sum(destReserved) !== count(PHASE_OUTBOUND) on tick ${tick}`).toBe(outbound)
+
+      const destCount = rig.state.header[H_DEST_COUNT] as number
+      for (let d = 0; d < destCount; d++) {
+        const m = rig.state.destOvercrowd[d] as number
+        // **[0, FAIL + DENOM - 1], not [0, FAIL].** `runOvercrowd` adds the ramp
+        // BEFORE the fail test, so the stored value can overshoot the threshold
+        // by up to `DENOM - 1` = 999, and `step`'s freeze then preserves the
+        // overshoot forever. A bound of FAIL would be a bound the shipped code
+        // is allowed to break.
+        if (m < 0 || m > OVERCROWD_FAIL_MILLITICKS + DENOM - 1) {
+          throw new Error(`destOvercrowd[${d}] is ${m} on tick ${tick}, outside [0, 2640999]`)
+        }
+        if (m > peakMeter) peakMeter = m
+      }
+
+      const ghosts = jamGhostCells(rig)
+      if (ghosts > 0) ghostTicks++
+      if (ghosts > peakGhostCells) peakGhostCells = ghosts
+    }
+
+    // ---------------------------------------------------------------------
+    // **THE GUARD THAT DECIDES WHETHER THIS TEST IS MEASURING ANYTHING.**
+    // Every invariant above is a SAFETY property and a frozen buffer satisfies
+    // all of them: the ledger stops moving, occupancy stays sound, the
+    // reservation sum keeps matching, no counter wraps and the meter stops
+    // climbing. If this fires, the FIXTURE is what changes, not the assertion.
+    // ---------------------------------------------------------------------
+    expect(isGameOver(rig.state), 'a 25,000-tick invariant sweep over a FROZEN buffer proves nothing').toBe(
+      false,
+    )
+    expect(rig.state.header[H_TICK]).toBe(ERASE_RUN_TICKS + 1)
+
+    // The cycle really ran, and it really ghosted. Without these the whole case
+    // is the sweep above with a longer horizon and two unused constants.
+    expect(erases, '25,200 / 700').toBe(36)
+    expect(replaces).toBe(36)
+    expect(peakGhostCells, 'a five-cell stroke takes both bits off the middle three').toBe(3)
+    expect(ghostTicks, 'ticks with at least one ghosted cell').toBeGreaterThan(0)
+    // The refund is what makes the ledger interesting: a stroke that never
+    // ghosted would be refunded on the spot and the identity would hold for a
+    // duller reason.
+    expect(rig.state.header[H_TILES] as number).toBeGreaterThan(0)
+    refunded = (rig.state.header[H_TILES] as number) - (9999 - INITIAL_ROAD_CELLS)
+    expect(refunded, 'tiles back in the budget, from the grants and the refunds together').toBeGreaterThan(0)
+
+    // Completeness ran, over the measured prefix, and the prefix is pinned at
+    // both ends: the valve must NOT have fired inside it (asserted in the loop)
+    // and it must fire on exactly the tick the constant names, or the window is
+    // shorter or longer than the thing it was measured against.
+    expect(completeTicks, 'ticks on which completeness was asserted').toBe(ERASE_COMPLETE_UNTIL - 1)
+    expect(completeChecked, 'cars ranged over — not vacuous').toBeGreaterThan(0)
+    expect(lastValveTick, 'the first valve firing, which is what closes the window').toBeGreaterThan(0)
+    expect(firstValveTick, 'and it is where the sweep measured it').toBe(ERASE_FIRST_VALVE_TICK)
+
+    // The meter never came close, so the horizon is not at risk of the freeze
+    // the guard above refuses.
+    expect(peakMeter).toBeGreaterThan(0)
+    expect(peakMeter).toBeLessThan(OVERCROWD_FAIL_MILLITICKS / 10)
+
+    // The valve still fires on this fixture — it is the only place in the repo
+    // where it fires through `runMovement`, and breaking the corridor 36 times
+    // must not have quietly turned that off.
+    expect(valves, 'the valve never fired, so this is not the bad network it claims to be').toBeGreaterThan(
+      0,
+    )
+
+    // Two identical runs agree, byte for byte, over a run that erases.
+    const second = buildJamRig('erase-run', JAM_STARVED_FIRST_HOUSE_Y, JAM_STARVED_HOUSE_COUNT)
+    for (let t = 0; t < ERASE_RUN_TICKS; t++) {
+      const phase = t % ERASE_PERIOD_TICKS
+      second.drive(
+        1,
+        phase === 0 ? ERASE_STROKE : phase === ERASE_HOLD_TICKS ? REPLACE_STROKE : undefined,
+      )
+    }
+    expect(hashState(second.state)).toBe(hashState(rig.state))
+    const untouched = buildJamRig('erase-run', JAM_STARVED_FIRST_HOUSE_Y, JAM_STARVED_HOUSE_COUNT)
+    expect(hashState(rig.state)).not.toBe(hashState(untouched.state))
   })
 })
 
@@ -3414,6 +3689,48 @@ function driveArm(arm: CityArm): ArmRun {
     wkOvercrowd = 0
   }
 
+  /**
+   * Runs frames until exactly one tick has passed.
+   *
+   * **A frame is not a tick, and this rig must not pretend otherwise.** Three
+   * things were measured getting here, none of them obvious from the loop's
+   * source:
+   *
+   *   - `advance(TICK_MS)` runs **zero** ticks on some frames. `TICK_MS` is
+   *     `1000 / 30` and `now2 - now1` after `now += TICK_MS` loses the last
+   *     bits, so `rawDt` lands a float ulp under `TICK_MS`. The first frame this
+   *     rig drove — tick 259 — ran zero.
+   *   - And then it runs **two**, because the shortfall carries in the
+   *     accumulator until one frame clears `2 * TICK_MS`.
+   *   - `oneTick(alpha)` subtracts the accumulator before adding, so it is
+   *     self-correcting. `alpha = 0.5` leaves half a tick of headroom in the
+   *     accumulator every frame, which is ~16.7 ms against a float error of
+   *     ~1e-13. `alpha = 0` leaves none and reproduces the zero-tick frame.
+   *
+   * The death loops elsewhere in this file absorb all of that silently, because
+   * they count frames and assert a tick. An arm that injects the opening on a
+   * NAMED tick cannot: the stroke would land somewhere other than where Task 10
+   * put it, and every figure below would be a different experiment reported
+   * under the old numbers. So the guard is exact and it is inside the loop.
+   *
+   * A burst would be safe even if one happened — `loop.ts` clears the queue
+   * after the FIRST tick of a drain, so an action reaches exactly one tick
+   * either way — but the per-tick SAMPLING below would skip the rest of it,
+   * which is why this refuses rather than tolerates.
+   */
+  const oneTick = (): void => {
+    const before = state.header[H_TICK] as number
+    let frames = 0
+    while ((state.header[H_TICK] as number) === before) {
+      rig.oneTick(0.5)
+      frames++
+      if (frames > 4) throw new Error(`driveArm: ${frames} frames ran no tick at all after ${before}`)
+    }
+    if ((state.header[H_TICK] as number) !== before + 1) {
+      throw new Error(`driveArm: one frame ran ${(state.header[H_TICK] as number) - before} ticks`)
+    }
+  }
+
   for (let tick = startTick + 1; tick <= endTick; tick++) {
     let actions: readonly TickAction[] | undefined
     if (arm !== 'no-input' && tick === startTick + 1) actions = openingActions
@@ -3424,10 +3741,10 @@ function driveArm(arm: CityArm): ArmRun {
     if (actions !== undefined) {
       for (const a of actions) rig.game.queue.enqueue(a.kind, a.a, a.b)
     }
-    // One frame, exactly one tick. The loop drains the queue and clears it, so
-    // nothing here can leak into the next tick.
-    const ran = rig.advance(TICK_MS)
-    if (ran !== 1) throw new Error(`driveArm: tick ${tick} ran ${ran} ticks, not 1`)
+    oneTick()
+    if ((state.header[H_TICK] as number) !== tick) {
+      throw new Error(`driveArm: expected tick ${tick}, state says ${state.header[H_TICK]}`)
+    }
     if (rig.game.queue.length !== 0) throw new Error(`driveArm: the queue was not drained on ${tick}`)
     if (tick === startTick + 1 && arm !== 'no-input') openingSpend = tilesBefore - tilesLeft(state)
 
@@ -3503,3 +3820,203 @@ function armRun(arm: CityArm): ArmRun {
   armRuns.set(arm, run)
   return run
 }
+
+describe('the run can be lost end to end, on the board a plain load opens', () => {
+  it('an unplayed city dies at a HAND-DERIVED 5,580 with a score of 0, and D2 is what kills it', () => {
+    const r = armRun('no-input')
+
+    // ---------------------------------------------------------------------
+    // THE DERIVATION, WHICH IS THE WHOLE CONTENT OF THIS ARM
+    // ---------------------------------------------------------------------
+    //
+    // 5,580 is not read off the run. It is:
+    //
+    //   D2 is colour 1's lone CIRCLE, so `computeSlotCounts` (demand.ts) gives
+    //   colour 1 two rotation slots — a circle carries two, a square one — and
+    //   BOTH of them are D2's. Colour 1 therefore fires every
+    //   PIN_PERIOD_TICKS / 2 = 259 ticks and every one of those pins lands on
+    //   D2, where colour 0's two squares share their colour's two slots and get
+    //   one pin per 518 ticks EACH.
+    //
+    //   The first pin is at tick 378 (`FIRST_PIN_TICK` in startingCity.test.ts:
+    //   119 + ceil(518 / 2)). D2's trigger cap is PIN_CAP_CIRCLE_TIMER = 8, so
+    //   it stands at cap from its 8th pin: 378 + 7 * 259 = 2,191.
+    //
+    //   The meter needs 3,390 consecutive at-cap ticks. `overcrowdRampSpeed`
+    //   adds floor(20t/30) on the t-th, saturating at DENOM = 1,000 once
+    //   `destOverTicks` reaches OVERCROWD_RAMP_FULL_TICKS = 1,500:
+    //   sum(floor(2t/3), t = 1..1500) = 750,000, leaving
+    //   2,640,000 - 750,000 = 1,890,000 at 1,000 a tick = 1,890 more.
+    //   1,500 + 1,890 = 3,390.
+    //
+    //   The k-th at-cap tick is 2,190 + k, so k = 3,390 lands on **5,580**.
+    //
+    // **The lower-indexed square D0 would die at 6,357, and saying which of the
+    // two dies is what makes this a derivation rather than a recorded number.**
+    // D0's pins are at 378, 896, 1414, 1932, 2450 and 2968; its square trigger
+    // cap is 6, so its first at-cap tick is 2,968 and 2,967 + 3,390 = 6,357.
+    // **The higher cap does not save the circle**: 8 pins at one per 259 ticks
+    // arrive sooner than 6 at one per 518, and §5.8's dial is the ratio of the
+    // two, not the cap alone. That asymmetry is the one thing M1e discovered
+    // about the pin capacities and it is in `constants.ts` and the M1f
+    // carry-forward as well as here.
+    //
+    // **And the derivation is robust to the spawner, which is worth stating
+    // because it looks like it should not be.** Task 5 adds destinations to this
+    // board even with no input — this run ends with five, not the three it was
+    // seeded with — and a new colour-1 destination changes `slotCount(1)`. But
+    // **each rotation slot still receives one pin per `period` regardless of how
+    // many destinations the colour has**, so D2's own arrival rate is untouched
+    // and 5,580 holds. Anything the spawner adds gets its first pin
+    // FIRST_PIN_DELAY_TICKS = 120 ticks after spawning and cannot complete a
+    // 3,390-tick meter before roughly tick 8,300, which is well after D2.
+    expect(r.deathTick, 'derived above, not recorded from the run').toBe(5580)
+    expect(r.deathTick, 'and the number three other files already carry').toBe(CITY_DEATH_TICK)
+    expect(2190 + 3390, 'the k-th at-cap tick, with k = 3,390').toBe(5580)
+    expect(378 + 7 * (PIN_PERIOD_TICKS / 2), "D2's 8th pin, at one per 259 ticks").toBe(2191)
+
+    // **D2 SPECIFICALLY.** "A destination that was never connected" is every
+    // destination on a board with no roads, so it is an assertion about
+    // nothing; the claim that has content is which one of the five reaches its
+    // meter first, and it is index 2.
+    expect(r.failedDest, "colour 1's lone circle, not the lower-indexed square").toBe(2)
+    expect(r.failedDestConnected, 'nothing is connected on a board nobody drew on').toBe(false)
+
+    expect(r.trips, 'nothing can move, so nothing scores').toBe(0)
+    expect(r.maxInFlight, 'and no car ever leaves its house').toBe(0)
+    // The spawner is live on this arm and the run is still lost — growth in the
+    // entity count is not growth in the behaviour anyone wanted.
+    expect(r.weeks.at(-1)?.dests).toBe(5)
+    expect(r.weeks.at(-1)?.houses).toBe(10)
+    // The tile grant landed exactly once inside 5,580 ticks: 30 + 30.
+    expect(r.weeks[0]?.tilesLeft).toBe(60)
+    expect(r.weeks[1]?.tilesLeft).toBe(60)
+    // The killer runs past the CIRCLE's hard cap, which is the roadless
+    // signature: nothing consumes a pin, so the count only climbs.
+    expect(r.weeks[1]?.peakDestPins).toBe(PIN_CAP_CIRCLE_HARD)
+  })
+
+  it('the 20-tile opening reaches 8,661 and every per-week figure it was measured at', () => {
+    const r = armRun('opening')
+
+    // **The opening was ACCEPTED, asserted rather than assumed.** A stroke
+    // refused for budget would silently turn this arm into a second copy of
+    // `no-input`, and every figure below would still look like a measurement.
+    expect(r.openingSpend, 'D2_LINK 5 tiles + CORRIDOR 15').toBe(20)
+
+    expect(r.deathTick, "Task 10's opening arm").toBe(8661)
+    expect(r.failedDest, 'D3 — a different destination from the one the empty board loses to').toBe(3)
+    expect(r.failedDestConnected, 'and its carpark is still bare').toBe(false)
+    expect(r.trips, "Task 10's figure").toBe(71)
+    expect(r.deathWeek).toBe(1)
+
+    // The per-week series, exact. Task 10 recorded this arm's death tick, its
+    // killer and its trip count and gated on its two delivery fractions; the
+    // six per-week series below are measured HERE for the first time, on the
+    // production boot, and are stated as figures rather than as bounds for the
+    // reason the block header gives.
+    expect(r.weeks.map((w) => w.maxInFlight), 'cars in motion').toEqual([2, 2])
+    expect(r.weeks.map((w) => w.longestQueue), 'nobody ever waits behind anybody').toEqual([1, 1])
+    expect(r.weeks.map((w) => w.refusals), 'H_ROUTES_REFUSED, per week').toEqual([0, 0])
+    expect(r.weeks.map((w) => w.blockedTicks), 'ticks with a blocked car').toEqual([0, 0])
+    expect(r.weeks.map((w) => w.peakDestPins), 'peak destPins over ALL destinations').toEqual([4, 10])
+    // The last sample before the freeze, so it is one ramp step under the
+    // threshold rather than at it — the death tick itself is never sampled,
+    // because the loop breaks on `isGameOver` before the sampling block.
+    expect(r.weeks.map((w) => w.peakOvercrowd), 'peak destOvercrowd').toEqual([0, 2639000])
+    expect(r.weeks[1]?.peakOvercrowd).toBeLessThan(OVERCROWD_FAIL_MILLITICKS)
+
+    // Task 10's Gate B numbers, on the other driver. An epsilon rather than an
+    // exact float compare, and the two ratios are stated as their own fractions
+    // so a change in either term is visible in the failure.
+    expect(r.weeks[0]?.trips).toBe(32)
+    expect(r.weeks[0]?.fires).toBe(38)
+    expect(r.weeks[1]?.trips).toBe(39)
+    expect(r.weeks[1]?.fires).toBe(55)
+    expect(32 / 38).toBeCloseTo(0.842, 3)
+    expect(39 / 55).toBeCloseTo(0.709, 3)
+
+    // Degeneracy guards. Both are satisfied by construction above and are here
+    // because the failure they catch — an arm that stops driving — is exactly
+    // the one every figure in this case would survive.
+    expect(r.trips).toBeGreaterThan(0)
+    expect(r.maxInFlight).toBeGreaterThan(0)
+  })
+
+  it('the greedy arm survives to week 6 and dies on a destination it HAD connected', () => {
+    const r = armRun('greedy')
+
+    expect(r.deathTick, "Task 10's greedy arm — 17 min 29 s").toBe(31456)
+    expect(r.deathWeek, 'week 6 of 12; the window is not what ends it').toBe(6)
+    expect(r.weeks.length, 'seven weeks, 0 through 6').toBe(7)
+    expect(r.failedDest).toBe(6)
+
+    // ---------------------------------------------------------------------
+    // THE BINDING CONSTRAINT, AND IT IS THE ONE TASK 10 NAMED
+    // ---------------------------------------------------------------------
+    //
+    // The run does not end because the network cannot carry the load. It ends
+    // on a destination whose carpark is ON the road network, with
+    // `H_ROUTES_REFUSED` at zero for the whole run and 97.5 % of every pin
+    // demand fired delivered. That is `dispatch.ts`'s Decision 4 cost —
+    // `advanceAccumulators` distributes pins EVENLY across a colour's rotation
+    // slots while `assembleSources` routes cars to the NEAREST unfilled pin —
+    // and not a throughput failure. A gate demanding a collapsing delivery
+    // fraction under greedy play would be demanding the wrong failure mode;
+    // the collapse belongs to the FIXED-network arm above, which is where
+    // Task 10 gated it.
+    expect(r.failedDestConnected, 'the killer was connected, and still starved').toBe(true)
+    expect(r.weeks.map((w) => w.refusals), 'not one route refused, in any week').toEqual([0, 0, 0, 0, 0, 0, 0])
+    expect(r.trips).toBe(747)
+    expect(r.fires).toBe(766)
+    expect(r.trips / r.fires, 'the delivery fraction never collapses').toBeCloseTo(0.975, 3)
+    expect(r.trips / r.fires).toBeGreaterThanOrEqual(0.9)
+    expect(r.trips / r.fires).toBeLessThan(1)
+
+    // Task 10's per-week series, reproduced by the other driver, exactly.
+    expect(r.weeks.map((w) => w.blockedTicks)).toEqual([0, 0, 99, 298, 287, 639, 597])
+    expect(r.weeks.map((w) => w.longestQueue)).toEqual([1, 1, 2, 3, 3, 4, 4])
+    expect(r.weeks.map((w) => w.peakDestPins), "Gate C's 1 -> 2 -> 5 -> 10 gradient").toEqual([
+      1, 1, 1, 1, 2, 5, 10,
+    ])
+    expect(r.maxInFlight, "Gate A's peak cars in motion").toBe(11)
+    expect(r.weeks.map((w) => w.dests)).toEqual([5, 6, 8, 10, 10, 11, 12])
+    expect(r.weeks.map((w) => w.houses)).toEqual([8, 13, 17, 21, 21, 23, 25])
+    // Tiles never bind: the whole twelve-week connect bill is 62 of 210 granted.
+    expect(Math.min(...r.weeks.map((w) => w.tilesLeft))).toBe(37)
+    expect(Math.max(...r.weeks.map((w) => w.tilesLeft))).toBe(151)
+    expect(r.unaffordable, 'the greedy policy never once could not afford its next connection').toBe(0)
+
+    // ---------------------------------------------------------------------
+    // THE FIRST HONEST COUNT OF THE ANTI-DEADLOCK VALVE ON A PLAYED BOARD
+    // ---------------------------------------------------------------------
+    //
+    // `constants.ts`'s MAX_BLOCKED_TICKS block records the valve on the two
+    // shipped boards with NO input, where `city` scores zero refusals for the
+    // dull reason that no road exists. This is the other arm: 31,456 ticks of
+    // competent play, cars genuinely standing behind each other from week 2 —
+    // and the worst wait any car ever takes is **32 ticks, 1.07 s, a factor of
+    // 42 below the 1,350-tick threshold.** M1d's headline feature is a
+    // one-second hesitation on the board that ships, and the demo board is
+    // still the only place the valve can fire.
+    expect(r.maxBlockedTicks, 'the worst wait, in ticks').toBe(32)
+    expect(r.valveFirings, 'the valve cannot fire on this board').toBe(0)
+    expect(MAX_BLOCKED_TICKS / 32, '42x from firing').toBeGreaterThan(42)
+  })
+
+  it('is not vacuous: the three arms are three different runs, not one run reported thrice', () => {
+    const none = armRun('no-input')
+    const opening = armRun('opening')
+    const greedy = armRun('greedy')
+    // Every pair differs in the death tick, the killer AND the trip count, so
+    // no two of them can be the same drive with a different label.
+    const ticks = [none.deathTick, opening.deathTick, greedy.deathTick]
+    expect(new Set(ticks).size).toBe(3)
+    expect(new Set([none.failedDest, opening.failedDest, greedy.failedDest]).size).toBe(3)
+    expect(new Set([none.trips, opening.trips, greedy.trips]).size).toBe(3)
+    // And the ordering the flip is FOR: doing nothing is worst, twenty tiles
+    // buys three and a half minutes, keeping up buys fourteen more.
+    expect(none.deathTick).toBeLessThan(opening.deathTick)
+    expect(opening.deathTick).toBeLessThan(greedy.deathTick)
+  })
+})

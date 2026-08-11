@@ -113,9 +113,30 @@ export const SHARP_TURN_SPEED_MUL = 333
  *   demo  6,703 ticks   7,544 refusals  max carBlockedTicks   55   0 valve firings
  * ```
  *
- * `city` refuses nothing because a board nobody draws on has no route, so no
- * car ever moves; `demo` refuses constantly and its worst wait is **55 ticks,
- * 1.8 s — a factor of 24.5 below this threshold.** So this constant is not
+ * **And M1e Task 12 adds the row the plan actually asked for — the PLAYED
+ * default, which is where cars run at all.** Driven through `createGame`'s own
+ * boot and input queue under the greedy connector, 31,456 ticks to the §5.8
+ * death:
+ *
+ * ```
+ *   city, greedy   31,456 ticks   0 refusals   max carBlockedTicks   32   0 valve firings
+ * ```
+ *
+ * Cars genuinely queue behind one another here — longest queue 4, 597 blocked
+ * ticks a week from week 5 — and the worst wait any car takes is **32 ticks,
+ * 1.07 s, a factor of 42 below this threshold.** `integration.test.ts` asserts
+ * all three figures.
+ *
+ * **Which row supersedes which: none of them.** The two no-input rows below are
+ * a claim about boards nobody plays and the greedy row is a claim about a board
+ * played optimally; they are three arms, not three attempts at one number. What
+ * changes with the greedy row is only that the valve's unreachability is no
+ * longer explained away by "no car ever moves" — on the played default 747
+ * trips complete and it still never fires.
+ *
+ * `city` refuses nothing on the no-input arm because a board nobody draws on has
+ * no route, so no car ever moves; `demo` refuses constantly and its worst wait
+ * is **55 ticks, 1.8 s — a factor of 24.5 below this threshold.** So this constant is not
  * "unvalidated"; it is unreachable outside purpose-built fixtures
  * (`game/test/jamFixture.ts`'s STARVED variant: 17 firings over 3,000 ticks at
  * twelve houses, 2 at eight; `sim/test/blocking.test.ts`'s hand-built gridlock
