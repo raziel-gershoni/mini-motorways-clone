@@ -315,20 +315,33 @@ export function resolveCar(
 // not part of the normal path.
 //
 // **That sentence used to have no "at a tick boundary" in it, and the missing
-// scope made it false of what is actually on screen.** Measured at the close of
-// M1e (Task 11), on the demo board after its warm start, maximised over every
-// live car and over alphas {0, 0.1, 0.25, 0.5, 0.75, 0.9, 1}:
+// scope made it false of what is actually on screen.**
+//
+// THE ENUMERATION, because two adjacent quantities here differ by 33% and a
+// review already conflated them: demo layout, after its warm start; one
+// `snapshotPrev` per tick and one `snapshotCurr` per frame, exactly as
+// `createFrameDriver` does it; alpha swept on a 21-point grid `g / 20`; the max
+// taken over every (car, frame) with `currLive === 1`; the frame-to-frame
+// columns gated on the same car having been live in the previous frame.
 //
 // ```
-//   schedule                       max |drawCar - lerpCar|      at alpha 1
-//   1 tick per frame, 3,000 frames        0.1320 (0.66x)          0.132002
-//   one 7-tick drain in ten, 3,000        0.9240 (4.62x)          0.200010
-//   every frame drains 7 ticks, 800       0.9920 (4.96x)          0.200010
+//   schedule                        A: max|drawCar-lerpCar|   B: at alpha 1   C: drawn step
+//   1 tick per frame, 3,000 frames        0.1320 (0.66x)        0.132002         0.1760
+//   one 7-tick drain in ten, 3,000        0.9240 (4.62x)        0.200010         1.0560
+//   every frame drains 7 ticks, 800       0.9920 (4.96x)        0.200010         1.1240
 // ```
 //
-// The alpha-1 column is the bound doing its job — it reaches 0.200010, which
-// IS `MAX_DRAW_LAG_CELLS`, and never exceeds it. The other column is the same
-// two functions sampled mid-frame, and it is 4.96x the bound.
+// **A, B and C are three different things and only A is the divergence.**
+// A is `drawCar` against `lerpCar` at the same alpha, over alpha < 1. B is the
+// same pair at alpha 1, which is the clamp doing its job — it reaches 0.200010,
+// which IS `MAX_DRAW_LAG_CELLS`, and never exceeds it. **C is not a divergence
+// at all**: it is how far the drawn car moves between one frame and the next,
+// which is also exactly `drawCar(1) - drawCar(0)` within one frame (measured
+// equal in all three rows). Row 1's A is 0.1320 and its C is 0.1760; quoting C
+// as A overstates the divergence by a third.
+//
+// So the claim is: the clamp holds at alpha 1 on every row, and the mid-frame
+// divergence reaches **4.96x** it.
 //
 // **The mechanism, which is in `frame.ts` rather than here.** `beforeStep` runs
 // `snapshotPrev` per TICK, so `prevXY -> currXY` spans only the LAST tick of a
@@ -343,11 +356,20 @@ export function resolveCar(
 //
 // **This is a documentation fix and not a regression**, and the reason is worth
 // stating so nobody "fixes" it: a multi-tick drain means the tab was starved,
-// the car really did move that far, and the drawn car covers the ground
-// smoothly where the exact interpolant covers it in one jump — measured, the
-// worst single-frame drawn displacement under a sustained 7-tick drain is
-// 1.1240 cells against the exact interpolant's 0.9240, i.e. the chase adds at
-// most its own outstanding lag and never teleports.
+// the car really did move that far, and the chase adds at most its own
+// outstanding lag on top of that. Measured as a per-(car, frame) EXCESS —
+// drawn step minus exact step on the same car and the same frame, which is the
+// quantity the sentence is about — the worst is **0.2000** on the sustained
+// 7-tick schedule, 0.1320 on the burst one and 0.0440 at one tick per frame.
+//
+// Note the first of those lands on `MAX_DRAW_LAG_CELLS` to four decimals, and
+// that is disclosed rather than hidden: it is what the clamp predicts, so it is
+// a measurement AGREEING with arithmetic and not a substitute for one. An
+// earlier draft of this paragraph quoted the two column-C figures instead
+// (1.1240 against 0.9240) — whose difference is that same 0.2000 — which reads
+// as measurement and is really the bound restated. The excess is the honest
+// form because it is maximised independently, over the same 18,888 car-frames,
+// and could have come back larger.
 //
 // Three things the bound is what makes safe. **All three are stated at a tick
 // boundary and inherit the scope above** — in particular, over a multi-tick

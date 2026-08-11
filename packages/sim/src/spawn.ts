@@ -45,6 +45,37 @@ import { pushBlockedSpawnDemand } from './demand'
  * is the only place that converts between the first and the third, through
  * `spawnZoneCellAt`, and no other module may index the zone.
  *
+ * ---------------------------------------------------------------------------
+ * THIS SPAWNER IS NOT CONNECTIVITY-AWARE, AND THAT IS THE MILESTONE'S DOMINANT
+ * FAILURE SHAPE — carried to M1f, recorded here because this is the code that
+ * causes it
+ * ---------------------------------------------------------------------------
+ *
+ * A building is placed on spacing and terrain alone. Nothing here asks whether
+ * a road reaches it, and **a spawned destination's carpark is road-free by
+ * construction** on any board the player has not just drawn to — so it is never
+ * a flow-field source, takes zero arrivals, and its §5.8 meter only ever fills.
+ * It killed three test fixtures during M1e and took two commits to find the
+ * third.
+ *
+ * **What makes it a product problem rather than a fixture problem: a player
+ * hits it the first time they do not connect a spawned building, and nothing in
+ * the UI can explain it** — what they see is a building they never asked for
+ * killing a city that looks fine. Task 9's shutdown copy is keyed to exactly
+ * this (`NO ROAD REACHES DESTINATION n`, chosen over `OVERCROWDED` precisely
+ * because it is computable from whether any road reaches the carpark), which
+ * makes the ending legible but does not make the danger visible while there is
+ * still time to act.
+ *
+ * **Design the ring and any future gate around UNREACHABILITY, not congestion.**
+ * And note what the obvious fix costs: M1e's plan proposed tiering the spawn
+ * scan by proximity to the spawning colour's own houses, and Task 10 measured
+ * it across five seeds — it survives all twelve weeks **by making the board
+ * inert** (peak `destPins` 1 in 65 of 65 week-observations, zero blocked ticks
+ * in 63 of 65, four cars ever in motion) and was refused. Connectivity
+ * awareness is not free; it is a difficulty change wearing a survivability
+ * change's clothes. See `docs/superpowers/m1f-carry-forward.md` §9.
+ *
  * **Why `sim` reads `REVEALED_*` at all.** Nothing may spawn where the player
  * cannot see it, and the rect is the only description of what is visible. The
  * import is legal (`sim` depends on `shared`) and it makes `constants.ts`'s

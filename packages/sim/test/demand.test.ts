@@ -187,6 +187,33 @@ describe('the weekly demand ramp (spec §5.3)', () => {
     expect(SPAWN_SCALE_MAX).toBe(3 * DENOM)
   })
 
+  it('the cap is never reached EXACTLY, which is what makes `>` and `>=` an equivalent mutant', () => {
+    // **The pin under `spawnScale`'s labelled equivalent mutant (M1e Task 11).**
+    // `s > SPAWN_SCALE_MAX` and `s >= SPAWN_SCALE_MAX` can only differ on a week
+    // where `s` lands exactly on the cap, and `s = BASE + PER_WEEK * w` does
+    // that iff `PER_WEEK` divides `(MAX - BASE)`. It does not — 2000 / 110 is
+    // 18.18… — so no integer week produces equality and the two spellings are
+    // indistinguishable by any observer.
+    //
+    // Asserted as the DIVISIBILITY rather than as "week 18 is 2,980 and week 19
+    // is 3,090", because the label is a claim about every week and a two-week
+    // spot check is a claim about two. This is the assertion `demand.ts`'s label
+    // cites; without it the label vouches for a mutant on a reading.
+    expect((SPAWN_SCALE_MAX - SPAWN_SCALE_BASE) % SPAWN_SCALE_PER_WEEK).not.toBe(0)
+    // And non-vacuously: the ramp must actually pass through the cap, or "never
+    // exactly equal" would be satisfied by a ramp that never gets there at all.
+    expect(SPAWN_SCALE_BASE).toBeLessThan(SPAWN_SCALE_MAX)
+    // The straddle, read off `spawnScale` itself rather than recomputed: the
+    // last uncapped week is strictly under and the first capped week's UNCAPPED
+    // value is strictly over, so the cap is crossed and never landed on.
+    const lastUncapped = SPAWN_SCALE_BASE + SPAWN_SCALE_PER_WEEK * 18
+    const firstOver = SPAWN_SCALE_BASE + SPAWN_SCALE_PER_WEEK * 19
+    expect(lastUncapped).toBeLessThan(SPAWN_SCALE_MAX)
+    expect(firstOver).toBeGreaterThan(SPAWN_SCALE_MAX)
+    expect(spawnScale(18)).toBe(lastUncapped)
+    expect(spawnScale(19)).toBe(SPAWN_SCALE_MAX)
+  })
+
   it('week 0 leaves the pin period EXACTLY at PIN_PERIOD_TICKS', () => {
     // This is what makes the ramp golden-neutral: an implementation that
     // scaled the ACCUMULATOR instead — multiplying every stored `pinAccum` by

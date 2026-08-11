@@ -153,7 +153,7 @@ interface Rig {
   readonly host: PointerHost
   readonly setPausedCalls: readonly boolean[]
   readonly paused: boolean
-  /** Pauses from outside the pointer — `main.ts`'s Telegram `deactivated` path. */
+  /** Pauses from outside the pointer. NOT a path that exists: `main.ts` has no Telegram `deactivated` handler and never has (M1e Task 11 checked). This models `Game.setPaused`, which `main.ts` exports and nothing in `packages/` calls — the rule is "no board input while paused", so the host must be able to pause from anywhere. */
   readonly forcePaused: (next: boolean) => void
   /** How many times the host was asked for a new run (M1e Task 9). */
   readonly restarts: number
@@ -1089,8 +1089,10 @@ describe('a drag whose end event was lost has a recovery path', () => {
   })
 
   it('abort() ends a drag out of band, and is idempotent', () => {
-    // `main.ts` calls this on a Telegram `deactivated` or a visibilitychange,
-    // where the webview may never deliver the pointerup.
+    // `main.ts` calls this on a `visibilitychange` to hidden (`attachVisibility`),
+    // where the webview may never deliver the pointerup. **That is its only
+    // production caller** — this comment also named a Telegram `deactivated`
+    // event for two milestones and there has never been a handler for one.
     const r = rig()
     expect(r.input.abort()).toBe(PointerOutcome.IGNORED)
     r.input.down(1, T8_14_X, T8_14_Y)
@@ -1199,9 +1201,13 @@ describe('board input while paused', () => {
   })
 
   it('refuses a move on a drag that was live when something else paused the game', () => {
-    // `main.ts` can pause from outside the pointer (a Telegram `deactivated`
-    // event, M3's hard pause), which is the only way a live drag can meet a
-    // paused game — the single-pointer rule blocks the clock while dragging.
+    // The host can pause from outside the pointer — `Game.setPaused`, which
+    // `main.ts` exports, plus M3's hard pause when it lands — and that is the
+    // only way a live drag can meet a paused game, since the single-pointer
+    // rule blocks the clock while dragging. **Not a Telegram `deactivated`
+    // event**, which this comment named for two milestones and which has never
+    // had a handler anywhere in `packages/`; the guard is kept for the rule, not
+    // for an enumerated caller (`pointer.ts`'s `move` says why).
     const r = rig()
     r.input.down(1, T8_14_X, T8_14_Y)
     r.forcePaused(true)

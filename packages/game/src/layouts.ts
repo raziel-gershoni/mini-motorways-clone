@@ -77,6 +77,29 @@ export const DEMO_LAYOUT_ID = 'demo'
  *     and eventually fails**, not a board that grinds; those are different
  *     feelings and only one of them is the demo board's.
  *
+ * **THE DIFFICULTY CURVE'S SHAPE, WHICH THE GATE MEASURES AND DOES NOT JUDGE —
+ * carried to M1f (`docs/superpowers/m1f-carry-forward.md` §12).** Task 10's
+ * gate establishes that the curve EXISTS; it says nothing about whether it is
+ * good, and two measured facts about its shape have no owner:
+ *
+ *   - **The first ten minutes are unloseable.** Weeks 0-3 hold every connected
+ *     destination at one pin, so a competent player cannot lose in that window
+ *     except by leaving a destination unconnected — which is the spawner's
+ *     unreachability failure (`sim/spawn.ts`'s module comment), not a
+ *     difficulty ramp.
+ *   - **Under greedy play the board is dead at 17:29**, and the greedy arm is an
+ *     *upper bound* on "a player who keeps up" rather than a model of one: its
+ *     connector is optimal and instant. Gate A's and Gate C's figures should be
+ *     read as "what is reachable", never as "what is typical".
+ *
+ * Both are judgements about pacing, and **the only instrument for them is a
+ * human with the app open** — which is Task 12's device session, and the thing
+ * in this milestone with the least evidence behind it. Note also that the gate
+ * is ONE SEED (`laneways-m2`, the one that ships, which is the right choice for
+ * a claim about the shipped board): three of the five seeds measured do not
+ * produce the clean 1 -> 2 -> 5 -> 10 gradient, so a spawner change in M1f may
+ * move the gate for reasons specific to this seed.
+ *
  * ---------------------------------------------------------------------------
  * THE THREE CHECKABLE FACTS BEHIND DECISION 13'S OPENING
  * ---------------------------------------------------------------------------

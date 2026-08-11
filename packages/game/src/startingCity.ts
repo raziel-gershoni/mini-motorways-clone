@@ -92,6 +92,19 @@ import {
  *     on column 8 touches it — so the meter that ends the run is untouched by
  *     the road this paragraph calls natural. Read the sentence above as a
  *     description of what a player is *drawn to*, never as advice.
+ *
+ *     **And the five-tile save is UNDISCOVERABLE IN GAME — carried to M1f
+ *     (`docs/superpowers/m1f-carry-forward.md` §11), recorded here because this
+ *     is where the measurement lives.** Nothing in the shipped UI tells a
+ *     player that column 17 is the move. Task 9's overcrowd ring says *which*
+ *     destination is dying and its shutdown line says *connect it*, and both
+ *     arrive **on the board, after the fact** rather than before it: on the
+ *     no-input default the ring first appears at 1:56 and the run ends at 3:06.
+ *     A player who has not read this comment gets a warning about the right
+ *     destination and no hint about direction. This is the same open question
+ *     Task 9 left and Task 10 restated; it is a design gap, not a bug, and it
+ *     has no code artefact of its own — which is exactly why it is written at
+ *     the site of the number that makes it true.
  *   - **House 0 is the FARTHER colour-0 house and house 1 the nearer**, so the
  *     nearer house sits at the HIGHER index. Along that column the four road
  *     costs are 30 / 50 / 60 / 140 (house1->D0, house1->D1, house0->D1,

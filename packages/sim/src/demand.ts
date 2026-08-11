@@ -152,6 +152,22 @@ import { destMetaColour, destMetaKind, DEST_KIND_CIRCLE } from './buildings'
  * SPAWN_SCALE_PER_WEEK * H_WEEK` with no adjustment — and week 0 is 1.0x, not
  * 1.11x. The cap first binds at `H_WEEK` 19: 1000 + 110*18 = 2,980 and
  * 1000 + 110*19 = 3,090.
+ *
+ * **`s > SPAWN_SCALE_MAX` versus `s >= SPAWN_SCALE_MAX` is a LABELLED EQUIVALENT
+ * MUTANT, and this is the label — the derivation above was here without it,
+ * which let it be relayed onward as "recorded at its site" when the only thing
+ * recorded was the arithmetic.** The two spellings can differ only on a week
+ * where `s` is exactly `SPAWN_SCALE_MAX = 3000`, and `s = 1000 + 110*w` hits
+ * 3000 at `w = 18.18…`, which is not an integer: week 18 gives 2,980 and week 19
+ * gives 3,090. So no reachable `H_WEEK` produces equality and the branch cannot
+ * be told apart by any observer, on any board, at any run length. **The
+ * condition that ends it is arithmetic, not a milestone**: it ends the moment
+ * `(SPAWN_SCALE_MAX - SPAWN_SCALE_BASE)` becomes divisible by
+ * `SPAWN_SCALE_PER_WEEK` — today 2000/110 — at which point `>=` and `>` differ
+ * by one week of full-rate demand. `demand.test.ts` asserts the non-divisibility
+ * directly, so the label fails rather than rots. **Do not manufacture a detector
+ * for the comparison**; the divisibility assertion is the whole of what can be
+ * checked.
  */
 export function spawnScale(week: number): number {
   const s = SPAWN_SCALE_BASE + SPAWN_SCALE_PER_WEEK * week

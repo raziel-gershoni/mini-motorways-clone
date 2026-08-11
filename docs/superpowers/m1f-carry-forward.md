@@ -128,6 +128,12 @@ What it means operationally is that lowering the constant is a change no shipped
 board can observe and raising it is free. The first real tuning evidence needs a
 board that jams, which is M1f's.
 
+**This is the NO-INPUT path and it is NOT the blocking finding. See §10**, which
+is a different claim on a different arm: on the *played* default, under the
+greedy connector, `H_ROUTES_REFUSED` is 0 and the worst `carBlockedTicks` is 32
+— 42× from firing — with cars genuinely queueing behind each other. `city`'s
+zero here is the duller fact that an undrawn board has no route at all.
+
 ## 6. The multi-tick draw divergence — documentation, not a regression
 
 `resolve.ts`'s `MAX_DRAW_LAG_CELLS` bound is a **tick-boundary** bound and now
@@ -137,8 +143,13 @@ spans the whole drain while `prevXY → currXY` spans only the last tick
 (`frame.ts`'s `beforeStep` runs per tick, `afterDrain` once).
 
 Not a regression — a multi-tick drain means the tab was starved and the car
-really did move that far — and the drawn car covers the ground more smoothly
-than the exact interpolant, not less. **One consequence is stated and NOT
+really did move that far, and the chase adds at most its own outstanding lag on
+top of it: measured as a per-(car, frame) excess of drawn step over exact step,
+the worst is **0.2000** on the sustained schedule, which lands on
+`MAX_DRAW_LAG_CELLS`. (An earlier draft argued this from a pair of
+frame-displacement figures whose difference IS that bound — arithmetic dressed
+as measurement. `resolve.ts` now names the three adjacent quantities separately,
+because a review conflated two of them that differ by a third.) **One consequence is stated and NOT
 measured**, and should not be quoted as if it were: over a multi-tick drain the
 drawn car lerps along a chord spanning the whole drain, so the "never leaves the
 road" argument's corner case is wider than 0.2 cells. The reproduction is
@@ -166,7 +177,124 @@ and both recorded at their sites: the `while`-drain spelling in
 `advanceAccumulators` (`demand.ts`) and `spawnScale`'s `>=`-vs-`>` cap
 comparison.
 
-## 8. Not carried here
+---
+
+# The four player-facing findings, which had no recipient at all
+
+Sections 1–8 above were all anchored to a file, a constant or a function when
+this document was written — which is this repository's catalogue entry *"a
+handoff item with no home in the source is the one that evaporates"*, reproduced
+**inside the document whose opening paragraph cites that rule**. The four items
+below are the milestone's player-facing findings. They came from Task 10's
+concerns and Task 5's carry, they lived only in `progress.md` and
+`task-10-report.md` — neither of which is a plan-time artefact — and they were
+dropped from the first draft of this file for exactly the reason the rule names:
+none of them is about a function.
+
+Each now has a home in the source as well, named per item. **Where a finding is
+a judgement rather than a fact about code, that is said plainly rather than
+disguised with a file path.**
+
+## 9. THE DOMINANT FAILURE SHAPE: a spawner that is not connectivity-aware
+
+*Task 5's carry, in its own words:* **"It killed three fixtures here and took two
+commits to find the third. A player hits it the first time they don't connect a
+spawned building, and NOTHING IN THE UI CAN EXPLAIN IT, because what they see is
+a building they never asked for killing a city that looks fine. Design the ring
+and the gate around UNREACHABILITY, not congestion."**
+
+A spawned destination's carpark is road-free by construction, so it is never a
+flow-field source, takes zero arrivals, and its §5.8 meter only ever fills.
+Task 9's shutdown copy is keyed to exactly this (`NO ROAD REACHES DESTINATION n`
+rather than `OVERCROWDED`, chosen because it is computable from whether any road
+reaches the carpark), which makes the ENDING legible without making the DANGER
+visible while there is still time to act.
+
+**The obvious fix is not free and was refused with measurements.** M1e's plan
+proposed tiering the spawn scan by proximity to the spawning colour's own
+houses. Task 10 applied it verbatim across five seeds: it survives all twelve
+weeks **by making the board inert** — peak `destPins` **1 in 65 of 65
+week-observations**, zero blocked ticks in 63 of 65, four to five cars ever in
+motion, delivery fraction ~1.00 — and the *baseline* is the arm that produces
+the 1 → 2 → 5 → 10 gradient. A different greedy policy gives byte-identical
+results, so it is not a tie-break artefact. **Connectivity awareness as
+specified is a difficulty DELETION wearing a survivability improvement's
+clothes.**
+
+**Home in the source:** `packages/sim/src/spawn.ts`'s module comment, which is
+the code that causes it.
+
+## 10. M1d's HEADLINE FEATURE IS NOW DEMO-ONLY ON THE BOARD THAT SHIPS
+
+*Task 10's concern 3, in the words its review asked to be carried:*
+**"M1d's blocking on the default is a ~1-second hesitation, not a jam —
+measured, not presumed. `H_ROUTES_REFUSED` is 0 over the whole run and the worst
+`carBlockedTicks` is 32 against a 1,350-tick valve, 42× from firing. Cars do
+stand behind each other (queue 4, 597 blocked ticks a week from week 5), but
+nothing is ever refused a route and the valve cannot fire. For that feature
+specifically the flip is a trade and the demo board is still the only place it
+fires; for the user's actual complaint it is not — 3 houses become 25, 3
+destinations become 12, 747 trips, and the outcome depends on what they drew."**
+
+That is measured on the **played** default under the greedy connector, which is
+the arm where cars actually run. **§5 of this document is not a substitute and
+must not be read as one**: §5 measures the valve on the **no-input** path, where
+the default has zero refusals for the different and duller reason that no road
+exists at all.
+
+The shape to notice is the previous milestone's: M1d shipped a headline feature
+that could not fire on the board that shipped, and nobody found out until a
+human opened it. The flip has re-created that condition for blocking
+specifically, knowingly, with the trade stated.
+
+**Home in the source:** `packages/sim/src/blocking.ts`'s module comment.
+
+## 11. The five-tile save is undiscoverable in game
+
+Nothing in the shipped UI tells a player that column 17 is the move. The
+measurement is stark — a 15-tile column-8 road buys **zero ticks** and does not
+even change which destination kills the city, while five tiles at column 17 buy
+**750 ticks** — and both of the game's own signals arrive **on the board, after
+the fact**: the overcrowd ring first appears at 1:56 and the run ends at 3:06.
+The ring names *which* destination; the shutdown line says *connect it*; neither
+says *where*.
+
+This is the same open question Task 9 left and Task 10 restated, and it is a
+**design gap, not a bug**. It has no code artefact of its own, which is why it
+is written at the site of the number that makes it true.
+
+**Home in the source:** `packages/game/src/startingCity.ts`, in the four-row
+death-tick table.
+
+## 12. The first ten minutes are unloseable, and greedy play dies at 17:29
+
+*Task 10's concern 1:* **"The board is easy for six minutes and then it is not,
+and under greedy play it is dead at 17:29. The gate says the curve exists; it
+says nothing about whether the curve is good. Weeks 0–3 hold every connected
+destination at one pin — a competent player cannot lose in the first ten minutes
+except by leaving a destination unconnected."**
+
+Two further caveats travel with it. **The greedy arm's connector is optimal and
+instant**, so it is an upper bound on "a player who keeps up" rather than a
+model of one; Gate A's and Gate C's figures read as *what is reachable*, never
+as *what is typical*. And **the gate is one seed** — `laneways-m2`, the one that
+ships, which is the right choice for a claim about the shipped board, but three
+of the five seeds measured do not produce the clean 1 → 2 → 5 → 10 gradient (two
+jump 1 → 10, one never leaves 2). If M1f changes the spawner the gate may move
+for reasons specific to this seed.
+
+**This one is a judgement about pacing and the only instrument for it is a human
+with the app open**, which is Task 12's device session — the thing in this
+milestone with the least evidence behind it. Saying that plainly is more useful
+than a file path; the file path below is where the caveats are recorded, not
+where the question can be answered.
+
+**Home in the source:** `packages/game/src/layouts.ts`, beside Decision 13's
+own measurements.
+
+---
+
+## 13. Not carried here
 
 The seed board is still **out of band** and therefore not replayable by a
 Worker: `seedStartingCity`'s six placements happen before tick 1 and travel in

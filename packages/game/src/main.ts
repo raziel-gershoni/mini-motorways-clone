@@ -324,9 +324,13 @@ export function createGame(deps: GameDeps): Game {
   // **The general rule, which the demo layout is only the first instance of.**
   // The equivalence was a property of the STATE this function is handed, not of
   // the code: it holds exactly while every car is parked when the snapshot is
-  // taken. Two more things in flight break it the same way. **M3's restore**
-  // hands `createGame` a state with cars mid-route. **M1e's in-`step` spawner**
-  // makes a car appear during the ramp with no prev entry. Keep the call last.
+  // taken. **The second instance has now REACHED, and this comment predicted
+  // it:** M1e Task 5's in-`step` spawner makes a car appear during the ramp with
+  // no prev entry, measured at tick 360 on `firstCity` — well inside the
+  // 258-tick warm start's successor runs and inside the demo's 1,200. One more
+  // is still in flight: **M3's restore** hands `createGame` a state with cars
+  // mid-route. **Keep the call last** — that is the rule, and it is now a
+  // requirement on two counts rather than a prediction on one.
   initCarSnapshots(builder.snapshots, state, world)
 
   // **Annotated, and that is load-bearing rather than style.** `onGameOver`

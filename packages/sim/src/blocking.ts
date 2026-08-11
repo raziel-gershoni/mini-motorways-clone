@@ -29,6 +29,34 @@ import { isCommittedTo } from './dispatch'
  * written; nothing else should compute it inline.
  *
  * ---------------------------------------------------------------------------
+ * ON THE BOARD THAT SHIPS, THIS IS A ONE-SECOND HESITATION AND NOT A JAM
+ * ---------------------------------------------------------------------------
+ *
+ * **Measured, not presumed, at M1e Task 10 on the PLAYED default** (the starting
+ * city under the greedy connector, which is the arm where cars actually run):
+ * `H_ROUTES_REFUSED` is **0 over the whole run** and the worst
+ * `carBlockedTicks` is **32 against a 1,350-tick valve — 42x from firing**.
+ * Cars do stand behind each other (longest queue 4, 597 blocked ticks a week
+ * from week 5), but nothing is ever refused a route and the valve cannot fire.
+ *
+ * **So M1d's headline feature is now DEMO-ONLY**, because M1e Task 10 flipped
+ * the default from `demoCity` to the starting city. For this module
+ * specifically the flip is a trade and it was made with that stated: the demo
+ * board is the only place blocking bites, and it is now behind
+ * `?startapp=demo`. For the user's actual complaint the flip is not a trade —
+ * 3 houses become 25, 3 destinations become 12, 747 trips, and the outcome
+ * depends on what they drew.
+ *
+ * Recorded here rather than only in a report because this is the module the
+ * claim is about, and because the previous milestone's post-mortem is the
+ * cautionary case: M1d shipped a headline feature that could not fire on the
+ * board that shipped, and nobody noticed until a human opened it. Carried to
+ * M1f in these words (`docs/superpowers/m1f-carry-forward.md` §10). **Do not
+ * read `MAX_BLOCKED_TICKS`'s own note as this one** — that measures the
+ * NO-INPUT path, where the default has zero refusals for the different and
+ * duller reason that no road exists.
+ *
+ * ---------------------------------------------------------------------------
  * THE FIVE LIFECYCLE EVENTS, IN FULL — DECISION 3
  * ---------------------------------------------------------------------------
  *
