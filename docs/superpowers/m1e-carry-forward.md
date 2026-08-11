@@ -464,7 +464,7 @@ Live at **https://laneways.laneways-spike.workers.dev**.
 
 ---
 
-## 11. Routing and movement now disagree, and the fix has a trap waiting in it
+## 11. Routing is congestion-blind ON PURPOSE — and it finally has a detector
 
 **`flowfield.ts` contains zero references to `occupancy`, `carBlockedTicks` or
 blocking of any kind.** Verified by grep at the close of M1d. Cars are routed as
@@ -479,19 +479,64 @@ board, where §6 measured `maxActive = 1`. **It becomes visible the day M1e's
 demand ramp lands** — which is the same trigger §6 records for head-on. Expect
 both to arrive together.
 
-**When you add the first congestion penalty, read `scratch.ts:43-49` before
-writing a line of it.** The bucket queue's `NB = DIAG_COST + 1` is the *exact*
-minimum with **zero slack** — an earlier version of that comment read the spread
-as 4 and called it headroom, and instrumenting 200 seeded random graphs measured
-the true maximum at 14, the full interval. A 3.5× overestimate of room that does
-not exist. The specific trap: a penalty applied **inside** `computeFlowField`
-rather than through the cost function merges two distances into one bucket, and
-the result is **wrong paths and no crash**. A silent failure in the component
-whose golden (`252514232`, §0) is a tripwire rather than a golden.
+### CORRECTED AT THE CLOSE OF M1e (Task 11) — twice, and the first correction is the more important one
+
+**1. This is a SPEC REQUIREMENT, not a defect awaiting a fix.** Everything above
+this line is accurate as description and wrong as framing. Spec §1 and §6 say
+the path cost carries no congestion term and that *"this omission is deliberate
+and load-bearing; it is the game"* — a jam attracting traffic is Mini Motorways.
+M1d's post-mortem listed *"routing and movement now disagree"* as a carried GAP
+and the M1e plan inherited that framing; there is nothing to close. What M1e
+owed, and what Task 11 shipped, is a **detector**, because the property had no
+test at all: the field golden `252514232` runs on a fixture with **no cars on
+it**, so an occupancy-dependent edge cost leaves it byte-identical, and
+`flowfield.ts` containing no reference to `occupancy` was verified by grep — a
+claim about the text, not about behaviour.
+
+`packages/sim/test/flowfield.test.ts`'s three congestion-blindness arms now
+carry it. Measured discrimination, over the canonical 1,833-test invocation:
+making `computeFlowField` read occupancy kills **4 tests repo-wide and moves not
+one of the nine goldens**; two of those four are the new arms, and before them
+the only two detectors in the repo were a demo-board erase measurement and a
+dispatch-order test, neither of which names the property and both of which would
+read as fixture drift.
+
+**2. `NB = DIAG_COST + 1` is NOT "the exact minimum with zero slack".** The
+minimum is `DIAG_COST` = 14. The paragraph this replaces was itself a correction
+of a worse claim (the "spread is 4" reading) and it over-corrected by one. The
+measurement, over the same 1,833 tests, mutating only the modulus so
+`createScratch`'s assert does not pre-empt the queue:
+
+| modulus | detectors |
+|---|---|
+| 14 | **0** — a genuine equivalent mutant |
+| 13 | 31, including the field golden — the first that aliases |
+| 16 (with `bucketHead` resized) | 1, and it is `createScratch allocates bucketHead sized NB` |
+| `NB = DIAG_COST + 2` | 1, and it is `NB is exactly one more than the largest edge cost` |
+
+So everything at or above 14 is behaviourally inert. **What the spare bucket
+buys is independence from one statement's position, and that was measured too:**
+move `bucketHead[b] = -1` from before the drain walk to after it and at modulus
+15 it is a 0-detector no-op, while at modulus 14 `computeFlowField` **does not
+terminate** (`flowfield.test.ts` alone, normally 0.55 s, produced no output in
+70 s). Size any future `NB` as `maxEdgeCost + 1` for that reason, not because
+`maxEdgeCost` would be wrong.
+
+**The trap itself is unchanged and is the part to actually read**
+(`scratch.ts`'s `NB` doc comment carries the full derivation):
+`assertBucketCountExceedsEveryEdgeCost` inspects only `edgeCost(k)`, so a
+penalty applied **inside** `computeFlowField` rather than through the cost
+function keeps the assert green while the queue aliases two distances into one
+bucket — **wrong paths, no crash**, in the component whose golden is a tripwire.
+And a *per-cell* penalty changes the SIGNATURE rather than the value: cost stops
+being a function of direction, and `edgeCost(dir)` plus everything calibrated
+against it goes structurally blind.
 
 Note also that M1d's intersection penalty is **not** an edge weight — it is a
 `laneSpeedMul` applied at movement time — so it set no precedent here and left
-`NB` untouched. Yours will be the first thing to actually change edge cost.
+`NB` untouched. M1e added no edge cost either: `DISTINCT_EDGE_COSTS` is still 2
+and the value set is still `{10, 14}`. The motorway tier that would change it is
+an item card, and the card modal went to M1f.
 
 ## 12. The ghost art is tested but has never been LOOKED AT
 

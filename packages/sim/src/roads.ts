@@ -167,6 +167,15 @@ export const OPPOSITE = Object.freeze([4, 5, 6, 7, 0, 1, 2, 3] as const)
  * what **M1f's** traffic lights and roundabouts are for. Repointed from M1e,
  * which shipped neither: both are §5.10 item cards and the card modal is M1f's,
  * so the gap is unchanged and still unowned by anything in the tree.
+ *
+ * **Also re-confirmed at the close of M1e (Task 11): `stepCell`'s `y < 0` is
+ * still the verified equivalent mutant it was labelled as through either
+ * caller, and it is still not to be "fixed".** Diffed across the whole
+ * milestone (base `1414e33`), the only change to this file is the paragraph
+ * above; `stepCell` and both callers' `next < 0` guards are byte-identical.
+ * **Do not tighten either caller's `next < 0` to `next === -1`** to manufacture
+ * a detector — that satisfies the label by strictly WEAKENING two guards, which
+ * is a worse trade than an untestable branch.
  */
 export const LANE_OF_DIR = Object.freeze([1, 0, 0, 0, 0, 1, 1, 1] as const)
 

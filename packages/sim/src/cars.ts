@@ -376,6 +376,19 @@ export function intersectionSpeedMul(state: GameState, cell: number): number {
  * purpose. Only a direct assertion on this function's return value can see the
  * direction today; nothing downstream can.
  *
+ * **Re-confirmed at the close of M1e (Task 11), by reading the constants rather
+ * than by re-running the equivalence.** Diffed across the whole milestone
+ * (base `1414e33`), `CAR_SPEED_UNITS_PER_TICK` = 330,
+ * `RIGHT_ANGLE_SPEED_MUL` = 667, `SHARP_TURN_SPEED_MUL` = 333,
+ * `INTERSECTION_SPEED_MUL` = 500 and `LANE_SPEED_DEFAULT` = 1000 are all
+ * byte-identical to what they were before Task 1 — none of the five has been
+ * touched since M1c at the latest. So the named condition that would end the
+ * inertness has not fired, and **no detector was manufactured for it**: a test
+ * that could see the rounding direction today would have to be a test of this
+ * function's literal return value, which the four `speedUnits` lines in
+ * `cars.test.ts` already are. Adding a behavioural one would be adding a test
+ * that cannot fail.
+ *
  * Returns `LANE_SPEED_DEFAULT` when nothing applies — the identity, which
  * `scaleSpeed` passes through exactly.
  */
