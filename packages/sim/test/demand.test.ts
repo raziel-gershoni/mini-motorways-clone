@@ -326,13 +326,28 @@ describe('the weekly demand ramp (spec §5.3)', () => {
     // bound, not a restatement of the same number.
     const largestSafeSlotCount = Math.min(tickClause, edgeClause) - 1
     expect(largestSafeSlotCount).toBe(166)
-    expect(SHIPPED_MAX_SLOT_COUNT).toBe(36)
-    expect(SHIPPED_MAX_SLOT_COUNT, 'the shipped maps must stay under the bound').toBeLessThan(
-      largestSafeSlotCount,
-    )
+
+    // **ORDER IS LOAD-BEARING HERE, and the first version of this test got it
+    // wrong.** The identity pins below (`SHIPPED_MAX_SLOT_COUNT` is 36,
+    // `demoCity` is 18) fire for ANY change to a map's `maxDestinations` —
+    // including a perfectly safe growth to 20. Written above the bound check
+    // they MASK it: a map raised to 84, which genuinely breaks the one-fire
+    // invariant, failed on "expected 168 to be 36" and the bound assertion
+    // never ran. Measured, by making that exact edit. So the bound goes first
+    // and the pins go last, and the two now say different things — "the
+    // invariant is broken" versus "a map grew, update the recorded figure".
+    expect(
+      SHIPPED_MAX_SLOT_COUNT,
+      'a shipped map now exceeds the one-fire bound: `demand.ts` calls the `while`-drain ' +
+        'spelling of the fire branch an EQUIVALENT MUTANT, and that label is no longer true',
+    ).toBeLessThan(largestSafeSlotCount)
     // 4.6x of headroom today. Stated as a ratio so a map that eats most of it
     // is visible here even while still technically safe.
     expect(largestSafeSlotCount / SHIPPED_MAX_SLOT_COUNT).toBeGreaterThan(4)
+
+    // The identity pins. A failure HERE and not above means a map changed size
+    // safely, and the figures in `demand.ts`'s module comment need updating.
+    expect(SHIPPED_MAX_SLOT_COUNT).toBe(36)
     // In map terms: `maxDestinations` may reach 83, all circles, against 18
     // today. This is the line the `while`-equivalence label is good up to.
     expect(Math.floor(largestSafeSlotCount / 2)).toBe(83)
