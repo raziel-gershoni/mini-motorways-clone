@@ -5,6 +5,7 @@ import {
   createScratch,
   createState,
   createWorld,
+  isGameOver,
   step,
   type FlowField,
   type GameState,
@@ -340,6 +341,30 @@ export function createGame(deps: GameDeps): Game {
     }),
     queue,
   )
+
+  // **A game whose state is ALREADY terminal at boot must end its loop here,
+  // because `onGameOver` fires on an EDGE and there is no edge to fire on.**
+  //
+  // `advance` reads `wasOver` before the step, deliberately — that is what stops
+  // it re-announcing 30 times a second on a frozen buffer. The cost is that a
+  // state which was terminal before the first `advance` never announces at all:
+  // `loop.paused` stays false, and `pointer.ts` refuses board input *while
+  // paused and by nothing else*, so the player draws roads that never appear,
+  // spends no tiles and gets no message. That is exactly the failure `end()`'s
+  // own doc comment exists to prevent, reached through a different door.
+  //
+  // **Unreachable from the two shipped layouts today** — their warm starts are
+  // 1,200 and 258 ticks against deaths at 6,703 and 5,580, and `layouts.test.ts`
+  // drives EVERY registered layout's own warm start and asserts it survives it,
+  // rather than leaving the property to these two happening to be short. It
+  // stops being unreachable the moment **M3's restore** hands `createGame` a
+  // saved game-over state, which is a path M3 has to decide about anyway.
+  //
+  // One line, above the pointer, so the pointer is constructed against a loop
+  // that already knows. Its detector is `integration.test.ts`'s *"a game whose
+  // state is ALREADY over at boot ends its loop too"*, which boots a rig with a
+  // 6,703-tick warm start.
+  if (isGameOver(state)) loop.end()
 
   const pointer = createPointerInput({
     camera: () => shell.camera,

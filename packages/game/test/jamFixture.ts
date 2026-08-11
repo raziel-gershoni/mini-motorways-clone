@@ -192,7 +192,28 @@ export function buildJamRig(
   houseCount: number = JAM_HOUSE_COUNT,
 ): JamRig {
   const rows = Array.from({ length: JAM_H }, () => '.'.repeat(JAM_W))
-  const map = parseMap('jam-rig', rows, 9999, 16, 4, 2)
+  // **`maxDestinations` is 1, not 4 — M1e Task 8.** This rig builds exactly one
+  // destination and pins it at 255 below, so the three spare slots were filled
+  // by M1e Task 5's spawner with buildings no car can reach: a spawned
+  // destination's carpark is road-free by construction on a board where nothing
+  // ever lays another road, so it is never a flow-field source and takes zero
+  // arrivals, while `destPins[0]`'s overflow feeds it pins. Under §5.8 that is
+  // a board that must lose, and `integration.test.ts`'s 20,000-tick sweep froze
+  // at tick 7,223 with 12,778 drives left to run — asserting safety properties
+  // over a byte-identical buffer, which they all satisfy.
+  //
+  // **`maxHouses` stays at 16 deliberately.** Twelve are built at most, so the
+  // HOUSE spawner still runs and still places one: this fixture keeps live
+  // spawner coverage on the tick, it just stops being handed destination slots
+  // it cannot use. Capping both would have been the larger change for no
+  // additional gain.
+  //
+  // Measured blast radius before the change, because the first pass declined it
+  // on a reading: capping this one parameter breaks **exactly one test**, the
+  // long-run sweep's own death assertions. `queueProbe.test.ts`,
+  // `allocation.test.ts` and every other jam case pass untouched, and nothing
+  // outside `packages/game` imports this file.
+  const map = parseMap('jam-rig', rows, 9999, 16, 1, 2)
   const world = createWorld(map)
   const state = createState(seed, map)
   const scratch = createScratch(

@@ -237,13 +237,29 @@ function profileAllocations(body: () => void): Allocator[] {
   )
   if (failure !== null) throw failure
 
-  body()
-
-  raw.post('HeapProfiler.stopSampling', (err, result) => {
-    failure = err
-    profile = (result as { profile?: { head: ProfileNode } } | undefined)?.profile?.head ?? null
-  })
-  session.disconnect()
+  // **`try`/`finally`, and it is a fix rather than tidiness — M1e Task 8.**
+  // Any throw out of `body` — an assertion, a rig invariant, `step` refusing a
+  // poisoned buffer — otherwise skips `stopSampling` and `disconnect` and
+  // leaves a connected inspector session with sampling ON for the rest of the
+  // worker, poisoning every later measurement in the process. That is the
+  // catalogue's worst-named defect, "an instrument that reports clean while
+  // measuring nothing", in its most contagious form: the corruption lands on
+  // OTHER tests.
+  //
+  // `assertProfiledLive` was originally called from inside `body` at two sites,
+  // which is exactly how this was found. Those two now sit immediately after
+  // the profiled window instead — same state, same verdict, and the guard no
+  // longer depends on the harness's robustness to be safe. The `finally` stays
+  // because the next throw will not be so considerate.
+  try {
+    body()
+  } finally {
+    raw.post('HeapProfiler.stopSampling', (err, result) => {
+      failure = err
+      profile = (result as { profile?: { head: ProfileNode } } | undefined)?.profile?.head ?? null
+    })
+    session.disconnect()
+  }
   if (failure !== null) throw failure
   if (profile === null) throw new Error('allocation harness: the profiler returned no profile')
 
@@ -1709,9 +1725,9 @@ describe('the tick allocates nothing on the blocking path, measured', () => {
       profiles.push(
         profileAllocations(() => {
           window = rig.drive(PROFILED_TICKS)
-          assertProfiledLive(rig.state, 'tick rig window')
         }),
       )
+      assertProfiledLive(rig.state, 'tick rig window')
       windows.push(window)
     }
 
@@ -2356,7 +2372,6 @@ describe('the tick allocates nothing on the JAM path, with every branch counted 
       const window = { crossings: 0, refusals: 0, valves: 0, dispatched: 0, trips: 0, pinMoves: 0 }
       const all = profileAllocations(() => {
         const o = rig.drive(JAM_WINDOW_TICKS)
-        assertProfiledLive(rig.state, 'jam window')
         // Copied field by field rather than spread: a spread inside the profiled
         // window allocates an object per window, in the harness rather than in
         // the code under test, and this file has already been bitten once by a
@@ -2367,6 +2382,7 @@ describe('the tick allocates nothing on the JAM path, with every branch counted 
         window.dispatched = o.dispatched
         window.pinMoves = o.pinMoves
       })
+      assertProfiledLive(rig.state, 'jam window')
       counts.crossings += window.crossings
       counts.refusals += window.refusals
       counts.carsDispatched += window.dispatched

@@ -539,26 +539,50 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     const framesDriven = WARMUP_FRAMES + WINDOW_COUNT * PROFILED_FRAMES
     const TICKS_PER_FRAME = (6459 - 1200) / 10500
     const framesToDeath = (DEMO_DEATH_TICK - 1200) / TICKS_PER_FRAME
-    // **THE CEILING FIRST, THE IDENTITY PIN SECOND — M1e Task 8.** These two
-    // were the other way round and the pin made the ceiling unreachable:
-    // `toBe(10500)` fires for ANY knob change at all, so the bound it was
-    // guarding never ran and the failure named the frame count rather than the
-    // death tick. That is exactly the defect M1e Task 6 found in its own
-    // derived bound one file over, and it was found here the same way — by
-    // attacking it rather than by reading it.
+    // **THE TWO BOUNDS FIRST, THE IDENTITY PIN LAST — and the pin has now
+    // dominated something twice, so read this before reordering it again.**
+    //
+    // `expect(framesDriven).toBe(10500)` fires for ANY knob change at all, in
+    // either direction. M1e Task 8 first moved it below the CEILING and left it
+    // above the FLOORS, which fixed one case and left the mirror image: setting
+    // `PROFILED_FRAMES` to 2,000 — the exact shrink the floor exists to catch —
+    // failed on *"the measured frame count behind the 6,459: expected 7500 to
+    // be 10500"* and the floor never ran. Same defect, one line down, found the
+    // same way.
+    //
+    // The rule the ordering encodes: **a pin that fires for every edit belongs
+    // after every bound that fires for one KIND of edit.** Three specific
+    // guards, then the catch-all.
+    //
+    // Measured to discriminate, three edits and three different reds:
+    //   WINDOW_COUNT 3 -> 4      -> 'past its death tick'      (the ceiling)
+    //   PROFILED_FRAMES -> 2000  -> 'shrunk below the length'  (the floor)
+    //   PROFILED_FRAMES -> 3100  -> 'the measured frame count' (the pin)
     expect(
       framesDriven,
       'these knobs now drive the demo rig past its death tick — see DEMO_DEATH_TICK',
     ).toBeLessThan(framesToDeath)
-    expect(framesDriven, 'the measured frame count behind the 6,459').toBe(10500)
-    // A fourth window is the specific edit this guards, and it must be over the
-    // line rather than merely near it.
+    // The FLOORS, second: the sampler needs enough frames and enough windows for
+    // the minimum-over-three statistic to mean anything. They guard the
+    // opposite direction from the ceiling and must be reachable independently
+    // of it — including independently of the fourth-window premise below, which
+    // ALSO goes false when the window shrinks and dominated them on the first
+    // attempt at this ordering.
+    expect(
+      PROFILED_FRAMES,
+      'the profiling window has shrunk below the length these budgets were measured over',
+    ).toBeGreaterThanOrEqual(3000)
+    expect(
+      WINDOW_COUNT,
+      'fewer than three windows and the minimum stops defeating the sampler’s strays',
+    ).toBeGreaterThanOrEqual(3)
+    // The ceiling's own premise, third: a fourth window is the specific edit it
+    // guards, so it has to be over the line rather than merely near it. This is
+    // broader than either bound above — it goes false when the window shrinks
+    // too — which is exactly why it sits below them.
     expect(WARMUP_FRAMES + 4 * PROFILED_FRAMES).toBeGreaterThan(framesToDeath)
-    // The two LOWER bounds, last: they are the knobs the ceiling above is
-    // about, and a lower bound placed first fires for every widening edit and
-    // hides which direction went wrong.
-    expect(PROFILED_FRAMES).toBeGreaterThanOrEqual(3000)
-    expect(WINDOW_COUNT).toBeGreaterThanOrEqual(3)
+    // The catch-all, LAST.
+    expect(framesDriven, 'the measured frame count behind the 6,459').toBe(10500)
     expect([...PROFILED_SCOPES].sort()).toEqual([
       'packages/game/src/',
       'packages/render/src/',

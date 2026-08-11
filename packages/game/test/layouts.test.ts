@@ -1,6 +1,20 @@
 import { describe, it, expect } from 'vitest'
 import { demoCity, firstCity } from '@laneways/shared'
-import { createState, createWorld, hashState } from '@laneways/sim'
+import {
+  createFieldInputRanges,
+  createFlowFields,
+  createScratch,
+  createState,
+  createWorld,
+  hashState,
+  isGameOver,
+  step,
+  H_TICK,
+  type TickInputs,
+} from '@laneways/sim'
+
+/** An empty batch — the warm start's own input, which is no input at all. */
+const NO_INPUT: TickInputs = { actions: [] }
 import {
   CITY_LAYOUT_ID,
   DEMO_LAYOUT_ID,
@@ -174,6 +188,49 @@ describe('the layout registry', () => {
     expect(Object.isFrozen(LAYOUTS[CITY_LAYOUT_ID])).toBe(true)
     expect(Object.isFrozen(LAYOUTS[DEMO_LAYOUT_ID])).toBe(true)
     expect(Object.isFrozen(LAYOUT_IDS)).toBe(true)
+  })
+
+  it('every layout survives its OWN warm start, so no board can boot already over', () => {
+    // **M1e Task 8's precondition, asserted for the registry rather than for the
+    // two boards that happen to be short.** `createGame` runs `warmStartTicks`
+    // bare `step` calls before the loop exists, and `onGameOver` fires on an
+    // EDGE inside `advance` — so a layout whose warm start reaches its own
+    // shutdown would boot terminal with the callback already missed. `main.ts`
+    // handles that case explicitly (`if (isGameOver(state)) loop.end()`), and
+    // this is the line that says no shipped layout needs it to.
+    //
+    // Driven rather than compared against a constant: `deathTicks.ts` records
+    // what the two boards do today, and a THIRD layout added tomorrow would have
+    // no entry there. Running the real warm start is the only check that covers
+    // a layout nobody has measured.
+    for (const id of LAYOUT_IDS) {
+      const layout = layoutFor(id)
+      const map = layout.map()
+      const world = createWorld(map)
+      const state = createState(layout.runSeed, map)
+      const scratch = createScratch(
+        world.cells,
+        map.groupCount,
+        map.maxDestinations,
+        createFieldInputRanges(map),
+      )
+      const fields = createFlowFields(map.groupCount, world.cells)
+      layout.seed(state, world)
+      for (let t = 0; t < layout.warmStartTicks; t++) {
+        step(state, world, fields, scratch, NO_INPUT)
+      }
+      expect(
+        isGameOver(state),
+        `layout "${id}" is already over after its own ${layout.warmStartTicks}-tick warm start — ` +
+          'it would boot with the shutdown already missed',
+      ).toBe(false)
+      // Vacuity: the warm start must actually have run, or "not over" is a
+      // statement about a board that never ticked.
+      expect(state.header[H_TICK], `layout "${id}" ran no warm start`).toBe(layout.warmStartTicks)
+      expect(layout.warmStartTicks).toBeGreaterThan(0)
+    }
+    // ...and the registry is not empty, or the loop above asserts nothing.
+    expect(LAYOUT_IDS.length).toBeGreaterThan(1)
   })
 
   it('does not answer for a prototype key — `layoutFor("toString")` throws', () => {

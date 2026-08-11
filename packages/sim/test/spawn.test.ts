@@ -1318,11 +1318,31 @@ describe('spawned cars drive, over a long horizon, with occupancy sound every ti
       // destinations over the whole run is then **0**, asserted below rather
       // than described.
       //
-      // 5 is a pin count `runDemand` can actually produce; 255 never was. The
-      // rig loses nothing by it — 21 houses, 10 destinations and 24 of the 38
-      // spawned car slots in motion, against 21 / 10 / 26 before, and the trip
-      // count nearly DOUBLES (339 -> 615) because a five-deep queue flows where
-      // a 255-deep one gridlocks.
+      // 5 is a pin count `runDemand` can actually produce; 255 never was.
+      //
+      // **This is a TRADE, and the first draft of this comment presented it as
+      // a free win.** What it buys: the 20,000-tick horizon this test's whole
+      // purpose depends on, 21 houses, 10 destinations, and a trip count that
+      // nearly DOUBLES (339 -> 615) because a five-deep queue flows where a
+      // 255-deep one gridlocks. What it GIVES UP, none of which was ever
+      // asserted here but all of which was being exercised:
+      //
+      //   - **the over-capacity regime entirely.** `destOverTicks` and the
+      //     overcrowd ramp now read 0 on every tick of this rig, so it exercises
+      //     none of phase 10's live branch. `overcrowd.test.ts` owns that
+      //     directly and `demoLayout.test.ts`'s week-1 window owns it in play.
+      //   - **the hard-cap pin-drop path.** At 255 every scheduled pin overflowed
+      //     and then dropped; at 5 the cap is never reached, so `H_PINS_DROPPED`
+      //     stops moving here. `demand.test.ts` covers the drop.
+      //   - **the `Uint8` 255 ceiling on `destPins`**, which this was the only
+      //     rig in the repo to sit on. Plan Decision 12's enumeration is the
+      //     standing check for that class, not this fixture.
+      //   - **the deep-queue dispatch regime** — dozens of unreserved pins on one
+      //     destination. `jamFixture` still holds 255 and still covers it.
+      //
+      // And it narrows one margin: `spawnedFlyers` falls **26 -> 24** against an
+      // unchanged floor of 20, so the clearance goes from 6 to 4. That is the
+      // figure to watch if this test ever starts flaking.
       for (let d = 0; d < dests; d++) {
         if ((r.state.destPins[d] as number) === SATURATED_PINS) continue
         const carpark = carparkCell(
