@@ -642,3 +642,36 @@ Related: [a blast-radius claim is a measurement, not a reading], and
 measurement]. The prediction here was the brief's own, written months before,
 and it is worth more than the measurement precisely because it was wrong in a
 direction nobody would have guessed.
+
+## A survivability gate can be passed by deleting the difficulty
+
+M1e's plan specified a lever to make its default board survivable. The implementer measured it across
+five seeds and refused it: the lever survives all twelve weeks by making the board **inert** — peak
+backlog of **1 in 65 of 65 week-observations**, zero blocked ticks in 63 of 65, four cars ever in
+motion, delivery fraction ~1.00.
+
+That is the previous milestone's inert shipped board, reproduced exactly, **by the mechanism proposed
+to fix the previous milestone's inert shipped board** — and it would have arrived with a green gate
+blessing it and a "survival 6.0 → 7.7 weeks" headline in the commit log.
+
+**Any gate phrased as "the system survives N of X" can be satisfied by removing the load.** Pair
+every survival threshold with a floor on the thing that makes survival hard: cars in motion, queue
+length, backlog reaching a cap, a delivery fraction that falls. The gate here catches the deletion
+precisely because it also asserts a *gradient* — some week at 1, a later week strictly between 1 and
+the cap, a later week at the cap — and a board with no difficulty fails the middle clause.
+
+Note the near-miss inside the fix: the first version of that gradient check passed `[1,1,1,6,6]`,
+because the capped week is also "a week above 1", so the middle clause was free. **A three-point
+shape needs a middle point that cannot be served by an endpoint.**
+
+## When the same wrong constant can reach both, extract the predicate rather than restating it
+
+The gradient check above was verified with synthetic series against a comment describing the rule.
+The repair extracted the predicate into one exported function, so the synthetic-series test runs
+**the same function the gate runs** — rather than a second copy that could agree with the comment
+while the gate disagrees with both.
+
+That is the durable form of this document's [two independent measurements that share one wrong
+constant] entry, applied preventively: where a rule is stated twice — once as prose, once as code —
+a test written against the prose does not test the code. **One predicate, one caller for the
+production path and one for the table of cases.**
