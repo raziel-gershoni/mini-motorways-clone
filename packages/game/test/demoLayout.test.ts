@@ -5,6 +5,7 @@ import {
   CARS_PER_HOUSE,
   DEST_SPAWN_PERIOD_TICKS,
   MAX_BLOCKED_TICKS,
+  PIN_PERIOD_TICKS,
   REVEALED_X0,
   REVEALED_Y0,
   REVEALED_W,
@@ -44,6 +45,8 @@ import {
   H_PINS_DROPPED,
   H_SCORE,
   H_SPAWN_COLOUR_CURSOR,
+  H_WEEK,
+  pinPeriodForWeek,
   type GameState,
   type TickAction,
   type WorldData,
@@ -187,6 +190,23 @@ function rigFor(seed: (state: GameState, world: WorldData) => void, map = demoCi
       }
       out.trips = (state.header[H_SCORE] as number) - scoreBefore
       for (let c = 0; c < carCount; c++) if (everBlocked[c] === 1) out.carsEverBlocked++
+      // **M1e Task 6's tripwire, and it is here rather than in one test because
+      // every `drive()` in this file funnels through it.** Every measured
+      // figure below was taken inside week 0, where `pinPeriodForWeek(0)` is
+      // `PIN_PERIOD_TICKS` bit-for-bit and the weekly demand ramp therefore
+      // cannot reach them — checked directly, not derived: neutralising the
+      // ramp to the bare constant reproduces 3,235 refusals / 1,401 blocked
+      // ticks / 171 trips / longest queue 7 over 3,000 ticks exactly.
+      //
+      // The point is what happens NEXT. Lengthening any window past 4,500
+      // ticks puts the drive into week 1, the period drops to 466, and every
+      // threshold below silently starts measuring a different game. This fails
+      // there instead — see the 5,000-tick window at the bottom of this file,
+      // which does cross the boundary and says so.
+      expect(
+        pinPeriodForWeek(state.header[H_WEEK] as number),
+        'this drive left week 0 — the demand ramp now reaches these figures and they must be re-measured',
+      ).toBe(PIN_PERIOD_TICKS)
       return out
     },
   }
@@ -543,15 +563,31 @@ describe('the demo layout is visibly congested, measured over 3,000 ticks', () =
     // ordinary drift does not fail them and a collapse back to the shipped city
     // does.
     //
-    // **Measured on this rig, this window and this seed: 3,125 refusals, 1,350
-    // blocked ticks, longest queue 7, 171 trips.** The three figures this
-    // comment used to quote — 3,483 / 1,563 / 8 — are none of them reproducible
-    // from it, and only the last is explained by the queue probe having been
-    // lane-blind (it reads 7 here under either probe; the figure that moved is
-    // the 20,000-tick one, 10 -> 8). The other two cannot have come from this
-    // fixture at all: `refusals` and `blockedTicks` are read off
-    // `carBlockedTicks`, which no probe touches. Re-measured rather than
-    // re-derived, and quoted with the window they were taken over.
+    // **Measured on this rig, this seed, and THIS 3,000-tick window: 3,235
+    // refusals, 1,401 blocked ticks, longest queue 7, 171 trips.**
+    //
+    // Two of those four moved in M1e and neither moved for the reason a reader
+    // would guess. The previous figures here — 3,125 / 1,350 / 7 / 171 — were
+    // taken before **Task 5's spawner**, whose §5.3.5 blocked-spawn push adds
+    // pins to a board that is already at `maxDestinations` and therefore adds
+    // traffic. `longestQueue` and `trips` are unchanged. **It is NOT the weekly
+    // demand ramp**, and that is a measurement rather than an inference: with
+    // the ramp neutralised to the bare `PIN_PERIOD_TICKS`, this window
+    // reproduces 3,235 / 1,401 / 7 / 171 exactly, because 3,000 ticks from tick
+    // 0 never leave week 0 and `pinPeriodForWeek(0)` IS that constant. The
+    // `drive()` helper now asserts that premise rather than leaving it here as
+    // prose.
+    //
+    // **A figure quoted without its window is the shape that produced the
+    // 3,483 / 1,563 confusion this comment used to be about.** Those two were
+    // never reproducible from this fixture: `refusals` and `blockedTicks` are
+    // read off `carBlockedTicks`, which no probe touches. The third of that
+    // trio, a longest queue of 8, came from a **20,000-tick window measured in
+    // a REVIEW — a window this file has never driven and does not drive now**
+    // (its two windows are this 3,000-tick one and the 5,000-tick one at the
+    // bottom of the file). Under the lane-blind probe that review's figure was
+    // 10; under the current probe it is 8. Neither number says anything about
+    // the 7 measured here, and neither is re-measured by anything in this file.
     expect(measured.refusals).toBeGreaterThan(1500)
     expect(measured.blockedTicks).toBeGreaterThan(750)
     expect(measured.longestQueue).toBeGreaterThanOrEqual(4)
@@ -568,17 +604,26 @@ describe('the demo layout is visibly congested, measured over 3,000 ticks', () =
 
   it('GRINDS rather than stops — throughput stays high while it queues', () => {
     // The acceptance criterion the first draft of this layout failed. A single
-    // shared trunk with the same 24 cars delivered 47 trips in 20,000 ticks and
-    // fired the anti-deadlock valve 214 times: total gridlock, which
-    // demonstrates the OPPOSITE of Decision 6's "a gridlocked city grinds
-    // rather than stops" and reads to a player as a bug. Three separate
-    // corridors deliver ~200 trips in 3,000.
+    // shared trunk with the same 24 cars delivered 47 trips and fired the
+    // anti-deadlock valve 214 times: total gridlock, which demonstrates the
+    // OPPOSITE of Decision 6's "a gridlocked city grinds rather than stops" and
+    // reads to a player as a bug.
+    //
+    // **Both of those figures are from a 20,000-tick window measured in a
+    // REVIEW, on a LAYOUT THAT NO LONGER EXISTS. Nothing in this file drives
+    // 20,000 ticks and nothing here can reproduce them** — they are kept as the
+    // reason the three-corridor layout is shaped the way it is, not as a
+    // measurement this suite maintains. The window this test actually drives is
+    // `TICKS` = 3,000, over which the shipped three-corridor layout delivers
+    // **171** trips.
     const measured = seededRig().drive(TICKS)
     expect(measured.trips).toBeGreaterThan(120)
     // And the valve — which is what a car driving THROUGH another looks like —
-    // never fires. Measured 0 over 20,000 ticks. This is an upper bound, not a
-    // feature request: if it starts firing, the layout has tipped into the
-    // gridlock the trips assertion above is guarding.
+    // never fires. Zero over this 3,000-tick window, and zero over the review's
+    // 20,000-tick one; only the first of those two is what this line asserts.
+    // This is an upper bound, not a feature request: if it starts firing, the
+    // layout has tipped into the gridlock the trips assertion above is
+    // guarding.
     expect(measured.valves).toBe(0)
   })
 
@@ -876,6 +921,24 @@ describe('the demo board under M1e’s spawn phase', () => {
       control.tick(NO_ACTIONS)
     }
     expect(isGameOver(live.state), 'this window must not reach the shutdown').toBe(false)
+
+    // **This is the ONE window in this file that leaves week 0, and M1e Task 6
+    // put a demand ramp inside it.** Past tick 4,500 the pin period drops from
+    // 518 to 466, so both runs below produce more pins than they did before
+    // that task: measured over this window, refusals go 5,540 -> 5,595 and
+    // blocked ticks 2,499 -> 2,490 with the ramp switched on. **Not one figure
+    // in this test moves for it**, and the reason is structural rather than
+    // lucky: every assertion here is either relational (live against control,
+    // and BOTH arms are ramped identically) or derived from
+    // `DEST_SPAWN_PERIOD_TICKS`, which the ramp does not touch. The
+    // ramp-sensitive figures live one section up, where `drive()` asserts that
+    // its own window never gets here.
+    //
+    // Stated as an assertion rather than as prose so that shortening this
+    // window below 4,500 — which would make the paragraph above quietly wrong —
+    // fails instead.
+    expect(live.state.header[H_WEEK], 'this window is expected to CROSS the week boundary').toBe(1)
+    expect(control.state.header[H_WEEK]).toBe(1)
 
     // The buildings genuinely cannot move — but this is the SECONDARY check,
     // not the test.

@@ -10,6 +10,8 @@ import {
   HOUSE_SPAWN_RETRY_TICKS,
   MAX_BLOCKED_TICKS,
   MAX_PATH_LEN,
+  PIN_CAP_CIRCLE_HARD,
+  PIN_CAP_CIRCLE_TIMER,
   PIN_CAP_SQUARE_TIMER,
   PIN_PERIOD_TICKS,
   FIRST_PIN_DELAY_TICKS,
@@ -56,6 +58,7 @@ import {
 import {
   placeHouse,
   placeDestination,
+  DEST_KIND_CIRCLE,
   DEST_KIND_SQUARE,
   ORIENTATION_N,
   ORIENTATION_S,
@@ -2647,5 +2650,246 @@ describe('golden replay: pins produced by the demand timer, across a week bounda
     expect(againObs.violations).toEqual([])
     expect(againObs.fireTicks).toEqual(DG_EXPECTED_FIRE_TICKS)
     expect(hashState(again.state)).toBe(DG_GOLDEN)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The ramp's OWN observable — a treatment/control, because nothing else in
+// this milestone can attribute anything to it
+// ---------------------------------------------------------------------------
+
+/**
+ * **What a player can attribute to the weekly ramp on the board that ships:
+ * nothing, and this section is what that sentence is worth instead.**
+ *
+ * The plan's observability line for this task was *"a player who has kept up
+ * for five minutes finds that the same road network stops coping"*. That line
+ * is satisfied by a build in which this task is ENTIRELY ABSENT: at five
+ * minutes the board is at week 2 and `spawnScale` is 1.22x, while Task 5's
+ * spawner has already added destinations and houses to the same board and
+ * grown `slotCount` directly. Delete the ramp and the sentence still passes.
+ * **For the whole of M1e the ramp and the spawner are confounded and no
+ * observation of the shipped board separates them.**
+ *
+ * So the ramp gets an observable of its own, built the way the testing
+ * catalogue prescribes for a correlated confound — **a treatment/control with
+ * the confounder structurally absent from both arms**:
+ *
+ *   - one 20x9 board, where `spawnZoneCells` is 0 and the spawner therefore
+ *     cannot place anything in EITHER arm (asserted, per arm);
+ *   - one road network, one house, two cars, one circle destination, and the
+ *     same 3,000 ticks in every arm;
+ *   - `H_WEEK` as the only thing that differs, reached by warm-starting
+ *     `H_TICK` to the week's first tick before anything is placed. The arms'
+ *     headers then differ in exactly one slot before the run
+ *     (`headerSlotsThatMoved` asserts it), and `destSpawnTick` is stamped from
+ *     that same tick so `tick - destSpawnTick` — the only thing eligibility
+ *     reads — is identical in all of them.
+ *   - and the SPAWN side is asserted identical across arms afterwards: same
+ *     countdowns, same colour cursor, same building counts. `colourUnlocked`
+ *     is the other `H_WEEK` reader that can reach this fixture, and that is
+ *     the measurement showing it did nothing.
+ *
+ * ---------------------------------------------------------------------------
+ * THE BOARD, AND THE ONE NUMBER THAT DECIDES WHETHER A RAMP CAN BITE AT ALL
+ * ---------------------------------------------------------------------------
+ *
+ * All-land 20 x 9, `cell = y * 20 + x`. A colour-0 CIRCLE — two rotation slots,
+ * so `slotCount(0)` = 2 — with a 25-cell corridor to a single house:
+ *
+ *   row 3:  C=================================.       62 .. 79
+ *   row 4:              H==================='          92 .. 99
+ *
+ *   d0: origin (2,0) orientation S, carpark (2,3) = 62, a CIRCLE
+ *   H0: (12,4) = 92, house index 0 -> cars 0 and 1
+ *
+ * The round trip is **394 ticks, measured** (50 crossings at 330 units/tick
+ * against a 2,500-unit orthogonal threshold is 379, plus the two right-angle
+ * cells at 79 and 99 crossed twice each). With `F` = 2 cars and `s` = 2 slots,
+ * a queue is stable exactly while `T < F * P / s`, i.e. while `394 < P_w`:
+ *
+ *   `pinPeriodForWeek(2)` = 424 > 394   stable
+ *   `pinPeriodForWeek(3)` = 389 < 394   the knee — DERIVED, and the measured
+ *                                       peak backlog leaves 1 at exactly week 3
+ *
+ * That is the whole difficulty curve in one inequality, and it says plainly why
+ * the ramp cannot be seen on the board that ships: `HOUSES_PER_DESTINATION` x
+ * `CARS_PER_HOUSE` is 4 cars per destination at EVERY week, so the fleet grows
+ * in step with demand and only the round trip can close the gap. Here the round
+ * trip is held fixed on purpose. On the shipped board it is not.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT WAS MEASURED, on this board, over 3,000 ticks, arms as below
+ * ---------------------------------------------------------------------------
+ *
+ *   week  scale   period  peak backlog  trips  dropped
+ *      0  1.00x      518             1      9        0
+ *      3  1.33x      389             2     12        0
+ *      8  1.88x      275             7     12        0
+ *      9  1.99x      260             8     12        0     <- the timer cap
+ *     19  3.00x      172            14     13        5     <- the hard cap
+ *
+ * **The ramp is real iff a connected destination reaches its timer cap by week
+ * N, and on this board N is 9.** Week 8 peaks at 7 and week 9 at 8, so the
+ * answer is a boundary rather than a big number, and the week-8 arm is what
+ * makes it one.
+ *
+ * **Throughput is the honest counterweight and it is measured here too.**
+ * Demand triples (518 -> 172) and completed trips go 9 -> 13, a factor of 1.44:
+ * the fleet is the binding term, not demand, which is the same thing the
+ * inequality above says. Growth in pins is not growth in trips.
+ */
+
+const CP_W = 20
+const CP_H = 9
+const CP_DEST_ORIGIN = 2 // (2,0)
+const CP_CARPARK = 62 // (2,3)
+const CP_ROW3_END = 79 // (19,3)
+const CP_ROW4_END = 99 // (19,4)
+const CP_HOUSE = 92 // (12,4)
+const CP_TICKS = 3000
+/** Measured on this board, both arms: 50 crossings plus two right-angle cells. */
+const CP_ROUND_TRIP = 394
+
+/** The corridor: row 3 east to the wall, one step south, row 4 back west to the house. */
+function copingCorridor(): TickAction[] {
+  const out: TickAction[] = []
+  for (let c = CP_CARPARK; c < CP_ROW3_END; c++) out.push({ kind: 'place', a: c, b: c + 1 })
+  out.push({ kind: 'place', a: CP_ROW3_END, b: CP_ROW4_END })
+  for (let c = CP_ROW4_END; c > CP_HOUSE; c--) out.push({ kind: 'place', a: c, b: c - 1 })
+  return out
+}
+
+interface CopingArm {
+  readonly rig: Rig
+  readonly obs: Observations
+  readonly peakBacklog: number
+  readonly trips: number
+  readonly dropped: number
+  readonly fires: number
+}
+
+/**
+ * One arm: the same board, warm-started into `week`, driven for `CP_TICKS`.
+ *
+ * The map id and the state seed are identical across arms on purpose — the
+ * only construction-time difference is the `H_TICK` write, which the caller
+ * asserts is the only header slot that differs.
+ */
+function runCopingArm(week: number): CopingArm {
+  const rig = makeRig('coping-fixture', allLandRows(CP_W, CP_H), STARTING_TILES)
+  const start = week * TICKS_PER_WEEK
+  rig.state.header[H_TICK] = start
+  expect(placeDestination(rig.state, rig.world, CP_DEST_ORIGIN, ORIENTATION_S, 0, DEST_KIND_CIRCLE)).toBe(true)
+  expect(placeHouse(rig.state, rig.world, CP_HOUSE, 0)).toBe(true)
+  // The confounder is structurally absent from this arm, not merely quiet.
+  expect(spawnZoneCells(rig.world), 'a 20x9 board clips the revealed rect to nothing').toBe(0)
+  expect(rig.state.destSpawnTick[0], 'eligibility is measured from this arm\'s own start').toBe(start)
+
+  const script: Script = {
+    actions: (tick) => (tick === start + 1 ? { actions: copingCorridor() } : NO_ACTIONS),
+    pins: noScriptedPins,
+  }
+  const obs = newObservations()
+  runScripted(rig, start, start + CP_TICKS, obs, script)
+  expect(obs.violations).toEqual([])
+  expect(rig.state.header[H_WEEK], `arm ${week} must stay inside its own week`).toBe(week)
+
+  return {
+    rig,
+    obs,
+    peakBacklog: Math.max(...obs.pinsHeldAfterTick),
+    trips: rig.state.header[H_SCORE] as number,
+    dropped: rig.state.header[H_PINS_DROPPED] as number,
+    fires: obs.fireTicks.length,
+  }
+}
+
+describe('the demand ramp, given an observable of its own: one board, one fleet, only the week differs', () => {
+  it('the same road network stops coping — and the week it stops is a boundary, not a big number', () => {
+    const w0 = runCopingArm(0)
+    const w3 = runCopingArm(3)
+    const w8 = runCopingArm(8)
+    const w9 = runCopingArm(9)
+    const w19 = runCopingArm(19)
+    const arms = [w0, w3, w8, w9, w19]
+
+    // -------------------------------------------------------------------
+    // The control: everything except the week is the same, before and after.
+    // -------------------------------------------------------------------
+    // Before the run, the two extreme arms' headers differ in exactly one slot.
+    // (Rebuilt rather than kept from above, because the arms have already run.)
+    const freshA = makeRig('coping-fixture', allLandRows(CP_W, CP_H), STARTING_TILES)
+    const freshB = makeRig('coping-fixture', allLandRows(CP_W, CP_H), STARTING_TILES)
+    freshB.state.header[H_TICK] = 19 * TICKS_PER_WEEK
+    expect(headerSlotsThatMoved(Array.from(freshA.state.header), freshB.state)).toEqual([H_TICK])
+
+    // After the run, the SPAWN side is byte-for-byte the same in every arm —
+    // so `colourUnlocked`, the other `H_WEEK` reader this fixture can reach,
+    // provably did nothing different. Without this the contrast below would be
+    // "the week changed and the board changed", which is the confound this
+    // whole section exists to escape.
+    for (const a of arms) {
+      expect(a.rig.state.header[H_DEST_COUNT], 'no destination spawned').toBe(1)
+      expect(a.rig.state.header[H_HOUSE_COUNT], 'no house spawned').toBe(1)
+      expect(a.rig.state.header[H_DEST_SPAWN_TIMER]).toBe(w0.rig.state.header[H_DEST_SPAWN_TIMER])
+      expect(a.rig.state.header[H_SPAWN_COLOUR_CURSOR]).toBe(w0.rig.state.header[H_SPAWN_COLOUR_CURSOR])
+      expect(Array.from(a.rig.state.houseSpawnTimer)).toEqual(Array.from(w0.rig.state.houseSpawnTimer))
+    }
+    // Vacuity on that control: the spawner genuinely RAN and was refused — the
+    // cursor moved off 0 — rather than never having been reached at all.
+    expect(w0.rig.state.header[H_SPAWN_COLOUR_CURSOR]).toBe(1)
+
+    // -------------------------------------------------------------------
+    // The knee, DERIVED before it is measured: a queue is stable while the
+    // round trip is under the period, at two cars and two rotation slots.
+    // -------------------------------------------------------------------
+    expect(CP_ROUND_TRIP).toBeLessThan(pinPeriodForWeek(2) as number) // 394 < 424
+    expect(CP_ROUND_TRIP).toBeGreaterThan(pinPeriodForWeek(3) as number) // 394 > 389
+    // ...and the measured backlog leaves 1 at exactly that week.
+    expect(w0.peakBacklog, 'week 0: the fleet is never more than one pin behind').toBe(1)
+    expect(w3.peakBacklog, 'week 3: the derived knee, measured').toBe(2)
+
+    // -------------------------------------------------------------------
+    // The headline: the destination reaches its TIMER cap at week 9 and not
+    // at week 8. A boundary, so the claim is falsifiable in both directions.
+    // -------------------------------------------------------------------
+    expect(w8.peakBacklog).toBe(7)
+    expect(w8.peakBacklog).toBeLessThan(PIN_CAP_CIRCLE_TIMER)
+    expect(w9.peakBacklog).toBe(PIN_CAP_CIRCLE_TIMER)
+    expect(w9.peakBacklog).toBe(8)
+    // And at the ramp's own cap the destination is jammed at its HARD cap and
+    // demand is being thrown away — the state no amount of week-0 play reaches.
+    expect(w19.peakBacklog).toBe(PIN_CAP_CIRCLE_HARD)
+    expect(w19.dropped).toBe(5)
+    expect(w0.dropped).toBe(0)
+    expect(w9.dropped).toBe(0)
+
+    // The backlog is monotone in the week over the five arms — a ramp, not a
+    // step at the cap.
+    const peaks = arms.map((a) => a.peakBacklog)
+    expect(peaks).toEqual([1, 2, 7, 8, 14])
+    for (let i = 1; i < peaks.length; i++) {
+      expect(peaks[i], `arm ${i}`).toBeGreaterThan(peaks[i - 1] as number)
+    }
+
+    // -------------------------------------------------------------------
+    // The counterweight, measured rather than assumed: demand triples and
+    // THROUGHPUT does not. The fleet is the binding term, which is why the
+    // ramp is invisible on a board whose fleet grows with it.
+    // -------------------------------------------------------------------
+    expect(w0.fires).toBe(11)
+    expect(w19.fires).toBe(33)
+    expect(w19.fires / w0.fires).toBeGreaterThan(2.9) // demand: 3.0x
+    expect(w0.trips).toBe(9)
+    expect(w19.trips).toBe(13)
+    expect(w19.trips / w0.trips).toBeLessThan(1.5) // throughput: 1.44x
+    // Every fire is accounted for in every arm — delivered, consumed or
+    // dropped — so `fires` is a ledger rather than a detector's opinion.
+    for (const a of arms) {
+      expect(
+        (a.rig.state.destPins[0] as number) + a.obs.pinsConsumed.length + a.dropped,
+      ).toBe(a.fires)
+    }
   })
 })
