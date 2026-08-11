@@ -11,6 +11,37 @@ each with what was measured about it.
 
 ---
 
+## THE FIGURES' VINTAGE — read this before quoting any number below
+
+**Every numeric figure in this file was re-derived against the tree at commit
+`14e7dee` on 2026-08-11, in M1e's closing sweep**, and each one is now marked in
+place as one of three things:
+
+- **confirmed** — reproduced, or pinned by a green assertion at HEAD, with the
+  site named;
+- **corrected** — the old figure is struck through in the text with the measured
+  one beside it and the rig stated;
+- **UNVERIFIED** — the figure could not be reproduced on any arm this tree can
+  drive, and is labelled as such rather than silently kept. There are five, all
+  in §15, all inherited from rigs that no longer exist. **They are not known to
+  be wrong. They are known to be unchecked**, which is a different and more
+  useful thing to be told.
+
+The sweep exists because this milestone's diagnosed dominant defect was *a
+durable artefact stating the opposite of what the same task measured*, and the
+review that named it found the family still open in the handoff. The generalised
+cause, in the reviewer's words, is worth carrying more than the corrections are:
+**"figures inherited from briefs written before the tree moved under them, and
+no per-task review can see that."** A per-task review checks a figure against its
+own task. Nothing checks it against the tree two tasks later, so a figure decays
+silently and the document reads exactly as well as it did when it was true.
+
+**So: a figure in this file is evidence about `14e7dee` and about nothing after
+it.** If M1f is quoting one to justify a change, re-run it — most have a named
+rig or a named assertion beside them now, which is what makes that cheap.
+
+---
+
 ## 1. Everything waiting on the §5.10 card modal
 
 M1e shipped the **load-bearing half** of §5.10 — `WEEKLY_TILE_GRANT`, 30 tiles a
@@ -116,9 +147,20 @@ from boot to its §5.8 death with no input:
   demo  6,703 ticks   7,544 refusals  max carBlockedTicks   55   0 valve firings
 ```
 
+**All six numbers confirmed on `14e7dee`, and the "refusals" column does not
+mean what the greedy row below means by it.** Driving each layout's own seed to
+its §5.8 death reproduces `5,580 / 0 / 0 / 0` and `6,703 / 7,544 / 55 / 0`
+exactly. But demo's 7,544 is **entry refusals** — `canEnter` saying no to a car,
+counted per car per tick — and it is not `H_ROUTES_REFUSED`, which is **0** on
+demo too. The greedy row's "0 refusals" IS `H_ROUTES_REFUSED`; that arm's entry
+refusals are **2,120**, which is the same thing the 7,544 counts and is not
+zero. Two quantities under one column heading, and the only reason the table
+never looked wrong is that city is zero on both. **Read the column as: demo
+7,544 entry / 0 route; city 0 / 0; city-greedy 2,120 entry / 0 route.**
+
 `city` refuses nothing because a board nobody draws on has no route; `demo`
 refuses constantly and its worst wait is **55 ticks, 1.8 s — a factor of 24.5
-below the threshold**. The only things that reach it are purpose-built fixtures
+below the threshold** (confirmed: 55 measured, 55/1350 = 24.5). The only things that reach it are purpose-built fixtures
 (`game/test/jamFixture.ts`'s STARVED variant, `sim/test/blocking.test.ts`'s
 hand-built gridlock ring).
 
@@ -202,6 +244,18 @@ deceleration a fact about the simulation rather than an inference in the
 renderer. That is a `rulesVersion` change and it belongs with §15.2's scheduler
 work, not with the smoothing.
 
+**Closing-sweep status of this section's figures: agreeing with the source of
+record, and NOT independently re-measured.** 0.9920 cells / 4.96×, the 0.2000
+excess, the 21-point alpha grid and the 5.7–15.2 % `queueProbe` disagreement all
+match `resolve.ts:323-362` and `queueProbe.ts:36` word for word, and 0.2000 is
+stated to equal `MAX_DRAW_LAG_CELLS`, which is a named constant. The superseded
+0.462 / 2.31× appears nowhere in `packages/`, which is what "superseded" should
+look like. **But every one of them is prose on both ends** — `resolve.ts` says
+outright that `carSmoothing.test.ts` cannot see this quantity — so agreement
+here means the handoff copied the source faithfully, not that the source was
+re-checked. The 7.5× is arithmetic on `resolve.ts`'s own table (4.96 / 0.66) and
+is not separately stated anywhere.
+
 ## 7. Things M1e verified are still inert, and must not acquire a manufactured test
 
 Both were carried in as *correct as labelled*, each with a named condition that
@@ -246,7 +300,19 @@ entry off it.**
   commuting, at 0 detectors, with `step.test.ts`'s disjointness scan as the only
   tripwire.
 - The `laneSpeedMul` and `stepCell` entries are unchanged and were re-confirmed
-  by reading the constants, not by re-running the equivalence.
+  by reading the constants, not by re-running the equivalence. The four
+  `speedUnits` pins ARE assertions — `583/584 → 192` and `416/417 → 137` at
+  `cars.test.ts:1590-1593` — so that entry is anchored, not merely read.
+
+**The closing sweep re-ran one register entry and added a second.** `4 <-> 5` is
+re-measured at 0 over 1,843 (see §17). And `spawn.ts`'s `maxHouses`
+short-circuit — the other labelled-inert line in this milestone — was
+re-measured the same way: deleting it is **0 detectors over 1,843**, green in
+all five packages, collection count unchanged, crash screen clean. Its comment
+had carried only the 1,693-era figure. **Both entries now name the suite size
+they were measured at**, because "0 detectors across the whole suite" in a
+durable comment is a claim that silently re-points at whatever suite the reader
+has.
 
 ---
 
@@ -287,12 +353,19 @@ visible while there is still time to act.
 proposed tiering the spawn scan by proximity to the spawning colour's own
 houses. Task 10 applied it verbatim across five seeds: it survives all twelve
 weeks **by making the board inert** — peak `destPins` **1 in 65 of 65
-week-observations**, zero blocked ticks in 63 of 65, four to five cars ever in
-motion, delivery fraction ~1.00 — and the *baseline* is the arm that produces
+week-observations**, zero blocked ticks in 63 of 65, four cars ever in motion,
+delivery fraction ~1.00 — and the *baseline* is the arm that produces
 the 1 → 2 → 5 → 10 gradient. A different greedy policy gives byte-identical
 results, so it is not a tie-break artefact. **Connectivity awareness as
 specified is a difficulty DELETION wearing a survivability improvement's
 clothes.**
+
+*(Corrected in the closing sweep: this paragraph read "four to five cars ever in
+motion" and its home in the source, `spawn.ts:75`, says **four**. The lever is
+not implemented, so nothing in the tree can arbitrate — but a handoff must not
+be the looser of the two copies of a figure it is relaying. Every other number
+in this paragraph matches `spawn.ts` word for word; the baseline gradient
+`1 → 2 → 5 → 10` is separately ANCHORED at `integration.test.ts:3979`.)*
 
 **Home in the source:** `packages/sim/src/spawn.ts`'s module comment, which is
 the code that causes it.
@@ -328,9 +401,18 @@ Nothing in the shipped UI tells a player that column 17 is the move. The
 measurement is stark — a 15-tile column-8 road buys **zero ticks** and does not
 even change which destination kills the city, while five tiles at column 17 buy
 **750 ticks** — and both of the game's own signals arrive **on the board, after
-the fact**: the overcrowd ring first appears at 1:56 and the run ends at 3:06.
-The ring names *which* destination; the shutdown line says *connect it*; neither
-says *where*.
+the fact**: the overcrowd ring first appears at **1:19** and the run ends at
+3:06. The ring names *which* destination; the shutdown line says *connect it*;
+neither says *where*.
+
+*(Corrected: this read 1:56, which is the **demo** board's first ring, tick
+3,492. The city's is tick **2,369** — measured as the first tick
+`frame.destOvercrowd[d]` is non-zero, which is `canvas.ts:1006`'s own draw
+condition. D2 reaches its trigger cap at 2,191 and the meter needs 178 more
+ticks to scale to 1 against `OVERCROWD_FULL_MILLITICKS`, so the cap tick is not
+the visible tick. On a stopwatch, minus the 258-tick warm start: **1:10** and
+2:57. The 750 ticks and the two death ticks are confirmed — 6,330 and 5,580,
+both now asserted, see §15.7.)*
 
 This is the same open question Task 9 left and Task 10 restated, and it is a
 **design gap, not a bug**. It has no code artefact of its own, which is why it
@@ -393,6 +475,19 @@ it happens beside each item. Run it in one sitting. Record the answers with the
 words **"one device, qualitative"** attached, exactly as the 2026-08-10 session
 did — it is evidence that the architecture holds, **not a measured budget**.
 
+**Every clock time in this section was re-derived in the closing sweep.** They
+are all `(tick − warmStart) / 30` and they all check out: tick 300 → 0:01.4,
+378 → 0:04, 2,369 → 1:10 (**corrected from 2,191 / 1:04**, see Q2), 4,242 /
+8,742 / 13,242 → 2:21 / 4:51 / 7:21, week 4's boundary → 9:51, 5,580 → 2:57,
+6,703 → 3:03, 31,456 → 17:29. Two others are confirmed against the code: the
+killer's ring really is drawn at **2× width** on the scrim
+(`SHUTDOWN_RING_WIDTH_SCALE = 2`, `canvas.ts:347`, asserted at
+`canvas.test.ts:3108`), and D2 really does reach **fourteen** pin dots on the
+no-input run (measured `destPins[2] = 14` at the death tick, its
+`PIN_CAP_CIRCLE_HARD`). Three are **UNVERIFIED** and marked where they appear:
+"unmistakable by ~1:34", "the score should tick about 6 seconds after a 3-cell
+stroke", and Q4's "182 assertions".
+
 ## Before you start: the clock you will be holding is NOT the clock in the source
 
 Every time written in this repo — Task 10's report, `demoLayout.ts`'s "3 minutes
@@ -441,7 +536,11 @@ the person judging it is the person who will decide whether the app works.
 - **At 0:04** (tick 378) the first pin lands: a dot appears on one destination.
 - Draw a road with your finger between a house and a same-colour destination's
   carpark. **A car should be running it within a second, and the score should
-  tick about 6 seconds after a 3-cell stroke.**
+  tick about 6 seconds after a 3-cell stroke.** *(**UNVERIFIED** — the "6
+  seconds" has no artefact. The nearest anchored figure is the seeded-city trip
+  test, which scores at tick 435 from a first pin at 378, i.e. **1.9 s** on a
+  much shorter route. Expect the right order of magnitude and do not file a bug
+  against 6.)*
 
 Answer: does the empty opening read as an invitation or as a failure?
 
@@ -453,11 +552,18 @@ them together.
 
 Do this on the **default board, doing nothing at all**:
 
-- **At 1:04 on your stopwatch** (tick 2,191) a ring begins closing on the
+- **At 1:10 on your stopwatch** (tick 2,369) a ring begins closing on the
   **circle right of the river, grid (14,14)–(16,15), whose carpark bay is at
   (17,14)**. It is colour 1's only destination and it is the one that kills the
-  city. The ring starts empty and fills clockwise.
+  city. The ring starts empty and fills clockwise. *(Corrected: this said 1:04 /
+  tick 2,191, which is when the METER starts, not when the ring first paints —
+  `canvas.ts` draws nothing while the scaled byte is 0, and that takes 178 more
+  ticks. If you are holding a stopwatch, 1:04 is six seconds early and you will
+  look at an empty destination and file a bug.)*
 - **By about 1:34** (tick ~3,090) it should be unmistakable at arm's length.
+  **UNVERIFIED** — "unmistakable" has no instrument in this tree and ~3,090 is
+  not reproduced by anything; treat it as the reporter's estimate, not a
+  measurement.
 - **The same destination is accumulating pin dots the whole time**, up to
   fourteen. Question: can you tell the ring from the dots, or do they smear into
   one grey blob?
@@ -492,7 +598,7 @@ Same run, keep watching.
   the first line is the other arm: `DESTINATION 2 WENT UNSERVED`. Both arms ship
   and they differ by two words. Do they read as different situations?
 
-## Q4 — The ghost art: 182 assertions, zero human minutes
+## Q4 — The ghost art: 182 assertions (UNVERIFIED count), zero human minutes
 
 Two pure aesthetic judgements are baked into the renderer and neither has ever
 been looked at: the ghost stroke is **half the live road's width**
@@ -551,8 +657,10 @@ enough:
 - **Weeks 0–3 (up to 9:51 on your stopwatch)** every connected destination sits
   at **one pin**. Nothing queues, nothing waits, nothing is ever refused a route.
 - **The tile counter jumps by 30 at 2:21, 4:51, 7:21, …** and you will never run
-  out: the whole twelve-week connection bill is 41–57 tiles against 390 granted,
-  and there were **zero unaffordable events in fifteen runs**.
+  out: the connection bill is **62 tiles against 210 granted** and the counter
+  never falls below 37. *(Corrected from "41–57 against 390" — see §15.5. The
+  three stopwatch times are arithmetic on `TICKS_PER_WEEK` minus the warm start
+  and are confirmed: `(4500k − 258) / 30` gives 2:21, 4:51, 7:21.)*
 - A new destination appears somewhere you have no road, roughly every 2.5
   minutes; a new house every 10 seconds or so until the board fills.
 
@@ -612,6 +720,15 @@ Measured: on the shipped board the ramp changes the no-input death tick by
 by **zero**. On a 41-cell corridor the same ramp is the entire difference between
 surviving 60,000 ticks and dying at week 9.
 
+**UNVERIFIED, all four figures** — 1.0 %, the 41-cell corridor, 60,000 ticks and
+week 9. The corridor rig has no artefact in the tree; the nearest surviving
+fixture is `loop.test.ts:2793-2836`'s **20×9, 25-cell** coping board, which does
+reach its timer cap in week 9 (`loop.test.ts:2962`) but is a different geometry,
+so quoting it as corroboration would be the mistake this sweep exists to stop.
+The *shape* of the claim — that the ramp's effect is a function of round-trip
+length, and this board does not produce one — is not in doubt; the numbers under
+it were not re-run.
+
 **So it is correctly implemented and its effect is a function of round-trip
 length, which M1e's board does not produce.** Freezing `pinPeriodForWeek` at
 week 0 leaves Task 10's Gate B green; freezing the destination SPAWNER takes
@@ -631,7 +748,11 @@ and it is the mechanism behind the default board's own death at 31,456.
 rotation slots. `assembleSources` (dispatch.ts) routes cars to the **nearest**
 unfilled pin. Within one colour those two rules disagree, and the disagreement is
 not marginal: a measured **297 / 10 / 0** trip split against a 2:1 demand ratio
-is an ordinary outcome. §5.9's house-clustering rule compounds it.
+is an ordinary outcome — **UNVERIFIED**, that split has no artefact anywhere in
+the tree and was not re-run. What IS confirmed is the consequence stated at the
+foot of this section (97.5 % delivery with `H_ROUTES_REFUSED` at 0, both
+asserted at `integration.test.ts:3960` and `:3969`), which is the evidence the
+handoff actually rests on. §5.9's house-clustering rule compounds it.
 
 Task 10's lever — the greedy connector's ordering — is the cheap half. The real
 fix is one of three, and **all three are changes to §5.3's stated scheduling rule
@@ -648,9 +769,13 @@ the constraint. The scheduler is.
 
 ## 15.3 `MAX_PATH_LEN` = 96 is a hard ceiling and nothing in the game says so
 
-96 route steps is the maximum distance a house may be from a carpark. Measured:
-on a 101-cell corridor **every dispatch is refused**, and a **fully connected**
-destination is unservable and dies, with or without the ramp.
+96 route steps is the maximum distance a house may be from a carpark.
+`MAX_PATH_LEN = 96` is confirmed (`constants.ts:289`, and `dispatch.test.ts`
+keys many assertions off it). Measured: on a 101-cell corridor **every dispatch
+is refused**, and a **fully connected** destination is unservable and dies, with
+or without the ramp — **UNVERIFIED**, no 101-cell corridor fixture exists in the
+tree; `dispatch.test.ts:1004` exercises the boundary at 97 steps instead. The
+ceiling is real and pinned; the corridor demonstration is not reproducible here.
 
 On a 14×22 rect a sensible road never approaches 96 steps. A winding one can, and
 **the failure is silent** — `H_ROUTES_REFUSED` rises and nothing else. There is
@@ -661,38 +786,88 @@ refusal count is already in the header.
 
 ## 15.4 Whether `DESTINATIONS_PER_WEEK` = 2 and `HOUSES_PER_DESTINATION` = 2 pace the city
 
-Both are [OURS] with no source in the spec. Measured over 40 weeks:
+Both are [OURS] with no source in the spec. **All four bullets below were
+re-measured in the closing sweep and three of them moved**, because the arms
+that produce them changed under Task 8's freeze: nothing that ships now reaches
+week 10, so a 40-week figure needs a rig that says so.
 
-- the schedule delivers **0.275 destinations a week**, not 2 — the retry cadence
-  and the geometry dominate the nominal rate;
-- the board seats **14** rather than the declared `maxDestinations` of 16, with
-  the last placement in **week 10**;
-- on the PLAYED board it is **13 by week 8**, because the player's own road
-  removes candidate cells;
-- after that the spawner is in permanent `BOARD_FULL` for the rest of the run.
+The rig, stated because the numbers are meaningless without it: the no-input
+city, stepped 180,000 ticks with §5.8 SUPPRESSED — `destOvercrowd` and
+`destOverTicks` zeroed after every step, which nothing but `overcrowd.ts` reads,
+so the spawner, demand and dispatch are bit-for-bit the shipped ones and only
+the ending is removed.
+
+- the schedule delivers ~~0.275~~ **0.250 destinations a week**, not 2 — ten
+  added over forty weeks. The retry cadence and the geometry dominate the
+  nominal rate, which is the finding and it survives the correction;
+- the board seats ~~14~~ **13** rather than the declared `maxDestinations` of
+  16, with the last placement in ~~week 10~~ **week 8** (tick 38,700, 26 houses
+  standing at that moment);
+- on the PLAYED board it is ~~13 by week 8~~ **12, in week 6, and the run ends
+  there** — the greedy arm dies at 31,456, which is week 6, so it never sees
+  week 8 at all. Reproduced against the shipped figures first: this rig gives
+  death 31,456, 747 trips, `H_ROUTES_REFUSED` 0, matching
+  `integration.test.ts:3949` exactly before it was believed about anything else;
+- ~~after that the spawner is in permanent `BOARD_FULL`~~ — **it is
+  `SCAN_EXHAUSTED`, and `BOARD_FULL` is UNREACHABLE on this board.** This
+  contradicted the paragraph twelve lines below it, which was right.
+
+**`BOARD_FULL` has two returns and neither can fire on `firstCity`**
+(`spawn.ts:426` and `:450`). The first needs `H_DEST_COUNT >= maxDestinations`,
+i.e. **16** destinations, against a board measured to seat 13 with no input and
+12 played. The second needs `limit >= zoneCells`, i.e. `24 >= 308`. Both
+measured on the tree: `spawnZoneCells(firstCity) = 308`,
+`SPAWN_CANDIDATE_LIMIT = 24`, `maxDestinations = 16`. So a failing destination
+scan on this board is always `SCAN_EXHAUSTED`.
+
+**Why this one mattered more than its size.** `pushBlockedSpawnDemand` — §5.3.5's
+redistribution — is called from those two returns and from nowhere else, so a
+task tuning `DESTINATIONS_PER_WEEK` off bullet 4 would believe the
+redistribution is firing on the shipped board. It fires **zero** times. That is
+exactly what the paragraph at the end of this section already said, and the two
+have been contradicting each other since the section was written.
 
 **The cause is geometric, not arithmetic**: seven contiguous free cells at
 Chebyshev ≥ 2 from every other destination, inside a 308-cell rect already
-carrying a river, eight trees, 27 houses and the player's roads.
-`HOUSES_PER_DESTINATION` is measured **not to be a lever** at 1, 2 or 3.
+carrying a river, **eight trees** (confirmed — 8 inside the zone, 24 on the
+board) and **25–28 houses** (~~27~~ — measured 25 on the greedy arm at its
+death, 26 at the last destination placement on the suppressed arm, 28 at forty
+weeks; 27 is in the band and is not a reading of anything) and the player's
+roads. `HOUSES_PER_DESTINATION` is measured **not to be a lever** at 1, 2 or 3 —
+**UNVERIFIED**, that sweep has no artefact in the tree and was not re-run.
 
-**A consequence Task 12 measured and nothing else records:** on `firstCity` the
-clipped spawn zone is **308** cells against a `SPAWN_CANDIDATE_LIMIT` of **24**,
-so a failing destination scan is always `SCAN_EXHAUSTED` and never `BOARD_FULL`
-— which means **§5.3.5's blocked-spawn redistribution never fires on the board
-that ships.** 0 pushes in 31,456 ticks of greedy play. Both of its arms are
-exercised only on `jamFixture`, where `maxDestinations` is 1.
+**A consequence Task 12 measured, and the bullet list above disagreed with it
+for the whole life of this document:** on `firstCity` the clipped spawn zone is
+**308** cells against a `SPAWN_CANDIDATE_LIMIT` of **24**, so a failing
+destination scan is always `SCAN_EXHAUSTED` and never `BOARD_FULL` — which means
+**§5.3.5's blocked-spawn redistribution never fires on the board that ships.**
+0 pushes in 31,456 ticks of greedy play. Both of its arms are exercised only on
+`jamFixture`, where `maxDestinations` is 1. All three figures confirmed on
+`14e7dee`; `allocation.test.ts:2921-2939` carries the same paragraph and asserts
+`SPAWN_CANDIDATE_LIMIT < 308`.
 
 ## 15.5 Whether 30 tiles a week is right for a 308-cell rect
 
 It is §5.10's Road Tiles rate on a board a **tenth** of the original's, and it is
-measured to be **6–8× slack**:
+measured to be slack by a factor of **3.4** on the arm that ships:
 
-- the whole twelve-week destination-connection bill is **41–57 tiles against 390
-  granted**;
-- the median connection is **3 tiles**;
-- there were **zero unaffordable events in fifteen runs**, and the greedy arm's
-  `tilesLeft` never drops below **37**.
+- the whole destination-connection bill is ~~41–57 tiles against 390 granted~~
+  **62 tiles against 210 granted** — 30 to start plus six weekly grants of 30,
+  because the greedy arm dies in **week 6** and never collects the thirteen
+  grants 390 assumes. Measured on the same rig that reproduces 31,456; the same
+  pair is asserted at `integration.test.ts:3985`;
+- the median connection is **3 tiles** — **UNVERIFIED**, no artefact;
+- there were zero unaffordable events ~~in fifteen runs~~ — **confirmed for the
+  one run that ships**, `expect(r.unaffordable).toBe(0)`
+  (`integration.test.ts:3988`); the "fifteen runs" aggregate has no artefact and
+  is UNVERIFIED. The greedy arm's `tilesLeft` never drops below **37** —
+  confirmed, asserted exactly at `integration.test.ts:3986`.
+
+*(The 41–57/390 pair is the shape this whole sweep is about: both halves were
+right for a twelve-week run, and Task 8's freeze made the run six weeks long
+without anyone re-reading the tile arithmetic. The CONCLUSION is unchanged and
+is if anything understated — 62 of 210 is still 3.4× slack, and `tilesLeft`
+bottoming at 37 says the constraint never binds.)*
 
 Tiles stop binding around week 3. After the colour unlocks end at week 4 the
 weekly boundary carries nothing but the destination timer — **which does not need
@@ -748,9 +923,18 @@ mechanism worth having and it is written down nowhere else:**
 The net effect on time-to-death is therefore **strongly negative** — the
 destination becomes harder, not easier — and that is the measured asymmetry M1e
 discovered on the board that ships: on `firstCity` the colour-1 **circle** dies
-at **5,580** where the colour-0 **square** would have died at **6,357**, despite
-the circle's higher cap. Same board, same first pin at tick 378; the circle takes
-a pin every 259 ticks and the square one every 518.
+at **5,580** where the colour-0 **square** would have died at ~~6,357~~
+**6,330**, despite the circle's higher cap. Same board, same first pin at tick
+378; the circle takes a pin every 259 ticks and the square one every 518.
+
+*(Corrected. **6,357 is the pre-spawner number** — D0 caps at 2,968 with
+`H_DEST_SPAWN_TIMER` parked. On the live tree Task 5's spawner adds a third
+colour-0 destination, `slotCount(0)` changes, and D0 caps at **2,941**, giving
+`2,940 + 3,390 = 6,330`. `da63dc2` corrected this once and it came back, twice —
+here and in a new `integration.test.ts` comment. **Both arms are now asserted**
+in `startingCity.test.ts`'s *"is not vacuous: WITHOUT the link"*: 2,941/6,330
+live and 2,968/6,357 parked, on the same rig, which is what a prose figure could
+not do. 5,580, 378, 259 and 518 are all separately confirmed and anchored.)*
 
 **So the upgrade is a real difficulty lever with a known sign and a known
 magnitude, and M1f can price it before building it.** `integration.test.ts`'s
@@ -793,6 +977,12 @@ And the new default board's car count **grows without bound as the city fills**:
 fleet, on a board nobody has profiled on a phone. The allocation harness says the
 frame allocates nothing; it says nothing at all about frame TIME.
 
+*(Confirmed: 25 houses by week 6 is asserted at `integration.test.ts:3984`, and
+`CARS_PER_HOUSE = 2`, so 50 is arithmetic on two anchored numbers rather than a
+third measurement. "Grows without bound" is loose — `firstCity`'s `maxHouses` is
+**40**, so the ceiling is 80 cars and the board hits its §5.8 death long before
+it. The concern stands; the phrase overstates it.)*
+
 ## 15.11 What the restart feels like
 
 M1e's restart is `location.reload()`: correct by construction, preserves
@@ -824,11 +1014,21 @@ standing permission that absorbs an unrelated regression silently.
 | `2312109239` | **road-network** | `sim/test/rollback.test.ts:820` | `placeRoad`/`eraseRoad` semantics, the tile ledger, the ghost regions. Scanned by `loop.test.ts:1324`. |
 | `252514232` | **field** | `sim/test/rollback.test.ts:864` | `flowfield.ts`'s relaxation, `edgeCost`, the bucket structure. **Not** the allocation shape — Task 3 removed an allocation and this did not move. Scanned by `loop.test.ts:1327`. |
 | `1877236894` | **loop** | `sim/test/loop.test.ts:1285` | the tick order, movement, dispatch, blocking. The broadest of the nine. |
-| `968680755` | **seed** | `game/test/startingCity.test.ts:767` **and** `game/test/demoLayout.test.ts:599` | `firstCity`'s map bytes or `seedStartingCity`'s six placements. **Two sites**, deliberately: `demoLayout.test.ts` asserts it to prove the demo work left the shipped seed alone. |
+| `968680755` | **seed** | `game/test/startingCity.test.ts:772` **and** `game/test/demoLayout.test.ts:599` | `firstCity`'s map bytes or `seedStartingCity`'s six placements. **Two sites**, deliberately: `demoLayout.test.ts` asserts it to prove the demo work left the shipped seed alone. |
 | `307910575` | **queue** | `sim/test/loop.test.ts:2296` | the blocking/queueing path on the queue fixture. |
 | `1531344761` | **multipliers** | `sim/test/cars.test.ts:1809` | `laneSpeedMul`, `CAR_SPEED_UNITS_PER_TICK`, any turn or intersection multiplier. |
 | `3152640907` | **demo** | `game/test/demoLayout.test.ts:574` | `demoCity`'s map bytes or `seedDemoLayout`. **`firstCity` cannot reach it** — a correction M1e Task 2 got wrong and its reviewer measured: changing `firstCity.startingTiles` moves **one** golden, not two, because the demo golden is `hashState` over a state built on `demoCity()`. |
 | `894844668` | **demand-pin** | `sim/test/loop.test.ts:2683` (`DG_GOLDEN`, declared 2409) | the demand timer, `pinPeriodForWeek`, the rotation, the week boundary's grant. New in M1e Task 6. |
+
+**All nine re-checked at `14e7dee`: nine digests green and unmoved, and eight of
+the ten cited line numbers exact.** The one that drifted is the `seed` golden's
+`startingCity.test.ts` site, which read 767, was 764 before the closing sweep
+and is **772** after it (the sweep added eight lines to that file's header
+comment). Mirror-scan sites `loop.test.ts:1322 / 1324 / 1327` and the
+`DG_GOLDEN` pair `2409 / 2683` are all exact. **A line number in a ledger is a
+figure like any other and decays faster than the rest** — it moves whenever
+anybody edits a comment above it, which is most commits. The digests are the
+durable half; treat the line as a hint and grep the digest.
 
 **Two properties of this set worth carrying.**
 
@@ -874,6 +1074,19 @@ reordering makes `step` throw during test COLLECTION and
 `carSmoothing.test.ts` (27) plus `integration.test.ts` (65) never run. All
 sixteen involve phase 6 or 7. **Their counts are lower bounds**, and `step.ts`
 marks every one.
+
+**Confirmed in the closing sweep, by re-running rather than by reading.** The
+canonical invocation at `14e7dee` collects **1,843** — shared 49, render 252,
+eslint-rules 69, sim 852, game 621 — so the suite has not moved since Task 12.
+`carSmoothing.test.ts` runs **27** and `integration.test.ts` **65**, so the
+short suite is 1,843 − 92 = **1,751** exactly. And `4 <-> 5` was re-applied
+alone — `runDemand` before `runSpawn` — over the same invocation: **green in all
+five packages, 0 detectors, collection count unchanged so the mutant ran, and no
+crash-screen match.** Three suite sizes, three zeroes. This is the third
+independent measurement of that row and the first taken after the milestone
+closed. **The rest of the 45-cell table was NOT re-run** — one row is not the
+sweep, and a reader wanting the other 44 should treat `step.ts`'s table as
+Task 12's and re-run it.
 
 **Two things that are easy to get wrong, and both were got wrong here first.**
 

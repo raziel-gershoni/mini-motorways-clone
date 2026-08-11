@@ -290,8 +290,11 @@ function nearSameColourHouse(
  * 72 wasted `canPlaceHouse` calls per 60 ticks on the demo board — which held
  * the default until M1e Task 10 and is still one token away.
  *
- * **Deleting it scores 0 detectors across the whole 1,693-test suite, measured,
- * and the detector Task 5's brief predicted CANNOT EXIST ANY MORE.** The brief
+ * **Deleting it scores 0 detectors, and the detector Task 5's brief predicted
+ * CANNOT EXIST ANY MORE.** Measured twice: 0 over the 1,693-test suite when
+ * Task 5 first ran it, and 0 again in M1e's closing sweep over the canonical
+ * invocation at **1,843** — five packages green, the collection count unchanged
+ * so the mutant ran, and no crash-screen match. The brief
  * named `demoAllocation.test.ts` as the only observer, via the bytes those
  * wasted calls would allocate — but M1e Task 4 made `canPlaceHouse`
  * allocation-free (every outcome is a frozen module-scope singleton), so the

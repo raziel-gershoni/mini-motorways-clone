@@ -219,6 +219,33 @@ Related: [tested and looked-at are different claims]. That entry is this one at 
 is the milestone-scale version, and it is worse, because here the tests were not merely silent about
 the player — they were passing *on inputs the player cannot produce*.
 
+# The M1e entries — and the vintage of every figure in them
+
+Everything below this line is M1e. **All of it was re-derived against the tree at commit `14e7dee` in
+M1e's closing sweep**, which is the same sweep that produced the corrections in the *durable artefact*
+entry further down. The classification, because "re-derived" is worth nothing without it:
+
+- **Anchored at HEAD** — pinned by a green assertion or a named constant, so it cannot rot silently.
+  The load-bearing ones: `[1,1,1,6,6]` and its four siblings; `1 → 2 → 5 → 10`; `maxInFlight >= 6`;
+  `11` peak cars; `5,580` and `8,661`; `62 tiles of 210` (measured again in the sweep, and note that
+  the M1f handoff carried `41–57 of 390` for the same quantity — **this file had it right and the
+  handoff did not**); week `18` and the `167`/`172` clauses; `6,459`; `21` return statements against
+  `grep -c`; `20.83`, budget `8`, `1.34`; `36`; `20,000`.
+- **History, and correct as history** — figures describing a state of the tree that a later task
+  deliberately changed. These must NOT be "corrected" to today's numbers; the entry is about the
+  incident. They are marked in place where a reader could mistake them for current, the sharpest being
+  the spawner-growth entry, whose `22 / 10 / 184 / exactly one` is the PRE-fix rig.
+- **Unreproducible on this tree** — figures whose rig no longer exists, chiefly the rejected
+  proximity lever (not implemented, so nothing can assert it) and several one-off allocation
+  injections (`8 events per 3,000-frame window`, `0/1056/0`, `6/6 at 30–66 B/event`, `4.29–6.61`,
+  `23 %`). They are left as written, because an entry's job here is to carry the *shape*, and marked
+  where the number rather than the shape is being leaned on.
+
+**The one rule this classification is for:** an entry in this file gets quoted into a brief, and a
+number quoted out of a narrative arrives looking like a measurement of the current tree. Two of the
+sixteen defects the closing sweep fixed entered the world exactly that way. If you are about to move a
+figure from here into a plan, check which of the three kinds it is first.
+
 ## A mutation harness's restore step is untested code, and it can eat the work it was testing
 
 M1e Task 1's implementer ran a mutation battery whose cleanup was `git checkout -- packages`. That is
@@ -421,10 +448,100 @@ The rule: **when a task's report and its commit message disagree, the report is 
 commit message is what ships.** Check the durable artefacts against the measurements last, deliberately,
 as a step — not as a side effect of writing them.
 
+### It was never brought under control, and the closing sweep says why
+
+M1e's whole-milestone review found **sixteen** further instances of this family, in the three artefact
+classes that cannot be corrected in place or that everything downstream reads: the final commit, the
+handoff, and this file. The sweep that closed them measured every one first, and three things
+generalise past the list.
+
+**The mechanism is not carelessness, it is DECAY, and no per-task review can see it.** A per-task
+review checks a figure against its own task's measurement, where it is correct. What makes it wrong is
+the tree moving two tasks later. `allocation.test.ts`'s "tick 3,833" was right for the drive index
+before someone joined it to an `H_TICK`; "41–57 tiles against 390 granted" was right for a twelve-week
+run before Task 8's freeze made the run six weeks long; "all four rings" was right for a board before
+Task 5's spawner added a fifth. **Every one of them passed the review that shipped it.** The only
+instrument that finds this class is a sweep at the end, against the tree, with the rig written down
+beside each number — and the sweep must record what it could NOT reproduce, or the unchecked figures
+become indistinguishable from the confirmed ones on the next reading.
+
+**The correction is where the danger concentrates, and this milestone produced four wrong ones.** A
+corrected figure reads as verified in a way the original never did — that is already an entry above,
+and here is its sharpest instance: `6,357` was correctly retired by `da63dc2` and **re-entered the tree
+three commits later in a NEW comment**, carrying the pre-spawner derivation, eight lines above that
+comment's own note that the spawner is live. Nothing was wrong with the correction. What was missing is
+that it left **no artefact**: the right number lived in prose in two files and the wrong one was free to
+be re-derived from first principles by anyone who did not know the spawner had landed. **A figure that
+nothing runs is a figure that comes back.** So the repair was not to edit the number a second time but
+to assert **both** arms — 2,941/6,330 live and 2,968/6,357 parked — in one test on one rig, which also
+made true a sentence that had claimed the parked arm was "reproduced exactly here" while no test in that
+file parked anything.
+
+**And a review of a stale figure can be stale in the other direction — this is the one to be careful
+of.** The sweep's most load-bearing item was a review finding that a boot-time `loop.end()` was
+*"justified by a dead argument"*, because the absolute its comment rested on — *"pointer refuses board
+input while paused and by nothing else"* — is measurably false since a later task put a `gameOver` arm
+in front of it. The absolute **is** false, at four sites, and the review found it correctly. The
+*inference* is wrong: `gameOver` reads the very flag `end()` alone sets, so that one line arms **both**
+refusals. Deleting it and booting a terminal-at-boot rig put **two road actions into the queue on a dead
+board**, with no restart offered, which is worse than the failure the comment described. **A premise can
+rot while its conclusion holds.** "The stated reason is stale, therefore the mechanism is dead" is the
+specific error to watch for when sweeping this class, because unlike the rest of the family it deletes
+working code rather than merely mis-describing it. Measure the mechanism, not the sentence.
+
+## Six ways a number goes wrong in prose while every test stays green
+
+The sixteen instances the closing sweep worked through were not sixteen careless typings. They fall
+into six mechanisms, and only the first is the one people look for. **Each is listed with the shipped
+instance, because the abstract form is unrecognisable without it.**
+
+1. **A stale count.** The figure was right and the tree grew. *"All four rings"* on a board that ends
+   with five; `"the whole 1,693-test suite"` on a suite of 1,843. Cheap to find, cheap to fix, and the
+   only one of the six that a careful reader can suspect from the text alone.
+2. **A unit change inside one sentence, hidden by an off-by-one that cancels.** *"Reaches the trigger
+   cap at tick 3,833, and 3,390 ticks later — tick 7,223."* 3,833 is a drive index, 7,223 is an
+   `H_TICK`, the rig's setup step is the one-tick offset between them, and joining them with an
+   inclusive-vs-exclusive gap made the arithmetic come out. **Both numbers were individually
+   defensible and the sentence was still wrong.** When two quantities in one sentence come from
+   different counters, say which counter each is.
+3. **Two quantities under one column heading.** A table read `city 0 refusals / demo 7,544 refusals /
+   city-greedy 0 refusals`. The demo figure is `canEnter` refusals; the greedy figure is
+   `H_ROUTES_REFUSED`. The greedy arm's entry refusals are **2,120**, not 0. Nothing ever looked wrong
+   because the third row is zero on both counters, so the ambiguity was invisible on exactly the row
+   that would have exposed it.
+4. **A ratio compared against an excess.** *"31,456 against 5,580 — 4.6x, not 1.077x."* 1.077 is
+   `best / control`; 4.6 is `best / control − 1`. The ratio is 5.64. **The comparison is the entire
+   content of the sentence and the two halves were different quantities.** Both sides are now asserted
+   as ratios, which is the only fix that holds.
+5. **A figure borrowed from the sibling fixture.** *"On the no-input default the ring first appears at
+   1:56."* 1:56 is the **demo** board's first ring (tick 3,492); the city's is tick 2,369, which is
+   1:19. Same repo, same paragraph shape, adjacent measurement — and a plausible number from the wrong
+   board is far harder to notice than an implausible one.
+6. **A comment quoting an enumeration far larger than the tripwire beneath it.** `spawn.ts` claimed
+   **430,122** exhaustive cases; the shipped sweep ran 46,284 and asserted only `checked > 20000`.
+   **The assertion is the tell**: a size guard loose enough to survive a 78 % narrowing is not
+   protecting the claim above it. Assert the enumeration exactly, or state what the sweep covers.
+
+**And one that is not about a number at all, because it is about the toolchain.** `buildings.ts`
+justified a real fix with *"both are far too large for V8 to inline"*. Under
+`--trace-turbo-inlining`, three runs out of three: `canPlaceDestination` refused for exceeding the
+bytecode limit, **`canPlaceHouse` inlined**, at bytecode size 175. The fix is right, the 40.0 B/call
+measurement is right, and *inlining is a precondition for scalar replacement rather than a guarantee
+of it* — so the code stands and only the reason was false. **This is the most durable of the seven,
+because the thing it explains is correct**: nothing will ever go red to question it, and the next
+person to reason from the sentence will reason from something nobody measured. A claim about the
+toolchain deserves the same scrutiny as a claim about the code, and it gets less.
+
 ## Growth in the entity count is not growth in the behaviour you wanted
 
 M1e's spawner made the city grow: 22 houses, 10 destinations, 184 trips over 20,000 ticks. It also
 produced **exactly one spawned car in motion.**
+
+*(Those four numbers are the PRE-fix rig and must not be read as current. The repaired rig — same
+20,000 ticks, but with the driver laying road reactively the way a player does — is **21 houses, 10
+destinations, 615 trips and 24 of 38 spawned car slots in motion**, asserted at `spawn.test.ts:1443`
+with the floor at 20. The population figures barely moved, which is the entry's whole point: the thing
+that changed is the only thing that was ever evidence.)*
 
 Two independent reasons, both invisible from the counts. A spawned house **cannot drive at all on its
 own** — placement refuses a road cell and the flow field relaxes over the road graph, so a house with
@@ -646,6 +763,19 @@ was believed about anything else — which is the only reason the contradiction
 read as a finding rather than as a broken harness. **Reproduce an inherited
 number with your new rig before you use the rig to contradict an inherited
 claim.**
+
+**That prescription paid for itself twice more in the closing sweep, and both
+times the reproduction is what made the correction safe.** A replica of
+`allocation.test.ts`'s dense rig, with `maxDestinations` put back to 4,
+reproduced its death tick of 7,223 exactly — and only then was its "trigger cap
+at 3,833" contradicted with 3,834. A hand-driven greedy arm reproduced 31,456
+ticks, 747 trips and `H_ROUTES_REFUSED` 0 against the production driver's
+assertions — and only then was the handoff's "13 destinations by week 8"
+contradicted with 12, in week 6, on a run that ends there. **In both cases the
+first rig I wrote did NOT reproduce** (23,935 ticks, 422 trips, 13 destinations —
+because it had no warm start and no opening stroke), and every conclusion drawn
+from it would have been a confident correction of a correct figure. The
+reproduction step is not ceremony; it is the step that caught my own harness.
 
 Related: [a blast-radius claim is a measurement, not a reading], and
 [a prediction written before the measurement is worth more than the
