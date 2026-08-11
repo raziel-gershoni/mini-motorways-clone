@@ -836,3 +836,41 @@ Related: [a mutation harness's restore step is untested code]. Each occurrence h
 mechanism — a wrong command, a destroyed symlink tree, a stale script, and now a shell operator — and
 none was caught by the suite. Every one was caught by looking at `git status` with human eyes. Assume
 the next one is also a mechanism nobody has seen.
+
+## The correction that would have deleted working code
+
+M1e's final review found a production comment stating an absolute — *board input is refused while
+paused and by nothing else* — that a later commit had falsified: a tap on a dead board returns
+`RESTART_REQUESTED`, never `REFUSED_PAUSED`. Its inference was that the mechanism the comment
+justified, a boot-time `loop.end()`, was therefore resting on a dead argument.
+
+**The absolute was false. The inference was backwards, and acting on it would have removed the
+player's only exit.** The sweep tested it the only way that settles it — by deleting the line and
+booting a terminal-at-boot rig: `over` and `paused` both false, a tap returns `DRAG_START`, a drag
+returns `DRAW`, and **two road actions queue on a dead board** with zero restarts. `gameOver()` reads
+`loop.over`, which only `end()` sets, so that one line arms *both* refusals.
+
+So a wrong comment can sit above correct and necessary code, and the wrongness of the comment says
+nothing about the code. **When a stale comment is the stated justification for a mechanism, test the
+mechanism before you touch either** — the comment is evidence about what someone believed, not about
+what the code does.
+
+This was the sixteenth member of the milestone's dominant defect family and **the only one where the
+obvious repair was destructive.** Fifteen prose fixes with no behavioural risk is exactly the run that
+makes the sixteenth feel safe.
+
+## The rule caught the sweeper: reproduce before you contradict, including your own new rig
+
+The same closing sweep built a rig to re-derive the milestone's figures and got 23,935 ticks / 422
+trips / 13 destinations against a recorded 31,456 / 747 / 12. It had omitted the warm start and the
+opening stroke.
+
+**Every correction drawn from that rig would have been a confident correction of a correct figure** —
+the precise failure this document already records twice, about to be committed by the task written to
+clean it up. What stopped it was the rule the same document states: reproduce an inherited number
+with your new rig *before* you use the rig to contradict an inherited claim.
+
+The generalisation worth keeping: **a rig that disagrees with the record is more likely to be wrong
+than the record is**, because the record was produced by a rig that had already reproduced something.
+Disagreement is a reason to check the instrument first, and the check is cheap — pick one number you
+are *not* trying to correct and see whether it comes back right.
