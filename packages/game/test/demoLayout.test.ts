@@ -71,11 +71,12 @@ import { DEMO_DEATH_TICK } from './deathTicks'
 import { NO_CROSSING, carAheadOf, longestQueue, travelDir } from '../src/queueProbe'
 
 /**
- * The demo layout — **the board a plain load opens**, and `?startapp=demo`
- * still names explicitly. It shipped behind the link first and became
- * `DEFAULT_LAYOUT_ID` once it was clear there was no reason for the default to
- * stay on a board that never moves a car; `layouts.test.ts` owns that choice
- * and nothing in this file depends on it.
+ * The demo layout — **the board `?startapp=demo` / `?layout=demo` opens**. It
+ * held `DEFAULT_LAYOUT_ID` for M1d and for M1e Tasks 1-9 and handed it back to
+ * the starting city at M1e Task 10, once the spawner made that board grow;
+ * `layouts.test.ts` owns that choice and **nothing in this file depends on it**
+ * — every rig here names the demo board's own map, seeder, seed and warm start,
+ * which is why the flip moved not one assertion in this file.
  *
  * **What this file is really testing is an OBSERVABILITY claim, not a
  * correctness one.** M1d shipped blocking, ghost roads and lane-speed

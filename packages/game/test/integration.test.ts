@@ -50,8 +50,8 @@ import { PointerOutcome } from '../src/pointer'
 import { EraseControlSurface } from '../src/eraseControl'
 import { SizingOutcome } from '../src/shell'
 import { DEMO_WARM_START_TICKS } from '../src/demoLayout'
-import { CITY_LAYOUT_ID, DEFAULT_LAYOUT_ID, LAYOUT_IDS } from '../src/layouts'
-import { DEMO_DEATH_TICK } from './deathTicks'
+import { CITY_LAYOUT_ID, DEMO_LAYOUT_ID, DEFAULT_LAYOUT_ID, LAYOUT_IDS } from '../src/layouts'
+import { CITY_DEATH_TICK, DEMO_DEATH_TICK } from './deathTicks'
 import {
   BOOT_FAILURE_ELEMENT_ID,
   BOOT_FAILURE_STYLE,
@@ -2214,38 +2214,44 @@ describe('20,000 LIVE drives on a deliberately bad network', () => {
  * about `hashState`, not about the assembled game.
  */
 describe('createGame opens the layout it was asked for', () => {
-  it('opens the DEMO board when the launch names nothing — no token, no city', () => {
+  it('opens the STARTING CITY when the launch names nothing — no token, no demo', () => {
     // **The end-to-end half of the default, through the real `createGame`.**
     // `layouts.test.ts` pins the constant; this is the only place that runs a
     // whole boot with `layoutId` absent, which is what every plain load and
     // every Telegram open with no `startapp` does.
     //
     // `layoutId: undefined` is written out rather than omitted so the rig's
-    // `in` check sees it — omitting it means "the city", which is what the
-    // other 17 cases in this file want and this one must not get.
+    // `in` check sees it. It now lands on the same board the omitted form does
+    // — M1e Task 10 gave the default back to the city — so this case is about
+    // the RESOLUTION being explicit rather than about a different board, and
+    // the discriminating half is the `not.toBe` pair at the foot.
     const rig = buildRig({ layoutId: undefined })
     expect(rig.game.layoutId).toBe(DEFAULT_LAYOUT_ID)
-    expect(rig.game.layoutId).toBe('demo')
-    expect(rig.game.world.map.id).toBe('demoCity')
-    expect(rig.game.warmStartTicks).toBe(DEMO_WARM_START_TICKS)
-    expect(rig.game.state.header[H_TICK] as number).toBe(DEMO_WARM_START_TICKS)
-    expect(rig.game.state.header[H_HOUSE_COUNT] as number).toBe(12)
-    expect(rig.game.state.header[H_DEST_COUNT] as number).toBe(18)
-    expect(rig.game.state.carPhase.length).toBe(24)
+    expect(rig.game.layoutId).toBe('city')
+    expect(rig.game.world.map.id).toBe('firstCity')
+    expect(rig.game.warmStartTicks).toBe(WARM_START_TICKS)
+    expect(rig.game.state.header[H_TICK] as number).toBe(WARM_START_TICKS)
+    // Three seeded houses and three seeded destinations, and the warm start is
+    // 258 ticks — far short of the spawner's first house at tick 300 — so the
+    // board a player's first frame shows is exactly `seedStartingCity`'s.
+    expect(rig.game.state.header[H_HOUSE_COUNT] as number).toBe(3)
+    expect(rig.game.state.header[H_DEST_COUNT] as number).toBe(3)
+    expect(rig.game.state.carPhase.length).toBe(80)
     // **And the board it is NOT.** Each of the four above is satisfied by the
-    // demo entry alone, so none of them would notice the city coming back if a
-    // future edit gave the two entries the same map. The city's own numbers are
+    // city entry alone, so none of them would notice the demo coming back if a
+    // future edit gave the two entries the same map. The demo's own numbers are
     // the discriminator, and they are asserted as absences here and as
     // presences in the case below.
-    expect(rig.game.world.map.id).not.toBe('firstCity')
-    expect(rig.game.warmStartTicks).not.toBe(WARM_START_TICKS)
+    expect(rig.game.world.map.id).not.toBe('demoCity')
+    expect(rig.game.warmStartTicks).not.toBe(DEMO_WARM_START_TICKS)
   })
 
   it('opens the starting city on layoutId "city" — still reachable, still today’s board', () => {
-    // The board that used to be the default. It is not deleted and it is not
-    // degraded: same map, same warm start, same three houses and six cars, one
-    // token away. `startingCity.test.ts` holds its seed golden; this holds the
-    // assembled boot.
+    // The board the default points at again. Naming it explicitly is a
+    // separate claim from getting it by default, and the two are asserted
+    // separately: same map, same warm start, same three houses and six cars.
+    // `startingCity.test.ts` holds its seed golden; this holds the assembled
+    // boot.
     const rig = buildRig({ layoutId: CITY_LAYOUT_ID })
     expect(rig.game.layoutId).toBe('city')
     expect(rig.game.world.map.id).toBe('firstCity')
@@ -2366,17 +2372,19 @@ describe('createGame opens the layout it was asked for', () => {
 
   it('REFUSES an unknown layoutId at boot rather than opening the default board', () => {
     // A silently-defaulting typo is indistinguishable from "the demo link does
-    // not work", which is the report this whole task exists to answer.
+    // not work", which is the report this whole task exists to answer — and
+    // with the default back on the city that is once again the literal
+    // incident, not an inverted restatement of it.
     expect(() => buildRig({ layoutId: 'demoo' })).toThrow(/unknown layout "demoo"/)
   })
 
   it('treats an empty layoutId as absent, so a half-copied link still boots', () => {
     // `?layout=` and `#tgWebAppStartParam=` both parse to `''`. It must land on
     // the default rather than on `layoutFor('')`'s throw — and on the SAME
-    // board as no token at all, which is the half a bare `.toBe('demo')` would
+    // board as no token at all, which is the half a bare `.toBe('city')` would
     // not say.
     expect(buildRig({ layoutId: '' }).game.layoutId).toBe(DEFAULT_LAYOUT_ID)
-    expect(buildRig({ layoutId: '' }).game.layoutId).toBe('demo')
+    expect(buildRig({ layoutId: '' }).game.layoutId).toBe('city')
     expect(buildRig({ layoutId: '' }).game.layoutId).toBe(
       buildRig({ layoutId: undefined }).game.layoutId,
     )
@@ -2494,12 +2502,16 @@ function captureErrors<T>(run: () => T): { result: T; logged: unknown[] } {
  */
 describe('the demo board stops dead, and stays a still image', () => {
   it('freezes at 3 min 43 s and draws a bit-identical frame forever after', () => {
-    // `layoutId: undefined` reaches `createGame` with the property genuinely
-    // absent — see `buildRig`'s note — so this is what a player who taps the
-    // bot link with no parameters gets. If Task 10 flips the default, this test
-    // follows it and the tick has to move with it.
-    const rig = buildRig({ layoutId: undefined })
-    expect(rig.game.layoutId, 'this must be whatever a plain launch opens').toBe(DEFAULT_LAYOUT_ID)
+    // **Pinned to `demo` by name at M1e Task 10, and the pin is the point.**
+    // This case used to pass `layoutId: undefined` and assert
+    // `DEMO_DEATH_TICK`, on the reasoning that the default WAS the demo — two
+    // claims in one rig. Task 10 flipped the default to the city, and the two
+    // came apart: the city with no input has no road, so no car ever moves and
+    // the still-image claim below would be satisfied by a board that was
+    // already a still image. So this block keeps measuring the demo board and
+    // `the board a plain load opens stops dead` below measures the default.
+    const rig = buildRig({ layoutId: DEMO_LAYOUT_ID })
+    expect(rig.game.layoutId, 'this block is about the demo board by name').toBe(DEMO_LAYOUT_ID)
 
     let frames = 0
     while (!isGameOver(rig.game.state) && frames < 20000) {
@@ -2607,12 +2619,13 @@ describe('the demo board stops dead, and stays a still image', () => {
     expect(rig.game.pointer.dragging).toBe(false)
   })
 
-  it('draws the shutdown screen the player actually reads, on the board that ships', () => {
-    // **The acceptance criterion, end to end, on the default board with no
-    // input of any kind.** Every prior task in this milestone could honestly
-    // answer "a human sees nothing"; this is the case that makes that false.
-    const rig = buildRig({ layoutId: undefined })
-    expect(rig.game.layoutId).toBe(DEFAULT_LAYOUT_ID)
+  it('draws the shutdown screen the player actually reads, on the demo board', () => {
+    // **Task 9's acceptance criterion, end to end, with no input of any kind.**
+    // Every prior task in this milestone could honestly answer "a human sees
+    // nothing"; this is the case that made that false. It is the WENT UNSERVED
+    // arm; the default board's own case below is the roadless one.
+    const rig = buildRig({ layoutId: DEMO_LAYOUT_ID })
+    expect(rig.game.layoutId).toBe(DEMO_LAYOUT_ID)
     let frames = 0
     while (!isGameOver(rig.game.state) && frames < 20000) {
       rig.advance(TICK_MS)
@@ -2687,7 +2700,8 @@ describe('the demo board stops dead, and stays a still image', () => {
 
   it('takes the erase control off the screen, because the scrim cannot reach it', () => {
     // **The most prominent thing on the shutdown screen was a button that does
-    // not restart.** The scrim is painted on the CANVAS; the erase control is
+    // not restart.** (Demo board, by name — see the first case in this block.)
+    // The scrim is painted on the CANVAS; the erase control is
     // native `MainButton` chrome or a `position: fixed` DOM pill, both outside
     // anything `drawFrame` can dim. Without `retire()` a player sees a dimmed
     // board reading TAP TO PLAY AGAIN and, under it, an undimmed full-width
@@ -2695,7 +2709,7 @@ describe('the demo board stops dead, and stays a still image', () => {
     //
     // Driven end to end through the real `onGameOver`, because the wiring is
     // the thing at risk — the control's own behaviour has its own file.
-    const rig = buildRig({ layoutId: undefined, fallback: true })
+    const rig = buildRig({ layoutId: DEMO_LAYOUT_ID, fallback: true })
     expect(rig.game.erase.retired, 'vacuity: live, the control is on screen').toBe(false)
     let frames = 0
     while (!isGameOver(rig.game.state) && frames < 20000) {
@@ -2716,13 +2730,13 @@ describe('the demo board stops dead, and stays a still image', () => {
     // it — the same hole `createGame`'s own `if (isGameOver(state)) loop.end()`
     // exists to close, and the retire has to be reached from the state for the
     // same reason.
-    const dead = buildRig({ layoutId: undefined, warmStartTicks: DEMO_DEATH_TICK, fallback: true })
+    const dead = buildRig({ layoutId: DEMO_LAYOUT_ID, warmStartTicks: DEMO_DEATH_TICK, fallback: true })
     expect(isGameOver(dead.game.state)).toBe(true)
     expect(dead.game.erase.retired, 'no frame has run, and the button is already gone').toBe(true)
     // Non-vacuous: the same rig one tick short is NOT retired, so this is about
     // the terminal state rather than about the fallback surface.
     const live = buildRig({
-      layoutId: undefined,
+      layoutId: DEMO_LAYOUT_ID,
       warmStartTicks: DEMO_DEATH_TICK - 1,
       fallback: true,
     })
@@ -2747,7 +2761,7 @@ describe('the demo board stops dead, and stays a still image', () => {
     //    checked is that a cold boot on the same seed is itself deterministic.
     //    That is the second half below, and it is the same property the seed
     //    golden pins, re-taken through the whole `createGame` assembly.
-    const rig = buildRig({ layoutId: undefined })
+    const rig = buildRig({ layoutId: DEMO_LAYOUT_ID })
     let frames = 0
     while (!isGameOver(rig.game.state) && frames < 20000) {
       rig.advance(TICK_MS)
@@ -2770,8 +2784,8 @@ describe('the demo board stops dead, and stays a still image', () => {
     // Cold boot, twice, on the same layout and the same seed: identical after
     // the warm start and identical again after a thousand more ticks. This is
     // what the reload produces.
-    const a = buildRig({ layoutId: undefined })
-    const b = buildRig({ layoutId: undefined })
+    const a = buildRig({ layoutId: DEMO_LAYOUT_ID })
+    const b = buildRig({ layoutId: DEMO_LAYOUT_ID })
     expect(hashState(b.game.state), 'two cold boots must agree at frame 0').toBe(
       hashState(a.game.state),
     )
@@ -2782,7 +2796,7 @@ describe('the demo board stops dead, and stays a still image', () => {
     expect(hashState(b.game.state), 'and after a thousand ticks').toBe(hashState(a.game.state))
     // Non-vacuous: the digest MOVES when the sim runs, so "equal" is not "equal
     // to the same frozen buffer".
-    expect(hashState(a.game.state)).not.toBe(hashState(buildRig({ layoutId: undefined }).game.state))
+    expect(hashState(a.game.state)).not.toBe(hashState(buildRig({ layoutId: DEMO_LAYOUT_ID }).game.state))
   })
 
   it('the ring fills long before the city dies, so the warning arrives in time to act', () => {
@@ -2792,7 +2806,7 @@ describe('the demo board stops dead, and stays a still image', () => {
     //
     // Measured rather than asserted loosely: the tick the first ring is drawn,
     // and the fraction of the run that has a ring on screen.
-    const rig = buildRig({ layoutId: undefined })
+    const rig = buildRig({ layoutId: DEMO_LAYOUT_ID })
     let firstRingTick = -1
     let firstLegibleTick = -1
     let ringFrames = 0
@@ -2880,7 +2894,7 @@ describe('the demo board stops dead, and stays a still image', () => {
     expect(totalDrains, 'no destination ever drained — the counter is not working').toBeGreaterThan(0)
     // Vacuity: the very first frames have NO ring, so this is measuring the
     // meter rather than a ring that is always drawn.
-    const fresh = buildRig({ layoutId: undefined })
+    const fresh = buildRig({ layoutId: DEMO_LAYOUT_ID })
     fresh.advance(TICK_MS)
     expect(fresh.ctx.log.some((c) => c.op === 'arc')).toBe(false)
   })
@@ -2902,7 +2916,7 @@ describe('the demo board stops dead, and stays a still image', () => {
     //
     // 6,703 is the demo board's death tick, so a 6,703-tick warm start boots a
     // game that has already lost.
-    const dead = buildRig({ layoutId: undefined, warmStartTicks: DEMO_DEATH_TICK })
+    const dead = buildRig({ layoutId: DEMO_LAYOUT_ID, warmStartTicks: DEMO_DEATH_TICK })
     expect(isGameOver(dead.game.state), 'vacuity: the warm start really did kill it').toBe(true)
     expect(dead.game.state.header[H_TICK]).toBe(DEMO_DEATH_TICK)
 
@@ -2926,6 +2940,163 @@ describe('the demo board stops dead, and stays a still image', () => {
     dead.advance(TICK_MS)
     expect(dead.game.loop.ticksLastFrame).toBe(0)
     expect(dead.game.builder.frame.paused).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The board a plain load opens — M1e Task 10's flip, seen from the phone
+// ---------------------------------------------------------------------------
+
+/**
+ * **The flip's player-visible consequence, and it is not the tick.**
+ *
+ * `DEFAULT_LAYOUT_ID` moved from `demo` to `city`, so a plain load now dies at
+ * **5,580** (3 min 06 s) instead of 6,703 (3 min 43 s). That much is
+ * bookkeeping. What actually changes on the screen is the FIRST LINE of the
+ * shutdown copy, because Task 9 keyed it on whether any road reaches the dying
+ * destination's carpark:
+ *
+ * | board a plain load opens | dies | killer | its carpark | first line |
+ * |---|---|---|---|---|
+ * | demo (M1d - M1e Task 9) | 6,703 | D2, corridor C | ON the network | `DESTINATION 2 WENT UNSERVED` |
+ * | city (M1e Task 10 on)   | 5,580 | D2, colour-1 circle | BARE | `NO ROAD REACHES DESTINATION 2` |
+ *
+ * Task 9's own comment says both arms are reachable on the shipped boards; this
+ * is the case that says which arm the DEFAULT produces, and it is the one that
+ * would have to change if the copy did. It is a better default than the demo's
+ * on exactly this axis: the roadless line names a remedy the player can act on
+ * in four `place` actions, and `startingCity.test.ts` proves those four remove
+ * this death entirely.
+ */
+describe('the board a plain load opens stops dead, and says the roadless thing', () => {
+  it('dies unprompted at 3 min 06 s and blames a destination NO ROAD REACHES', () => {
+    // `layoutId: undefined` reaches `createGame` with the property genuinely
+    // absent — see `buildRig`'s note — so this is what a player who taps the
+    // bot link with no parameters gets.
+    const rig = buildRig({ layoutId: undefined })
+    expect(rig.game.layoutId, 'this must be whatever a plain launch opens').toBe(DEFAULT_LAYOUT_ID)
+    expect(rig.game.layoutId, 'and Task 10 made that the city').toBe(CITY_LAYOUT_ID)
+
+    let frames = 0
+    while (!isGameOver(rig.game.state) && frames < 20000) {
+      rig.advance(TICK_MS)
+      frames++
+    }
+    expect(isGameOver(rig.game.state), 'the default board must end a run on its own').toBe(true)
+    expect(rig.game.state.header[H_TICK]).toBe(CITY_DEATH_TICK)
+    expect(Math.round(CITY_DEATH_TICK / 30), 'which is 186 s — 3 min 06 s at 30 Hz').toBe(186)
+    // Strictly EARLIER than the board this replaced, so the two death ticks
+    // cannot be confused for each other and a copy-paste of the old constant
+    // fails rather than passing by luck.
+    expect(CITY_DEATH_TICK).toBeLessThan(DEMO_DEATH_TICK)
+    expect(rig.game.loop.over).toBe(true)
+    expect(rig.game.loop.paused).toBe(true)
+
+    rig.ctx.log = []
+    rig.advance(TICK_MS)
+    const frame = rig.game.builder.frame
+    expect(frame.gameOver).toBe(true)
+    const failed = frame.failedDest
+    expect(failed, 'the seeded colour-1 circle, D2').toBe(2)
+
+    // **The discriminator between the two arms, asserted before the copy** —
+    // otherwise "the line says NO ROAD" is a claim about a string rather than
+    // about the board. D2's carpark is (17, 14) and no input laid anything.
+    const carpark = frame.destCarpark[failed] as number
+    expect(carpark, 'D2 opens EAST, so its carpark is (17, 14)').toBe(14 * 24 + 17)
+    expect(rig.game.state.roads[carpark] as number, 'nothing reaches it').toBe(0)
+
+    const scrimIndex = rig.ctx.log.findIndex(
+      (c) => c.op === 'fill' && c.style === PALETTE.scrim,
+    )
+    expect(scrimIndex, 'the board must go dark').toBeGreaterThanOrEqual(0)
+    const said = rig.ctx.log
+      .slice(scrimIndex + 1)
+      .filter((c): c is TextCommand => c.op === 'text')
+      .map((c) => c.text)
+    expect(said).toEqual([
+      `NO ROAD REACHES DESTINATION ${failed}`,
+      'CONNECT EVERY DESTINATION WITH A ROAD',
+      `${rig.game.state.header[H_SCORE] as number} TRIPS`,
+      'TAP TO PLAY AGAIN',
+    ])
+    // ...and the OTHER arm is not what this board produces. Asserted as an
+    // absence because the two strings share every word but two, and a
+    // `toContain` over the line would be satisfied by either.
+    for (const line of said) expect(line).not.toContain('WENT UNSERVED')
+    for (const line of said) expect(line).not.toContain('CROWD')
+    // With no road there is no trip, so the count is honestly zero — and that
+    // is the line a player reads under the blame.
+    expect(rig.game.state.header[H_SCORE] as number).toBe(0)
+  })
+
+  it('rings the destination that did it, long enough before the end to act on', () => {
+    // The same claim Task 9 measured on the demo board, re-measured on the
+    // board that now ships. D2 reaches its trigger cap of 8 on tick 2,191 and
+    // the run ends at 5,580, so a ring is up for most of the run.
+    //
+    // **The usable warning is 2,481 ticks — 1 min 23 s — and it is the SAME
+    // number the demo board gives.** That is a derivation, not a coincidence
+    // and not a copied literal: on both boards the killer is never served, so
+    // its meter only ever climbs, and the interval between "the ring reaches
+    // 26/255" and "the meter completes" is a pure function of §5.8's ramp. The
+    // bound below is therefore the demo case's bound, unchanged, and it is
+    // looser than the measurement on purpose — what has to hold is "the warning
+    // arrives with time to act", not "at tick 3,099".
+    const rig = buildRig({ layoutId: undefined })
+    let firstRingTick = -1
+    let firstLegibleTick = -1
+    let ringFrames = 0
+    let frames = 0
+    while (!isGameOver(rig.game.state) && frames < 20000) {
+      rig.advance(TICK_MS)
+      frames++
+      if (rig.ctx.log.some((c) => c.op === 'arc')) {
+        ringFrames++
+        if (firstRingTick < 0) firstRingTick = rig.game.state.header[H_TICK] as number
+      }
+      if (
+        firstLegibleTick < 0 &&
+        [...rig.game.builder.frame.destOvercrowd].some((m) => m >= 26)
+      ) {
+        firstLegibleTick = rig.game.state.header[H_TICK] as number
+      }
+    }
+    expect(isGameOver(rig.game.state)).toBe(true)
+    expect(firstRingTick, 'a ring must appear at all').toBeGreaterThan(0)
+    expect(firstLegibleTick, 'a ring must become legible at all').toBeGreaterThan(firstRingTick)
+    expect(
+      CITY_DEATH_TICK - firstLegibleTick,
+      'a LEGIBLE warning must arrive at least a minute before the end',
+    ).toBeGreaterThan(30 * 60)
+    expect(
+      ringFrames / frames,
+      'a ring is on screen for most of the run, not only at the end',
+    ).toBeGreaterThan(0.5)
+    // Vacuity, exactly as the demo case takes it: the first frames have NO
+    // ring, so this is measuring a meter rather than an arc that is always
+    // drawn.
+    const fresh = buildRig({ layoutId: undefined })
+    fresh.advance(TICK_MS)
+    expect(fresh.ctx.log.some((c) => c.op === 'arc')).toBe(false)
+  })
+
+  it('takes the erase control off the screen and lets a tap start a new run', () => {
+    // The two things a player can still do at a shutdown, on the board they
+    // actually get. Both are Task 9's; this is the case that says they are
+    // reached on the DEFAULT rather than only behind `?layout=demo`.
+    const rig = buildRig({ layoutId: undefined, fallback: true })
+    expect(rig.game.erase.retired, 'vacuity: live, the control is on screen').toBe(false)
+    let frames = 0
+    while (!isGameOver(rig.game.state) && frames < 20000) {
+      rig.advance(TICK_MS)
+      frames++
+    }
+    expect(rig.game.state.header[H_TICK]).toBe(CITY_DEATH_TICK)
+    expect(rig.game.erase.retired, 'the button outlived the city').toBe(true)
+    expect(rig.game.pointer.down(1, rig.cx(9), rig.cy(20))).toBe(PointerOutcome.RESTART_REQUESTED)
+    expect(rig.restarts, 'one tap, one new run').toBe(1)
+    expect(rig.game.queue.inputs.actions.length, 'and nothing reached the queue').toBe(0)
   })
 })
 
@@ -3055,7 +3226,7 @@ describe('a boot that throws puts the reason on the screen', () => {
     // Nothing named a board, which is what the entry point does on a plain
     // load: a successful boot hands back the DEFAULT layout.
     expect(result?.layoutId).toBe(DEFAULT_LAYOUT_ID)
-    expect(result?.layoutId).toBe('demo')
+    expect(result?.layoutId).toBe('city')
   })
 
   it('declines quietly where there is no DOM, and survives a reporter that itself throws', () => {

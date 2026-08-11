@@ -33,15 +33,15 @@ import { seedStartingCity } from '../src/startingCity'
  * object literal rather than a branch in `createGame`.
  *
  * **Which entry the no-token path reaches is a third thing, and it has its own
- * case at the top of this file.** It is `demo`. The starting city was the
- * default until the demo board existed, is still one token away, and has its
- * own case here as well — the two are asserted separately because "the default
- * is X" and "Y is still reachable" fail for different reasons and want
+ * case at the top of this file.** It is `city`, as of M1e Task 10 — the demo
+ * board held it for M1d and for M1e Tasks 1-9, is still one token away, and has
+ * its own case here as well. The two are asserted separately because "the
+ * default is X" and "Y is still reachable" fail for different reasons and want
  * different messages.
  */
 
 describe('the layout registry', () => {
-  it('THE DEFAULT IS THE DEMO BOARD, by name — a plain load opens `demo`', () => {
+  it('THE DEFAULT IS THE STARTING CITY, by name — a plain load opens `city`', () => {
     // **The detector for one line, `DEFAULT_LAYOUT_ID` in `layouts.ts`, and it
     // is deliberately the narrowest test in the file.** Flipping that constant
     // is flipping what every player sees on a plain load, and before this case
@@ -50,43 +50,45 @@ describe('the layout registry', () => {
     // has 24 cars and my arithmetic says 6". None of them named the cause. This
     // one does, in its title and in its message.
     //
-    // The literal `'demo'` is load-bearing next to the symbolic form. Without
-    // it, renaming `DEMO_LAYOUT_ID` and re-pointing the default at the city in
-    // the same edit would satisfy `toBe(DEMO_LAYOUT_ID)` — the two constants
+    // The literal `'city'` is load-bearing next to the symbolic form. Without
+    // it, renaming `CITY_LAYOUT_ID` and re-pointing the default at the demo in
+    // the same edit would satisfy `toBe(CITY_LAYOUT_ID)` — the two constants
     // would agree with each other about a board neither of them is.
-    expect(DEFAULT_LAYOUT_ID, 'the board a plain load opens').toBe('demo')
-    expect(DEFAULT_LAYOUT_ID).toBe(DEMO_LAYOUT_ID)
-    // ...and it is NOT the starting city, stated as its own assertion because
+    expect(DEFAULT_LAYOUT_ID, 'the board a plain load opens').toBe('city')
+    expect(DEFAULT_LAYOUT_ID).toBe(CITY_LAYOUT_ID)
+    // ...and it is NOT the demo board, stated as its own assertion because
     // that is the specific flip a reader of this file is most likely to make:
-    // the city was the default until the demo board existed, and the reason it
-    // is not any more (six cars that never move) is not visible from here.
-    expect(DEFAULT_LAYOUT_ID).not.toBe(CITY_LAYOUT_ID)
+    // the demo was the default for M1d and M1e Tasks 1-9, and the reason it is
+    // not any more (M1e Task 5's spawner makes the city grow, and Task 10's
+    // gate measures that it does) is not visible from here.
+    expect(DEFAULT_LAYOUT_ID).not.toBe(DEMO_LAYOUT_ID)
     // An id that is not a key would boot `undefined.map()`, which is the
     // failure the whole registry is shaped to make unconstructible.
     expect(LAYOUTS[DEFAULT_LAYOUT_ID]).toBeDefined()
     expect(LAYOUT_IDS).toContain(DEFAULT_LAYOUT_ID)
   })
 
-  it('resolves an absent token to the default — no token, no city', () => {
+  it('resolves an absent token to the default — no token, no demo', () => {
     // `undefined` is what a launch with nothing in the URL produces, and `''`
     // is what `layoutToken` returns for a value outside Telegram's charset.
     // Both are "nobody named a board", and both must land on the SAME board —
-    // asserted through `DEFAULT_LAYOUT_ID` rather than through `demo` so this
+    // asserted through `DEFAULT_LAYOUT_ID` rather than through `city` so this
     // case is about the resolution and the case above is about the choice.
     expect(layoutFor(undefined)).toBe(LAYOUTS[DEFAULT_LAYOUT_ID])
     expect(layoutFor('')).toBe(LAYOUTS[DEFAULT_LAYOUT_ID])
     expect(layoutFor('')).toBe(layoutFor(undefined))
     // Non-vacuity: `LAYOUTS[DEFAULT_LAYOUT_ID]` would be satisfied by a
     // registry with one entry in it, and by a `layoutFor` that ignores its
-    // argument entirely. The city is a different object and is still reachable.
-    expect(layoutFor(undefined)).not.toBe(LAYOUTS[CITY_LAYOUT_ID])
-    expect(layoutFor(CITY_LAYOUT_ID)).toBe(LAYOUTS[CITY_LAYOUT_ID])
+    // argument entirely. The demo is a different object and is still reachable.
+    expect(layoutFor(undefined)).not.toBe(LAYOUTS[DEMO_LAYOUT_ID])
+    expect(layoutFor(DEMO_LAYOUT_ID)).toBe(LAYOUTS[DEMO_LAYOUT_ID])
   })
 
   it('keeps the starting city reachable by its own id, and unchanged', () => {
-    // The board that was the default until this milestone. `?layout=city` in a
-    // browser, `?startapp=city` inside Telegram. Deleting it, renaming it or
-    // folding it into the demo entry all fail here.
+    // The board the default points at again as of M1e Task 10 — and still
+    // reachable by name, which is a separate claim from being the default.
+    // `?layout=city` in a browser, `?startapp=city` inside Telegram. Deleting
+    // it, renaming it or folding it into the demo entry all fail here.
     expect(CITY_LAYOUT_ID).toBe('city')
     expect(layoutFor('city')).toBe(LAYOUTS[CITY_LAYOUT_ID])
     expect(layoutFor('city').map().id).toBe('firstCity')
@@ -102,11 +104,10 @@ describe('the layout registry', () => {
 
   it('REFUSES an unknown id loudly, naming it and listing the ones that exist', () => {
     // The failure this exists to prevent, restated for the default that is
-    // actually in force: `?startapp=cty` silently opening the demo board, while
-    // the reader believes they are looking at the starting city and has nothing
-    // to point at. It is the same lie the demo link told in the other
-    // direction. A throw is the only outcome that cannot be mistaken for the
-    // default board.
+    // actually in force: `?startapp=demoo` silently opening the starting city,
+    // while the reader believes they are looking at the demo board and has
+    // nothing to point at. That is the original incident, exactly. A throw is
+    // the only outcome that cannot be mistaken for the default board.
     expect(() => layoutFor('demoo')).toThrow(/layoutFor: unknown layout "demoo"/)
     // The whole line, which is what catches the list being dropped.
     expect(() => layoutFor('demoo')).toThrow(/the layouts that exist are city, demo/)

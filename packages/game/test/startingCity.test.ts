@@ -9,8 +9,10 @@ import {
   PIN_PERIOD_TICKS,
   FIRST_PIN_DELAY_TICKS,
   PIN_CAP_CIRCLE_TIMER,
+  PIN_CAP_SQUARE_TIMER,
   OVERCROWD_FAIL_MILLITICKS,
   CARS_PER_HOUSE,
+  TICKS_PER_WEEK,
   type MapData,
 } from '@laneways/shared'
 import {
@@ -32,13 +34,20 @@ import {
   placeHouse,
   placeRoad,
   hasTree,
+  isGameOver,
+  roadMask,
+  stepCell,
+  destinationFitsSpawnZone,
+  weekOfTick,
   DEST_KIND_SQUARE,
   DEST_KIND_CIRCLE,
   ORIENTATION_E,
   ORIENTATION_W,
   PHASE_IDLE,
   PHASE_OUTBOUND,
+  PHASE_RETURNING,
   H_DEST_COUNT,
+  H_FAILED_DEST,
   H_HOUSE_COUNT,
   H_PINS_DROPPED,
   H_ROUTES_REFUSED,
@@ -53,6 +62,8 @@ import {
   type WorldData,
 } from '@laneways/sim'
 import { hashBytes } from '@laneways/sim'
+import { CITY_LAYOUT_ID, DEFAULT_LAYOUT_ID, layoutFor } from '../src/layouts'
+import { longestQueue } from '../src/queueProbe'
 // The M1e Task 1 re-bless proof, shared with the five `sim` golden sites. A
 // relative reach into another package's test directory is unusual here and
 // deliberate: the alternative is a second copy of the splice, and two copies
@@ -865,13 +876,19 @@ describe('a full scored trip on the seeded city, driven through step()', () => {
     )
   })
 
-  it('keeps every window in this file below the tick this board kills itself on', () => {
+  it('keeps the two hand-derived windows below the tick this board kills itself on', () => {
     // M1e Task 7, and see `CITY_DEATH_TICK`'s own comment for the measurement.
-    // Nothing here can observe the shutdown yet — Task 8 wires it — so this is
-    // the mechanism that stops a later task lengthening a window into a frozen
-    // sim and asserting over a corpse. It is a STRICT inequality against a
-    // measured number, not a restatement of one: 5,580 came off a 40,000-tick
-    // drive of the real boot path, and the two bounds came off the pin ladder.
+    // This is the mechanism that stops a later task lengthening one of the two
+    // HAND-DERIVED windows into a frozen sim and asserting over a corpse. It is
+    // a STRICT inequality against a measured number, not a restatement of one:
+    // 5,580 came off a 40,000-tick drive of the real boot path, and the two
+    // bounds came off the pin ladder.
+    //
+    // **It is deliberately about those two constants and not about "every
+    // window in this file", which is what it used to be called.** §8's
+    // survivability gate drives 12 weeks and runs THROUGH the shutdown on
+    // purpose — the freeze is part of what it measures — and its assertions are
+    // aggregates taken while the run was live, not readings taken at the end.
     expect(CITY_DEATH_TICK).toBe(5580)
     expect(TRIP_TICK_BOUND, 'the trip window has 91 % margin').toBeLessThan(CITY_DEATH_TICK)
     expect(DEMO_TICK_BOUND, 'the not-nearest window has 86 % margin').toBeLessThan(CITY_DEATH_TICK)
@@ -1054,5 +1071,771 @@ describe('a scored trip from the house that is NOT nearest to its own destinatio
     expect(state.carCell[0] as number).toBe(H0_CELL)
     expect(state.header[H_ROUTES_REFUSED] as number).toBe(0)
     expect(state.header[H_PINS_DROPPED] as number).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 8. THE SURVIVABILITY GATE — the measurement `DEFAULT_LAYOUT_ID` is behind
+// ---------------------------------------------------------------------------
+
+/**
+ * **M1e Task 10. The flip back to this board is behind this block, and what it
+ * gates on is deliberately none of the three things that would have passed on
+ * the build M1d shipped.**
+ *
+ * Not **weeks survived**: that is satisfiable by a build in which nothing ever
+ * writes `H_GAME_OVER`, which is the identical hole M1d shipped, in the
+ * milestone written to correct M1d. Not **entity counts**: M1e Task 5 reached
+ * 22 houses and 10 destinations with **exactly one spawned car in motion**, and
+ * `spawn.test.ts` carries that measurement in its own source. Growth in
+ * population is not growth in traffic.
+ *
+ * So this gates on three quantities, on the board that ships, under scripted
+ * input traces a player could actually produce:
+ *
+ *   **(a)** completed **trips** and **cars in motion** — including cars in
+ *   motion that belong to houses the SPAWNER placed, which is the clause Task
+ *   5's rig would have failed;
+ *   **(b)** the **delivery fraction** `trips / fires`, one number for what the
+ *   weekly demand ramp does to a fixed network;
+ *   **(c)** peak `destPins` on ROAD-CONNECTED destinations against
+ *   **`PIN_CAP_*_TIMER`** — the timer cap, not the hard cap, because
+ *   `overcrowdTriggerCap` is what the meter actually reads.
+ *
+ * ---------------------------------------------------------------------------
+ * THE THREE TRACES, AND WHY THE THIRD ONE HAS TO EXIST
+ * ---------------------------------------------------------------------------
+ *
+ * | trace | tiles spent | dies | killer | its carpark | trips |
+ * |---|---|---|---|---|---|
+ * | no input | 0 | **5,580** | D2 | bare | 0 |
+ * | the 20-tile opening, then nothing | 20 | **8,661** | D3 | bare | 71 |
+ * | greedy-connect | 62 | **31,456** | D6 | **on the network** | **747** |
+ *
+ * The first two reproduce `CITY_DEATH_TICK` and `startingCity.ts`'s own
+ * four-row table bit-for-bit, which is what says this rig is measuring the
+ * shipped boot path and not a lookalike. The third is the only one that reaches
+ * the regime the gate is about: a player who keeps connecting is the player
+ * whose city is allowed to get busy, and a gate measured on a board nobody
+ * maintains measures the seed, not the game.
+ *
+ * **Greedy-connect is scripted, deterministic and replayable as an input log.**
+ * Every 30 ticks it finds the lowest-index destination whose carpark is not in
+ * the same road component as a same-colour house and buys the cheapest path
+ * joining them, if it can afford it. Nothing here reads a flow field, a pin or
+ * a car: it is a policy over `roads`, `houseCell` and `destCell`, which is
+ * exactly what a person looking at the screen has.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT THE GATE FOUND, AND THE PART THAT IS NOT THE ANSWER IT EXPECTED
+ * ---------------------------------------------------------------------------
+ *
+ * **Plan Task 10 Step 3 proposed a spawner change — tiering the destination
+ * scan by proximity to the spawning colour's own houses — and this gate
+ * REJECTED it.** Both variants were driven through this rig, five seeds, twelve
+ * weeks, in one sitting. Measured on the shipped seed:
+ *
+ * ```
+ *                              baseline (shipped)     house-proximity tiers
+ *   peak destPins, connected   1 1 1 1 2 5 10         1, in all twelve weeks
+ *   longest queue              1 1 2 3 3 4 4          1, in all twelve weeks
+ *   ticks with a blocked car   0 0 99 298 287 639 597 0, in all twelve weeks
+ *   peak cars in flight        11                     4
+ *   delivery fraction, weekly  0.95 .. 0.95           0.95 .. 1.03
+ *   mean round trip, ticks     57 -> 205              59 -> 51
+ *   destinations by week 11    12                     10
+ *   dies                       31,456 (D6, connected) never, in 12 weeks
+ * ```
+ *
+ * The lever does improve survival — it survives everything, on all five seeds.
+ * It does it by making the board **inert**: destinations spawn beside their own
+ * colour's houses, round trips fall to ~51 ticks, every pin is served the tick
+ * it fires, and the meter never leaves 1. That is M1d's *"service is 4.3x
+ * faster than arrival"* reproduced by the mechanism proposed to fix it. Plan
+ * Step 5 says in as many words: *"if the baseline passes Gate A and the lever
+ * does not, ship the baseline and say so."* The baseline passes and the lever
+ * does not. `spawn.ts` is unchanged by Task 10.
+ *
+ * **The plan's stated reasons for the lever also did not reproduce on this
+ * tree.** It cited dropped pins running at 85 a week under the baseline and
+ * destinations the greedy policy could not reach. Measured here, on the
+ * baseline, five seeds:
+ *
+ *   - **dropped pins are 0 in every week of the shipped seed's run** and 0 for
+ *     all twelve weeks of one other seed; on the remaining three they are 6, 13
+ *     and 16, and every one of them lands in the week the run dies — i.e. after
+ *     the network was already losing, not before it;
+ *   - **at most ONE destination stands unconnected at any week boundary** on
+ *     the shipped seed (two on the others), and it is always one placed inside
+ *     that week;
+ *   - `tilesLeft` never falls below **37**, and the connect bill is **62 tiles
+ *     of the 210 granted** by the time the shipped seed dies. Unaffordable
+ *     connect decisions are **0 on two seeds and 75 on three**, and all 75 fall
+ *     in the half-week immediately after the 20-tile opening, while the spend
+ *     is being re-granted — never later, and never with the budget at 0.
+ *
+ * Tiles are not the constraint on any seed, which is the plan's own finding and
+ * the one part of Step 3's derivation that does reproduce.
+ *
+ * ---------------------------------------------------------------------------
+ * THE HONEST LIMIT, stated here rather than found by a player
+ * ---------------------------------------------------------------------------
+ *
+ * **On this board the delivery fraction is a weak instrument, and (b) is
+ * reported as much as it is gated.** Under greedy play the network delivers
+ * **97.5 %** of everything demand fires, right up to the tick it dies — because
+ * the failure is not a throughput failure. It is `dispatch.ts`'s Decision 4
+ * cost: demand round-robins EVENLY across a colour's rotation slots while cars
+ * flow to the NEAREST unfilled pin, so one destination starves while the board
+ * looks healthy. **The fraction only collapses when the player STOPS keeping
+ * up**, which is the second trace: 0.84 in week 0 and 0.71 in week 1, on a
+ * network that stopped growing. That pair is what (b) gates on, and it is the
+ * shape the same measurement takes on the demo board (0.82 falling to 0.39).
+ *
+ * Closing the round-robin/nearest mismatch is a change to §5.3's scheduling
+ * rule and to `dispatch.ts`, and it is M1f's, carried with this measurement.
+ */
+
+/** Twelve weeks, which is 54,000 ticks — long enough for every arm to end. */
+const GATE_WEEKS = 12
+
+/**
+ * The tile prices Decision 13's opening pays, as the two strokes a player
+ * draws: column 17 from D2's carpark down to its own colour-1 house (five
+ * cells, four `place` actions) and column 8 down the colour-0 carparks (fifteen
+ * cells, fourteen actions). 18 actions, 20 tiles of the 30 the board starts
+ * with. **Both strokes are asserted accepted rather than assumed** — see the
+ * first case in this block.
+ */
+const GATE_OPENING: readonly (readonly number[])[] = [D2_LINK, CORRIDOR]
+
+/** How often the greedy policy is allowed to act. One decision per 30 ticks — 1 s. */
+const GREEDY_PERIOD_TICKS = 30
+
+interface GateWeek {
+  readonly week: number
+  readonly dests: number
+  readonly connected: number
+  readonly houses: number
+  readonly trips: number
+  readonly fires: number
+  readonly frac: number
+  readonly maxInFlight: number
+  readonly longestQueue: number
+  readonly blockedTicks: number
+  readonly dropped: number
+  readonly refusals: number
+  readonly tilesLeft: number
+  /** Peak `destPins` over destinations whose carpark carries a road, this week. */
+  readonly peakPinsConnected: number
+  /** Peak `destPins` over destinations whose carpark does NOT, this week. */
+  readonly peakPinsRoadless: number
+  /** Peak of the board-wide sum of `destPins`, this week. */
+  readonly peakSumPins: number
+  /** Did any ROAD-CONNECTED destination stand at or above its own timer cap? */
+  readonly capReachedConnected: boolean
+}
+
+interface GateRun {
+  readonly weeks: readonly GateWeek[]
+  readonly deathTick: number
+  readonly failedDest: number
+  readonly failedDestConnected: boolean
+  readonly trips: number
+  readonly fires: number
+  readonly maxInFlight: number
+  readonly maxSpawnedInFlight: number
+  readonly unaffordable: number
+  readonly outsideRect: number
+}
+
+/**
+ * The number of times demand has FIRED, derived from the two writers of
+ * `destPins` rather than counted by a second implementation of `fireColour`.
+ *
+ * `demand.ts` writes `destPins[recipient] + 1` on a fire that lands and
+ * `H_PINS_DROPPED + 1` on one that does not; `trips.ts` writes `destPins[d] - 1`
+ * on an arrival and `H_SCORE + 1` when that car gets home. So every fire is in
+ * exactly one of four places — dropped, still standing on a destination, being
+ * carried home by a returning car, or scored — and the sum is conserved by
+ * construction:
+ *
+ * ```
+ *   fires = H_PINS_DROPPED + sum(destPins) + #cars in PHASE_RETURNING + H_SCORE
+ * ```
+ *
+ * **A structural oracle rather than a second integration, deliberately** — this
+ * file's own catalogue records a milestone where two "independent" measurements
+ * shared one wrong phase constant and agreed exactly. This derivation passes
+ * through no phase constant it could get wrong except `PHASE_RETURNING`, and
+ * that term is checked at both ends: on the no-input arm it is 0 for the whole
+ * run and the identity still balances.
+ */
+function firesSoFar(state: GameState): number {
+  let n = (state.header[H_PINS_DROPPED] as number) + (state.header[H_SCORE] as number)
+  const destCount = state.header[H_DEST_COUNT] as number
+  for (let d = 0; d < destCount; d++) n += state.destPins[d] as number
+  for (let c = 0; c < state.carPhase.length; c++) {
+    if ((state.carPhase[c] as number) === PHASE_RETURNING) n++
+  }
+  return n
+}
+
+/** §5.8's trigger cap for destination `d` — the one `overcrowdTriggerCap` reads. */
+function gateTimerCap(state: GameState, d: number): number {
+  return destMetaKind(state.destMeta[d] as number) === DEST_KIND_CIRCLE
+    ? PIN_CAP_CIRCLE_TIMER
+    : PIN_CAP_SQUARE_TIMER
+}
+
+function gateCarpark(state: GameState, world: WorldData, d: number): number {
+  return carparkCell(
+    state.destCell[d] as number,
+    destMetaOrientation(state.destMeta[d] as number),
+    world.w,
+    world.h,
+  )
+}
+
+/** True iff `cell` is one of the six non-carpark footprint cells of a destination. */
+function inAnyFootprint(state: GameState, world: WorldData, cell: number): boolean {
+  const destCount = state.header[H_DEST_COUNT] as number
+  for (let d = 0; d < destCount; d++) {
+    const orientation = destMetaOrientation(state.destMeta[d] as number)
+    if (isFootprintCell(state.destCell[d] as number, orientation, world.w, cell)) return true
+  }
+  return false
+}
+
+/**
+ * The set of cells reachable from `from` by following road bits.
+ *
+ * **Bits, not "both cells carry a road".** `graph.ts`'s `isConnected` already
+ * makes that distinction for one pair and this is the transitive closure of the
+ * same relation: two adjacent cells can each carry a road toward something else
+ * and be in different components, and a policy that could not tell would
+ * re-buy the same connection every 30 ticks forever.
+ */
+function gateRoadComponent(state: GameState, world: WorldData, from: number): Set<number> {
+  const seen = new Set<number>([from])
+  const stack: number[] = [from]
+  while (stack.length > 0) {
+    const c = stack.pop() as number
+    const mask = roadMask(state, c)
+    for (let dir = 0; dir < 8; dir++) {
+      if ((mask & (1 << dir)) === 0) continue
+      const next = stepCell(c, dir, world.w, world.h)
+      if (next < 0 || seen.has(next)) continue
+      seen.add(next)
+      stack.push(next)
+    }
+  }
+  return seen
+}
+
+/**
+ * The cheapest road a player could draw from `from` to any cell in `goals`, in
+ * TILES, with the path.
+ *
+ * A 0-1 breadth-first search: entering a cell that already carries a road bit
+ * costs nothing and entering bare ground costs one tile, which is exactly
+ * `canPlaceRoad`'s own price — its cost is "how many of the two endpoints have
+ * a zero mask", and a cell's mask stops being zero after the first segment that
+ * touches it, so the sum over a stroke is the number of bare cells on it.
+ *
+ * Refuses the cells `canPlaceRoad` refuses: impassable terrain, and the six
+ * non-carpark footprint cells of any destination. A carpark and a house cell
+ * are both road-legal by design (M1c decision 5), which is what makes a
+ * carpark-to-house path expressible at all.
+ */
+function gateCheapestPath(
+  state: GameState,
+  world: WorldData,
+  from: number,
+  goals: ReadonlySet<number>,
+): { cost: number; path: number[] } | undefined {
+  const legal = (c: number): boolean =>
+    world.passable[c] === 1 && !inAnyFootprint(state, world, c)
+  if (!legal(from)) return undefined
+  const dist = new Int32Array(world.cells).fill(0x7fffffff)
+  const prev = new Int32Array(world.cells).fill(-1)
+  const buckets: number[][] = []
+  const push = (c: number, d: number): void => {
+    while (buckets.length <= d) buckets.push([])
+    ;(buckets[d] as number[]).push(c)
+  }
+  const startCost = roadMask(state, from) === 0 ? 1 : 0
+  dist[from] = startCost
+  push(from, startCost)
+  for (let d = 0; d < buckets.length; d++) {
+    const bucket = buckets[d] as number[]
+    for (let bi = 0; bi < bucket.length; bi++) {
+      const c = bucket[bi] as number
+      if ((dist[c] as number) !== d) continue
+      if (goals.has(c)) {
+        const path: number[] = []
+        for (let cur = c; cur !== -1; cur = prev[cur] as number) path.push(cur)
+        path.reverse()
+        return { cost: d, path }
+      }
+      for (let dir = 0; dir < 8; dir++) {
+        const next = stepCell(c, dir, world.w, world.h)
+        if (next < 0 || !legal(next)) continue
+        const nd = d + (roadMask(state, next) === 0 ? 1 : 0)
+        if (nd < (dist[next] as number)) {
+          dist[next] = nd
+          prev[next] = c
+          push(next, nd)
+        }
+      }
+    }
+  }
+  return undefined
+}
+
+/** One stroke's worth of `place` actions, exactly as a drag emits them. */
+function gatePathActions(path: readonly number[]): TickAction[] {
+  const out: TickAction[] = []
+  for (let i = 0; i + 1 < path.length; i++) {
+    out.push({ kind: 'place', a: path[i] as number, b: path[i + 1] as number })
+  }
+  return out
+}
+
+/** The greedy policy's decision for this tick, or nothing to do. */
+function gateGreedyActions(
+  state: GameState,
+  world: WorldData,
+  tally: { unaffordable: number },
+): TickAction[] | undefined {
+  const destCount = state.header[H_DEST_COUNT] as number
+  const houseCount = state.header[H_HOUSE_COUNT] as number
+  for (let d = 0; d < destCount; d++) {
+    const colour = destMetaColour(state.destMeta[d] as number)
+    const goals = new Set<number>()
+    for (let h = 0; h < houseCount; h++) {
+      if ((state.houseColour[h] as number) === colour) goals.add(state.houseCell[h] as number)
+    }
+    if (goals.size === 0) continue
+    const cp = gateCarpark(state, world, d)
+    if (cp < 0) continue
+    const component = gateRoadComponent(state, world, cp)
+    let joined = false
+    for (const g of goals) if (component.has(g)) joined = true
+    if (joined) continue
+    const found = gateCheapestPath(state, world, cp, goals)
+    if (found === undefined) continue
+    if (found.cost > tilesLeft(state)) {
+      tally.unaffordable++
+      continue
+    }
+    return gatePathActions(found.path)
+  }
+  return undefined
+}
+
+type GateArm = 'no-input' | 'opening' | 'greedy'
+
+/**
+ * Boots **through `DEFAULT_LAYOUT_ID`**, not through `firstCity()` directly.
+ *
+ * That coupling is the point: the gate is a claim about *the board a plain load
+ * opens*, so flipping the default to a board that cannot pass it fails here as
+ * well as in `layouts.test.ts`. The named assertion below is what keeps the
+ * failure legible rather than arriving as "expected 747 to be at least 400".
+ */
+function gateBoot(): Rig {
+  const layout = layoutFor(DEFAULT_LAYOUT_ID)
+  const map = layout.map()
+  const world = createWorld(map)
+  const state = createState(layout.runSeed, map)
+  const scratch = createScratch(
+    world.cells,
+    map.groupCount,
+    map.maxDestinations,
+    createFieldInputRanges(map),
+  )
+  const fields = createFlowFields(map.groupCount, world.cells)
+  layout.seed(state, world)
+  for (let t = 0; t < layout.warmStartTicks; t++) step(state, world, fields, scratch, NO_ACTIONS)
+  return { map, world, state, scratch, fields }
+}
+
+function driveGate(arm: GateArm): GateRun {
+  const { state, world, fields, scratch } = gateBoot()
+  const startTick = state.header[H_TICK] as number
+  const endTick = startTick + GATE_WEEKS * TICKS_PER_WEEK
+  const seededCars = (state.header[H_HOUSE_COUNT] as number) * CARS_PER_HOUSE
+  const tally = { unaffordable: 0 }
+  const weeks: GateWeek[] = []
+
+  const openingActions: TickAction[] = []
+  for (const stroke of GATE_OPENING) openingActions.push(...gatePathActions(stroke))
+
+  let deathTick = -1
+  let outsideRect = 0
+  let maxInFlight = 0
+  let maxSpawnedInFlight = 0
+
+  let week = weekOfTick(startTick)
+  let weekTrips = state.header[H_SCORE] as number
+  let weekFires = firesSoFar(state)
+  let weekDropped = state.header[H_PINS_DROPPED] as number
+  let weekRefusals = state.header[H_ROUTES_REFUSED] as number
+  let wkInFlight = 0
+  let wkQueue = 0
+  let wkBlocked = 0
+  let wkPinsConnected = 0
+  let wkPinsRoadless = 0
+  let wkSumPins = 0
+  let wkCapConnected = false
+
+  const closeWeek = (): void => {
+    const destCount = state.header[H_DEST_COUNT] as number
+    let connected = 0
+    for (let d = 0; d < destCount; d++) {
+      const cp = gateCarpark(state, world, d)
+      if (cp >= 0 && roadMask(state, cp) !== 0) connected++
+    }
+    const trips = (state.header[H_SCORE] as number) - weekTrips
+    const fires = firesSoFar(state) - weekFires
+    weeks.push({
+      week,
+      dests: destCount,
+      connected,
+      houses: state.header[H_HOUSE_COUNT] as number,
+      trips,
+      fires,
+      frac: fires === 0 ? 0 : trips / fires,
+      maxInFlight: wkInFlight,
+      longestQueue: wkQueue,
+      blockedTicks: wkBlocked,
+      dropped: (state.header[H_PINS_DROPPED] as number) - weekDropped,
+      refusals: (state.header[H_ROUTES_REFUSED] as number) - weekRefusals,
+      tilesLeft: tilesLeft(state),
+      peakPinsConnected: wkPinsConnected,
+      peakPinsRoadless: wkPinsRoadless,
+      peakSumPins: wkSumPins,
+      capReachedConnected: wkCapConnected,
+    })
+    weekTrips = state.header[H_SCORE] as number
+    weekFires = firesSoFar(state)
+    weekDropped = state.header[H_PINS_DROPPED] as number
+    weekRefusals = state.header[H_ROUTES_REFUSED] as number
+    wkInFlight = 0
+    wkQueue = 0
+    wkBlocked = 0
+    wkPinsConnected = 0
+    wkPinsRoadless = 0
+    wkSumPins = 0
+    wkCapConnected = false
+  }
+
+  for (let tick = startTick + 1; tick <= endTick; tick++) {
+    let actions: TickAction[] | undefined
+    if (arm !== 'no-input' && tick === startTick + 1) actions = openingActions
+    else if (arm === 'greedy' && tick % GREEDY_PERIOD_TICKS === 0) {
+      actions = gateGreedyActions(state, world, tally)
+    }
+    step(state, world, fields, scratch, actions === undefined ? NO_ACTIONS : { actions })
+
+    if (isGameOver(state)) {
+      deathTick = state.header[H_TICK] as number
+      closeWeek()
+      break
+    }
+
+    let inFlight = 0
+    let spawnedInFlight = 0
+    let blocked = false
+    for (let c = 0; c < state.carPhase.length; c++) {
+      const phase = state.carPhase[c] as number
+      if (phase === PHASE_OUTBOUND || phase === PHASE_RETURNING) {
+        inFlight++
+        if (c >= seededCars) spawnedInFlight++
+      }
+      if ((state.carBlockedTicks[c] as number) > 0) blocked = true
+    }
+    if (inFlight > wkInFlight) wkInFlight = inFlight
+    if (inFlight > maxInFlight) maxInFlight = inFlight
+    if (spawnedInFlight > maxSpawnedInFlight) maxSpawnedInFlight = spawnedInFlight
+    if (blocked) wkBlocked++
+    // `longestQueue` allocates a `Map` and a `Set` per call, so it is sampled
+    // rather than run every tick — this is a measurement rig, not a frame path,
+    // and a queue that stands for one tick in thirty is not a queue.
+    if (tick % 10 === 0) {
+      const q = longestQueue(state, world)
+      if (q > wkQueue) wkQueue = q
+    }
+
+    const destCount = state.header[H_DEST_COUNT] as number
+    let sumPins = 0
+    for (let d = 0; d < destCount; d++) {
+      const cp = gateCarpark(state, world, d)
+      const pins = state.destPins[d] as number
+      sumPins += pins
+      if (cp >= 0 && roadMask(state, cp) !== 0) {
+        if (pins > wkPinsConnected) wkPinsConnected = pins
+        if (pins >= gateTimerCap(state, d)) wkCapConnected = true
+      } else if (pins > wkPinsRoadless) {
+        wkPinsRoadless = pins
+      }
+      if (!destinationFitsSpawnZone(state.destCell[d] as number, destMetaOrientation(state.destMeta[d] as number), world)) {
+        outsideRect++
+      }
+    }
+    if (sumPins > wkSumPins) wkSumPins = sumPins
+
+    const w = weekOfTick(tick)
+    if (w !== week) {
+      closeWeek()
+      week = w
+    }
+  }
+  if (deathTick < 0) closeWeek()
+
+  const failedDest = state.header[H_FAILED_DEST] as number
+  const failedCarpark =
+    failedDest >= 0 && failedDest < (state.header[H_DEST_COUNT] as number)
+      ? gateCarpark(state, world, failedDest)
+      : -1
+  return {
+    weeks,
+    deathTick,
+    failedDest,
+    failedDestConnected: failedCarpark >= 0 && roadMask(state, failedCarpark) !== 0,
+    trips: state.header[H_SCORE] as number,
+    fires: firesSoFar(state),
+    maxInFlight,
+    maxSpawnedInFlight,
+    unaffordable: tally.unaffordable,
+    outsideRect,
+  }
+}
+
+/**
+ * Driven once and shared, because three arms x twelve weeks is 100,000-odd
+ * `step` calls and each case below reads a different projection of the same
+ * run. The sim is deterministic, so this is memoisation and not sampling.
+ */
+const gateRuns = new Map<GateArm, GateRun>()
+function gateRun(arm: GateArm): GateRun {
+  const cached = gateRuns.get(arm)
+  if (cached !== undefined) return cached
+  const fresh = driveGate(arm)
+  gateRuns.set(arm, fresh)
+  return fresh
+}
+
+describe('the survivability gate the default board is flipped behind', () => {
+  it('is measuring the board a plain load opens, on the real boot path', () => {
+    // **The named assertion, first, so a flip of `DEFAULT_LAYOUT_ID` fails here
+    // with the id in the message rather than as an arithmetic surprise three
+    // cases down.** Everything below boots through `layoutFor`, so without this
+    // the whole block would silently re-point at whatever board the default
+    // names next.
+    expect(DEFAULT_LAYOUT_ID, 'the gate is about the board a plain load opens').toBe(
+      CITY_LAYOUT_ID,
+    )
+    const layout = layoutFor(DEFAULT_LAYOUT_ID)
+    expect(layout.map().id).toBe('firstCity')
+    expect(layout.runSeed).toBe('laneways-m2')
+    expect(layout.warmStartTicks).toBe(258)
+
+    // The rig reproduces the two inherited death ticks EXACTLY, which is what
+    // says it is driving the shipped boot and not a lookalike. Both came off a
+    // 40,000-tick drive at M1e Tasks 7 and 9, by a different rig, in a
+    // different file.
+    expect(gateRun('no-input').deathTick, 'the no-input death tick').toBe(CITY_DEATH_TICK)
+    expect(gateRun('no-input').deathTick).toBe(5580)
+    expect(gateRun('opening').deathTick, "the 20-tile opening's death tick").toBe(8661)
+
+    // And the opening really is 18 accepted `place` actions for 20 tiles, out
+    // of the 30 the board starts with — Decision 13's first checkable fact.
+    let actions = 0
+    for (const stroke of GATE_OPENING) actions += gatePathActions(stroke).length
+    expect(actions, '4 on column 17 + 14 on column 8').toBe(18)
+    const { state, world, fields, scratch } = gateBoot()
+    const opening: TickAction[] = []
+    for (const stroke of GATE_OPENING) opening.push(...gatePathActions(stroke))
+    step(state, world, fields, scratch, { actions: opening })
+    expect(tilesLeft(state), '20 of 30 tiles, and every action accepted').toBe(10)
+    for (const stroke of GATE_OPENING) {
+      for (const cell of stroke) {
+        expect(roadMask(state, cell), `opening cell ${cell} was refused`).not.toBe(0)
+      }
+    }
+  })
+
+  it('GATE A — trips and CARS IN MOTION, including cars the spawner put there', () => {
+    // **The clause M1d failed and the clause Task 5 failed, in one case.**
+    // M1d's shipped board measured `maxInFlight` 1 over 200,000 ticks; Task 5's
+    // spawner rig reached 22 houses and 10 destinations with exactly one
+    // spawned car in motion. Both thresholds below are set against those
+    // numbers rather than just under the measurement, so passing them means
+    // something specific rather than "better than today".
+    const greedy = gateRun('greedy')
+    // Measured: 747 trips, 11 cars in flight at once, 9 of them from spawned
+    // houses, 25 houses and 12 destinations by week 6.
+    expect(greedy.trips, 'completed trips').toBeGreaterThanOrEqual(400)
+    expect(greedy.maxInFlight, 'peak cars in motion — M1d measured 1').toBeGreaterThanOrEqual(6)
+    expect(
+      greedy.maxSpawnedInFlight,
+      'peak cars in motion from SPAWNER-placed houses — Task 5 measured 1',
+    ).toBeGreaterThanOrEqual(4)
+
+    // **The discrimination, on the same board and the same boot.** Every
+    // threshold above is satisfiable by a busier fixture; none of them is
+    // satisfiable by this board with no player input, which is what the
+    // demotion was about.
+    const idle = gateRun('no-input')
+    expect(idle.trips, 'no input, no road, no trip').toBe(0)
+    expect(idle.maxInFlight, 'and not one car ever leaves a driveway').toBe(0)
+
+    // Growth in population is NOT what is being asserted — it is reported, as
+    // the input to the thing above rather than as evidence of it.
+    const last = greedy.weeks[greedy.weeks.length - 1] as GateWeek
+    expect(last.houses, 'reported, not gated').toBeGreaterThan(3)
+    expect(last.dests, 'reported, not gated').toBeGreaterThan(3)
+    // Nothing may ever spawn where the player cannot see it, over the whole run.
+    expect(greedy.outsideRect, 'a building spawned outside the revealed rect').toBe(0)
+    expect(idle.outsideRect).toBe(0)
+  })
+
+  it('GATE B — the delivery fraction falls when the player stops keeping up', () => {
+    // **`trips / fires`, and the two arms say different things on purpose.**
+    //
+    // The gated half is the FIXED network: a player who draws the 20-tile
+    // opening and then stops. Demand ramps (`pinPeriodForWeek` shortens every
+    // week) against a road network that does not, and one number says so.
+    // Measured: 32/38 = 0.842 in week 0, 39/55 = 0.709 in week 1 — the same
+    // shape the demo board's corridor gives (0.82 falling to 0.39 by week 19).
+    const opening = gateRun('opening')
+    expect(opening.weeks.length, 'the opening arm must reach a second week').toBeGreaterThanOrEqual(2)
+    const w0 = opening.weeks[0] as GateWeek
+    const w1 = opening.weeks[1] as GateWeek
+    expect(w0.fires, 'vacuity: demand must actually have fired').toBeGreaterThan(20)
+    expect(w1.fires, 'and again in week 1').toBeGreaterThan(20)
+    expect(w0.frac, 'week 0 delivers most of what fires').toBeGreaterThanOrEqual(0.8)
+    expect(w1.frac, 'and week 1 does not').toBeLessThanOrEqual(0.75)
+    expect(w0.frac - w1.frac, 'the ramp costs at least 5 points in one week').toBeGreaterThanOrEqual(
+      0.05,
+    )
+    // The denominator is the ramp, not the network shrinking: MORE fired in
+    // week 1 than in week 0, and fewer of them landed.
+    expect(w1.fires, 'demand grew').toBeGreaterThan(w0.fires)
+
+    // **The reported half, and it is the finding rather than the threshold.**
+    // Under greedy play this board delivers 97.5 % of everything demand fires
+    // and still dies, because the failure is distributional rather than a
+    // throughput collapse. A gate that demanded a falling fraction here would
+    // be demanding the wrong failure mode.
+    const greedy = gateRun('greedy')
+    const cumulative = greedy.trips / greedy.fires
+    expect(cumulative, 'the network keeps up almost perfectly').toBeGreaterThanOrEqual(0.9)
+    expect(cumulative, 'and not completely — some demand is always in flight').toBeLessThan(1)
+    // ...and it keeps up without ever dropping a pin, which is the other half
+    // of "the player was not beaten by something they could not control". Both
+    // clauses are per-week rather than in aggregate: a single week of dropped
+    // pins is demand the player could not have served however they played, and
+    // a total would let a late collapse hide behind an early surplus.
+    //
+    // **Both are properties of THIS seed and are stated as such.** Across the
+    // five seeds measured at Task 10 the other four drop 0, 6, 13 and 16 pins,
+    // every one of them in the week the run dies; `tilesLeft` bottoms out at 37
+    // here and at 38-40 elsewhere, and never at 0.
+    for (const wk of greedy.weeks) {
+      expect(wk.dropped, `week ${wk.week} dropped pins`).toBe(0)
+      expect(wk.tilesLeft, `week ${wk.week} ran out of tiles`).toBeGreaterThan(0)
+    }
+    expect(greedy.unaffordable, 'no connect decision was unaffordable on this seed').toBe(0)
+  })
+
+  it('GATE C — peak destPins on a CONNECTED destination climbs to its timer cap', () => {
+    // **The shape, not the level.** A board where a connected destination sits
+    // at 1 pin forever is a board where service outruns demand — M1d's hole,
+    // and measured, exactly what plan Step 3's proposed spawner lever produces
+    // (1 in every one of twelve weeks). A board that steps straight from 1 to
+    // the cap has no difficulty curve either. What a curve looks like is a
+    // gradient, so that is what this asserts: an early week at 1, a later week
+    // above it, and a later week still at `PIN_CAP_*_TIMER` — the TIMER cap,
+    // because `overcrowdTriggerCap` is the thing the meter reads, not the hard
+    // cap `hasRoom` reads.
+    //
+    // Measured on the shipped seed: 1, 1, 1, 1, 2, 5, 10 across weeks 0-6,
+    // against a square timer cap of 6 and a hard cap of 10.
+    const greedy = gateRun('greedy')
+    const peaks = greedy.weeks.map((w) => w.peakPinsConnected)
+    const flat = peaks.findIndex((p) => p >= 1 && p <= 1)
+    expect(flat, 'no week where a connected destination held exactly one pin').toBeGreaterThanOrEqual(0)
+    const risen = peaks.findIndex((p, i) => i > flat && p >= 2)
+    expect(risen, `no later week above 1 — peaks were ${peaks.join(', ')}`).toBeGreaterThan(flat)
+    const capped = greedy.weeks.findIndex((w, i) => i > risen && w.capReachedConnected)
+    expect(
+      capped,
+      `no connected destination ever reached its own timer cap — peaks were ${peaks.join(', ')}`,
+    ).toBeGreaterThan(risen)
+
+    // The board-wide sum climbs with it, which is the same claim read the other
+    // way: it is not one destination's spike on an otherwise idle board.
+    // Measured 2 -> 18.
+    const sums = greedy.weeks.map((w) => w.peakSumPins)
+    expect(Math.max(...sums), 'peak sum(destPins)').toBeGreaterThanOrEqual(8)
+    expect(Math.max(...sums)).toBeGreaterThan(sums[0] as number)
+
+    // **And the run ends on a destination the player HAD connected.** That is
+    // what makes the loss legible as "you did not keep up" rather than "the
+    // spawner put a building somewhere you could not reach" — the failure shape
+    // that killed three fixtures at Task 8. It is also the arm of Task 9's
+    // shutdown copy that a competent player gets: `WENT UNSERVED`, not
+    // `NO ROAD REACHES`.
+    expect(greedy.deathTick, 'the greedy arm must actually end within the window').toBeGreaterThan(0)
+    expect(greedy.failedDest, 'and name a destination').toBeGreaterThanOrEqual(0)
+    expect(
+      greedy.failedDestConnected,
+      `destination ${greedy.failedDest} killed the run and had no road`,
+    ).toBe(true)
+
+    // The contrast, same board, no input: the killer is ROADLESS, its pins run
+    // far past any timer cap, and no connected destination ever climbs at all.
+    const idle = gateRun('no-input')
+    expect(idle.failedDestConnected, 'with no roads, the killer cannot be connected').toBe(false)
+    for (const wk of idle.weeks) {
+      expect(wk.peakPinsConnected, `week ${wk.week}: nothing is connected`).toBe(0)
+    }
+    expect(Math.max(...idle.weeks.map((w) => w.peakPinsRoadless))).toBeGreaterThan(
+      PIN_CAP_CIRCLE_TIMER,
+    )
+  })
+
+  it('reports what the gate does NOT gate on, so the numbers outlive this task', () => {
+    // **Survival in weeks is reported and not gated, and that is deliberate.**
+    // Across five seeds the baseline greedy arm survives 6, 12+, 7, 10 and 3
+    // weeks — a spread wide enough that a survival threshold at n = 1 would be
+    // a coin flip, and the shipped seed is not the median. The gate is on the
+    // shape (C) and on the absence of an unplayable failure (B), because those
+    // reproduced on every seed and survival did not.
+    //
+    // `refusals` is reported for the same reason and a different one: it stays
+    // 0 on this board for the whole measured run, where the demo board scores
+    // thousands. That is the one clause of M1d's demotion that did NOT stop
+    // being true, and `layouts.ts` says so rather than claiming otherwise.
+    const greedy = gateRun('greedy')
+    let refusals = 0
+    let blocked = 0
+    let longest = 0
+    for (const wk of greedy.weeks) {
+      refusals += wk.refusals
+      blocked += wk.blockedTicks
+      longest = Math.max(longest, wk.longestQueue)
+    }
+    expect(refusals, 'this board loads up; it does not grind').toBe(0)
+    // Blocking DOES fire here, late — 0 through week 1, then hundreds of ticks
+    // a week from week 2. Asserted as a floor only, because the week it starts
+    // is a spawn-placement property and pinning it would make every tuning
+    // change a failure that says nothing about blocking.
+    expect(blocked, 'M1d blocking never fired on this board at all').toBeGreaterThan(1000)
+    expect(longest, 'and cars really do stand behind each other').toBeGreaterThanOrEqual(3)
+    expect(greedy.weeks[0]?.blockedTicks, 'but not in the first week — it is a late property').toBe(0)
   })
 })

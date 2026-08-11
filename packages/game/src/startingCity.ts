@@ -15,22 +15,30 @@ import {
  * cell coordinates, placed once at startup, fully deterministic, no schedule
  * and no RNG.
  *
- * **It is no longer the board a plain load opens on** — `DEFAULT_LAYOUT_ID`
- * (`layouts.ts`) is the demo, because six cars that never move demonstrate
- * nothing. This city is reached by `?layout=city` / `?startapp=city`, and
- * nothing about it changed when the default moved: same map, same seeder, same
- * `RUN_SEED`, same 258-tick warm start, same seed golden `968680755` (was
- * `1178110182` before M1e Task 1's pure-layout re-bless), all
- * pinned by `test/startingCity.test.ts` against the explicit `city` id rather
- * than against whatever the default happens to be.
+ * **It is the board a plain load opens on again** — `DEFAULT_LAYOUT_ID`
+ * (`layouts.ts`) points here as of M1e Task 10, because M1e Task 5's spawner
+ * ended the "six cars that never move" clause that demoted it and Task 10's
+ * gate measured that it did. Nothing about this file changed when the default
+ * moved, in either direction: same map, same seeder, same `RUN_SEED`, same
+ * 258-tick warm start, same seed golden `968680755` (was `1178110182` before
+ * M1e Task 1's pure-layout re-bless), all pinned by
+ * `test/startingCity.test.ts` against the explicit `city` id rather than
+ * against whatever the default happens to be.
  *
- * **M1e REPLACES THIS FILE.** It is not M1e's authored spawn schedule and it
- * must not grow into one. `placeHouse`/`placeDestination` (`buildings.ts`) had
- * no production caller anywhere in `packages/` before this file existed, and
- * `step`'s seven phases contain no spawner: without a seed an M2 build renders
- * terrain and roads and nothing else — no house, no destination, no pin, no
- * car, no score — and M2's Goal is unreachable. This is the smallest thing
- * that makes the Goal reachable, and nothing more.
+ * **M1e SPAWNS AROUND THIS SEED; it does not replace it.** An earlier version
+ * of this paragraph said "M1e REPLACES THIS FILE", and that is false: the
+ * milestone shipped an in-`step` spawner (`sim/spawn.ts`) that adds houses and
+ * destinations *on top of* these six placements, which are still the tick-0
+ * board and still the seed golden. What remains true is that this file is not
+ * M1e's authored spawn schedule and must not grow into one — the schedule is
+ * `spawn.ts`'s, driven by timers in the state buffer, and a second hand-written
+ * table here would be a second source of truth for what the board contains.
+ * `placeHouse`/`placeDestination` (`buildings.ts`) had no production caller
+ * anywhere in `packages/` before this file existed, and M2's `step` had no
+ * spawner: without a seed an M2 build renders terrain and roads and nothing
+ * else — no house, no destination, no pin, no car, no score — and M2's Goal is
+ * unreachable. This is the smallest thing that makes the Goal reachable, and
+ * nothing more.
  *
  * **The seed is out of band, so an M2 run is NOT replayable by a Worker.**
  * Server-side verification replays `(seed, mapId, actions)` through `step`,

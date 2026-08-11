@@ -256,7 +256,8 @@ function nearSameColourHouse(
  * FALSE — and without this line every colour runs a full 24-cell scan every
  * retry period forever on a board that has been at `maxHouses` since tick 0,
  * failing only at `placeHouse`'s own capacity check 24 calls later. That is
- * 72 wasted `canPlaceHouse` calls per 60 ticks on the board a plain load opens.
+ * 72 wasted `canPlaceHouse` calls per 60 ticks on the demo board — which held
+ * the default until M1e Task 10 and is still one token away.
  *
  * **Deleting it scores 0 detectors across the whole 1,693-test suite, measured,
  * and the detector Task 5's brief predicted CANNOT EXIST ANY MORE.** The brief

@@ -20,13 +20,21 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  * 0, `ENTER_VALVE` 0, and a maximum of **one** car in flight. Six cars, frozen.
  * The player opened it and said it looked like the same demo. They were right.
  *
- * This file is the board where all of it fires, and **it is the board a plain
- * load now opens on** — `DEFAULT_LAYOUT_ID` (`layouts.ts`). It shipped behind
- * `?startapp=demo` / `?layout=demo` first, which left the default the board
- * that demonstrates nothing; there was no reason for that and the default
- * moved. It still changes **nothing** about the starting city, which is now the
- * one behind a token (`?layout=city`): `startingCity.ts` and `firstCity.ts` are
- * untouched byte-for-byte and every golden holds.
+ * This file is the board where all of it fires, and **it is the board behind
+ * `?startapp=demo` / `?layout=demo`.** It held `DEFAULT_LAYOUT_ID` for M1d and
+ * for M1e Tasks 1-9; **M1e Task 10 gave the default back to the starting city**,
+ * because Task 5's spawner ended the "six cars that never move" clause that
+ * demoted it and Task 10's gate measured that it did. Nothing here changed in
+ * either direction: `demoCity.ts` and this file are untouched byte-for-byte,
+ * the demo golden `3152640907` holds, and the board is one token away.
+ *
+ * **It is not survivable, and that is why it is not the default.** Six traces
+ * were driven through the real pointer at M1e Task 10 and the best of them
+ * equals the control: the board is over-subscribed on every colour, `maxHouses`
+ * is already at cap so the spawner can add nothing, the fleet is fixed at 24
+ * and the weekly demand ramp runs 3x against it. A board a player cannot
+ * affect is a demonstration, not a game — which is exactly what this file is
+ * for.
  *
  * ---------------------------------------------------------------------------
  * THE ARITHMETIC, AND THE DRAFT THAT FAILED IT
@@ -218,9 +226,22 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  *      **zero**. Plan Decision 7 accepts this deliberately — a board authored
  *      to be badly run should die in the milestone about badly-run cities
  *      dying — and Task 8 is what turns the meter reaching its threshold into
- *      an actual shutdown. **Until Task 8 lands, nothing visible happens at
- *      6,703 and the board keeps running.** Task 9 draws the ring that makes
- *      the last two minutes of it legible.
+ *      an actual shutdown. Task 9 draws the ring that makes the last two
+ *      minutes of it legible.
+ *
+ *      **WHAT TO LOOK FOR, since this is the list a playtester is handed and
+ *      this file has shipped a wrong line before (Decision 7).** At **3 min 43
+ *      s** the board goes dark, a ring closes on **the destination at the top
+ *      of corridor C** — D2, the colour-2 circle at grid (16, 9) — and four
+ *      lines appear: `DESTINATION 2 WENT UNSERVED`, `CONNECT EVERY DESTINATION
+ *      WITH A ROAD`, the trip count, and `TAP TO PLAY AGAIN`. **A tap starts
+ *      it again**, from a cold boot, on the same seed and therefore the same
+ *      board. Nothing before that tap is recoverable: the sim is frozen, the
+ *      grid refuses input, and the erase button is taken off the screen.
+ *      The first line is the `WENT UNSERVED` arm because D2's carpark IS on
+ *      the network; the starting city with no input produces the other arm,
+ *      `NO ROAD REACHES DESTINATION 2`, and both are reachable on shipped
+ *      boards.
  *   7. **NOT the anti-deadlock valve**, by design. It fires at 1,350 consecutive
  *      blocked ticks — 45 seconds of one car being refused every single tick —
  *      and on this layout it never fires at all over 20,000 ticks. That is the

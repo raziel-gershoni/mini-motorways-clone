@@ -172,9 +172,10 @@ export interface GameDeps {
    * Which board to open on — a key of `LAYOUTS` (`layouts.ts`).
    *
    * `undefined` (and `''`) mean `DEFAULT_LAYOUT_ID`, which is what every launch
-   * that names nothing gets — **the demo board**, since a plain load of the
-   * shipped starting city never moves a car. `'city'` opens that city. An id
-   * that is not in the table THROWS; see `layoutFor`. `startGame` reads it from
+   * that names nothing gets — **the starting city**, since M1e Task 5's spawner
+   * ended the "a plain load never moves a car" clause that demoted it and Task
+   * 10's gate measured that it did. `'demo'` opens the demo board. An id that
+   * is not in the table THROWS; see `layoutFor`. `startGame` reads it from
    * `layoutToken(location.hash, location.search, startParam())`.
    */
   readonly layoutId?: string
@@ -237,9 +238,9 @@ export interface Game {
 
 export function createGame(deps: GameDeps): Game {
   // The ONE line that decides which board this run opens on. With no token
-  // `layoutFor` returns `DEFAULT_LAYOUT_ID`'s entry — the demo board, because
-  // the shipped starting city never moves a car on a plain load; `?layout=city`
-  // still opens it. Nothing here reads a map, a seed or a warm start directly,
+  // `layoutFor` returns `DEFAULT_LAYOUT_ID`'s entry — the starting city, which
+  // M1e's spawner grows and M1e Task 10's gate measures; `?layout=demo` still
+  // opens the demo board. Nothing here reads a map, a seed or a warm start directly,
   // so no golden can move through this function whichever entry it gets. An
   // unknown token throws by name rather than falling back; `layouts.ts` says
   // why that matters more than it looks.

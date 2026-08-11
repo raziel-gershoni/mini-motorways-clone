@@ -124,10 +124,10 @@ describe('layoutToken', () => {
     //
     // **It says `''`, not which board that is, and the distinction is the
     // point.** This function's job ends at "was a token supplied"; which entry
-    // `''` reaches is `DEFAULT_LAYOUT_ID`'s, and it moved from the starting
-    // city to the demo without one line here changing. `layouts.test.ts` owns
-    // that answer, and duplicating it here would be a second place to update
-    // and a first place to forget.
+    // `''` reaches is `DEFAULT_LAYOUT_ID`'s, and it has now moved twice — city
+    // to demo at M1d, demo back to city at M1e Task 10 — without one line here
+    // changing either time. `layouts.test.ts` owns that answer, and duplicating
+    // it here would be a second place to update and a first place to forget.
     expect(layoutToken('', '', null)).toBe('')
     expect(layoutToken('#tgWebAppData=x&tgWebAppVersion=8.0', '', null)).toBe('')
     expect(layoutToken('', '?fallback=1', null)).toBe('')

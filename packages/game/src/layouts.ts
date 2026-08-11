@@ -12,7 +12,7 @@ import { DEMO_RUN_SEED, DEMO_WARM_START_TICKS, seedDemoLayout } from './demoLayo
  * `?layout=` in a browser.
  *
  * **Nothing here can move a golden, and that is still true now the default has
- * changed.** Each entry names four values that live in their own file —
+ * changed twice.** Each entry names four values that live in their own file —
  * `firstCity`/`seedStartingCity`/`RUN_SEED`/`WARM_START_TICKS` for the city,
  * and the demo's four in `demoLayout.ts` — so this file rebinds which entry the
  * no-token path reaches and edits neither. Every golden is pinned to an
@@ -49,30 +49,54 @@ export const CITY_LAYOUT_ID = 'city'
 export const DEMO_LAYOUT_ID = 'demo'
 
 /**
- * What a run opens on when no layout is named — **the demo board**.
+ * What a run opens on when no layout is named — **the starting city**.
  *
  * ---------------------------------------------------------------------------
- * WHY THIS IS THE DEMO AND NOT THE SHIPPED STARTING CITY
+ * WHY IT MOVED BACK, AND WHICH OF THE OLD REASONS STOPPED BEING TRUE
  * ---------------------------------------------------------------------------
  *
- * The starting city is **inert on the board that ships**. Instrumented on the
- * exact production boot over 200,000 ticks it produces `REFUSED_OCCUPIED` 0,
- * `ENTER_VALVE` 0, a maximum of one car in flight, and 1,510 dropped pins:
- * three houses feeding four destination slots at one pin per 129.5 ticks
- * against a ~60-tick round trip, with no shipped control that can add a car.
- * A player opening it sees six cars that never move. M1d's blocking, M1d's
- * ghost roads and M1d's lane speeds cannot fire there at all.
+ * M1d demoted this board with four clauses. **Three of them end here and one
+ * does not**, and saying which is the whole content of this comment — the
+ * mirror-image overclaim ("the city is alive now") would be exactly the
+ * unmeasured sentence that got the board demoted in the first place.
  *
- * The demo board is where all of it does: 24 cars, at least one refused entry
- * on ~59 % of ticks, and a standing queue up to 8. Putting it behind a link
- * meant the shipped default stayed the board that demonstrates nothing, and
- * "why does it have to be by a param" had no answer.
+ *   - *"six cars that never move"* — **ends.** The spawner (M1e Task 5) adds
+ *     houses from tick 300 and destinations every half-week, and a player who
+ *     draws the opening below has cars running immediately. Measured on the
+ *     real boot path with a scripted greedy-connect trace: **25 houses, 12
+ *     destinations, 747 completed trips and 11 cars in flight at once** by
+ *     week 6, of which **9 belong to houses the spawner placed**.
+ *   - *"nothing can add a car"* — **ends.** That is the whole of Task 5.
+ *   - *"M1d's blocking cannot fire there"* — **ends, LATE.** On the same trace
+ *     `blockedTicks` is 0 through week 1, 99 in week 2 and 597-639 a week from
+ *     week 5, with the longest standing queue reaching 4. It is a week-5
+ *     property, not a first-minute one.
+ *   - **`refusals` stays 0 on this board for the whole measured run**, where
+ *     the demo board scores thousands. That clause did NOT stop being true and
+ *     is not claimed. The starting city after M1e is a board that **loads up
+ *     and eventually fails**, not a board that grinds; those are different
+ *     feelings and only one of them is the demo board's.
  *
- * **The starting city is not deleted and is not unreachable — it is one token
- * away**, `?layout=city` in a browser and `?startapp=city` inside Telegram, and
- * it keeps its own tests, its own RNG seed and its own seed golden
- * `968680755` (was `1178110182`; re-blessed for pure layout in M1e Task 1).
- * What changed is which id the *absent* token resolves to.
+ * ---------------------------------------------------------------------------
+ * THE THREE CHECKABLE FACTS BEHIND DECISION 13'S OPENING
+ * ---------------------------------------------------------------------------
+ *
+ *   - **The opening is solvable for 20 of the 30 starting tiles** — 18 `place`
+ *     actions, all accepted — down column 17 (`y` 14..18) and column 8
+ *     (`y` 10..24). `startingCity.test.ts` drives both strokes through `step`.
+ *   - **The river's two-cell land gap at rows 18-19 keeps the board connected
+ *     without bridges**, so nothing the player has to build crosses water.
+ *   - **The demo board keeps its id, its seed, its warm start and its golden,
+ *     and is one token away** — `?layout=demo` / `?startapp=demo`. Flipping
+ *     this line back is one token of source.
+ *
+ * **What a plain load does NOT do is survive.** With no input at all the city
+ * shuts down on tick **5,580** (3 min 06 s) on D2, whose carpark carries no
+ * road — so the shutdown screen reads `NO ROAD REACHES DESTINATION 2`, which
+ * is the OTHER arm from the one the demo board produced. That change is
+ * player-visible copy and it is asserted in `integration.test.ts`. Five tiles
+ * on column 17 remove that death entirely (`startingCity.test.ts`), and the
+ * latest draw that still saves it is tick 5,550 — 95 % of the run.
  *
  * ---------------------------------------------------------------------------
  * WHAT DEPENDS ON THIS CONSTANT
@@ -81,16 +105,19 @@ export const DEMO_LAYOUT_ID = 'demo'
  * Everything a plain load does, and nothing else. No golden reads it: every
  * test that cares which board it is on names the id (`layouts.test.ts`'s own
  * default case is the one exception, and it exists precisely to be that
- * exception). `integration.test.ts`'s rig pins `city` explicitly for the same
- * reason — its cases were written against that board and re-derive its
- * 258-tick warm start, so they must keep measuring it however this line reads.
+ * exception). `integration.test.ts`'s rig already pinned `city` explicitly for
+ * its arithmetic cases, and its demo-board shutdown cases now pin `demo` for
+ * the same reason — a case that asserts one board's death tick must not follow
+ * this line.
  *
  * Changing this line changes what every player sees, so it has a detector that
- * names the answer: `layouts.test.ts`'s *"the default is the demo board, by
+ * names the answer: `layouts.test.ts`'s *"the default is the starting city, by
  * name"*. A flip fails there first, with the id it was flipped to in the
- * message, rather than diffusely across twenty boards-worth of assertions.
+ * message, rather than diffusely across twenty boards-worth of assertions —
+ * and `startingCity.test.ts`'s survivability gate boots through THIS constant,
+ * so a flip back to a board that cannot pass the gate fails there too.
  */
-export const DEFAULT_LAYOUT_ID = DEMO_LAYOUT_ID
+export const DEFAULT_LAYOUT_ID = CITY_LAYOUT_ID
 
 const CITY_LAYOUT: Layout = Object.freeze({
   id: CITY_LAYOUT_ID,
@@ -136,10 +163,11 @@ export const LAYOUT_IDS: readonly string[] = Object.freeze(Object.keys(LAYOUTS).
  * while the player believes they are looking at the one they asked for — the
  * failure that produced this registry in the first place, when `?startapp=demoo`
  * would have booted the frozen starting city and looked *exactly* like "the
- * demo link does nothing". It survives the default moving: today a typo would
- * silently open the demo instead of the `city` a reader asked for, which is the
- * same lie with the boards swapped. A named throw is the only outcome a
- * mistyped link cannot be confused with.
+ * demo link does nothing". It survives the default moving in either direction:
+ * with the city as the default a typo would silently open the city instead of
+ * the `demo` a reader asked for, which is the original lie with the boards
+ * swapped back. A named throw is the only outcome a mistyped link cannot be
+ * confused with.
  *
  * `''` and `undefined` both mean "no token was supplied" — `layoutToken`
  * (`main.ts`) returns the empty string for a value outside Telegram's
