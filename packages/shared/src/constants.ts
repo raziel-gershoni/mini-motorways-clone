@@ -219,6 +219,36 @@ export const MAX_PATH_LEN = 96
  */
 export const PIN_PERIOD_TICKS = 518
 
+// --- The weekly demand ramp (spec §5.3, [OURS]) ---
+/**
+ * `spawnScale(w) = 1.0 + 0.11 * (w - 1)`, capped at 3.0, at `DENOM`. Spec §5.3
+ * calls this "the single most important tuning unknown in the project"; §13
+ * lists it as an open risk and names the telemetry overlay as its mitigation.
+ * Treat all three numbers as a starting point.
+ *
+ * **What this ramp does and does not do — see plan Decision 2.** It does not
+ * raise the number of pins a destination can hold, and it does not add cars.
+ * It shortens the interval between pins at one rotation slot from 518 ticks to
+ * 172, so the round-trip time a connected destination can survive falls by the
+ * same factor. That is the difficulty curve and it is measurable as a ratio;
+ * Task 10's gate measures it. Reading this constant as "demand triples" without
+ * the fleet term is how the first draft of this plan came to claim a difficulty
+ * curve it could not observe.
+ *
+ * **What a player can attribute to it in M1e: nothing, and that is measured
+ * rather than conceded.** Task 5's spawner grows `slotCount` on the same board
+ * at the same time, so on the board that ships the ramp and the spawner are
+ * confounded and no observation separates them. The ramp's own effect is real
+ * and it is isolated in `loop.test.ts`'s treatment/control arm — one 20x9 board
+ * where the spawner is STRUCTURALLY absent, one fleet, one road network, and
+ * `H_WEEK` as the only difference between the two runs. See that test for the
+ * measured figures; do not quote a difficulty claim without naming the board it
+ * was measured on.
+ */
+export const SPAWN_SCALE_BASE = 1000
+export const SPAWN_SCALE_PER_WEEK = 110
+export const SPAWN_SCALE_MAX = 3000
+
 /**
  * Ticks after a destination's `destSpawnTick` before it joins the demand
  * rotation (`packages/sim/src/demand.ts`'s eligibility gate: `tick -

@@ -1,6 +1,15 @@
-import { PIN_CAP_SQUARE_HARD, PIN_CAP_CIRCLE_HARD, PIN_PERIOD_TICKS, FIRST_PIN_DELAY_TICKS } from '@laneways/shared'
+import {
+  PIN_CAP_SQUARE_HARD,
+  PIN_CAP_CIRCLE_HARD,
+  PIN_PERIOD_TICKS,
+  FIRST_PIN_DELAY_TICKS,
+  DENOM,
+  SPAWN_SCALE_BASE,
+  SPAWN_SCALE_PER_WEEK,
+  SPAWN_SCALE_MAX,
+} from '@laneways/shared'
 import type { GameState } from './state'
-import { H_TICK, H_DEST_COUNT, H_PINS_DROPPED } from './state'
+import { H_TICK, H_WEEK, H_DEST_COUNT, H_PINS_DROPPED } from './state'
 import type { Scratch } from './scratch'
 import { CT_BLOCKED_PUSH_DISCARDED } from './scratch'
 import { destMetaColour, destMetaKind, DEST_KIND_CIRCLE } from './buildings'
@@ -61,16 +70,39 @@ import { destMetaColour, destMetaKind, DEST_KIND_CIRCLE } from './buildings'
  * `advanceAccumulators`):
  *
  *   acc[c] += slotCount(c)                     // once per tick
- *   if (acc[c] >= PIN_PERIOD_TICKS) { acc[c] -= PIN_PERIOD_TICKS; fire(c) }
+ *   if (acc[c] >= P_w) { acc[c] -= P_w; fire(c) }   // P_w = pinPeriodForWeek(H_WEEK)
  *
- * `acc -= PIN_PERIOD_TICKS`, never `acc = 0`: the remainder must carry, or a
- * `slotCount` that does not evenly divide `PIN_PERIOD_TICKS` drifts the
+ * `acc -= P_w`, never `acc = 0`: the remainder must carry, or a
+ * `slotCount` that does not evenly divide the period drifts the
  * same way movement's per-edge progress would if a crossing dropped its
  * remainder (decision 3) — small at any one firing, compounding over the
- * run. `slotCount(c) <= 2 * maxDestinations <= 32 < PIN_PERIOD_TICKS`
- * (518), so at most one threshold crossing — one fire — happens per colour
- * per tick: an invariant with its own bound, stated so nobody reaches for a
- * `while` loop that is never actually exercised.
+ * run. `slotCount(c) <= 2 * maxDestinations <= 32 < P_w`
+ * (518 at week 0, 172 at the cap), so at most one threshold crossing — one
+ * fire — happens per colour per tick: an invariant with its own bound, stated
+ * so nobody reaches for a `while` loop that is never actually exercised.
+ *
+ * **The bound is still ONE under M1e's weekly ramp, and the argument is
+ * EXTENDED rather than replaced.** The tick-to-tick half above is untouched:
+ * the smallest period the ramp can produce is `pinPeriodForWeek(19)` = 172 and
+ * `32 < 172`. What the ramp adds is a second case the old argument did not
+ * cover — a period that SHRINKS between one tick and the next, which can leave
+ * `acc` above the new threshold with nothing having been added to it. That case
+ * is bounded too, over ADJACENT weeks:
+ *
+ *   - the largest adjacent drop is `518 - 466 = 52`, at the 0 -> 1 boundary,
+ *     and every later drop is smaller (`pinPeriodForWeek` is convex in the
+ *     week; `demand.test.ts` asserts the maximum is at week 1 over 40 weeks);
+ *   - the most `acc` can carry into a boundary tick is `P_{w-1} - 1` = 517,
+ *     plus at most `slotCount` = 32 added on the tick itself, so 549;
+ *   - one fire leaves at most `549 - 466 = 83`, against a threshold of 466.
+ *
+ * **So a `while`-drain spelling of the fire branch is an EQUIVALENT MUTANT**:
+ * its second iteration is unreachable at every week and every slot count this
+ * game can produce. It is recorded here with its derivation for the two
+ * opposite mistakes it prevents — nobody should reach for a `while` (it would
+ * be a loop that cannot iterate twice, i.e. an `if` with extra syntax), and
+ * nobody should delete the `if` on the strength of a mutation surviving. The
+ * bound is one; the `if` is what expresses it.
  *
  * **Overflow** (decision 1): if the rotation's chosen destination is at its
  * hard cap (`PIN_CAP_SQUARE_HARD`/`PIN_CAP_CIRCLE_HARD`, [OURS]; the *timer*
@@ -86,6 +118,34 @@ import { destMetaColour, destMetaKind, DEST_KIND_CIRCLE } from './buildings'
  * is the schedule; overflow redirects one pin, it does not hand away whose
  * turn is next.
  */
+
+/**
+ * §5.3's weekly demand ramp at `DENOM`. `H_WEEK` is zero-based and the spec's
+ * `w` is one-based, so `1.0 + 0.11 * (w - 1)` is `SPAWN_SCALE_BASE +
+ * SPAWN_SCALE_PER_WEEK * H_WEEK` with no adjustment — and week 0 is 1.0x, not
+ * 1.11x. The cap first binds at `H_WEEK` 19: 1000 + 110*18 = 2,980 and
+ * 1000 + 110*19 = 3,090.
+ */
+export function spawnScale(week: number): number {
+  const s = SPAWN_SCALE_BASE + SPAWN_SCALE_PER_WEEK * week
+  return s > SPAWN_SCALE_MAX ? SPAWN_SCALE_MAX : s
+}
+
+/**
+ * The accumulator threshold for `week`.
+ *
+ * **The ramp scales the PERIOD and not the increment, and that choice is
+ * load-bearing twice over.** Multiplying the increment by `scale / DENOM`
+ * truncates once per TICK, which is the drift `acc -= period` exists to
+ * prevent; scaling in `DENOM` units instead is exact but multiplies every
+ * stored `pinAccum` by 1,000, which moves the loop, queue and multiplier
+ * goldens behaviourally for no gameplay reason. Scaling the threshold
+ * truncates once per WEEK, in a comparison rather than an accumulation, and at
+ * week 0 it is `518000 / 1000` = 518 — bit-for-bit today's constant.
+ */
+export function pinPeriodForWeek(week: number): number {
+  return ((PIN_PERIOD_TICKS * DENOM) / spawnScale(week)) | 0
+}
 
 /** True iff destination `d` has cleared its first-pin delay as of `tick`. The one eligibility check — see the module comment. */
 function isEligible(state: GameState, d: number, tick: number): boolean {
@@ -307,11 +367,17 @@ export function computeSlotCounts(state: GameState, scratch: Scratch): void {
 export function advanceAccumulators(state: GameState, scratch: Scratch): void {
   const tick = state.header[H_TICK] as number
   const groupCount = state.pinAccum.length
+  // Hoisted per CALL, never per run. The period is a function of `H_WEEK`, so
+  // caching it across ticks freezes the cadence at whatever week the cache was
+  // filled on — a mutation the demand golden catches, because its second
+  // cadence never arrives. Hoisting it out of the colour loop is free: every
+  // colour on one tick is in the same week by construction.
+  const period = pinPeriodForWeek(state.header[H_WEEK] as number)
   for (let c = 0; c < groupCount; c++) {
     const slotCount = scratch.slotCounts[c] as number
     state.pinAccum[c] = (state.pinAccum[c] as number) + slotCount
-    if ((state.pinAccum[c] as number) >= PIN_PERIOD_TICKS) {
-      state.pinAccum[c] = (state.pinAccum[c] as number) - PIN_PERIOD_TICKS
+    if ((state.pinAccum[c] as number) >= period) {
+      state.pinAccum[c] = (state.pinAccum[c] as number) - period
       fireColour(state, c, tick)
     }
   }

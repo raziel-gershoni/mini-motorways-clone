@@ -7,14 +7,27 @@ import {
   PIN_CAP_CIRCLE_HARD,
   TICKS_PER_WEEK,
   DAYS_PER_WEEK,
+  DENOM,
+  SPAWN_SCALE_BASE,
+  SPAWN_SCALE_PER_WEEK,
+  SPAWN_SCALE_MAX,
   type MapData,
 } from '@laneways/shared'
-import { createState, snapshot, restore, H_TICK, H_DEST_COUNT, H_PINS_DROPPED, type GameState } from '../src/state'
+import {
+  createState,
+  snapshot,
+  restore,
+  H_TICK,
+  H_WEEK,
+  H_DEST_COUNT,
+  H_PINS_DROPPED,
+  type GameState,
+} from '../src/state'
 import { createWorld, type WorldData } from '../src/world'
 import { createFieldInputRanges } from '../src/regions'
 import { createScratch, type Scratch } from '../src/scratch'
 import { placeDestination, ORIENTATION_S, DEST_KIND_SQUARE, DEST_KIND_CIRCLE } from '../src/buildings'
-import { computeSlotCounts, advanceAccumulators, runDemand } from '../src/demand'
+import { computeSlotCounts, advanceAccumulators, runDemand, spawnScale, pinPeriodForWeek } from '../src/demand'
 
 /**
  * All-land grid, generated rather than hand-typed (this is a test file, not
@@ -105,6 +118,157 @@ function forceFireAtTick(state: GameState, scratch: Scratch, tickValue: number, 
   scratch.slotCounts[colour] = PIN_PERIOD_TICKS
   advanceAccumulators(state, scratch)
 }
+
+/**
+ * A rig whose colour-0 `slotCount` is exactly 2, built from two REAL eligible
+ * squares and `computeSlotCounts` rather than by doctoring `scratch` — so the
+ * week-boundary test below drives the accumulator with the same `slotCounts`
+ * the production path produces, and its hand-computed carry is arithmetic
+ * about the shipped code rather than about a hand-written array.
+ */
+function accumulatorRig(): { state: GameState; scratch: Scratch } {
+  const { map, world } = fixture('accumulator-rig')
+  const { state, scratch } = rig(map, world)
+  placeEligibleNow(state, world, 0, 0, 0, DEST_KIND_SQUARE)
+  placeEligibleNow(state, world, 5, 0, 0, DEST_KIND_SQUARE)
+  state.header[H_TICK] = 1
+  computeSlotCounts(state, scratch)
+  expect(scratch.slotCounts[0], 'the rig must genuinely have slotCount(0) = 2').toBe(2)
+  return { state, scratch }
+}
+
+/**
+ * Every fire the demand module has produced, wherever the pin landed: pins
+ * standing on destinations plus pins dropped. Counting only `destPins` would
+ * read a capped board as a board that never fired.
+ */
+function sumPins(state: GameState): number {
+  let sum = state.header[H_PINS_DROPPED] as number
+  for (let d = 0; d < (state.header[H_DEST_COUNT] as number); d++) sum += state.destPins[d] as number
+  return sum
+}
+
+describe('the weekly demand ramp (spec §5.3)', () => {
+  it('is the spec ramp at DENOM, one-based in the spec and zero-based in H_WEEK', () => {
+    // §5.3: spawnScale(w) = 1.0 + 0.11 * (w - 1), capped at 3.0, with w
+    // ONE-based. `H_WEEK` is zero-based, so w = H_WEEK + 1 and the +0.11 term
+    // multiplies H_WEEK directly. Off-by-one here scales week 0 to 1.11x and
+    // every measured figure in the repo inherits it.
+    expect(spawnScale(0)).toBe(SPAWN_SCALE_BASE)
+    expect(spawnScale(1)).toBe(1110)
+    expect(spawnScale(5)).toBe(1550)
+    expect(spawnScale(18)).toBe(2980)
+    expect(spawnScale(19), 'the cap first binds here, not at 18').toBe(SPAWN_SCALE_MAX)
+    expect(spawnScale(200)).toBe(SPAWN_SCALE_MAX)
+    // The three constants are the spec's three numbers at DENOM, asserted here
+    // rather than only inside the table above, so a change to one of them
+    // fails in a place that names it.
+    expect(SPAWN_SCALE_BASE).toBe(DENOM)
+    expect(SPAWN_SCALE_PER_WEEK).toBe(110)
+    expect(SPAWN_SCALE_MAX).toBe(3 * DENOM)
+  })
+
+  it('week 0 leaves the pin period EXACTLY at PIN_PERIOD_TICKS', () => {
+    // This is what makes the ramp golden-neutral: every golden fixture in the
+    // repo that runs at all runs inside week 0 (the longest is 13,499 ticks
+    // with no destinations), so an implementation that scaled the accumulator
+    // instead would move three of them for nothing.
+    expect(pinPeriodForWeek(0)).toBe(PIN_PERIOD_TICKS)
+    expect(pinPeriodForWeek(1)).toBe(466)
+    expect(pinPeriodForWeek(19)).toBe(172)
+  })
+
+  it('shortens the period monotonically and then holds it flat at the cap', () => {
+    // The table above is six points; this is the shape between and past them.
+    // A `spawnScale` that returned the base unconditionally satisfies neither,
+    // but a `spawnScale` that ramped the WRONG WAY (period growing with the
+    // week) satisfies the two-point week-0/week-1 pair only by its endpoints.
+    for (let w = 1; w <= 19; w++) {
+      expect(pinPeriodForWeek(w), `week ${w} must be strictly shorter than week ${w - 1}`).toBeLessThan(
+        pinPeriodForWeek(w - 1) as number,
+      )
+    }
+    for (let w = 20; w <= 40; w++) {
+      expect(pinPeriodForWeek(w), `week ${w} is past the cap and must not move`).toBe(pinPeriodForWeek(19))
+    }
+    // The whole ramp is a 3x shortening and no more — 518 -> 172 is 3.011x
+    // rather than exactly 3 because 518000/3000 truncates. Stated so that
+    // "demand triples" is read as the period shrinking, not as three times the
+    // cars: see `spawnScale`'s own doc comment.
+    expect(PIN_PERIOD_TICKS / (pinPeriodForWeek(19) as number)).toBeGreaterThan(3)
+    expect(PIN_PERIOD_TICKS / (pinPeriodForWeek(19) as number)).toBeLessThan(3.02)
+  })
+
+  it('fires exactly ONCE on a week boundary and leaves no backlog behind it', () => {
+    // The one-fire invariant SURVIVES the ramp, and the first draft of this
+    // plan weakened it when it should have extended it. That draft asserted
+    // `fires <= 3` from `floor((maxPeriod - 1) / minPeriod)` = floor(517/172) —
+    // which pairs week 0's period with week 19's, and `H_WEEK` cannot cross 19
+    // boundaries in one tick.
+    //
+    // The real bound is over ADJACENT weeks. The largest adjacent drop is
+    // 0 -> 1: 518 - 466 = 52, and every later drop is smaller. Carrying in at
+    // most `P_w - 1` = 517 plus `slotCount <= 32` gives 549; one fire leaves
+    // 549 - 466 = 83, far under 466. **So the bound is ONE, the same as every
+    // other tick, and there is no backlog to drain.**
+    //
+    // Consequence, recorded rather than papered over: the `while`-drain mutant
+    // this test was originally written to catch is an EQUIVALENT MUTANT — a
+    // `while` that can never iterate twice is a `for`. `fires <= 3` is
+    // satisfied by every implementation including that mutant, which is a test
+    // that cannot fail wearing a bound's clothes.
+    const { state, scratch } = accumulatorRig() // slotCount(0) = 2
+    state.header[H_WEEK] = 0
+    state.pinAccum[0] = (pinPeriodForWeek(0) as number) - 1 // 517, maximal carry-in
+    state.header[H_WEEK] = 1
+    const fires: number[] = []
+    for (let i = 0; i < 4; i++) {
+      const before = sumPins(state)
+      advanceAccumulators(state, scratch)
+      fires.push(sumPins(state) - before)
+    }
+    expect(fires[0], 'the boundary tick fires once').toBe(1)
+    expect(fires.slice(1), 'and there is nothing queued behind it').toEqual([0, 0, 0])
+    // Vacuity: the carry must genuinely have survived the period change, or
+    // this is a test about an accumulator that was reset.
+    expect(state.pinAccum[0], 'the remainder carried').toBe(517 + 2 - 466 + 2 + 2 + 2)
+  })
+
+  it('the largest ADJACENT period drop is 0 -> 1, which is what makes the bound one', () => {
+    // The derivation the module comment and the boundary test both rest on,
+    // asserted rather than asserted-about: if some later adjacent pair dropped
+    // by more than 52, the residue argument would have to be redone at that
+    // pair instead. `slotCount <= 32` is `2 * maxDestinations` at the
+    // 16-destination maps this repo ships (demand.ts's own bound).
+    let worstDrop = 0
+    let worstWeek = -1
+    for (let w = 1; w <= 40; w++) {
+      const drop = (pinPeriodForWeek(w - 1) as number) - (pinPeriodForWeek(w) as number)
+      if (drop > worstDrop) {
+        worstDrop = drop
+        worstWeek = w
+      }
+    }
+    expect(worstWeek).toBe(1)
+    expect(worstDrop).toBe(PIN_PERIOD_TICKS - 466)
+    expect(worstDrop).toBe(52)
+    // Maximal carry-in plus the maximal per-tick increment, less one fire, is
+    // strictly under the smallest threshold that carry can meet.
+    const MAX_SLOT_COUNT = 32
+    const residue = (PIN_PERIOD_TICKS - 1) + MAX_SLOT_COUNT - (pinPeriodForWeek(1) as number)
+    expect(residue).toBe(83)
+    expect(residue).toBeLessThan(pinPeriodForWeek(1) as number)
+    // And the same statement for every later boundary, since a smaller drop
+    // makes the residue smaller: this is the "the bound stays one" claim over
+    // the whole ramp rather than at its worst point only.
+    for (let w = 1; w <= 40; w++) {
+      const carriedIn = (pinPeriodForWeek(w - 1) as number) - 1 + MAX_SLOT_COUNT
+      expect(carriedIn - (pinPeriodForWeek(w) as number), `week ${w}`).toBeLessThan(
+        pinPeriodForWeek(w) as number,
+      )
+    }
+  })
+})
 
 describe('constants: PIN_PERIOD_TICKS and FIRST_PIN_DELAY_TICKS', () => {
   it('PIN_PERIOD_TICKS is 518, derived through the week (never through TICKS_PER_DAY = 0)', () => {
