@@ -48,11 +48,13 @@ import {
   JAM_UNBLOCKED_TRIPS,
 } from './jamFixture'
 import { TICK_MS } from '../src/loop'
+import { MAX_DRAW_LAG_CELLS, MAX_SIM_CELLS_PER_TICK } from '../src/resolve'
 import { PointerOutcome } from '../src/pointer'
 import { EraseControlSurface } from '../src/eraseControl'
 import { SizingOutcome } from '../src/shell'
 import { DEMO_WARM_START_TICKS } from '../src/demoLayout'
 import { CITY_LAYOUT_ID, DEFAULT_LAYOUT_ID, LAYOUT_IDS } from '../src/layouts'
+import { DEMO_DEATH_TICK } from './deathTicks'
 import {
   BOOT_FAILURE_ELEMENT_ID,
   BOOT_FAILURE_STYLE,
@@ -2467,6 +2469,145 @@ function captureErrors<T>(run: () => T): { result: T; logged: unknown[] } {
     console.error = original
   }
 }
+
+// ---------------------------------------------------------------------------
+// The board stops dead — what a player actually sees (M1e Task 8)
+// ---------------------------------------------------------------------------
+
+/**
+ * **The milestone's observability line, driven end to end through the real
+ * loop.** Nothing draws a shutdown screen yet — Task 9 owns that — so what a
+ * player gets on the default board, unprompted, partway through the fourth
+ * minute, is the board *stopping dead*. This test is what says so, on the
+ * production path: `createGame` with no layout token, real frames, the real
+ * draw path.
+ *
+ * ---------------------------------------------------------------------------
+ * THE DRAWN CARS DO NOT SETTLE ONTO THEIR SIM POSITIONS, AND THE TASK BRIEF
+ * SAID THEY WOULD
+ * ---------------------------------------------------------------------------
+ *
+ * The brief's own observability paragraph predicted that "the frozen cars settle
+ * onto their exact sim positions rather than stopping mid-stride… the drawn
+ * position converges to it monotonically and exactly — measured at three ticks".
+ * **Measured on this rig: it does not converge at all.** The reasoning was right
+ * about `resolve.ts` and wrong about the loop. `advanceDraw` — the speed-limited
+ * chase — is advanced inside `snapshotCurr`, which the driver calls from
+ * `afterDrain`, which `loop.frame` only reaches when a drain actually ran. And
+ * `onGameOver` calls `loop.end()`, which pauses. So the drain stops on the same
+ * frame the sim freezes, the chase is never advanced again, and every car stops
+ * wherever the lerp had it.
+ *
+ * That is the difference between "the rAF loop keeps running" — true, `onFrame`
+ * re-arms unconditionally and `render` is still called every frame — and "the
+ * loop keeps draining", which is false. Only the second one advances anything.
+ *
+ * **What is actually true is the half that matters to a player, and it is
+ * stronger**: the drawn frame is *bit-identical* from then on, over frames of
+ * varying length. There is no jitter, no drift and no slow settle; the picture
+ * is a still image. The cars stop a fraction of a cell short of where the sim
+ * says they are — **0.0886 cells** driving even 33.4 ms frames and **0.2200**
+ * through this rig's cadence, since `alpha` freezes wherever the last frame left
+ * it — and nothing on screen is drawn against the sim position, so there is
+ * nothing to compare it to. Both are well inside a cell's 0.5 half-width, so
+ * every frozen car is still on its own road.
+ *
+ * **That residual is pre-existing rather than something the freeze introduces**,
+ * and it is worth the sentence because `resolve.ts` claims "no car is ever drawn
+ * more than 0.2 cells from where the sim says it is". `MAX_DRAW_LAG_CELLS`
+ * bounds `drawCurrXY` against `currXY` at a drain boundary; the frame is a lerp
+ * between `drawPrevXY` and `drawCurrXY`, so against the CURRENT sim position it
+ * can sit further back. Measured on a LIVE demo board over 4,000 frames the
+ * worst case is **0.2632 cells**, larger than anything the freeze produces. The
+ * freeze makes a transient permanent, at a smaller value — it does not widen
+ * the band.
+ */
+describe('the demo board stops dead, and stays a still image', () => {
+  it('freezes at 3 min 43 s and draws a bit-identical frame forever after', () => {
+    // `layoutId: undefined` reaches `createGame` with the property genuinely
+    // absent — see `buildRig`'s note — so this is what a player who taps the
+    // bot link with no parameters gets. If Task 10 flips the default, this test
+    // follows it and the tick has to move with it.
+    const rig = buildRig({ layoutId: undefined })
+    expect(rig.game.layoutId, 'this must be whatever a plain launch opens').toBe(DEFAULT_LAYOUT_ID)
+
+    let frames = 0
+    while (!isGameOver(rig.game.state) && frames < 20000) {
+      rig.advance(TICK_MS)
+      frames++
+    }
+
+    // It ended, on the measured tick, unprompted and with no input of any kind.
+    expect(isGameOver(rig.game.state), 'the default board must end a run on its own').toBe(true)
+    expect(rig.game.state.header[H_TICK]).toBe(DEMO_DEATH_TICK)
+    expect(Math.round(DEMO_DEATH_TICK / 30), 'which is 223 s — 3 min 43 s at 30 Hz').toBe(223)
+    // The loop followed, and it cannot be talked out of it.
+    expect(rig.game.loop.over).toBe(true)
+    expect(rig.game.loop.paused).toBe(true)
+    rig.game.loop.setPaused(false)
+    expect(rig.game.loop.paused, 'a clock tap must not resume a dead sim').toBe(true)
+
+    // The picture, which is the observable. Frames of DIFFERENT lengths, so a
+    // residual accumulator or a live `alpha` would show up as movement.
+    const drawn = (): string =>
+      Array.from(
+        rig.game.builder.frame.carXY.slice(0, rig.game.builder.frame.carCount * 2),
+      ).join(',')
+    rig.advance(TICK_MS)
+    const still = drawn()
+    rig.ctx.log = []
+    for (let k = 0; k < 60; k++) rig.advance(20 + (k % 7) * 5)
+    expect(drawn(), 'the board is a still image, not a slow settle').toBe(still)
+    expect(rig.game.loop.ticksLastFrame, 'and no tick ran').toBe(0)
+    // ...while the draw path is still running, which is what lets Task 9 put a
+    // screen on top of it. A frozen board that stopped DRAWING would be a black
+    // rectangle, and this is the line that separates the two.
+    expect(
+      rig.ctx.log.filter((c) => c.op === 'blit').length,
+      'rAF is never cancelled — the frame path stays live',
+    ).toBeGreaterThan(0)
+    expect(rig.game.builder.frame.carCount, 'the cars are still on the board, not removed').toBe(24)
+    expect(rig.game.builder.frame.paused, 'and the frame knows it').toBe(true)
+
+    // The cars stopped SHORT of their sim positions rather than settling onto
+    // them — see the block comment. Asserted as a measured band rather than as
+    // convergence, because convergence is what the brief predicted and it is
+    // not what happens.
+    const snaps = rig.game.builder.snapshots
+    let worst = 0
+    let n = 0
+    for (let i = 0; i < snaps.slots; i++) {
+      if ((snaps.currLive[i] as number) === 0) continue
+      worst = Math.max(
+        worst,
+        Math.hypot(
+          (rig.game.builder.frame.carXY[n * 2] as number) - (snaps.currXY[i * 2] as number),
+          (rig.game.builder.frame.carXY[n * 2 + 1] as number) - (snaps.currXY[i * 2 + 1] as number),
+        ),
+      )
+      n++
+    }
+    // **Bounded by a derivation, not by whichever number this cadence happens to
+    // produce.** The frame is a lerp between `drawPrevXY` and `drawCurrXY`, and
+    // `alpha` freezes at whatever the last frame left — so the residual depends
+    // on the frame cadence at the instant of death, and a literal here would be
+    // a property of this rig's `advance` rather than of the code. Measured:
+    // **0.0886** cells driving even 33.4 ms frames, **0.2200** through this
+    // rig's cadence. The bound that holds for both is
+    // `MAX_DRAW_LAG_CELLS + MAX_SIM_CELLS_PER_TICK` = 0.3333: `drawCurrXY` is
+    // within the lag of the sim position at its own drain, `drawPrevXY` is the
+    // previous drain's `drawCurrXY`, and the sim moved at most one tick of
+    // travel in between.
+    expect(worst, 'the drawn cars did NOT converge onto the sim positions').toBeGreaterThan(0)
+    expect(worst, 'and they are bounded by one lag plus one tick of travel').toBeLessThan(
+      MAX_DRAW_LAG_CELLS + MAX_SIM_CELLS_PER_TICK,
+    )
+    // The property that actually matters, and the reason none of this is
+    // visible: a cell's half-width is 0.5, so every frozen car is still drawn
+    // on its own road rather than beside it.
+    expect(worst, 'a frozen car is still on the road').toBeLessThan(0.5)
+  })
+})
 
 describe('a boot that throws puts the reason on the screen', () => {
   it('renders a surface carrying the failure, the bad token and every layout id', () => {
