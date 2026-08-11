@@ -18,6 +18,7 @@ import {
   PAUSE_BAR_FRACTION,
   MAX_DRAWN_PINS,
   RING_WIDTH_FRACTION,
+  SHUTDOWN_TEXT_INSET_CSS,
   destFootprintH,
   destFootprintW,
   drawFrame,
@@ -2934,12 +2935,21 @@ describe('the shutdown screen', () => {
     expect(lines.length, 'three lines: what died, the score, and the way out').toBe(3)
     for (const line of lines) {
       expect(line.maxWidth, `"${line.text}" is unconstrained`).toBeGreaterThan(0)
-      expect(line.x - line.maxWidth / 2, `"${line.text}" runs off the left`).toBeGreaterThanOrEqual(0)
+      // **Against the INSET, not against zero, and that is what gives the inset
+      // a detector.** Measured: with the bound at 0, dropping
+      // `SHUTDOWN_TEXT_INSET_CSS` entirely still passes — a full-canvas-width
+      // `maxWidth` centred on the canvas fits the canvas exactly. The margin is
+      // the thing that has to hold on a phone with a notch, so it is the thing
+      // asserted.
+      expect(line.x - line.maxWidth / 2, `"${line.text}" runs off the left`).toBeGreaterThanOrEqual(
+        SHUTDOWN_TEXT_INSET_CSS,
+      )
       expect(line.x + line.maxWidth / 2, `"${line.text}" runs off the right`).toBeLessThanOrEqual(
-        camera.cssW,
+        camera.cssW - SHUTDOWN_TEXT_INSET_CSS,
       )
       expect(line.textAlign, 'maxWidth only bounds a CENTRED run').toBe('center')
     }
+    expect(SHUTDOWN_TEXT_INSET_CSS, 'a zero inset would make the two bounds above vacuous').toBeGreaterThan(0)
     // Three distinct baselines, so the lines do not stack on one another.
     expect(new Set(lines.map((l) => l.y)).size).toBe(3)
   })
