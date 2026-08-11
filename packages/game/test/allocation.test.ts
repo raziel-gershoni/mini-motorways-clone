@@ -1530,8 +1530,29 @@ function bytesIn(all: readonly Allocator[], file: string): number {
  * liveness was re-proved by injecting into `canEnter` and into the refusal
  * branch specifically rather than inherited from Task 2's proof. See the task
  * report's allocation section for the figures.
+ *
+ * **`overcrowd.ts` joined the list at M1e Task 7, and the reason is an
+ * ATTRIBUTION boundary rather than a new file.** That task's rare path is
+ * `applyArrivalKnockback`, which lives in `overcrowd.ts` and is called from
+ * `arriveAtDestination` in `trips.ts` once per completed trip — about 0.07
+ * times per tick on the demo board. Measured: an escaping object injected into
+ * it is caught by THIS per-trip arm at **40.12 B/trip floored over three
+ * windows (draws 45.71 / 44.11 / 40.12), 5.0x the 8 B budget** — but charged to
+ * **`trips.ts`**, because V8 inlined the callee into its caller. Inlining is
+ * not a stable property, and the file's own module comment already says
+ * function-level attribution is unstable; across a file boundary the same
+ * instability moves the charge between two FILES, and only one of them was in
+ * this list. The per-FRAME arm cannot cover the gap: at ~105 arrivals in a
+ * 3,000-frame window a 40 B/arrival regression is ~1.4 B/frame, under the
+ * measured 4 B noise floor by construction. So the file is named here, and both
+ * landing sites are covered whichever way the inliner decides on the day.
+ *
+ * `runOvercrowd` itself needs none of this — it runs every tick over every live
+ * destination, and injecting into it charges `overcrowd.ts` **15.79-31.90
+ * B/frame against a per-frame budget of 4** on the demo rig, red in all three
+ * windows.
  */
-const TASK2_TICK_FILES = ['blocking.ts', 'cars.ts', 'trips.ts'] as const
+const TASK2_TICK_FILES = ['blocking.ts', 'cars.ts', 'trips.ts', 'overcrowd.ts'] as const
 
 /**
  * The five files M1d Task 5's ghost path runs in, and the two that are NEW to
@@ -1794,6 +1815,17 @@ describe('the tick allocates nothing on the blocking path, measured', () => {
     // QUIETEST of the three positive controls — one escaping object per
     // completed trip in `completeTrip` — so this is the margin that matters.
     expect(COMPLETION_BUDGET_BYTES_PER_TRIP * 4).toBeLessThan(35)
+    // **M1e Task 7's own two signals on this same statistic, measured rather
+    // than sketched, because the file list it widened is only worth widening if
+    // the arm can see the thing.** An escaping object in
+    // `applyArrivalKnockback` floors at **40.12** B/trip when the inliner
+    // charges `trips.ts` (draws 45.71 / 44.11 / 40.12) and at **159.20** when
+    // it charges `overcrowd.ts` (160.00 / 159.20 / 171.94). 8 clears the weaker
+    // of the two by 5.0x. Asserted against the weaker one and with a strict
+    // inequality, so the two quantities can be told apart — a safety factor
+    // whose right-hand side came out of the same measurement as its left is a
+    // restatement, not a margin.
+    expect(COMPLETION_BUDGET_BYTES_PER_TRIP * 4, "Task 7's weaker landing site").toBeLessThan(40.12)
   })
 
   it('DOES report a sim/src allocation on the same rig, same scope, same predicate — the guard can fail', () => {
