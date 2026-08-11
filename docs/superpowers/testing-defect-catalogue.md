@@ -508,3 +508,56 @@ The shipped guard therefore reads `H_TICK` off the real rig rather than recomput
 assertion at the knobs as a second line. **When a bound protects against a rig's behaviour, measure
 the rig** — a model of the rig is a second implementation of it, and it can be wrong in the direction
 that makes the bound look safe.
+
+## A rule you can cite is not a rule you have applied
+
+M1e Task 8 declined its own largest coverage restoration on the grounds that it "moves every other
+fixture" — a claim it never ran. Its reviewer capped one constant and measured the real cost:
+**exactly one failing test**, which simply reverted, recovering 12,778 ticks of live invariant
+checking.
+
+The implementer's own summary of it is the entry: *"I cited 'a blast-radius claim is a measurement,
+not a reading' against the plan in the same report where I broke it."*
+
+That is the failure mode of a catalogue. Entries get read, quoted, and used to judge other people's
+work, while the behaviour they describe goes on happening in the writer's own. **Citing an entry is
+evidence you recognised the shape somewhere else, not evidence you checked for it here.**
+
+The operational form: when you invoke a rule against someone else's decision, run it against your own
+open decisions in the same sitting. The rules in this file are cheap to apply and expensive to
+re-learn, and every one of them was written by somebody who had just violated it.
+
+## Safety properties are satisfied trivially by a frozen system
+
+M1e Task 8 made the sim freeze on game over. A 20,000-tick invariant sweep then spent **12,778 ticks
+asserting over a corpse** — and stayed green, because everything it asserts is a *safety* property:
+occupancy soundness, the reservation invariant, no counter wrap, no starvation. "Nothing bad
+happened" is trivially true of a system in which nothing happened.
+
+The task documented the loss honestly and did not repair it, which is the subtler error: an honest
+note about a dead sweep still leaves a dead sweep.
+
+**Every long-horizon sweep needs a liveness assertion alongside its safety ones**, and it must be
+strong enough to notice the run ending early. The fix here is worth copying: assert off the **peak
+meter** rather than the terminal flag — because a meter that climbs and unwinds never sets the flag,
+and it is the tick *before* the flag that says the margin is gone. A flag check would have passed on
+a board one tick from death.
+
+## An interlock is a mechanism; "the next commit will fix it" is a promise
+
+Task 8 shipped a state where the default board is indistinguishable from a crash — frozen frame,
+refused input, no message — with the UI deferred to the next task. Correct sequencing, disclosed
+three times, and **nothing in the tree prevented a deploy landing there.**
+
+This document's own entry says a handoff item with no code artefact is the one that evaporates, and
+the milestone had already lost two. So the mitigation became a **deliberately failing test** that the
+next task deletes as its first act.
+
+What makes it good rather than annoying is the key it is anchored to: `RenderFrame` cannot
+*express* a shutdown, and `render` imports nothing from `sim`, so nothing can be drawn without a new
+field on the frame. **That is structural, not a guess about the next task's shape** — the interlock
+cannot be satisfied by a cosmetic change, and its worst failure mode is that the next task deletes a
+file it was going to delete anyway.
+
+Use this whenever a commit knowingly ships a bad intermediate state: encode the constraint as a red
+test keyed on something the fix must structurally change.
