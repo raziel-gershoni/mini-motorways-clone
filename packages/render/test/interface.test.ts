@@ -184,23 +184,42 @@ describe('RenderFrame is constructible from plain typed arrays and scalars alone
     // `render` but not in a hand-built fixture, so the fixture is where it has
     // to be caught.
     //
-    // **Seven since M1e Task 9.** The count is asserted against the frame's own
-    // key list rather than written out, so an eighth parallel array added
-    // without a length check here fails rather than silently widening the gap:
-    //   grep -c "^  readonly dest" packages/render/src/types.ts
+    // **Seven since M1e Task 9, and the SET IS DERIVED FROM THE FRAME rather
+    // than written out.** The first version of this test carried a hand-written
+    // six-element literal and asserted `parallel.length === 6` — tautologically
+    // true, and it would have said nothing about an eighth array. It also
+    // prescribed `grep -c "^  readonly dest"`, which returns 8 because it counts
+    // `destCount: number`. Both were the Task 4 remedy cited and not built.
+    //
+    // So: every own key of the frame beginning `dest` that holds a typed array
+    // is collected at run time, and each one must be `destCell.length` long. An
+    // eighth is covered the moment it exists, and the count assertion below is
+    // the tripwire that makes adding one a deliberate act rather than a silent
+    // widening.
     const frame = handBuiltFrame()
     const n = frame.destCell.length
     expect(n).toBe(3)
-    const parallel = [
-      frame.destColour,
-      frame.destKind,
-      frame.destOrientation,
-      frame.destPins,
-      frame.destCarpark,
-      frame.destOvercrowd,
-    ]
-    expect(parallel.length, 'seven dest-indexed arrays, destCell included').toBe(6)
-    for (const array of parallel) expect(array.length).toBe(n)
+    const parallel = Object.entries(frame).filter(
+      (entry): entry is [string, { length: number }] =>
+        entry[0].startsWith('dest') && ArrayBuffer.isView(entry[1]),
+    )
+    expect(
+      parallel.map(([name]) => name).sort(),
+      'a dest-indexed array was added or renamed — give it a length check here',
+    ).toEqual([
+      'destCarpark',
+      'destCell',
+      'destColour',
+      'destKind',
+      'destOrientation',
+      'destOvercrowd',
+      'destPins',
+    ])
+    for (const [name, array] of parallel) expect(array.length, name).toBe(n)
+    // Non-vacuous on the filter itself: `destCount` is a NUMBER and must not be
+    // collected, or `.length` would read `undefined` and pass nothing.
+    expect(parallel.map(([name]) => name)).not.toContain('destCount')
+    expect(typeof frame.destCount).toBe('number')
   })
 
   it('places every dead slot INSIDE the drawn region, not on cell 0', () => {

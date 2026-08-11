@@ -23,6 +23,7 @@ import {
   EnterOutcome,
   canEnter,
   claimCell,
+  failedDestination,
   isGameOver,
   occupantOf,
   packRouteStep,
@@ -2648,23 +2649,85 @@ describe('the demo board stops dead, and stays a still image', () => {
       .slice(scrimIndex + 1)
       .filter((c): c is TextCommand => c.op === 'text')
       .map((c) => c.text)
+    // **The exact four lines, in order, and the first one is the review's
+    // headline.** "OVERCROWDED" described too much traffic; measured, this
+    // destination has ZERO draining frames — it is never served at all — so the
+    // word sent the player to draw FEWER roads. The demo board's D2 is on the
+    // road network and still receives nothing, which is why the first line here
+    // is the WENT UNSERVED arm rather than the roadless one.
+    const carpark = rig.game.builder.frame.destCarpark[failed] as number
+    expect(rig.game.state.roads[carpark] as number, 'D2 IS on the network').toBeGreaterThan(0)
     expect(said).toEqual([
-      `DESTINATION ${failed} OVERCROWDED`,
+      `DESTINATION ${failed} WENT UNSERVED`,
+      'CONNECT EVERY DESTINATION WITH A ROAD',
       `${rig.game.state.header[H_SCORE] as number} TRIPS`,
       'TAP TO PLAY AGAIN',
     ])
+    // The word that must never come back, on the whole phase.
+    for (const line of said) expect(line).not.toContain('CROWD')
 
     // 3. And the ring is still there under the scrim, around the destination
     //    that did it — which is what makes "which one" a thing the player can
     //    SEE rather than a number they have to count buildings for.
     const rings = rig.ctx.log.filter((c): c is ArcCommand => c.op === 'arc')
     expect(rings.length, 'at least the failed destination is ringed').toBeGreaterThan(0)
+    // The killer's ring is redrawn OVER the scrim, so "which one" is pointed at
+    // rather than inferred from being the biggest arc on a board of eighteen.
+    const overScrim = rig.ctx.log
+      .slice(scrimIndex + 1)
+      .filter((c): c is ArcCommand => c.op === 'arc')
+    expect(overScrim.length, 'exactly the killer, redrawn above the dim').toBe(1)
     // §5.8's hidden grace: the killer's meter is at the FAIL threshold, folded
     // against FULL, so its ring is 249/255 — nearly closed and never closed.
     expect(frame.destOvercrowd[failed] as number).toBe(249)
     const widest = Math.max(...rings.map((r) => r.sweep))
     expect(widest).toBeCloseTo((249 / 255) * Math.PI * 2, 6)
     expect(widest, 'the ring is NOT full at the moment it kills you').toBeLessThan(Math.PI * 2)
+  })
+
+  it('takes the erase control off the screen, because the scrim cannot reach it', () => {
+    // **The most prominent thing on the shutdown screen was a button that does
+    // not restart.** The scrim is painted on the CANVAS; the erase control is
+    // native `MainButton` chrome or a `position: fixed` DOM pill, both outside
+    // anything `drawFrame` can dim. Without `retire()` a player sees a dimmed
+    // board reading TAP TO PLAY AGAIN and, under it, an undimmed full-width
+    // bright button offering ERASE ROADS.
+    //
+    // Driven end to end through the real `onGameOver`, because the wiring is
+    // the thing at risk — the control's own behaviour has its own file.
+    const rig = buildRig({ layoutId: undefined, fallback: true })
+    expect(rig.game.erase.retired, 'vacuity: live, the control is on screen').toBe(false)
+    let frames = 0
+    while (!isGameOver(rig.game.state) && frames < 20000) {
+      rig.advance(TICK_MS)
+      frames++
+    }
+    expect(rig.game.state.header[H_TICK]).toBe(DEMO_DEATH_TICK)
+    expect(rig.game.erase.retired, 'the button outlived the city').toBe(true)
+    // Sticky against everything that could re-render it, including the tap that
+    // is about to restart the run.
+    rig.game.erase.sync()
+    rig.game.pointer.down(1, rig.cx(9), rig.cy(20))
+    expect(rig.game.erase.retired).toBe(true)
+  })
+
+  it('retires it at boot too, when the state was ALREADY over and there is no edge', () => {
+    // `onGameOver` fires on an EDGE, so a restored game-over state never fires
+    // it — the same hole `createGame`'s own `if (isGameOver(state)) loop.end()`
+    // exists to close, and the retire has to be reached from the state for the
+    // same reason.
+    const dead = buildRig({ layoutId: undefined, warmStartTicks: DEMO_DEATH_TICK, fallback: true })
+    expect(isGameOver(dead.game.state)).toBe(true)
+    expect(dead.game.erase.retired, 'no frame has run, and the button is already gone').toBe(true)
+    // Non-vacuous: the same rig one tick short is NOT retired, so this is about
+    // the terminal state rather than about the fallback surface.
+    const live = buildRig({
+      layoutId: undefined,
+      warmStartTicks: DEMO_DEATH_TICK - 1,
+      fallback: true,
+    })
+    expect(isGameOver(live.game.state)).toBe(false)
+    expect(live.game.erase.retired).toBe(false)
   })
 
   it('the restart tap mutates not one byte of sim state, so a new run is a COLD BOOT', () => {
@@ -2731,15 +2794,32 @@ describe('the demo board stops dead, and stays a still image', () => {
     // and the fraction of the run that has a ring on screen.
     const rig = buildRig({ layoutId: undefined })
     let firstRingTick = -1
+    let firstLegibleTick = -1
     let ringFrames = 0
     let frames = 0
+    // **The drain count, which is what the ring's own doc comment used to claim
+    // a player could read.** A meter that ever falls means the destination was
+    // relieved; one that never falls means it was never served.
+    const prevMeter = new Uint8Array(rig.game.state.destCell.length)
+    const drainFrames = new Int32Array(rig.game.state.destCell.length)
     while (!isGameOver(rig.game.state) && frames < 20000) {
       rig.advance(TICK_MS)
       frames++
+      const frame = rig.game.builder.frame
+      for (let d = 0; d < frame.destCount; d++) {
+        const m = frame.destOvercrowd[d] as number
+        if (m < (prevMeter[d] as number)) drainFrames[d] = (drainFrames[d] as number) + 1
+        prevMeter[d] = m
+      }
       const drawn = rig.ctx.log.some((c) => c.op === 'arc')
       if (drawn) {
         ringFrames++
         if (firstRingTick < 0) firstRingTick = rig.game.state.header[H_TICK] as number
+      }
+      // A ring at 1/255 is 1.4 degrees of arc — about a pixel. The tick that
+      // matters is the one a person can SEE, taken at a tenth of a turn.
+      if (firstLegibleTick < 0 && [...frame.destOvercrowd].some((m) => m >= 26)) {
+        firstLegibleTick = rig.game.state.header[H_TICK] as number
       }
     }
     expect(isGameOver(rig.game.state)).toBe(true)
@@ -2748,25 +2828,56 @@ describe('the demo board stops dead, and stays a still image', () => {
     // these is a statistical figure:
     //
     // ```
-    //   first ring      tick 3,492   1 min 56 s
-    //   death           tick 6,703   3 min 43 s
-    //   warning         3,211 ticks  1 min 47 s
-    //   ring on screen  3,212 of 5,504 frames — 58.4 % of the run
+    //   first ring        tick 3,492   1 min 56 s   (1/255 = 1.4 deg of arc)
+    //   first LEGIBLE     tick 4,222   2 min 21 s   (>= 10 % = 36 deg)
+    //   death             tick 6,703   3 min 43 s
+    //   usable warning    2,481 ticks  1 min 23 s   (from the legible ring)
+    //   ring on screen    3,212 of 5,504 frames — 58.4 % of the run
     // ```
+    //
+    // **The warning is measured from the LEGIBLE ring, not the first pixel of
+    // one.** A 1.4-degree arc is about one pixel at a 29 px tile; quoting 1:56
+    // as the moment the player is warned overstates it by 25 seconds.
     //
     // The bounds below are looser than the measurements on purpose: what has to
     // hold is "the warning arrives with time to act", not "at tick 3,492", and
     // pinning the tick would turn every spawn-tuning change into a failure that
     // says nothing about the ring.
     expect(firstRingTick, 'a ring must appear at all').toBeGreaterThan(0)
+    expect(firstLegibleTick, 'a ring must become legible at all').toBeGreaterThan(firstRingTick)
     expect(
-      DEMO_DEATH_TICK - firstRingTick,
-      'the warning must arrive at least a minute before the end',
+      DEMO_DEATH_TICK - firstLegibleTick,
+      'a LEGIBLE warning must arrive at least a minute before the end',
     ).toBeGreaterThan(30 * 60)
     expect(
       ringFrames / frames,
       'a ring is on screen for most of the run, not only at the end',
     ).toBeGreaterThan(0.5)
+
+    // ---------------------------------------------------------------------
+    // **What the ring actually shows, measured — and it is NOT "fills when
+    // congested, drains when served".**
+    // ---------------------------------------------------------------------
+    // §5.8's meter unwinds at 2,000 milli-ticks a tick while a destination is
+    // under capacity, so in principle a served destination's ring falls again.
+    // On the boards that ship, a player never sees that: the destination that
+    // ends the run has ZERO draining frames on the demo board and on the
+    // starting city, and the only demo ring that drains at all peaks at 19/255
+    // — 27 degrees of arc — in the last 25 s of a 223 s run.
+    //
+    // So the honest reading of a ring on a shipped board is "this destination
+    // is not being served and it will end the run", which is a stronger signal
+    // than the two-state one, and it is the claim the source now makes.
+    const failed = failedDestination(rig.game.state)
+    expect(failed).toBeGreaterThanOrEqual(0)
+    expect(
+      drainFrames[failed] as number,
+      'the killer’s meter fell at some point — the "fills and drains" reading is back',
+    ).toBe(0)
+    // Non-vacuous on the instrument: it CAN count a drain, and does, on the one
+    // destination that gets any relief at all.
+    const totalDrains = [...drainFrames].reduce((a, b) => a + b, 0)
+    expect(totalDrains, 'no destination ever drained — the counter is not working').toBeGreaterThan(0)
     // Vacuity: the very first frames have NO ring, so this is measuring the
     // meter rather than a ring that is always drawn.
     const fresh = buildRig({ layoutId: undefined })

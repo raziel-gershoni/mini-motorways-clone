@@ -18,6 +18,7 @@ import {
   PAUSE_BAR_FRACTION,
   MAX_DRAWN_PINS,
   RING_WIDTH_FRACTION,
+  SHUTDOWN_RING_WIDTH_SCALE,
   SHUTDOWN_TEXT_INSET_CSS,
   destFootprintH,
   destFootprintW,
@@ -2554,7 +2555,10 @@ function drawWith(frame: RenderFrame): Command[] {
  * other 33x33 fill and this section's classifiers do not need to tell them
  * apart.
  */
-function frameWithOvercrowd(meters: readonly number[], gameOver = false): RenderFrame {
+function frameWithOvercrowd(
+  meters: readonly number[],
+  options: { gameOver?: boolean; failedDest?: number } = {},
+): RenderFrame {
   const base = frameB()
   return {
     ...base,
@@ -2566,7 +2570,8 @@ function frameWithOvercrowd(meters: readonly number[], gameOver = false): Render
     destPins: new Uint8Array([0, 0]),
     destCarpark: new Int32Array([-1, -1]),
     destOvercrowd: new Uint8Array(meters),
-    gameOver,
+    gameOver: options.gameOver ?? false,
+    failedDest: options.failedDest ?? -1,
   }
 }
 
@@ -2672,13 +2677,20 @@ const RING_BOUND_MARKERS: readonly {
 
 /** Fixture B, in game over, with the knobs each shutdown assertion varies. */
 function gameOverFrame(
-  options: { score?: number; failedDest?: number; camera?: Camera } = {},
+  options: { score?: number; failedDest?: number; camera?: Camera; destCount?: number } = {},
 ): RenderFrame {
   const base = frameB()
   return {
     ...base,
     camera: options.camera ?? base.camera,
     score: options.score ?? base.score,
+    // **`destCount` is a knob because the roadless split is guarded on the LIVE
+    // prefix.** Fixture B has one live destination, so `failedDest: 1` names a
+    // dead slot and takes the fail-closed arm whatever the road under it says —
+    // which is correct behaviour and useless for exercising the split. The two
+    // tests that cross the arms open the prefix to 2; every other case leaves it
+    // alone so the liveness rule keeps its teeth here too.
+    destCount: options.destCount ?? base.destCount,
     gameOver: true,
     failedDest: options.failedDest ?? 0,
   }
@@ -2931,15 +2943,84 @@ describe('the shutdown screen', () => {
   })
 
   it('names the destination that shut the city down, as a whole line', () => {
-    expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 2 })))).toContain(
-      'DESTINATION 2 OVERCROWDED',
+    // Fixture B's destination 0 has its carpark at (3, 1), which carries road
+    // mask 16 — so this is the SERVED-BUT-NOT-ENOUGH arm.
+    expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 0 })))).toContain(
+      'DESTINATION 0 WENT UNSERVED',
     )
     // The index is what varies, so vary it — a fixture on one value cannot tell
     // the label apart from a constant string, and the memo makes a stale cache
-    // the likeliest way to get one.
-    expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 7 })))).toContain(
-      'DESTINATION 7 OVERCROWDED',
+    // the likeliest way to get one. Destination 1's carpark is (4, 1), which
+    // carries no road, so this also crosses to the other arm.
+    expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 1, destCount: 2 })))).toContain(
+      'NO ROAD REACHES DESTINATION 1',
     )
+  })
+
+  it('never says OVERCROWDED, because the destination that dies receives too FEW cars', () => {
+    // **The word this screen must not use.** "Overcrowded" describes too much
+    // traffic; measured on both shipped boards the destination that ends the
+    // run has ZERO draining frames — it is never served at all — so a player
+    // who reads it draws fewer roads, which is the opposite of the fix. The
+    // assertion is on the whole shutdown phase rather than on one line, so a
+    // future fourth line cannot quietly reintroduce it.
+    for (const d of [0, 1]) {
+      for (const line of shutdownTexts(drawWith(gameOverFrame({ failedDest: d, destCount: 2 })))) {
+        expect(line, `"${line}" tells the player the roads were too busy`).not.toContain('CROWD')
+      }
+    }
+  })
+
+  it('splits the line on whether ANY road reaches the carpark, both arms on one fixture', () => {
+    // The two arms want different remedies — "draw a road to it" against "serve
+    // it faster" — so the fixture puts one destination on each side of the
+    // predicate and flips only the index between the two draws. Both arms are
+    // reachable on the boards that ship: every starting-city carpark is bare,
+    // and the demo board's killer is on the network and still receives nothing.
+    const frame = frameB()
+    expect(frame.roads[frame.destCarpark[0] as number] as number, 'dest 0 IS reachable').toBe(16)
+    expect(frame.roads[frame.destCarpark[1] as number] as number, 'dest 1 is NOT').toBe(0)
+    expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 0, destCount: 2 })))).toContain(
+      'DESTINATION 0 WENT UNSERVED',
+    )
+    expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 1, destCount: 2 })))).toContain(
+      'NO ROAD REACHES DESTINATION 1',
+    )
+    // ...and the arm follows the ROAD, not the index: put a road under dest 1's
+    // carpark and the same index crosses over.
+    const paved = gameOverFrame({ failedDest: 1, destCount: 2 })
+    paved.roads[paved.destCarpark[1] as number] = 4
+    expect(shutdownTexts(drawWith(paved))).toContain('DESTINATION 1 WENT UNSERVED')
+  })
+
+  it('takes the roadless arm for an index outside the LIVE prefix, failing closed', () => {
+    // `failedDest` is -1 on a live frame and bounded above only by `destCount`.
+    // Without the index guard, `destCarpark[-1]` is `undefined` — neither `< 0`
+    // nor `=== 0` once it has indexed `roads` — so an out-of-range index took
+    // the REACHABLE arm and asserted that a destination which does not exist was
+    // on the road network.
+    for (const failedDest of [-1, 1, 9]) {
+      expect(
+        shutdownTexts(drawWith(gameOverFrame({ failedDest }))),
+        `failedDest ${failedDest} on a one-destination frame`,
+      ).toContain(`NO ROAD REACHES DESTINATION ${failedDest}`)
+    }
+    // Non-vacuous: index 1 crosses to the other arm the moment it is LIVE and
+    // paved, so the guard is about the prefix and not about the number 1.
+    const live = gameOverFrame({ failedDest: 1, destCount: 2 })
+    live.roads[live.destCarpark[1] as number] = 4
+    expect(shutdownTexts(drawWith(live))).toContain('DESTINATION 1 WENT UNSERVED')
+  })
+
+  it('says the verb of the game, which the failure state contained no word of', () => {
+    // Before this line the shutdown screen named a building and a number and
+    // left the remedy to be inferred. `startingCity.ts` measures what inference
+    // produces: the road a player is most drawn to on the shipped city buys
+    // zero ticks.
+    const said = shutdownTexts(drawWith(gameOverFrame({ failedDest: 0 })))
+    expect(said).toContain('CONNECT EVERY DESTINATION WITH A ROAD')
+    // The property, not the sentence: the screen must contain the verb at all.
+    expect(said.some((l) => l.includes('ROAD')), 'no line mentions a road').toBe(true)
   })
 
   it('tells the player how to start again', () => {
@@ -2954,7 +3035,7 @@ describe('the shutdown screen', () => {
     const log = drawWith(gameOverFrame({ camera, failedDest: 12 }))
     const index = log.findIndex((c) => c.op === 'fillRect' && c.fillStyle === PALETTE.scrim)
     const lines = log.slice(index + 1).filter((c): c is FillTextCommand => c.op === 'fillText')
-    expect(lines.length, 'three lines: what died, the score, and the way out').toBe(3)
+    expect(lines.length, 'four lines: what died, what to do, the score, the way out').toBe(4)
     for (const line of lines) {
       expect(line.maxWidth, `"${line.text}" is unconstrained`).toBeGreaterThan(0)
       // **Against the INSET, not against zero, and that is what gives the inset
@@ -2972,14 +3053,14 @@ describe('the shutdown screen', () => {
       expect(line.textAlign, 'maxWidth only bounds a CENTRED run').toBe('center')
     }
     expect(SHUTDOWN_TEXT_INSET_CSS, 'a zero inset would make the two bounds above vacuous').toBeGreaterThan(0)
-    // Three distinct baselines, so the lines do not stack on one another.
-    expect(new Set(lines.map((l) => l.y)).size).toBe(3)
+    // Four distinct baselines, so the lines do not stack on one another.
+    expect(new Set(lines.map((l) => l.y)).size).toBe(4)
   })
 
   it('draws the shutdown text ON the scrim, in a colour that is not the scrim', () => {
     const lines = drawWith(gameOverFrame({}))
       .filter((c): c is FillTextCommand => c.op === 'fillText')
-      .slice(-3)
+      .slice(-4)
     for (const line of lines) {
       expect(line.fillStyle, `"${line.text}" is invisible on its own scrim`).not.toBe(PALETTE.scrim)
       expect(line.fillStyle).toBe(PALETTE.land)
@@ -2999,18 +3080,58 @@ describe('the shutdown screen', () => {
     expect(log.slice(0, scrimIndex).filter((c) => c.op === 'fillText').length).toBe(3)
   })
 
-  it('still draws the ring of the destination that killed the city, under the scrim', () => {
-    // The screen has to answer WHICH destination, and pointing at it is
-    // stronger than naming it — which is why the scrim is translucent. A frozen
-    // meter is at 249/255, so the ring is nearly closed and it is the only one
-    // on the board.
-    const frame = frameWithOvercrowd([0, 249], true)
-    const log = drawWith(frame)
-    expect(onlyArc(log).x).toBeCloseTo(expectedCentreX(1), 5)
-    // Under the scrim, not over it: the dim applies to the ring too, so the
-    // text is the brightest thing on the screen.
+  it('draws the killer’s ring TWICE — once under the scrim and again over it, thicker', () => {
+    // **The screen has to answer WHICH destination, and pointing at it is
+    // stronger than naming it.** Under the scrim alone the ring is dimmed with
+    // everything else, so "which one" was inferable only from being the biggest
+    // arc on a board of eighteen buildings. Over it, the sentence and the thing
+    // it names are the two bright objects on the screen.
+    const log = drawWith(frameWithOvercrowd([0, 249], { gameOver: true, failedDest: 1 }))
     const scrimIndex = log.findIndex((c) => c.op === 'fillRect' && c.fillStyle === PALETTE.scrim)
-    expect(log.findIndex((c) => c.op === 'arc')).toBeLessThan(scrimIndex)
+    const found = arcs(log)
+    expect(found.length, 'the board pass plus the shutdown pass').toBe(2)
+
+    const under = found[0] as ArcCommand
+    const over = found[1] as ArcCommand
+    expect(log.findIndex((c) => c.op === 'arc'), 'the board ring is under').toBeLessThan(scrimIndex)
+    expect(log.map((c) => c.op).lastIndexOf('arc'), 'the shutdown ring is over').toBeGreaterThan(
+      scrimIndex,
+    )
+
+    // Same destination, same geometry, twice the stroke — so a mutation that
+    // redrew the WRONG ring, or the same one at the same weight, is separable.
+    for (const arc of [under, over]) {
+      expect(arc.x).toBeCloseTo(expectedCentreX(1), 5)
+      expect(arc.y).toBeCloseTo(expectedCentreY(1), 5)
+      expect(arc.endAngle - arc.startAngle).toBeCloseTo((249 / 255) * Math.PI * 2, 9)
+    }
+    expect(over.lineWidth).toBe(under.lineWidth * SHUTDOWN_RING_WIDTH_SCALE)
+    expect(SHUTDOWN_RING_WIDTH_SCALE, 'a scale of 1 draws the same ring twice').toBeGreaterThan(1)
+  })
+
+  it('draws the shutdown ring for the FAILED destination, not for whichever is biggest', () => {
+    // Two rings on the board, and the failed one is the SMALLER — so "the
+    // shutdown pass redraws the largest arc" and "it redraws `failedDest`" are
+    // separable, which they are not on a real board where the killer is at 249.
+    const log = drawWith(frameWithOvercrowd([60, 200], { gameOver: true, failedDest: 0 }))
+    const scrimIndex = log.findIndex((c) => c.op === 'fillRect' && c.fillStyle === PALETTE.scrim)
+    const over = arcs(log.slice(scrimIndex + 1))
+    expect(over.length).toBe(1)
+    const arc = over[0] as ArcCommand
+    expect(arc.x).toBeCloseTo(expectedCentreX(0), 5)
+    expect(arc.endAngle - arc.startAngle).toBeCloseTo((60 / 255) * Math.PI * 2, 9)
+  })
+
+  it('redraws nothing over the scrim when failedDest names no live destination', () => {
+    // -1 is representable on the frame and `destCount` bounds the other end;
+    // neither may index a typed array out of range and stroke a NaN arc.
+    for (const failedDest of [-1, 2, 99]) {
+      const log = drawWith(frameWithOvercrowd([0, 200], { gameOver: true, failedDest }))
+      const scrimIndex = log.findIndex((c) => c.op === 'fillRect' && c.fillStyle === PALETTE.scrim)
+      expect(arcs(log.slice(scrimIndex + 1)).length, `failedDest ${failedDest}`).toBe(0)
+      // ...and the board pass still drew its own, so this is not "nothing drew".
+      expect(arcs(log).length).toBe(1)
+    }
   })
 
   it('draws nothing of the shutdown when the run is live', () => {
@@ -3070,17 +3191,32 @@ describe('failedText: the fourth single-slot cache in this file', () => {
     // cannot.
     drawWith(gameOverFrame({ failedDest: 4 }))
     expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: -1 })))).toContain(
-      'DESTINATION -1 OVERCROWDED',
+      'NO ROAD REACHES DESTINATION -1',
     )
     expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 0 })))).toContain(
-      'DESTINATION 0 OVERCROWDED',
+      'DESTINATION 0 WENT UNSERVED',
     )
     expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 5 })))).toContain(
-      'DESTINATION 5 OVERCROWDED',
+      'NO ROAD REACHES DESTINATION 5',
     )
     // ...and back, so the cache is keyed rather than one-shot.
     expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 0 })))).toContain(
-      'DESTINATION 0 OVERCROWDED',
+      'DESTINATION 0 WENT UNSERVED',
+    )
+  })
+
+  it('is keyed on the ARM as well as the index, so the pair cannot go half-stale', () => {
+    // The `roadless` arm can flip for a fixed index, and a cache keyed on the
+    // index alone would keep the old sentence forever. Same index, twice, with
+    // only the road under the carpark changing.
+    const bare = gameOverFrame({ failedDest: 1, destCount: 2 })
+    expect(shutdownTexts(drawWith(bare))).toContain('NO ROAD REACHES DESTINATION 1')
+    const paved = gameOverFrame({ failedDest: 1, destCount: 2 })
+    paved.roads[paved.destCarpark[1] as number] = 4
+    expect(shutdownTexts(drawWith(paved))).toContain('DESTINATION 1 WENT UNSERVED')
+    // ...and back again, so it is a cache rather than a one-way latch.
+    expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 1, destCount: 2 })))).toContain(
+      'NO ROAD REACHES DESTINATION 1',
     )
   })
 })

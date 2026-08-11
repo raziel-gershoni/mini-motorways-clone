@@ -185,6 +185,13 @@ function fallbackStyle(background: string, colour: string): string {
 
 const FALLBACK_STYLE_OFF = fallbackStyle(ERASE_OFF_BG, ERASE_OFF_FG)
 const FALLBACK_STYLE_ON = fallbackStyle(ERASE_ON_BG, ERASE_ON_FG)
+/**
+ * The retired pill (M1e Task 9). `display:none` rather than `visibility:hidden`
+ * or an alpha: the element is `position: fixed` over the canvas, and anything
+ * short of removing it from layout leaves a dead target a thumb can still find
+ * on the shutdown screen.
+ */
+const FALLBACK_STYLE_HIDDEN = 'display:none'
 
 /**
  * `MainButton.setParams`'s two argument objects, **preallocated**.
@@ -300,6 +307,25 @@ export interface EraseControl {
   readonly sync: () => void
   /** How many times the surface has been written. A count, so "it re-rendered" is checkable. */
   readonly renders: number
+  /**
+   * Takes the control off the screen for good — §5.8's shutdown, M1e Task 9.
+   *
+   * **The scrim is drawn on the CANVAS and this control is not.** On Telegram it
+   * is the native full-width `MainButton`, which sits outside the webview's
+   * content area entirely; the DOM fallback is a `position: fixed` pill above
+   * it. Nothing the renderer does can dim either. So without this, a player
+   * whose city has just shut down sees a dimmed board reading TAP TO PLAY AGAIN
+   * with an undimmed, full-width, brightly coloured button under it offering to
+   * ERASE ROADS — an affordance for an action that no longer exists, in front of
+   * one that does. The pause bars come down on a shutdown frame for exactly this
+   * reason; this is the larger half of the same lesson.
+   *
+   * Idempotent, and **sticky**: `sync()` and `press()` cannot bring it back,
+   * because the run cannot come back either. A new run is a fresh `createGame`.
+   */
+  readonly retire: () => void
+  /** True once `retire()` has been called. */
+  readonly retired: boolean
 }
 
 /**
@@ -351,7 +377,14 @@ export function createEraseControl(deps: EraseControlDeps): EraseControl {
     }
   }
 
+  /** Sticky. Set only by `retire()`, never cleared — see `EraseControl.retire`. */
+  let retired = false
+
   function render(erase: boolean): void {
+    // The terminal guard, first and unconditional, in `Loop.setPaused`'s idiom:
+    // refusing only the presses would leave `sync()` able to re-show a button
+    // that must stay gone.
+    if (retired) return
     renders++
     if (mb !== null) {
       label = erase ? MAIN_BUTTON_LABEL_ON : MAIN_BUTTON_LABEL_OFF
@@ -394,6 +427,23 @@ export function createEraseControl(deps: EraseControlDeps): EraseControl {
     press,
     sync(): void {
       render(host.eraseMode)
+    },
+    retire(): void {
+      if (retired) return
+      // Set BEFORE the surface calls, so a `hide()` that throws on a partial
+      // client still leaves the control refusing every later render rather than
+      // half-retired and re-showable.
+      retired = true
+      // `hide()` and not `setParams({ is_visible: false })`: the params object
+      // is preallocated and frozen, and a second pair of them for one call is
+      // two more constants to keep in sync with the colours.
+      if (mb !== null) mb.hide?.()
+      // The fallback is a DOM pill; `display:none` is the only thing that takes
+      // a `position: fixed` element out of the player's way completely.
+      else if (element !== null) element.setAttribute('style', FALLBACK_STYLE_HIDDEN)
+    },
+    get retired(): boolean {
+      return retired
     },
     get erase(): boolean {
       return host.eraseMode

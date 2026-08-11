@@ -66,6 +66,24 @@ import {
  *     That column is the natural first road the player draws, 15 cells for 15
  *     of the 30 starting tiles, and it connects both colour-0 houses to both
  *     colour-0 destinations at once.
+ *
+ *     **It is also the WRONG first move, and that is measured rather than
+ *     argued (M1e Task 9).** Driving this exact stroke through the real pointer
+ *     and then running to failure:
+ *
+ *     ```
+ *       no road at all            death tick 5,580   killer D2   0 trips
+ *       column 8,  y=10..24 (15)  death tick 5,580   killer D2  21 trips
+ *       column 17, y=14..18  (5)  death tick 6,330   killer D0  24 trips
+ *       both                (20)  death tick 8,661   killer D3  71 trips
+ *     ```
+ *
+ *     **Fifteen tiles here buy ZERO ticks and do not even change which
+ *     destination kills the city**, while five tiles at column 17 buy 750 ticks
+ *     (25 s). The reason is D2: it is colour 1, east of the river, and nothing
+ *     on column 8 touches it — so the meter that ends the run is untouched by
+ *     the road this paragraph calls natural. Read the sentence above as a
+ *     description of what a player is *drawn to*, never as advice.
  *   - **House 0 is the FARTHER colour-0 house and house 1 the nearer**, so the
  *     nearer house sits at the HIGHER index. Along that column the four road
  *     costs are 30 / 50 / 60 / 140 (house1->D0, house1->D1, house0->D1,

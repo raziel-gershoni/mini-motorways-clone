@@ -350,10 +350,21 @@ export function createGame(deps: GameDeps): Game {
       // already a no-op past the failure — so this is a follower: it stops the
       // loop draining 30 ticks a second into a frozen buffer, and `end()` makes
       // that refusal sticky against the clock tap below, which forwards
-      // straight to `loop.setPaused`. Task 9 adds the input-side half and the
-      // way back out.
+      // straight to `loop.setPaused`.
+      //
+      // **`erase.retire()` is the second half, and it is here because the scrim
+      // cannot reach it.** The shutdown screen is painted on the canvas; the
+      // erase control is native `MainButton` chrome or a `position: fixed` DOM
+      // pill, both outside anything `drawFrame` can dim. Left alone, a dead
+      // board reading TAP TO PLAY AGAIN ships with a full-width bright button
+      // under it offering ERASE ROADS.
+      //
+      // The forward reference is the same shape as `loop`'s own above and safe
+      // for the same reason: this closure only ever runs from inside `advance`,
+      // which cannot happen before `createGame` returns.
       onGameOver: () => {
         loop.end()
+        erase.retire()
       },
     }),
     queue,
@@ -416,6 +427,14 @@ export function createGame(deps: GameDeps): Game {
     createFallback: deps.createFallback,
     preferFallback: deps.preferFallback,
   })
+
+  // The already-terminal-at-boot path's half of the same thing. `loop.end()`
+  // ran above, before this control existed, and `onGameOver` fires on an EDGE
+  // so it will never fire for this game — so the retire has to be reached from
+  // the state rather than from the event. Same reasoning as the `loop.end()`
+  // line itself, and unreachable from the two shipped layouts for the same
+  // reason: it is M3's restore that makes it live.
+  if (loop.over) erase.retire()
 
   return {
     state,

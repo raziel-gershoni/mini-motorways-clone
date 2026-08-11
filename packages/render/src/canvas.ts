@@ -232,24 +232,33 @@ export const RING_RADIUS_FRACTION = 0.62
  * px — visible on a phone, and thin enough that a nearly-closed ring still reads
  * as a ring rather than as a disc.
  *
- * **The rounding is a measured allocation fix, not tidiness, and it is worth the
- * paragraph because the number it produces is indistinguishable to the eye.**
- * `ctx.lineWidth` is a native accessor on a real `CanvasRenderingContext2D`, but
- * on any context that is a plain object — which is every test double in this
- * repo and the only shape the allocation harness ever profiles — it is a JS
- * property initialised to the Smi `0`. Storing `29 * 0.16 = 4.64` transitions
- * that field's representation to Double and allocates a fresh `HeapNumber` on
- * every store thereafter, and the transition itself deoptimises every function
- * in this file that had the old map in its feedback. Measured on
- * `drawAllocation.test.ts`'s city rig: **17.34 / 18.90 / 20.46 / 25.66 / 37.27
- * B/frame charged to this file on five consecutive runs**, against a floor of 4
- * and a pre-change baseline of 0.00-0.43. With the round, the same rig measures
- * **0.00**.
+ * **The floor at 1 is a correctness fix and the ROUND is not — this paragraph
+ * said otherwise and was wrong, so read the whole of it before citing it.**
  *
- * The floor at 1 is the other half: `fitCamera` clamps the tile at 1 for a
- * degenerate viewport, where `round(0.16)` is 0 — and a `lineWidth` of 0 paints
- * *nothing* on a real canvas, which is a ring that silently disappears rather
- * than a ring that is thin.
+ * The floor: `fitCamera` clamps the tile at 1 for a degenerate viewport, where
+ * `round(1 * 0.16)` is 0 — and a `lineWidth` of 0 paints *nothing* on a real
+ * canvas, which is a ring that silently disappears rather than one that is thin.
+ * That is real and it has a detector.
+ *
+ * The round: `ctx.lineWidth` is a native accessor on a real
+ * `CanvasRenderingContext2D` but a JS property initialised to the Smi `0` on
+ * every test double in this repo, so a fractional store transitions that
+ * field's representation to Double. The first draft of this comment called that
+ * a `HeapNumber` **per store** and cited *"17.34 / 18.90 / 20.46 / 25.66 / 37.27
+ * B/frame on five consecutive runs"*. **Both halves are wrong.** V8 mutates a
+ * Double field in place after the transition, so it is ONE allocation plus the
+ * deopt of every function holding the old map — and re-measured on the current
+ * rig, which writes a ring meter before every frame so the transition happens
+ * during WARMUP, the fractional form is **clean 5 of 5** and so is the rounded
+ * one. The original figures were real, but they measured a one-off landing
+ * inside a profiled window on a rig where the first ring did not appear until
+ * ~tick 2,500; they are a property of that rig, not of this expression.
+ *
+ * So the round stays on its own merits — a whole-CSS-pixel stroke is a crisper
+ * one at the DPR-2 cap, and avoiding a needless representation transition costs
+ * nothing — and **not** because a harness is watching it. See
+ * `drawAllocation.test.ts`'s `countingContext`, which says the same thing from
+ * the instrument's side.
  */
 export const RING_WIDTH_FRACTION = 0.16
 
@@ -313,8 +322,29 @@ export const SHUTDOWN_LINE_STRIDE_CSS = 34
  */
 export const SHUTDOWN_TEXT_INSET_CSS = 16
 
-/** The one line of the shutdown screen that carries no number, so it is preallocated whole. */
+/** The two shutdown lines that carry no number, so they are preallocated whole. */
 export const RESTART_TEXT = 'TAP TO PLAY AGAIN'
+
+/**
+ * The verb of the game, said out loud on the one screen where the player has
+ * been proved not to know it.
+ *
+ * Before this line the failure state contained none of the words "road",
+ * "connect" or "draw" — it named a building and a number and left the remedy to
+ * be inferred. `startingCity.ts` measures what inference produces: the road a
+ * player is most drawn to on the shipped city buys **zero ticks**.
+ */
+export const ADVICE_TEXT = 'CONNECT EVERY DESTINATION WITH A ROAD'
+
+/**
+ * How much thicker the killer's ring is drawn over the scrim than under it.
+ *
+ * Two, because the ring is competing with a 24 px bold line for attention and
+ * because the scrim is between the player and the board but not between them
+ * and this — anything less reads as the same ring rather than as the answer to
+ * the sentence above it.
+ */
+export const SHUTDOWN_RING_WIDTH_SCALE = 2
 
 /**
  * `sim/buildings.ts`'s orientation numbering, N and S only — the two values that
@@ -416,7 +446,37 @@ function tilesText(tilesLeft: number): string {
 }
 
 /**
- * "DESTINATION 3 OVERCROWDED", memoised on the index — **the fourth instance of
+ * The line naming what died — **and the word it does NOT use is the point.**
+ *
+ * The first version of this screen read `DESTINATION 2 OVERCROWDED`, and
+ * "overcrowded" describes too much traffic. Measured on both shipped boards,
+ * that is the opposite of what happens: on the demo board the destination that
+ * ends the run has **zero draining frames** — its meter climbs from tick 3,492
+ * to the end and never once falls, i.e. it is never served at all — and on the
+ * starting city all four rings behave the same way. A player who reads
+ * "overcrowded" concludes the roads are congested and draws fewer of them. The
+ * sharpest evidence that this matters: the 15-tile column-8 road that
+ * `startingCity.ts` calls *"the natural first road the player draws"* buys
+ * **zero ticks**, while five tiles somewhere else buy 750.
+ *
+ * So the line says which of the two things happened, and it is decided from
+ * data `render` already holds rather than from new state:
+ *
+ * - **`NO ROAD REACHES DESTINATION n`** when the destination's carpark carries
+ *   no road bit. A car drives *onto* the carpark and the flow field relaxes over
+ *   the road graph, so a bare carpark is a destination nothing can ever serve —
+ *   which is the shape a spawned building has by construction, and the shape all
+ *   four of the starting city's have. The remedy is literally a road.
+ * - **`DESTINATION n WENT UNSERVED`** otherwise. Not "overcrowded": the meter
+ *   integrates time spent over pin capacity, so what it measures is demand that
+ *   went unmet, in the congested case as much as in the abandoned one. This is
+ *   the demo board's case — D2's carpark IS on the network and it still received
+ *   nothing.
+ *
+ * Both arms are reachable on the boards that ship, which is why the split is a
+ * split and not a branch with a dead side.
+ *
+ * Memoised on the index and the arm together — **the fourth instance of
  * this file's single-slot cache, and by a wide margin the cheapest.**
  * `scoreText` rebuilds whenever the score moves; `failedDest` changes at most
  * once per run, so after the first shutdown frame this is one integer
@@ -446,15 +506,42 @@ function tilesText(tilesLeft: number): string {
  * nothing reads is dead weight in every frame's type and a false claim in
  * whatever the plan promised the shutdown screen would say.
  */
-let cachedFailedDest = -2
+let cachedFailedKey = -2
 let cachedFailedText = ''
 
-function failedText(d: number): string {
-  if (d !== cachedFailedDest) {
-    cachedFailedDest = d
-    cachedFailedText = `DESTINATION ${d} OVERCROWDED`
+function failedText(d: number, roadless: boolean): string {
+  // One key for both inputs, so the pair cannot go half-stale: `d * 2 + arm`.
+  // The `roadless` arm can genuinely flip for a fixed `d` — the player may lay
+  // a road across the carpark while the shutdown screen is up on a future
+  // in-place restart — and a cache keyed on the index alone would keep the old
+  // sentence forever.
+  const key = d * 2 + (roadless ? 1 : 0)
+  if (key !== cachedFailedKey) {
+    cachedFailedKey = key
+    cachedFailedText = roadless
+      ? `NO ROAD REACHES DESTINATION ${d}`
+      : `DESTINATION ${d} WENT UNSERVED`
   }
   return cachedFailedText
+}
+
+/**
+ * Does destination `d`'s carpark carry no road? See `failedText`.
+ *
+ * `-1` is `carparkCell`'s off-grid sentinel and counts as roadless — a bay that
+ * is not on the board is not one anything can drive to.
+ */
+function carparkIsRoadless(frame: RenderFrame, d: number): boolean {
+  // **The index is guarded as well as the cell, and fails CLOSED.** `failedDest`
+  // is -1 on a live frame and is bounded above only by `destCount`, and without
+  // this line `destCarpark[-1]` is `undefined` — which is neither `< 0` nor,
+  // after indexing `roads` with it, `=== 0`, so an out-of-range index quietly
+  // took the *reachable* arm and asserted that a destination which does not
+  // exist was on the road network. A slot with no carpark is one nothing can
+  // drive to, which is the roadless arm by definition.
+  if (d < 0 || d >= frame.destCount) return true
+  const carpark = frame.destCarpark[d] as number
+  return carpark < 0 || (frame.roads[carpark] as number) === 0
 }
 
 // ---------------------------------------------------------------------------
@@ -661,9 +748,24 @@ function drawShutdown(
   ctx.fillStyle = palette.scrim
   ctx.fillRect(0, 0, right, gridBottom)
 
+  // **The killer's ring, redrawn OVER the scrim and thicker.** Under the scrim
+  // it is dimmed with everything else, so "which destination" was inferable
+  // only from being the biggest arc on a board of 18 buildings. Over it, the
+  // sentence below and the thing it names are the two bright objects on the
+  // screen, and the player's eye goes from one to the other without counting.
+  // Guarded on the live prefix, because `failedDest` is -1 on a frame no other
+  // line of this function can be reached from.
+  const failed = frame.failedDest
+  if (failed >= 0 && failed < frame.destCount) {
+    strokeRing(ctx, frame, palette, failed, SHUTDOWN_RING_WIDTH_SCALE)
+  }
+
   const cx = right / 2
   const cy = (gridTop + gridBottom) / 2
   const maxWidth = right - 2 * SHUTDOWN_TEXT_INSET_CSS
+  // Four lines, centred as a block: `cy` is the middle of the run, so the top
+  // line sits 1.5 strides above it rather than 1.
+  const top = cy - 1.5 * SHUTDOWN_LINE_STRIDE_CSS
 
   ctx.font = SHUTDOWN_FONT
   ctx.textAlign = 'center'
@@ -672,12 +774,20 @@ function drawShutdown(
   // choice `BOOT_FAILURE_STYLE` makes for the same reason: the panel must not
   // be mistakable for part of the board.
   ctx.fillStyle = palette.land
-  // In the order a reader needs them: what happened, what it was worth, what to
-  // do. `maxWidth` on every line, so a long label condenses instead of leaving
-  // the canvas — the same construction guarantee `fillCentred` gives the HUD.
-  ctx.fillText(failedText(frame.failedDest), cx, cy - SHUTDOWN_LINE_STRIDE_CSS, maxWidth)
-  ctx.fillText(scoreText(frame.score), cx, cy, maxWidth)
-  ctx.fillText(RESTART_TEXT, cx, cy + SHUTDOWN_LINE_STRIDE_CSS, maxWidth)
+  // In the order a reader needs them: what happened, **what to do about it**,
+  // what it was worth, and how to start again.
+  //
+  // **The third line is the one the first version was missing.** A failure
+  // state whose text contains none of the words "road", "connect" or "draw"
+  // leaves the player to infer the verb of the game from a noun, and the
+  // measurement in `startingCity.ts` is what happens when they infer wrong.
+  //
+  // `maxWidth` on every line, so a long label condenses instead of leaving the
+  // canvas — the same construction guarantee `fillCentred` gives the HUD.
+  ctx.fillText(failedText(failed, carparkIsRoadless(frame, failed)), cx, top, maxWidth)
+  ctx.fillText(ADVICE_TEXT, cx, top + SHUTDOWN_LINE_STRIDE_CSS, maxWidth)
+  ctx.fillText(scoreText(frame.score), cx, top + 2 * SHUTDOWN_LINE_STRIDE_CSS, maxWidth)
+  ctx.fillText(RESTART_TEXT, cx, top + 3 * SHUTDOWN_LINE_STRIDE_CSS, maxWidth)
 }
 
 /**
@@ -869,45 +979,67 @@ function drawDestinations(ctx: DrawContext, frame: RenderFrame, palette: Palette
     // copy of it — the catalogue's most expensive bounds finding is that two
     // loops mean two bounds and one fixture defeating both.
     //
-    // **What the ring says is not "this destination is busy".** The meter
-    // integrates while a destination is over its pin capacity and unwinds at
-    // 2 s per second while it is not, so a SERVED destination's ring rises and
-    // falls and an UNREACHABLE one's rises monotonically and never drains. The
-    // second shape is the dominant failure on both shipped boards — a spawned
-    // destination's carpark is road-free by construction, so it takes zero
-    // arrivals ever and nothing on the board looks wrong while it kills the
-    // city. A ring that only ever climbs is the one thing on screen that says
-    // which building to connect, and it is the reason the ring is drawn AT the
-    // building rather than as a bar in the HUD.
+    // **What the ring says, measured rather than reasoned.** The meter
+    // integrates while a destination is over its pin capacity and unwinds while
+    // it is not, so a served destination's ring *can* fall — but on both shipped
+    // boards it does not: every destination that ends a run has **zero draining
+    // frames**, and the only demo ring that drains peaks at 19/255 in the last
+    // 25 s. So a ring here means "this destination is not being served and it
+    // will end the run", full stop. Drawn AT the building rather than as a bar
+    // in the HUD for exactly that reason — the answer to "which one" has to be a
+    // place, not a number.
     //
     // Zero draws nothing: an empty ring on every destination is 16 rings of
     // noise and the one that matters stops standing out.
     const meter = frame.destOvercrowd[d] as number
-    if (meter !== 0) {
-      // `max` of the two, which is 3 for both orientations today — see
-      // `RING_RADIUS_FRACTION` for why it is written derived anyway.
-      const span = footprintW > footprintH ? footprintW : footprintH
-      ctx.strokeStyle = palette.overcrowd
-      // A whole CSS pixel, and an integer store. See `RING_WIDTH_FRACTION`:
-      // the fractional form charged this file 17-37 B/frame under the
-      // allocation harness, measured, because a double into a Smi-shaped
-      // property boxes on every store.
-      ctx.lineWidth = ringWidth(tile)
-      ctx.beginPath()
-      // `beginPath` per ring, not per frame: without it every ring after the
-      // first joins the previous one's subpath and the board grows a web of
-      // straight lines between destinations.
-      ctx.arc(
-        px + (footprintW * tile) / 2,
-        py + (footprintH * tile) / 2,
-        span * tile * RING_RADIUS_FRACTION,
-        RING_START_ANGLE,
-        RING_START_ANGLE + (meter / RING_FULL) * TAU,
-      )
-      // `arc` alone appends to the path and paints nothing.
-      ctx.stroke()
-    }
+    if (meter !== 0) strokeRing(ctx, frame, palette, d, 1)
   }
+}
+
+/**
+ * One overcrowd ring, around destination `d`'s footprint.
+ *
+ * Shared by phase 6 and phase 11, and shared rather than copied for the reason
+ * `drawMaskLayer` is called twice instead of written twice: two copies would be
+ * two geometries, and the second one's only protection would be a copied test.
+ * `widthScale` is the only thing the two call sites differ by — the shutdown
+ * screen redraws the killer's ring thicker, over the scrim.
+ */
+function strokeRing(
+  ctx: DrawContext,
+  frame: RenderFrame,
+  palette: Palette,
+  d: number,
+  widthScale: number,
+): void {
+  const camera = frame.camera
+  const tile = camera.tileSize
+  const cell = frame.destCell[d] as number
+  const orientation = frame.destOrientation[d] as number
+  const footprintW = destFootprintW(orientation)
+  const footprintH = destFootprintH(orientation)
+  const px = gridToScreenX(camera, cell % frame.gridW)
+  const py = gridToScreenY(camera, Math.floor(cell / frame.gridW))
+  // `max` of the two, which is 3 for both orientations today — see
+  // `RING_RADIUS_FRACTION` for why it is written derived anyway.
+  const span = footprintW > footprintH ? footprintW : footprintH
+  ctx.strokeStyle = palette.overcrowd
+  // A whole CSS pixel, and an integer store — see `RING_WIDTH_FRACTION`, and
+  // note that no allocation harness is watching this.
+  ctx.lineWidth = ringWidth(tile) * widthScale
+  // `beginPath` per ring, not per frame: without it every ring after the first
+  // joins the previous one's subpath and the board grows a web of straight
+  // lines between destinations.
+  ctx.beginPath()
+  ctx.arc(
+    px + (footprintW * tile) / 2,
+    py + (footprintH * tile) / 2,
+    span * tile * RING_RADIUS_FRACTION,
+    RING_START_ANGLE,
+    RING_START_ANGLE + ((frame.destOvercrowd[d] as number) / RING_FULL) * TAU,
+  )
+  // `arc` alone appends to the path and paints nothing.
+  ctx.stroke()
 }
 
 /**

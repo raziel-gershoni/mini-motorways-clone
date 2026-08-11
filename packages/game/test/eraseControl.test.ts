@@ -56,6 +56,7 @@ function installTelegram(version: string | null, complete = true): MainButtonRec
       handler = h
     },
     show: () => calls.push('show'),
+    hide: () => calls.push('hide'),
   }
   if (!complete) delete mb.show
   const webApp: Record<string, unknown> = { MainButton: mb }
@@ -468,5 +469,93 @@ describe('the DOM fallback does not cover the pause control', () => {
   it('is at least a 44 px touch target, and inset from the edge', () => {
     expect(FALLBACK_MAX_WIDTH_CSS).toBeGreaterThanOrEqual(44)
     expect(FALLBACK_RIGHT_CSS).toBeGreaterThanOrEqual(HUD_PAD_CSS)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The control comes off the screen when the city does — M1e Task 9
+// ---------------------------------------------------------------------------
+
+describe('retire(): the shutdown screen cannot dim what is not on the canvas', () => {
+  /**
+   * **Why this exists.** §5.8's shutdown paints a scrim over the board and
+   * writes TAP TO PLAY AGAIN across it. This control is not on the canvas — on
+   * Telegram it is the native full-width `MainButton`, which lives outside the
+   * webview's content area entirely, and the fallback is a `position: fixed`
+   * pill above it. Neither can be dimmed by anything `drawFrame` does. Left
+   * alone, a player whose city has just shut down sees a dimmed board offering
+   * one action and an undimmed, bright, full-width button offering another.
+   *
+   * The pause bars come down on a shutdown frame for exactly this reason; this
+   * is the larger half of the same lesson, and it was missed the first time.
+   */
+  it('hides the MainButton, and cannot be talked back into showing it', () => {
+    const mb = installTelegram('8.0')
+    const control = createEraseControl({ host: fakeHost(), createFallback: NO_FALLBACK })
+    expect(control.surface).toBe(EraseControlSurface.MAIN_BUTTON)
+    expect(mb.calls, 'vacuity: it was shown at boot').toContain('show')
+    expect(control.retired).toBe(false)
+
+    control.retire()
+    expect(control.retired).toBe(true)
+    expect(mb.calls.at(-1), 'the last thing the button was told was to go away').toBe('hide')
+
+    // **Sticky, in `Loop.end()`'s idiom.** `sync()` is called by `main.ts` on a
+    // restored mode and `press()` by the button's own handler; neither may
+    // bring back a control whose run is over, and a guard on only one of them
+    // would leave the pair able to disagree.
+    const after = mb.calls.length
+    control.sync()
+    control.press()
+    mb.press()
+    expect(mb.calls.length, 'something re-rendered a retired control').toBe(after)
+    expect(control.retired).toBe(true)
+  })
+
+  it('takes the DOM fallback out of layout, not merely out of sight', () => {
+    // `display:none` rather than an alpha or `visibility`: the pill is
+    // `position: fixed` over the canvas, and anything short of removing it from
+    // layout leaves a dead target a thumb can still find on the shutdown screen.
+    // No Telegram at all — `pnpm dev` in a browser, and the only surface where
+    // the pill is what the player actually has.
+    const element = fallbackRecorder()
+    const control = createEraseControl({ host: fakeHost(), createFallback: () => element })
+    expect(control.surface).toBe(EraseControlSurface.DOM_NO_TELEGRAM)
+    const styleOf = (): string | undefined =>
+      element.calls.filter((c) => c.startsWith('style=')).at(-1)?.slice('style='.length)
+    expect(styleOf(), 'vacuity: it was styled at boot').toBeTruthy()
+    expect(styleOf()).not.toBe('display:none')
+
+    control.retire()
+    expect(styleOf()).toBe('display:none')
+    // ...and it stays gone.
+    control.sync()
+    control.press()
+    expect(styleOf()).toBe('display:none')
+  })
+
+  it('is idempotent, and survives a surface that has no hide at all', () => {
+    // A partial client is the norm this file is built for: `createEraseControl`
+    // never throws on any client, and retiring must not be the one thing that
+    // does. `complete: false` deletes `show`; the optional-call form covers a
+    // missing `hide` the same way.
+    const mb = installTelegram('8.0', false)
+    const control = createEraseControl({ host: fakeHost(), createFallback: NO_FALLBACK })
+    expect(() => {
+      control.retire()
+      control.retire()
+    }).not.toThrow()
+    expect(control.retired).toBe(true)
+    expect(mb.calls.filter((c) => c === 'hide').length, 'once, not twice').toBeLessThanOrEqual(1)
+  })
+
+  it('declines quietly where there is no surface at all', () => {
+    installTelegram(null)
+    const control = createEraseControl({ host: fakeHost(), createFallback: NO_FALLBACK })
+    expect(control.surface).toBe(EraseControlSurface.NONE)
+    expect(() => {
+      control.retire()
+    }).not.toThrow()
+    expect(control.retired).toBe(true)
   })
 })

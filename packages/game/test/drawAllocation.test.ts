@@ -280,10 +280,23 @@ function countingContext(counts: DrawCounts, surfaces: { ghost: unknown }): Game
   const ctx: GameContext = {
     fillStyle: '',
     strokeStyle: '',
-    // **A Smi, and it must stay one.** `canvas.ts` rounds the ring's stroke
-    // width to a whole CSS pixel precisely so this field never transitions to a
-    // Double representation — the fractional form boxed a `HeapNumber` per ring
-    // and charged this file 17-37 B/frame. See `RING_WIDTH_FRACTION`.
+    // **A Smi — and THIS HARNESS CANNOT TELL YOU WHETHER IT STAYS ONE.**
+    //
+    // `canvas.ts` rounds the ring's stroke width so this field never transitions
+    // to a Double representation. An earlier version of this comment said the
+    // budget below was what caught the fractional form. Measured, it is not:
+    // reverting `ringWidth` to `tile * RING_WIDTH_FRACTION` leaves this file
+    // **clean on 5 of 5 runs**, because the transition is a ONE-OFF (V8 mutates
+    // a Double field in place afterwards) and this rig writes a ring meter
+    // before every frame — so the ring draws from frame 1, the transition
+    // happens inside `drive(WARMUP_FRAMES)`, and the minimum over three windows
+    // never sees it. The change that made the ring budget non-vacuous is the
+    // same change that hid this.
+    //
+    // The detector that DOES exist is
+    // `render/test/canvas.test.ts > keeps the stroke width a whole CSS pixel on
+    // every tile size, and never zero`. A claim about the instrument needs the
+    // same scrutiny as a claim about the code, and this one did not have it.
     lineWidth: 0,
     beginPath: () => undefined,
     arc: () => {

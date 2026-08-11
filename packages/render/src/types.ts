@@ -329,14 +329,21 @@ export interface RenderFrame {
    * unreachable and the spec's 2 s "hidden grace" is what the player does not
    * see. `render` never learns the milli-tick figures; `game` folds them.
    *
-   * **What a filling ring MEANS is not "this destination is busy".** The meter
-   * integrates while a destination is over its pin capacity and unwinds while
-   * it is not, so a served destination's ring rises and falls and an
-   * UNREACHABLE one's ring rises monotonically and never drains. That second
-   * shape is the dominant failure on the shipped boards — a spawned
-   * destination's carpark is road-free by construction, so it takes zero
-   * arrivals ever — and the ring is the only thing on screen that distinguishes
-   * the two.
+   * **What a filling ring MEANS is not "this destination is busy" — and it is
+   * not the two-state gauge an earlier version of this comment described
+   * either.** The meter integrates while a destination is over its pin capacity
+   * and unwinds at 2,000 milli-ticks a tick while it is not, so *in principle* a
+   * served destination's ring rises and falls while a starved one only rises.
+   *
+   * **Measured on both shipped boards, a player never sees the falling half.**
+   * The destination that ends the run has **zero draining frames** on the demo
+   * board and on the starting city; the only demo ring that drains at all peaks
+   * at 19/255 — 27 degrees of arc — inside the last 25 s of a 223 s run. So on
+   * the boards that ship, a ring means one thing: *this destination is not being
+   * served, and it is what will end the run.* That is a stronger signal than the
+   * two-state reading, not a weaker one — it is simply not the reading the
+   * comment used to claim. `integration.test.ts`'s ring-timing case pins the
+   * zero-drain measurement so the claim has an observer.
    */
   readonly destOvercrowd: Uint8Array
   /** Live cars only. */
