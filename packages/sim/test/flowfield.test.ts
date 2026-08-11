@@ -1,15 +1,21 @@
 import { describe, it, expect } from 'vitest'
-import { parseMap, ORTHO_COST, DIAG_COST, type MapData } from '@laneways/shared'
-import { createState, nonZeroWord, type GameState } from '../src/state'
+import { parseMap, ORTHO_COST, DIAG_COST, MAX_BLOCKED_TICKS, type MapData } from '@laneways/shared'
+import { createState, hashState, isGameOver, nonZeroWord, H_SCORE, type GameState } from '../src/state'
 import { createWorld, type WorldData } from '../src/world'
-import { placeRoad, DIR_COUNT, DX, DY } from '../src/roads'
+import { placeRoad, DIR_COUNT, DX, DY, LANE_COUNT } from '../src/roads'
 import { seedFromString, randomBelow } from '../src/rng'
 import { edgeCost } from '../src/graph'
 import { hashBytes } from '../src/hash'
+import { FREE } from '../src/blocking'
+import { placeDestination, placeHouse, ORIENTATION_S, DEST_KIND_SQUARE } from '../src/buildings'
+import { assembleSources } from '../src/dispatch'
+import { step, type TickAction } from '../src/step'
 import {
   createFlowField,
   createFlowFields,
   createScratch,
+  CT_REBUILDS,
+  CT_SYNCS,
   DISTINCT_EDGE_COSTS,
   INF,
   NB,
@@ -21,7 +27,11 @@ import {
   type Scratch,
 } from '../src/scratch'
 import { computeFlowField, hashSources, hashFieldInputRegions, syncFields, fieldFor } from '../src/flowfield'
-import { createFieldInputRanges } from '../src/regions'
+import {
+  createFieldInputRanges,
+  isFieldIrrelevantRegion,
+  FIELD_IRRELEVANT_REGIONS,
+} from '../src/regions'
 
 /**
  * Fixtures and helpers shared across this file. All-LAND boards throughout:
@@ -1375,5 +1385,405 @@ describe('fieldFor: staleness', () => {
 
     const mismatchedWorld: WorldData = { ...world, cells: world.cells + 1 }
     expect(() => fieldForColour(state, mismatchedWorld, fields, 0, scratch)).toThrow(/dist\.length/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Routing stays congestion-blind — the detector the field golden cannot be
+// (M1e Task 11)
+// ---------------------------------------------------------------------------
+
+/**
+ * **Spec §1/§6 make the omission the game: path cost carries no congestion
+ * term, so a queue never re-routes anybody. This is a REQUIREMENT, not a
+ * deferral** — M1d recorded "routing and movement now disagree" as a gap and it
+ * is not one; the field prices LENGTH and movement prices TRAFFIC, on purpose
+ * (`cars.ts`'s module comment derives the same split for the lane-speed
+ * multipliers). What M1e owes is not a fix. It is a **detector**, because
+ * nothing in the repo could see the property being broken.
+ *
+ * **Why the field golden `252514232` cannot be that detector: its fixture has
+ * no cars at all.** `rollback.test.ts`'s "field golden" builds a road network by
+ * hand, seeds two sources off `firstRoadedCells`, and never calls `step` — so
+ * `occupancy` is entirely `FREE`, `carBlockedTicks` entirely 0, and an
+ * occupancy-dependent edge cost would add zero to every relaxation and leave
+ * that hash byte-identical. The same is true of every other golden that folds
+ * field bytes. A golden pins the answer on ONE input; congestion-blindness is a
+ * statement about a family of inputs the goldens never vary.
+ *
+ * So the tests below run a board that is genuinely, measurably jammed and then
+ * ask whether the field can tell. Three arms, and they are three because they
+ * fail to different mutations — proved in the mutation table in this task's
+ * report, not asserted here:
+ *
+ *   1. **The rebuild arm.** Force a full rebuild of every colour under each of
+ *      several wildly different occupancies and compare `dist`/`dir` byte for
+ *      byte against the same board with an EMPTY occupancy. This is the arm
+ *      that kills "`computeFlowField` reads occupancy".
+ *   2. **The staleness-key arm.** Change occupancy and run the ordinary
+ *      `assembleSources` + `syncFields` a tick does: `CT_REBUILDS` must not
+ *      move. This is the arm that kills "`occupancy` was reclassified
+ *      FIELD_INPUT" — and it is worth stating plainly that **arm 2 alone cannot
+ *      see arm 1's mutation**, because a field that is never rebuilt is
+ *      trivially unchanged. That is exactly the trap the brief's own sketch
+ *      falls into, and the reason arm 1 exists.
+ *   3. **The derived arm.** Arms 1 and 2 name `occupancy` by hand, and a
+ *      hand-list is the artefact that lets the next region through. Arm 3
+ *      scrambles EVERY region `regions.ts` classifies FIELD_IRRELEVANT, from
+ *      the frozen list itself, so a region added later is swept without anyone
+ *      remembering to add it here.
+ */
+
+const CB_W = 16
+const CB_H = 20
+/** The corridor's column, and the only column with any road on it. */
+const CB_X = 8
+/** The carpark row: the top of the corridor, and the bottleneck. */
+const CB_CARPARK_Y = 4
+const CB_FIRST_HOUSE_Y = 6
+const CB_HOUSE_COUNT = 8
+const CB_BOTTOM_Y = CB_FIRST_HOUSE_Y + CB_HOUSE_COUNT - 1
+/**
+ * Long enough to be deep in the jam and short enough that the overcrowd meter
+ * has not ended the run: measured at 400 ticks this rig has 3,030 refusals, 14
+ * of its 16 cars refused on one tick, 44 completed trips and
+ * `destOvercrowd[0] = 16,184` against `OVERCROWD_FAIL_MILLITICKS` = 2,550,000.
+ * The liveness assertions below re-derive all of that rather than trusting it.
+ */
+const CB_TICKS = 400
+/** Written directly, exactly as a pin fire would — a big supply, so the jam is the only thing limiting throughput. */
+const CB_PIN_TOPUP = 255
+const CB_PIN_FLOOR = 60
+
+interface BlindRig {
+  readonly state: GameState
+  readonly world: WorldData
+  readonly fields: readonly FlowField[]
+  readonly scratch: Scratch
+  /** Refused entries over the drive: ticks on which some car's `carBlockedTicks` rose. */
+  readonly refusals: number
+  /** The most cars refused on any single tick — this fixture's queue depth. */
+  readonly deepestSimultaneousRefusal: number
+}
+
+function cbCell(x: number, y: number): number {
+  return y * CB_W + x
+}
+
+/**
+ * A one-wide dead-end corridor with eight houses standing on it and one
+ * carpark at the top — the same shape as `game/test/jamFixture.ts`, rebuilt
+ * here because `sim` cannot import from `game` and because this file needs the
+ * `fields`/`scratch` handles that fixture keeps private.
+ *
+ * `maxHouses` is exactly 8 and `maxDestinations` exactly 1, so `runSpawn` can
+ * place nothing: every car in the run comes from the eight authored houses and
+ * the jam is the fixture's, not the spawner's.
+ */
+function buildJammedRig(): BlindRig {
+  const rows = Array.from({ length: CB_H }, () => '.'.repeat(CB_W))
+  const map = parseMap('congestion-blind', rows, 9999, CB_HOUSE_COUNT, 1, 2)
+  const world = createWorld(map)
+  const state = createState('congestion-blind', map)
+  const scratch = createScratch(
+    world.cells,
+    map.groupCount,
+    map.maxDestinations,
+    createFieldInputRanges(map),
+  )
+  const fields = createFlowFields(map.groupCount, world.cells)
+  if (!placeDestination(state, world, cbCell(CB_X, 1), ORIENTATION_S, 0, DEST_KIND_SQUARE)) {
+    throw new Error('congestion-blind rig: the destination did not place')
+  }
+  for (let y = CB_FIRST_HOUSE_Y; y <= CB_BOTTOM_Y; y++) {
+    if (!placeHouse(state, world, cbCell(CB_X, y), 0)) {
+      throw new Error(`congestion-blind rig: no house at y=${y}`)
+    }
+  }
+  const build: TickAction[] = []
+  for (let y = CB_CARPARK_Y; y < CB_BOTTOM_Y; y++) {
+    build.push({ kind: 'place', a: cbCell(CB_X, y), b: cbCell(CB_X, y + 1) })
+  }
+  step(state, world, fields, scratch, { actions: build })
+  state.destPins[0] = CB_PIN_TOPUP
+
+  const cars = state.carPhase.length
+  const prevBlocked = new Int32Array(cars)
+  let refusals = 0
+  let deepest = 0
+  for (let t = 0; t < CB_TICKS; t++) {
+    if ((state.destPins[0] as number) < CB_PIN_FLOOR) state.destPins[0] = CB_PIN_TOPUP
+    step(state, world, fields, scratch, { actions: [] })
+    let simultaneous = 0
+    for (let c = 0; c < cars; c++) {
+      const blocked = state.carBlockedTicks[c] as number
+      // A refusal is exactly a rise in `carBlockedTicks` — `advanceCar` calls
+      // `noteEntryRefused` on every refused entry and nothing else writes the
+      // region, so this counts `canEnter`'s refusals from production behaviour
+      // rather than by re-asking the oracle at a moment `runMovement` would not.
+      if (blocked > (prevBlocked[c] as number)) {
+        refusals++
+        simultaneous++
+      }
+      prevBlocked[c] = blocked
+    }
+    if (simultaneous > deepest) deepest = simultaneous
+  }
+  return { state, world, fields, scratch, refusals, deepestSimultaneousRefusal: deepest }
+}
+
+/** The occupancy-shaped regions, as one value, so a variant is a full specification rather than a diff against whatever ran last. */
+interface Congestion {
+  readonly name: string
+  readonly occupancy: Int16Array
+  readonly carBlockedTicks: Int16Array
+  readonly ghostMask: Uint8Array
+  readonly ghostCommitted: Uint8Array
+}
+
+function captureCongestion(name: string, state: GameState): Congestion {
+  return {
+    name,
+    occupancy: Int16Array.from(state.occupancy),
+    carBlockedTicks: Int16Array.from(state.carBlockedTicks),
+    ghostMask: Uint8Array.from(state.ghostMask),
+    ghostCommitted: Uint8Array.from(state.ghostCommitted),
+  }
+}
+
+function applyCongestion(state: GameState, c: Congestion): void {
+  state.occupancy.set(c.occupancy)
+  state.carBlockedTicks.set(c.carBlockedTicks)
+  state.ghostMask.set(c.ghostMask)
+  state.ghostCommitted.set(c.ghostCommitted)
+}
+
+/** Every colour's `dist` and `dir` bytes, concatenated in colour order. */
+function fieldBytes(fields: readonly FlowField[]): Uint8Array {
+  let total = 0
+  for (const f of fields) total += f.dist.byteLength + f.dir.byteLength
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const f of fields) {
+    out.set(new Uint8Array(f.dist.buffer, f.dist.byteOffset, f.dist.byteLength), offset)
+    offset += f.dist.byteLength
+    out.set(new Uint8Array(f.dir.buffer, f.dir.byteOffset, f.dir.byteLength), offset)
+    offset += f.dir.byteLength
+  }
+  return out
+}
+
+/**
+ * `'identical'`, or the first byte that differs with both values — never a
+ * bare boolean. A `toEqual` over 2,560 bytes prints a wall; the failure that
+ * matters here is "which cell's distance moved, and by how much".
+ */
+function firstFieldDifference(a: Uint8Array, b: Uint8Array): string {
+  if (a.length !== b.length) return `length ${a.length} vs ${b.length}`
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return `byte ${i}: ${a[i]} vs ${b[i]}`
+  }
+  return 'identical'
+}
+
+/**
+ * A full rebuild of every colour, through the production path, with the
+ * staleness stamps zeroed first so the rebuild cannot be skipped.
+ *
+ * **Zeroing the stamps is what makes arm 1 an arm at all.** Without it
+ * `syncFields` sees an unchanged FIELD_INPUT hash, returns immediately, and the
+ * comparison below is between a buffer and itself. `assembleSources` is called
+ * too, exactly as `step` does, so a future edit that made SOURCE ASSEMBLY read
+ * occupancy is caught here as well as one that made the relaxation read it.
+ */
+function forceRebuild(rig: BlindRig): void {
+  for (const f of rig.fields) {
+    f.builtFromFieldInputs = 0
+    f.builtFromSources = 0
+  }
+  assembleSources(rig.state, rig.world, rig.scratch)
+  syncFields(rig.state, rig.world, rig.fields, rig.scratch)
+}
+
+describe('routing stays congestion-blind (M1e Task 11)', () => {
+  it('the fixture is a genuine jam and the sim is still live — vacuity, and it must come first', () => {
+    const rig = buildJammedRig()
+
+    // 1. There must be a jam, or every assertion below is made over an empty
+    //    board and proves nothing.
+    expect(rig.refusals, 'no entry was ever refused: this board is not jammed').toBeGreaterThan(0)
+    expect(
+      rig.deepestSimultaneousRefusal,
+      'no tick refused three cars at once: this is a stall, not a queue',
+    ).toBeGreaterThanOrEqual(3)
+    let occupiedSlots = 0
+    for (let i = 0; i < rig.state.occupancy.length; i++) {
+      if ((rig.state.occupancy[i] as number) !== FREE) occupiedSlots++
+    }
+    expect(occupiedSlots, 'no lane slot is claimed: there is nothing for the field to be blind to').toBeGreaterThanOrEqual(6)
+
+    // 2. And the sim must be LIVE. "Byte-identical under any occupancy" is
+    //    trivially true of a frozen buffer, and §5.8's shutdown makes `step` a
+    //    no-op the moment a destination's timer fills — which this rig, pinned
+    //    at 255, would eventually reach.
+    expect(isGameOver(rig.state), 'the run ended: every property below is about a corpse').toBe(false)
+    expect(rig.state.header[H_SCORE], 'no trip completed: the corridor stopped rather than ground').toBeGreaterThan(0)
+
+    // 3. And the FIELD must be non-trivial. An all-INF field, or one where every
+    //    reachable cell sits at the same distance, is byte-identical under any
+    //    occupancy for reasons that have nothing to do with the cost function —
+    //    the same guard `rollback.test.ts`'s field golden carries.
+    const field = fieldFor(rig.state, rig.world, rig.fields, 0, rig.scratch)
+    const distinct = new Set(Array.from(field.dist))
+    expect(distinct.size, 'the field has no real distance spread').toBeGreaterThanOrEqual(8)
+    expect(distinct.has(0), 'no accepted source').toBe(true)
+    expect(distinct.has(INF), 'nowhere is unreachable').toBe(true)
+  })
+
+  it('arm 1: a full rebuild under ANY occupancy is byte-identical to the same board with an empty one', () => {
+    const rig = buildJammedRig()
+    const cells = rig.world.cells
+    const cars = rig.state.carPhase.length
+    const jam = captureCongestion('the jam as the run left it', rig.state)
+
+    const empty: Congestion = {
+      name: 'an empty board: no car anywhere, nothing blocked, no ghost',
+      occupancy: new Int16Array(cells * LANE_COUNT).fill(FREE),
+      carBlockedTicks: new Int16Array(cars),
+      ghostMask: new Uint8Array(cells),
+      ghostCommitted: new Uint8Array(cells),
+    }
+
+    // A saturated corridor: every lane of every cell claimed, which is a state
+    // `canEnter` can never actually produce and is precisely why it belongs
+    // here — the claim is about ARBITRARY occupancy, not reachable occupancy.
+    const saturated: Congestion = {
+      ...empty,
+      name: 'every lane of every cell claimed',
+      occupancy: Int16Array.from({ length: cells * LANE_COUNT }, (_, i) => i % cars),
+    }
+    // The brief's pattern: `(c % 7) - 1`, which interleaves FREE (-1) with five
+    // different car indices, so no cell's two lanes agree and no run of cells
+    // does either.
+    const patterned: Congestion = {
+      ...empty,
+      name: 'the interleaved pattern (i % 7) - 1',
+      occupancy: Int16Array.from({ length: cells * LANE_COUNT }, (_, i) => (i % 7) - 1),
+    }
+    // Every car saturated at the valve threshold, on top of the real jam: this
+    // is the state in which `canEnter` returns `ENTER_VALVE` and lets a car
+    // through a cell another car holds, i.e. the one moment movement and
+    // occupancy disagree the most.
+    const valved: Congestion = {
+      ...jam,
+      name: 'every car saturated at MAX_BLOCKED_TICKS, so every entry is valve-displaced',
+      carBlockedTicks: new Int16Array(cars).fill(MAX_BLOCKED_TICKS),
+    }
+    // Ghost cells everywhere. `ghostMask` is FIELD_IRRELEVANT on the argument
+    // that `roads` already carries the erase — this is that argument's test.
+    const ghosted: Congestion = {
+      ...jam,
+      name: 'every cell a ghost, every ghost committed',
+      ghostMask: new Uint8Array(cells).fill(0xff),
+      ghostCommitted: new Uint8Array(cells).fill(3),
+    }
+
+    applyCongestion(rig.state, empty)
+    forceRebuild(rig)
+    const baseline = fieldBytes(rig.fields)
+    const baselineState = hashState(rig.state)
+
+    for (const variant of [jam, saturated, patterned, valved, ghosted]) {
+      applyCongestion(rig.state, variant)
+      // The variant must actually have changed the buffer, or "the field did
+      // not move" is a statement about a no-op. `hashState` folds the WHOLE
+      // buffer, so this is the one assertion that cannot be satisfied by the
+      // partition being right.
+      expect(hashState(rig.state), `"${variant.name}" did not change a single byte of state`).not.toBe(baselineState)
+      forceRebuild(rig)
+      expect(
+        firstFieldDifference(baseline, fieldBytes(rig.fields)),
+        `"${variant.name}" changed the field, so a cost, a source or a tie-break is reading occupancy`,
+      ).toBe('identical')
+    }
+  })
+
+  it('arm 2: changing occupancy does not even trigger a rebuild — it is not in the staleness key', () => {
+    const rig = buildJammedRig()
+    // A tick's worth of sync first, so the stamps describe the board exactly as
+    // it stands and any rebuild below is attributable to what this test writes.
+    assembleSources(rig.state, rig.world, rig.scratch)
+    syncFields(rig.state, rig.world, rig.fields, rig.scratch)
+    const before = fieldBytes(rig.fields)
+    const rebuildsBefore = rig.scratch.counters[CT_REBUILDS] as number
+    const syncsBefore = rig.scratch.counters[CT_SYNCS] as number
+
+    for (let i = 0; i < rig.state.occupancy.length; i++) rig.state.occupancy[i] = (i % 7) - 1
+    for (let i = 0; i < rig.state.carBlockedTicks.length; i++) {
+      rig.state.carBlockedTicks[i] = MAX_BLOCKED_TICKS
+    }
+    assembleSources(rig.state, rig.world, rig.scratch)
+    syncFields(rig.state, rig.world, rig.fields, rig.scratch)
+
+    expect(
+      firstFieldDifference(before, fieldBytes(rig.fields)),
+      'occupancy must not change a single distance',
+    ).toBe('identical')
+    expect(
+      rig.scratch.counters[CT_REBUILDS],
+      'and must not even trigger a rebuild: occupancy has been classified FIELD_INPUT',
+    ).toBe(rebuildsBefore)
+    // The sync itself must have HAPPENED, or the two assertions above are about
+    // a call that returned before doing anything — the same "a green result
+    // from an instrument that measured nothing" shape the catalogue names.
+    expect(rig.scratch.counters[CT_SYNCS], 'syncFields did not run').toBe(syncsBefore + 1)
+  })
+
+  it('arm 3: scrambling EVERY FIELD_IRRELEVANT region but `header` leaves the field byte-identical', () => {
+    const rig = buildJammedRig()
+    forceRebuild(rig)
+    const baseline = fieldBytes(rig.fields)
+    const baselineState = hashState(rig.state)
+
+    /**
+     * **`header` is the one exclusion, and it is a real one rather than a
+     * convenience.** `assembleSources` reads `H_DEST_COUNT` off the header, so
+     * scrambling it changes the source set and legitimately changes the field —
+     * which is not a contradiction, because the partition is the flow-field
+     * STALENESS KEY and nothing else (`regions.ts` says so in as many words).
+     * `H_DEST_COUNT` only ever moves when a destination is placed, and that same
+     * call writes `destCell` and `destMeta`, both FIELD_INPUT, so the hash sees
+     * every change to it through another door.
+     */
+    const EXCLUDED = Object.freeze(['header'] as const)
+    const swept = FIELD_IRRELEVANT_REGIONS.filter((name) => !(EXCLUDED as readonly string[]).includes(name))
+    // Derived, never hand-listed: a region added to the partition is swept here
+    // without anyone remembering to come back, and a region added to EXCLUDED
+    // has to be a region that exists.
+    expect(swept.length, 'EXCLUDED names something that is not FIELD_IRRELEVANT').toBe(
+      FIELD_IRRELEVANT_REGIONS.length - EXCLUDED.length,
+    )
+    for (const name of EXCLUDED) expect(isFieldIrrelevantRegion(name)).toBe(true)
+
+    const driver = new Uint32Array(1)
+    driver[0] = seedFromString('congestion-blind-scramble')
+    const views = rig.state as unknown as Record<string, { length: number; [i: number]: number }>
+    let written = 0
+    for (const name of swept) {
+      const view = views[name]
+      if (view === undefined) throw new Error(`arm 3: GameState has no view named "${name}"`)
+      for (let i = 0; i < view.length; i++) {
+        view[i] = randomBelow(driver, 0, 512) - 1
+        written++
+      }
+    }
+    expect(written, 'the scramble wrote nothing').toBeGreaterThan(0)
+    expect(hashState(rig.state), 'the scramble changed no byte').not.toBe(baselineState)
+
+    forceRebuild(rig)
+    expect(
+      firstFieldDifference(baseline, fieldBytes(rig.fields)),
+      'some FIELD_IRRELEVANT region reaches the field',
+    ).toBe('identical')
   })
 })
