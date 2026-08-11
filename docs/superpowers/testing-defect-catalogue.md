@@ -600,3 +600,45 @@ That last check is the transferable part. When you split a message into cases, *
 the shipped configuration can actually produce.** A branch no board reaches is dead copy that reads
 as coverage, and the version with fewer reachable arms is usually the one keyed to a fact rather than
 to a story about the past.
+
+## A survivability improvement that removes the difficulty looks exactly like a survivability improvement
+
+M1e Task 10's brief carried a measured lever — tier the destination spawn scan
+by proximity to the spawning colour's own houses — with figures behind it:
+greedy survival 6.0 → 7.7 weeks, round trip 360 → 153 ticks, dropped pins 85 a
+week → 0, and *"peak `destPins` on connected destinations 1 → 2 → 10 across nine
+weeks where the baseline steps straight to the cap."*
+
+Re-measured on the tree that ships, five seeds, twelve weeks, both variants in
+one run, **every one of those inverted or evaporated.** The lever survives
+everything — and does it by making the board inert: peak `destPins` **1 in all
+twelve weeks**, longest queue 1, zero blocked ticks, four cars in flight, mean
+round trip 51 ticks, delivery fraction ~1.00. The *baseline* is the one that
+produces 1 → 2 → 5 → 10. And the problems the lever was for did not reproduce
+at all: 0 dropped pins in every week of the shipped seed, at most one
+destination unconnected at any week boundary, 62 tiles spent of 210 granted.
+
+Two things generalise.
+
+**"It survives longer" and "it is a better game" are the same number until the
+gate separates them.** Every survival-shaped metric — weeks lived, trips, cars,
+population — moved the right way under the lever. The only measurement that
+noticed was the *shape* one: does a connected destination's pin count climb
+through a gradient to its timer cap. That is the metric M1d's own post-mortem
+implies and the one nobody had written down as a gate.
+
+**A brief's measurements have a tree attached, and the tree moves under them.**
+These figures were taken before Tasks 7 and 8 existed; the round-robin/nearest
+mismatch they were compensating for now expresses itself through an overcrowd
+meter that did not exist when they were taken. The rig that found this
+reproduced both inherited death ticks bit-for-bit (5,580 and 8,661) *before* it
+was believed about anything else — which is the only reason the contradiction
+read as a finding rather than as a broken harness. **Reproduce an inherited
+number with your new rig before you use the rig to contradict an inherited
+claim.**
+
+Related: [a blast-radius claim is a measurement, not a reading], and
+[a prediction written before the measurement is worth more than the
+measurement]. The prediction here was the brief's own, written months before,
+and it is worth more than the measurement precisely because it was wrong in a
+direction nobody would have guessed.
