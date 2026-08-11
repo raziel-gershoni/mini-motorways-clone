@@ -2606,6 +2606,25 @@ describe('the demo board stops dead, and stays a still image', () => {
     // visible: a cell's half-width is 0.5, so every frozen car is still drawn
     // on its own road rather than beside it.
     expect(worst, 'a frozen car is still on the road').toBeLessThan(0.5)
+
+    // ---------------------------------------------------------------------
+    // **And the whole reason `end()` is sticky: the grid is shut.**
+    // ---------------------------------------------------------------------
+    // `pointer.ts` refuses board input while paused and by nothing else, so a
+    // resume would re-open `HitRegion.GRID` on a dead sim and the player would
+    // draw roads that never appear, spend no tiles and get no message. This is
+    // the end-to-end consequence of `loop.end()` rather than a restatement of
+    // it: a real `pointerdown` on a real board cell, through the real pointer
+    // machine, after a real shutdown — and it is refused for the RIGHT reason,
+    // named by the outcome code rather than inferred from an empty queue.
+    const before = rig.game.queue.inputs.actions.length
+    expect(rig.game.pointer.down(1, rig.cx(9), rig.cy(20))).toBe(PointerOutcome.REFUSED_PAUSED)
+    rig.game.pointer.move(1, rig.cx(9), rig.cy(21))
+    rig.game.pointer.up(1)
+    expect(rig.game.queue.inputs.actions.length, 'and nothing reached the queue').toBe(before)
+    // Task 9 replaces this refusal with a RESTART_REQUESTED early return above
+    // the HUD test; until then a tap does nothing at all, which is the cost
+    // stated in the report and the reason Task 9 is the next commit.
   })
 })
 
