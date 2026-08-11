@@ -336,15 +336,29 @@ interface Observation {
  * the arrival knockback is phase 9 and the meter integration is phase 10, so a
  * car arriving on tick T knocks the meter back BEFORE that tick's integration.
  *
- * **The order matters and it is worth exactly one arrival period, so it is a
- * named parameter of this helper rather than an incidental line order.** Run
- * the other way round — integrate, then knock back — the boundary is
+ * **The order matters to every death tick this sweep reports, so it is a
+ * documented property of this helper rather than an incidental line order.**
+ * Run the other way round — integrate, then knock back — the boundary is
  * unchanged at 90/91 (it is a property of the fixed point, not of the phasing)
- * but every illustrative death tick moves: P = 91 reads 163,253 instead of
- * 163,162 and P = 92 reads 84,362 instead of 84,271. The brief's draft of this
- * sweep had the two lines the other way, which models phase 10 running before
- * phase 9 — the exact transposition the brink test in `trips.test.ts` exists to
- * refuse. Its stated numbers were right; its code was not.
+ * and every death tick moves. Measured over the six periods either side of the
+ * boundary, the shift is **91 ticks for P = 91, 92, 93 and 95, and 1 tick for
+ * P = 94 and 96**:
+ *
+ * ```
+ *   P        91       92       93       94       95       96
+ *   wrong  163253    84362    57936    44647    36665    31292
+ *   right  163162    84271    57845    44646    36574    31291
+ * ```
+ *
+ * An earlier draft of this paragraph, and of the commit message that shipped
+ * it, said the shift is "exactly one arrival period". **It is not** — that is
+ * true of 91 and of nothing else in the table, and it was written from two rows
+ * rather than six. Where the crossing lands inside the cycle decides it.
+ *
+ * The brief's draft of this sweep had the two lines the other way, which models
+ * phase 10 running before phase 9 — the exact transposition the brink test in
+ * `trips.test.ts` exists to refuse. Its stated numbers were right; its code was
+ * not.
  */
 function sweepPeriod(period: number, horizon: number): number {
   const { state } = overcrowdRig({ pins: PIN_CAP_SQUARE_TIMER })
