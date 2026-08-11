@@ -357,11 +357,17 @@ export const DEMO_WARM_START_TICKS = 1200
  * `cell = y * world.w + x` is computed here, from the map the caller holds, so
  * the tables never hard-code a width.
  *
- * **This allocates** — three loops over frozen literals, plus whatever
- * `canPlaceDestination` allocates for its 7-cell arrays. That is fine and it is
+ * **This allocates** — three loops over frozen literals. That is fine and it is
  * stated rather than assumed: this runs once, before tick 1, on the same
  * pre-tick path as `seedStartingCity`. Nothing here is on the tick or frame
  * path, and `allocation.test.ts` profiles neither.
+ *
+ * The clause that used to end that sentence — "plus whatever
+ * `canPlaceDestination` allocates for its 7-cell arrays" — was true until M1e
+ * Task 4 and is now false: those arrays are gone, and both placement predicates
+ * measure 0.0000 B per call (`packages/game/test/placementAllocation.test.ts`).
+ * The conclusion is unchanged and the reason is not, which is worth the two
+ * lines because this is the file Task 5 extends.
  */
 export function seedDemoLayout(state: GameState, world: WorldData): void {
   for (let i = 0; i < DEMO_DESTINATIONS.length; i++) {

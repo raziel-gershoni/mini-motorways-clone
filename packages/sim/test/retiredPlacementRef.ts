@@ -1,8 +1,37 @@
+/**
+ * **The pre-M1e-Task-4 `canPlaceDestination` / `canPlaceHouse`, kept verbatim as
+ * a migration reference — NOT coverage, and NOT reachable from production.**
+ *
+ * Extracted from commit `e6440d7`, the task's base, and edited in exactly three
+ * mechanical ways: the two predicates are renamed `retired*`, their internal
+ * self-calls follow the rename, and every other export is de-exported so this
+ * module adds nothing to any public surface. **No logic was retyped**, which is
+ * the point — a differential against a reimplementation proves nothing.
+ *
+ * Its one consumer is `retiredPlacement.test.ts`, which compares the two
+ * implementations' actual return values over ~35,000 (board, cell, orientation)
+ * cases. The committed equivalence proof in `buildings.test.ts` covers the
+ * SPACING RULE only; this covers all four cell passes, the prologue, the
+ * rejection order and the carpark, end to end.
+ *
+ * **It lives in `test/`, not `src/`, and that is load-bearing.** The task report
+ * originally claimed this artefact could not be committed because a copy in
+ * `src/` trips `determinism.test.ts`'s source scan. The scan's `SCAN_ROOTS` are
+ * `sim/src` and `shared/src` only — the reason was true of the location I first
+ * tried and false as a reason not to commit it, which is the catalogue's
+ * "a confident wrong reason for why something cannot be tested is worse than an
+ * admitted unknown, because it ends the search". Task 4's reviewer found it.
+ *
+ * **Delete this and its test when the rewrite has been on main for a
+ * milestone**, the same expiry the equivalence proof in `buildings.test.ts`
+ * carries. It is dead weight the moment nobody is verifying the migration.
+ */
+
 import { CARS_PER_HOUSE } from '@laneways/shared'
-import type { GameState } from './state'
-import { H_HOUSE_COUNT, H_DEST_COUNT, H_TICK } from './state'
-import { hasTree } from './roads'
-import type { WorldData } from './world'
+import type { GameState } from '../src/state'
+import { H_HOUSE_COUNT, H_DEST_COUNT, H_TICK } from '../src/state'
+import { hasTree } from '../src/roads'
+import type { WorldData } from '../src/world'
 
 /**
  * Buildings and cars: placement validity, footprint/carpark geometry,
@@ -36,24 +65,24 @@ import type { WorldData } from './world'
  */
 
 // --- Orientation: names the side the carpark attaches to (decision 5) ---
-export const ORIENTATION_N = 0
-export const ORIENTATION_E = 1
-export const ORIENTATION_S = 2
-export const ORIENTATION_W = 3
-export const ORIENTATION_COUNT = 4
+const ORIENTATION_N = 0
+const ORIENTATION_E = 1
+const ORIENTATION_S = 2
+const ORIENTATION_W = 3
+const ORIENTATION_COUNT = 4
 
 // --- destMeta bit layout: bits 0-2 colour, bit 3 kind, bits 4-5 orientation, bits 6-7 zero ---
-export const DEST_KIND_SQUARE = 0
-export const DEST_KIND_CIRCLE = 1
+const DEST_KIND_SQUARE = 0
+const DEST_KIND_CIRCLE = 1
 
 /** Non-carpark footprint cells per destination: a 2x3 (or 3x2) rectangle minus nothing — the carpark is the 7th, separate cell. */
-export const FOOTPRINT_CELL_COUNT = 6
+const FOOTPRINT_CELL_COUNT = 6
 
 // --- Car phases. PHASE_NONE = 0 is what makes an untouched car slot read as "does not exist" rather than "idle at cell 0". ---
-export const PHASE_NONE = 0
-export const PHASE_IDLE = 1
-export const PHASE_OUTBOUND = 2
-export const PHASE_RETURNING = 3
+const PHASE_NONE = 0
+const PHASE_IDLE = 1
+const PHASE_OUTBOUND = 2
+const PHASE_RETURNING = 3
 
 function inBounds(cell: number, cells: number): boolean {
   return Number.isInteger(cell) && cell >= 0 && cell < cells
@@ -110,16 +139,11 @@ function validateOrientation(orientation: number): void {
  * its right or left). Read off the orientation directly rather than a
  * lookup table of two entries — there are only two distinct shapes and the
  * condition IS the fact being encoded.
- *
- * **Exported since M1e Task 4** so Task 5's zone-fit check can ask for the
- * footprint's extent rather than re-deriving it. A second copy of "N and S are
- * 2x3" is the copied-constant defect this project has already paid for once in
- * `render`; there is no architectural boundary forcing one here.
  */
-export function footprintWidth(orientation: number): number {
+function footprintWidth(orientation: number): number {
   return orientation === ORIENTATION_N || orientation === ORIENTATION_S ? 2 : 3
 }
-export function footprintHeight(orientation: number): number {
+function footprintHeight(orientation: number): number {
   return orientation === ORIENTATION_N || orientation === ORIENTATION_S ? 3 : 2
 }
 
@@ -135,7 +159,7 @@ export function footprintHeight(orientation: number): number {
  * and a caller wiring destination colours against `map.groupCount` is a
  * separate, caller-side concern.
  */
-export function packDestMeta(colour: number, kind: number, orientation: number): number {
+function packDestMeta(colour: number, kind: number, orientation: number): number {
   if (!Number.isInteger(colour) || colour < 0 || colour > 7) {
     throw new Error(`packDestMeta: colour must be an integer in [0, 7], got ${colour}`)
   }
@@ -147,17 +171,17 @@ export function packDestMeta(colour: number, kind: number, orientation: number):
 }
 
 /** Bits 0-2 of a packed `destMeta` byte. Allocation-free — safe to call once per destination per tick. */
-export function destMetaColour(meta: number): number {
+function destMetaColour(meta: number): number {
   return meta & 0x7
 }
 
 /** Bit 3 of a packed `destMeta` byte. Allocation-free. */
-export function destMetaKind(meta: number): number {
+function destMetaKind(meta: number): number {
   return (meta >> 3) & 0x1
 }
 
 /** Bits 4-5 of a packed `destMeta` byte. Allocation-free — this is what `carparkCell` needs from a stored destination. */
-export function destMetaOrientation(meta: number): number {
+function destMetaOrientation(meta: number): number {
   return (meta >> 4) & 0x3
 }
 
@@ -182,38 +206,23 @@ export function destMetaOrientation(meta: number): number {
  * `dirBetween` (roads.ts) guards against applies here: a naive index
  * offset near the grid's right edge would silently wrap into the next row.
  */
-export function carparkCell(destCell: number, orientation: number, w: number, h: number): number {
+function carparkCell(destCell: number, orientation: number, w: number, h: number): number {
   validateOrientation(orientation)
-  const cx = carparkX(destCell, orientation, w)
-  const cy = carparkY(destCell, orientation, w)
+  const x0 = destCell % w
+  const y0 = (destCell / w) | 0
+  let cx = x0
+  let cy = y0
+  if (orientation === ORIENTATION_N) {
+    cy = y0 - 1
+  } else if (orientation === ORIENTATION_S) {
+    cy = y0 + 3
+  } else if (orientation === ORIENTATION_E) {
+    cx = x0 + 3
+  } else {
+    cx = x0 - 1 // ORIENTATION_W
+  }
   if (cx < 0 || cx >= w || cy < 0 || cy >= h) return -1
   return cy * w + cx
-}
-
-/**
- * `carparkCell`'s arithmetic, split into its two axes — the same expression it
- * has always evaluated, hoisted so `spacingViolated` below can compare carpark
- * COORDINATES without first packing them into a cell index and unpacking them
- * again.
- *
- * **Deliberately without a bounds check and without `validateOrientation`**,
- * which is why they are private. `carparkCell` keeps both, so its contract is
- * unchanged; the one other caller is `spacingViolated`, whose two orientations
- * come from an already-validated candidate and from a stored destination that
- * was validated when it was placed. The `else` arm is W, exactly as it was, and
- * is only reachable for a validated orientation.
- */
-function carparkX(destCell: number, orientation: number, w: number): number {
-  const x0 = destCell % w
-  if (orientation === ORIENTATION_E) return x0 + 3
-  if (orientation === ORIENTATION_W) return x0 - 1
-  return x0
-}
-function carparkY(destCell: number, orientation: number, w: number): number {
-  const y0 = (destCell / w) | 0
-  if (orientation === ORIENTATION_N) return y0 - 1
-  if (orientation === ORIENTATION_S) return y0 + 3
-  return y0
 }
 
 /**
@@ -226,7 +235,7 @@ function carparkY(destCell: number, orientation: number, w: number): number {
  * Allocation-free, and decomposes both `destCell` and `cell` to x/y before
  * comparing, for the same row-seam reason `carparkCell` documents.
  */
-export function isFootprintCell(destCell: number, orientation: number, w: number, cell: number): boolean {
+function isFootprintCell(destCell: number, orientation: number, w: number, cell: number): boolean {
   validateOrientation(orientation)
   const width = footprintWidth(orientation)
   const height = footprintHeight(orientation)
@@ -238,87 +247,44 @@ export function isFootprintCell(destCell: number, orientation: number, w: number
 }
 
 /**
- * The minimum Chebyshev (king-move) distance between two axis-aligned boxes,
- * given as inclusive `[x0, x1] x [y0, y1]`.
- *
- * `min over cells of max(|dx|, |dy|)` is `max(gapX, gapY)`, where each gap is
- * the separation along that axis or 0 if the projections overlap. Derived
- * rather than sampled, and pinned against the retired pairwise implementation
- * exhaustively in `buildings.test.ts` — a rewrite of a heavily-tested
- * predicate owes a proof, and "it passes the existing tests" is not one when
- * the existing tests were written against the other algorithm.
- *
- * No `Math` calls — plain comparisons, matching this codebase's existing style
- * (roads.ts, graph.ts), and allocation-free like everything else on this path.
+ * All 7 cells of a destination (6 footprint + 1 carpark), or `null` if the
+ * footprint's bounding box or the carpark itself does not fit on the `world`
+ * grid. Allocates one 7-element array — never call this from a per-tick
+ * path; it exists only for placement validity (below), which runs once per
+ * placement action, not once per tick.
  */
-function boxChebyshev(
-  ax0: number,
-  ay0: number,
-  ax1: number,
-  ay1: number,
-  bx0: number,
-  by0: number,
-  bx1: number,
-  by1: number,
-): number {
-  let gx = 0
-  if (bx0 > ax1) gx = bx0 - ax1
-  else if (ax0 > bx1) gx = ax0 - bx1
-  let gy = 0
-  if (by0 > ay1) gy = by0 - ay1
-  else if (ay0 > by1) gy = ay0 - by1
-  return gx > gy ? gx : gy
+function allSevenCells(destCell: number, orientation: number, world: WorldData): number[] | null {
+  const width = footprintWidth(orientation)
+  const height = footprintHeight(orientation)
+  const x0 = destCell % world.w
+  const y0 = (destCell / world.w) | 0
+  if (x0 < 0 || x0 + width > world.w || y0 < 0 || y0 + height > world.h) return null
+
+  const carpark = carparkCell(destCell, orientation, world.w, world.h)
+  if (carpark === -1) return null
+
+  const out: number[] = []
+  for (let dy = 0; dy < height; dy++) {
+    for (let dx = 0; dx < width; dx++) {
+      out.push((y0 + dy) * world.w + (x0 + dx))
+    }
+  }
+  out.push(carpark)
+  return out
 }
 
-/**
- * True iff a destination at `(aCell, aOrientation)` sits closer than
- * Chebyshev 2 to one at `(bCell, bOrientation)` — the §5.9 spacing rule, over
- * four box pairs instead of 49 cell pairs and **with no array**.
- *
- * This replaced `allSevenCells` plus a 49-pair loop in M1e Task 4. The old form
- * built a fresh 7-element `number[]` for the candidate and **one more per
- * existing destination** — measured at 1,888 B per `canPlaceDestination` call
- * on the demo board's 18 destinations — and its own doc comment said "never
- * call this from a per-tick path". Task 5 puts it on one, at up to
- * `SPAWN_CANDIDATE_LIMIT * ORIENTATION_COUNT` = 96 calls per attempt.
- *
- * A carpark is a 1x1 box, so all four comparisons are the same call. Both
- * directions of the footprint-vs-carpark pair are present and they are NOT
- * symmetric inputs: an earlier defect in this file survived all 366 tests
- * because a compound mutation was applied to one side of a symmetric
- * comparison only.
- *
- * @internal Exported for the exhaustive equivalence proof in `buildings.test.ts`
- * only — this is not part of the module's public surface, on the precedent of
- * `assertPlaceCost` (roads.ts).
- */
-export function spacingViolated(
-  aCell: number,
-  aOrientation: number,
-  bCell: number,
-  bOrientation: number,
-  w: number,
-): boolean {
-  const ax0 = aCell % w
-  const ay0 = (aCell / w) | 0
-  const ax1 = ax0 + footprintWidth(aOrientation) - 1
-  const ay1 = ay0 + footprintHeight(aOrientation) - 1
-  const bx0 = bCell % w
-  const by0 = (bCell / w) | 0
-  const bx1 = bx0 + footprintWidth(bOrientation) - 1
-  const by1 = by0 + footprintHeight(bOrientation) - 1
-  const acx = carparkX(aCell, aOrientation, w)
-  const acy = carparkY(aCell, aOrientation, w)
-  const bcx = carparkX(bCell, bOrientation, w)
-  const bcy = carparkY(bCell, bOrientation, w)
-  if (boxChebyshev(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1) < 2) return true
-  if (boxChebyshev(ax0, ay0, ax1, ay1, bcx, bcy, bcx, bcy) < 2) return true
-  if (boxChebyshev(acx, acy, acx, acy, bx0, by0, bx1, by1) < 2) return true
-  if (boxChebyshev(acx, acy, acx, acy, bcx, bcy, bcx, bcy) < 2) return true
-  return false
+/** Chebyshev (king-move) distance between two cells on a `w`-wide grid. No `Math` calls — plain comparisons, matching this codebase's existing style (roads.ts, graph.ts). */
+function chebyshevDistance(aCell: number, bCell: number, w: number): number {
+  const ax = aCell % w
+  const ay = (aCell / w) | 0
+  const bx = bCell % w
+  const by = (bCell / w) | 0
+  const dx = ax > bx ? ax - bx : bx - ax
+  const dy = ay > by ? ay - by : by - ay
+  return dx > dy ? dx : dy
 }
 
-export type BuildingPlaceFailure =
+type BuildingPlaceFailure =
   | 'out-of-bounds'
   | 'terrain'
   | 'tree'
@@ -327,47 +293,7 @@ export type BuildingPlaceFailure =
   | 'building'
   | 'capacity'
 
-export type PlaceCheck = { readonly ok: true } | { readonly ok: false; readonly reason: BuildingPlaceFailure }
-
-/**
- * Every `canPlaceDestination`/`canPlaceHouse` outcome is a module-scope frozen
- * singleton, exactly as `canPlaceRoad`'s are (`roads.ts:303-319`) and for the
- * same measured reason: the object literal these functions used to return
- * ESCAPES — both are far too large for V8 to inline, so scalar replacement
- * cannot delete it — and M1d measured the identical literal in `canPlaceRoad`
- * at 40.6-44.3 B per call, which is why that function carried a `'roads.ts':
- * 128` known-violation budget until it was fixed this way. **Measured here
- * before the fix: `canPlaceHouse` 40.0 B/call**, the same literal at the same
- * price, on the demo board.
- *
- * M1e Task 5 puts BOTH of these on a per-tick path at up to
- * `SPAWN_CANDIDATE_LIMIT * ORIENTATION_COUNT` = 96 calls per destination
- * attempt. Removing the cell arrays (`spacingViolated`, above) does not remove
- * this; it is a separate allocation with a separate fix, and reporting the
- * first as "Task 4 made placement allocation-free" without the second is how a
- * green harness comes to be a claim about the wrong thing.
- *
- * **What pins this, since the obvious answer is wrong.** No test compares a
- * `PlaceCheck` by identity by accident, and the allocation harness on the demo
- * FRAME loop cannot see either function at all — neither has a per-frame caller
- * until Task 5, measured as `buildings.ts` absent from 9 of 9 profile windows
- * with an escaping allocation injected at the top of both. The detectors are
- * `buildings.test.ts`'s frozen/identity block (deterministic, all eight
- * outcomes) and `placementAllocation.test.ts`'s per-CALL rig. Reverting any one
- * `return` below to a literal turns exactly one identity assertion red.
- *
- * `Object.freeze` does not recurse — there is one object per outcome and each
- * is frozen at its own level, which is what the `roads.ts` note means by
- * "every level".
- */
-const B_OK = Object.freeze({ ok: true } as const)
-const B_OOB = Object.freeze({ ok: false, reason: 'out-of-bounds' } as const)
-const B_TERRAIN = Object.freeze({ ok: false, reason: 'terrain' } as const)
-const B_TREE = Object.freeze({ ok: false, reason: 'tree' } as const)
-const B_ROAD = Object.freeze({ ok: false, reason: 'road' } as const)
-const B_SPACING = Object.freeze({ ok: false, reason: 'spacing' } as const)
-const B_BUILDING = Object.freeze({ ok: false, reason: 'building' } as const)
-const B_CAPACITY = Object.freeze({ ok: false, reason: 'capacity' } as const)
+type PlaceCheck = { readonly ok: true } | { readonly ok: false; readonly reason: BuildingPlaceFailure }
 
 /**
  * Whether `cell` coincides with any existing house cell or lies within any
@@ -404,17 +330,17 @@ function cellOverlapsAnyDestination(state: GameState, world: WorldData, cell: nu
  * the capacity gate (no duplicate `<`/`<=` check elsewhere that could drift
  * from this one).
  */
-export function canPlaceHouse(state: GameState, world: WorldData, cell: number): PlaceCheck {
-  if (!inBounds(cell, world.cells)) return B_OOB
-  if (world.passable[cell] !== 1) return B_TERRAIN
-  if (hasTree(state, world, cell)) return B_TREE
-  if ((state.roads[cell] as number) !== 0) return B_ROAD
+export function retiredCanPlaceHouse(state: GameState, world: WorldData, cell: number): PlaceCheck {
+  if (!inBounds(cell, world.cells)) return { ok: false, reason: 'out-of-bounds' }
+  if (world.passable[cell] !== 1) return { ok: false, reason: 'terrain' }
+  if (hasTree(state, world, cell)) return { ok: false, reason: 'tree' }
+  if ((state.roads[cell] as number) !== 0) return { ok: false, reason: 'road' }
   if (cellOverlapsAnyDestination(state, world, cell) || cellOverlapsAnyHouse(state, cell)) {
-    return B_BUILDING
+    return { ok: false, reason: 'building' }
   }
   const houseCount = state.header[H_HOUSE_COUNT] as number
-  if (houseCount >= world.map.maxHouses) return B_CAPACITY
-  return B_OK
+  if (houseCount >= world.map.maxHouses) return { ok: false, reason: 'capacity' }
+  return { ok: true }
 }
 
 /**
@@ -432,9 +358,9 @@ export function canPlaceHouse(state: GameState, world: WorldData, cell: number):
  * index 0, a real destination). `carProgress`, `carRouteLen`,
  * `carRouteCursor` and `carRoute` are left at their already-zero default.
  */
-export function placeHouse(state: GameState, world: WorldData, cell: number, colour: number): boolean {
+function placeHouse(state: GameState, world: WorldData, cell: number, colour: number): boolean {
   assertColourInRange(colour, world, 'placeHouse')
-  const check = canPlaceHouse(state, world, cell)
+  const check = retiredCanPlaceHouse(state, world, cell)
   if (!check.ok) return false
 
   const h = state.header[H_HOUSE_COUNT] as number
@@ -466,82 +392,51 @@ export function placeHouse(state: GameState, world: WorldData, cell: number, col
  * sharing a cell means some pair of cells is at Chebyshev distance 0, which
  * the spacing rule (>= 2) already rejects.
  */
-export function canPlaceDestination(
+export function retiredCanPlaceDestination(
   state: GameState,
   world: WorldData,
   destCell: number,
   orientation: number,
 ): PlaceCheck {
-  // **The prologue, in this order, and it is load-bearing.**
-  // `validateOrientation` first: a bad orientation is a programming error and
-  // must throw rather than be reported as a placement rejection, including when
-  // the cell is ALSO bad — which is the only case that can tell the two orders
-  // apart, and is what `buildings.test.ts`'s prologue test asserts.
-  // `inBounds` second: it is the only `Number.isInteger` check on `destCell` in
-  // the codebase, and everything below indexes typed arrays with it.
   validateOrientation(orientation)
-  if (!inBounds(destCell, world.cells)) return B_OOB
+  if (!inBounds(destCell, world.cells)) return { ok: false, reason: 'out-of-bounds' }
 
-  const width = footprintWidth(orientation)
-  const height = footprintHeight(orientation)
-  const x0 = destCell % world.w
-  const y0 = (destCell / world.w) | 0
-  if (x0 < 0 || x0 + width > world.w || y0 < 0 || y0 + height > world.h) return B_OOB
-  const carpark = carparkCell(destCell, orientation, world.w, world.h)
-  if (carpark === -1) return B_OOB
+  const cells = allSevenCells(destCell, orientation, world)
+  if (cells === null) return { ok: false, reason: 'out-of-bounds' }
 
-  // Three passes over the same 7 cells, in the same order as the retired
-  // `allSevenCells` walk (footprint row-major, then the carpark) — though the
-  // order inside a pass cannot be observed, since every cell in one pass
-  // yields the same reason. The PASSES' order is what is observable, and it is
-  // unchanged: terrain, then tree, then road.
-  for (let dy = 0; dy < height; dy++) {
-    for (let dx = 0; dx < width; dx++) {
-      if (world.passable[(y0 + dy) * world.w + (x0 + dx)] !== 1) return B_TERRAIN
-    }
+  for (let i = 0; i < cells.length; i++) {
+    if (world.passable[cells[i] as number] !== 1) return { ok: false, reason: 'terrain' }
   }
-  if (world.passable[carpark] !== 1) return B_TERRAIN
-
-  for (let dy = 0; dy < height; dy++) {
-    for (let dx = 0; dx < width; dx++) {
-      if (hasTree(state, world, (y0 + dy) * world.w + (x0 + dx))) return B_TREE
-    }
+  for (let i = 0; i < cells.length; i++) {
+    if (hasTree(state, world, cells[i] as number)) return { ok: false, reason: 'tree' }
   }
-  if (hasTree(state, world, carpark)) return B_TREE
-
-  for (let dy = 0; dy < height; dy++) {
-    for (let dx = 0; dx < width; dx++) {
-      if ((state.roads[(y0 + dy) * world.w + (x0 + dx)] as number) !== 0) return B_ROAD
-    }
+  for (let i = 0; i < cells.length; i++) {
+    if ((state.roads[cells[i] as number] as number) !== 0) return { ok: false, reason: 'road' }
   }
-  if ((state.roads[carpark] as number) !== 0) return B_ROAD
 
   const destCount = state.header[H_DEST_COUNT] as number
   for (let d = 0; d < destCount; d++) {
     const otherCell = state.destCell[d] as number
     const otherOrientation = destMetaOrientation(state.destMeta[d] as number)
-    // No bounds check on the incumbent: every stored destination was itself
-    // validated against this exact grid before it was placed, which is the same
-    // invariant the retired `allSevenCells(...) as number[]` cast relied on.
-    // **Same invariant, different failure mode, and the difference is not an
-    // improvement.** Given a corrupted `destCell`/`destMeta` the retired cast
-    // handed `null` to an indexing loop and threw a `TypeError`; `spacingViolated`
-    // has no bounds to fail and returns a plausible boolean instead. Unreachable
-    // today — nothing writes those regions but `placeDestination` — and the
-    // silent answer is the wrong one to inherit if that ever stops being true.
-    if (spacingViolated(destCell, orientation, otherCell, otherOrientation, world.w)) return B_SPACING
-  }
-
-  for (let dy = 0; dy < height; dy++) {
-    for (let dx = 0; dx < width; dx++) {
-      if (cellOverlapsAnyHouse(state, (y0 + dy) * world.w + (x0 + dx))) return B_BUILDING
+    // `allSevenCells` cannot return null here: every stored destination was
+    // itself validated against this exact grid before it was placed.
+    const otherCells = allSevenCells(otherCell, otherOrientation, world) as number[]
+    for (let i = 0; i < cells.length; i++) {
+      for (let j = 0; j < otherCells.length; j++) {
+        if (chebyshevDistance(cells[i] as number, otherCells[j] as number, world.w) < 2) {
+          return { ok: false, reason: 'spacing' }
+        }
+      }
     }
   }
-  if (cellOverlapsAnyHouse(state, carpark)) return B_BUILDING
 
-  if (destCount >= world.map.maxDestinations) return B_CAPACITY
+  for (let i = 0; i < cells.length; i++) {
+    if (cellOverlapsAnyHouse(state, cells[i] as number)) return { ok: false, reason: 'building' }
+  }
 
-  return B_OK
+  if (destCount >= world.map.maxDestinations) return { ok: false, reason: 'capacity' }
+
+  return { ok: true }
 }
 
 /**
@@ -553,7 +448,7 @@ export function canPlaceDestination(
  * `destPins`/`destReserved` are left at their already-zero default: a
  * freshly placed destination starts with no pins and no reservations.
  */
-export function placeDestination(
+function placeDestination(
   state: GameState,
   world: WorldData,
   destCell: number,
@@ -562,7 +457,7 @@ export function placeDestination(
   kind: number,
 ): boolean {
   assertColourInRange(colour, world, 'placeDestination')
-  const check = canPlaceDestination(state, world, destCell, orientation)
+  const check = retiredCanPlaceDestination(state, world, destCell, orientation)
   if (!check.ok) return false
 
   const d = state.header[H_DEST_COUNT] as number

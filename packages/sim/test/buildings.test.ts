@@ -1023,9 +1023,24 @@ interface PlaceCase {
 }
 
 /**
- * Every outcome BOTH predicates can produce, as a zero-argument call: eight
- * from `canPlaceDestination` and seven from `canPlaceHouse`, over the eight
- * distinct singletons between them.
+ * Every `return` SITE both predicates have, as a zero-argument call — **21 of
+ * them, not 15, and the difference is the whole point.**
+ *
+ * The list was first written per *reason*: eight outcomes from
+ * `canPlaceDestination`, seven from `canPlaceHouse`. That is the right list for
+ * asserting behaviour and the wrong one for asserting allocation, because the
+ * unit an editor can revert to a literal is a **`return` statement**, and six
+ * statements were reachable only through a case this list did not have. Task
+ * 4's reviewer swept all 21 one at a time: 15 turned something red and **six
+ * did not — five of them the carpark line of a cell pass, and the sixth a
+ * second `B_OOB` site.** Every miss was the same class this file had already
+ * found and closed for behaviour two blocks up, carried across with `toEqual`,
+ * which cannot see identity.
+ *
+ * So the naming is deliberate: `dest terrain` and `dest terrain (carpark)` are
+ * the same outcome from different statements, and a list keyed on outcomes
+ * cannot express that. **If a rejection reason ever gains another `return`,
+ * add a case here or that statement is unpinned.**
  *
  * Each case owns its fixture. `roads.test.ts` builds most of its eight from one
  * board; that is not available here, because `capacity` needs a full board and
@@ -1049,6 +1064,50 @@ function everyPlaceOutcome(): PlaceCase[] {
     add('dest ok', { ok: true }, () => canPlaceDestination(state, world, destCellFor(3, 1), ORIENTATION_N))
     add('dest out-of-bounds', { ok: false, reason: 'out-of-bounds' }, () =>
       canPlaceDestination(state, world, world.cells, ORIENTATION_N),
+    )
+    // **Per SITE, not per reason** — see the block comment below. `B_OOB` is
+    // returned from three different lines and the case above reaches only the
+    // first: origin (8,1) overhangs the grid in x with an in-range `destCell`,
+    // and origin (2,0) fits its box but wants a carpark at y = -1.
+    add('dest out-of-bounds (footprint overhang)', { ok: false, reason: 'out-of-bounds' }, () =>
+      canPlaceDestination(state, world, destCellFor(8, 1), ORIENTATION_N),
+    )
+    add('dest out-of-bounds (carpark off grid)', { ok: false, reason: 'out-of-bounds' }, () =>
+      canPlaceDestination(state, world, destCellFor(2, 0), ORIENTATION_N),
+    )
+  }
+  // The carpark half of each cell pass. Same four fixtures as the carpark sweep
+  // test above, asked the other question: that test uses `toEqual`, which
+  // cannot see identity, so it carried the class across for BEHAVIOUR and left
+  // these four `return` sites unpinned for allocation.
+  {
+    const { map, world } = holed('sgl-dest-terrain-carpark', '~', 0, 3)
+    const state = createState('s', map)
+    add('dest terrain (carpark)', { ok: false, reason: 'terrain' }, () =>
+      canPlaceDestination(state, world, destCellFor(3, 1), ORIENTATION_N),
+    )
+  }
+  {
+    const { map, world } = holed('sgl-dest-tree-carpark', 'T', 0, 3)
+    const state = createState('s', map)
+    add('dest tree (carpark)', { ok: false, reason: 'tree' }, () =>
+      canPlaceDestination(state, world, destCellFor(3, 1), ORIENTATION_N),
+    )
+  }
+  {
+    const { map, world } = fixture('sgl-dest-road-carpark')
+    const state = createState('s', map)
+    expect(placeRoad(state, world, destCellFor(3, 0), destCellFor(4, 0))).toBe(true)
+    add('dest road (carpark)', { ok: false, reason: 'road' }, () =>
+      canPlaceDestination(state, world, destCellFor(3, 1), ORIENTATION_N),
+    )
+  }
+  {
+    const { map, world } = fixture('sgl-dest-building-carpark')
+    const state = createState('s', map)
+    expect(placeHouse(state, world, destCellFor(3, 0), 0)).toBe(true)
+    add('dest building (carpark)', { ok: false, reason: 'building' }, () =>
+      canPlaceDestination(state, world, destCellFor(3, 1), ORIENTATION_N),
     )
   }
   {
@@ -1176,7 +1235,10 @@ describe('placement validity allocates nothing per call — frozen singletons', 
     for (const { name, expected, call } of cases) {
       expect(call(), name).toEqual(expected)
     }
-    expect(cases.length).toBe(15)
+    // One case per `return` statement in the two predicates. Counted, because
+    // the list being SHORTER than the code is exactly how six sites went
+    // unpinned: `grep -c 'return B_' packages/sim/src/buildings.ts` is 21.
+    expect(cases.length, 'one case per return SITE — see the block comment').toBe(21)
     expect(new Set(cases.map((c) => (c.expected.ok ? 'ok' : c.expected.reason))).size).toBe(8)
   })
 
