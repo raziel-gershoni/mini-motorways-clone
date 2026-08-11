@@ -658,3 +658,66 @@ draining — on their phone in Telegram, and reported:
 **Both answers exist only because the default board changed.** Neither question was answerable on
 the shipped starting city, which never moves a car. That is the practical argument for §12's rule:
 a feature nobody can see is a feature nobody can judge.
+
+---
+
+## 17. THE DEFAULT BOARD IS THE STARTING CITY AGAIN, AND THE PLAN'S SPAWNER LEVER WAS REJECTED (M1e Task 10)
+
+`DEFAULT_LAYOUT_ID` is `city`. The gate it flipped behind lives in
+`startingCity.test.ts` §8, boots through `layoutFor(DEFAULT_LAYOUT_ID)`, and
+measures three things on the shipped board under scripted traces: completed
+trips and cars in motion (747 / 11, **9 of them from spawner-placed houses**);
+the delivery fraction `trips / fires` (0.842 → 0.709 across weeks 0-1 on a
+network the player stops growing); and peak `destPins` on **road-connected**
+destinations against `PIN_CAP_*_TIMER` (1, 1, 1, 1, 2, 5, 10 against a square
+timer cap of 6). The rig reproduces both inherited death ticks bit-for-bit —
+5,580 and 8,661 — before it is believed about anything else.
+
+**Plan Task 10 Step 3's spawner lever — tier the destination scan by proximity
+to the spawning colour's own houses — was measured and rejected, and there are
+TWO independent reasons. Do not resurrect it without answering both.**
+
+**Reason 1: it is a difficulty deletion, not a difficulty change.** Driven
+through the same rig, five seeds, twelve weeks, against the baseline in one
+sitting: the lever survives everything and does it by making the board inert —
+peak connected `destPins` **1 in every week of every seed**, longest queue 1,
+zero blocked ticks, four cars in flight, mean round trip 51 ticks, delivery
+fraction ~1.00. The *baseline* is the one that produces the gradient. That is
+M1d's *"service is 4.3× faster than arrival"* reproduced by the mechanism
+proposed to fix it. A variant with exclusive rings measures the same, so it is
+the bias and not the budget arithmetic. The plan's stated reasons did not
+reproduce either: 0 dropped pins in every week of the shipped seed, at most one
+destination unconnected at any week boundary, 62 tiles spent of 210 granted.
+
+**Reason 2: the code as literally written is a BANNED CONSTRUCT, and neither the
+plan nor the implementer noticed.** Step 3 specifies
+`const DEST_SPAWN_HOUSE_TIERS = new Int32Array([1, 2, 3, 5, 8, 0x7fffffff])` at
+module scope in `sim/src/spawn.ts`. Verified by applying exactly that line:
+`determinism.test.ts` fails with *"banned construct module-scope preallocated
+container — the sim owns no mutable state outside the state buffer"*. **The
+lever was therefore not shippable as written without also amending one of the
+sim's determinism rules**, which no task in this milestone was scoped to touch.
+A `readonly number[]` inside the function, or a `Object.freeze`d plain array,
+avoids it; the plan's own justification for the typed array ("this file runs
+inside the tick") is the argument the rule exists to overrule.
+
+**What M1f inherits.** The residual is `dispatch.ts`'s Decision 4 cost, which
+the gate makes visible rather than fixes: demand round-robins EVENLY across a
+colour's rotation slots while cars flow to the NEAREST unfilled pin, so **the
+board delivers 97.5 % of everything demand fires and still dies**, on a
+destination the player *had* connected. Closing it is a change to §5.3's
+scheduling rule — seed a colour's field only at its most-starved destination,
+weight by `destPins`, or route the rotation to the shortest queue instead of the
+next slot. Any spawner change M1f makes must be re-run against §8's gate, and
+the five comparison seeds are named in that block so the runs can be reproduced.
+
+**Two player-visible facts to carry.** The shutdown line on the default board is
+now `NO ROAD REACHES DESTINATION 2` with no input (the demo board produced
+`DESTINATION 2 WENT UNSERVED`), and both arms are reachable on the default —
+roadless with no input, unserved under competent play. And **M1d's blocking on
+the default is a ~1-second hesitation, not a jam**: `H_ROUTES_REFUSED` is 0 over
+the whole run and the worst `carBlockedTicks` is 32 against a 1,350-tick valve —
+42× from firing. For that feature specifically, the flip is a trade, and the
+demo board is still the only place it fires. For the user's actual complaint it
+is not: 3 houses become 25, 3 destinations become 12, 747 trips, and the outcome
+depends on what they drew.
