@@ -472,3 +472,39 @@ Nothing about the shipped behaviour changed. What changed is that a wrong mental
 an artefact rather than carried forward — and it was only catchable because the prediction was
 written down **before** the number came back. A measurement taken without a prediction confirms
 whatever it finds.
+
+## Two independent measurements that share one wrong constant agree perfectly, and the agreement is the trap
+
+M1e Task 7 reported a destination's last arrival at tick 1,274, corrected a plan figure of 1,549 to
+it, and offered as evidence that **two independent integrations agreed**. Both were wrong.
+
+The harness hard-coded `PHASE_OUTBOUND = 1` and `PHASE_RETURNING = 2`. The real values are **2 and
+3**. So the "arrival" predicate matched the `IDLE → OUTBOUND` edge and counted **dispatches**.
+Both integrations imported that same constant — **independent on every axis except the one that
+mattered** — so they agreed exactly, and their agreement was reported as corroboration.
+
+Cross-checking is only worth what the checks fail to share. Two implementations of the same wrong
+premise are one measurement quoted twice.
+
+**The oracle that broke it touched no phase constant at all:** `destPins` is written in exactly two
+places repo-wide, +1 on fire and −1 on arrival, so a decrement *is* an arrival by construction. That
+is the property to look for — an oracle whose derivation does not pass through the thing you might
+have wrong.
+
+Two practical rules. **Prefer a structural oracle to a second implementation** — a conservation law,
+a counter with one writer, an invariant — because it fails differently rather than identically. And
+when a measurement contradicts a figure someone else derived, **suspect the instrument before the
+figure**: here the plan's 1,549 was right all along, and the "correction" was the defect. Compare
+against [a correction can repeat the exact error it is correcting] — this is its instrumented twin.
+
+## An arithmetic model of what a rig does is not what the rig does
+
+The same task needed to know where a profiling rig's last window ends, to keep it below a tick at
+which the sim freezes. Its first answer was derived — warmup plus windows times frames — and gave
+**5,250**. The rig actually ends at **6,459**, a 23% error, on the quantity a safety margin was being
+computed from.
+
+The shipped guard therefore reads `H_TICK` off the real rig rather than recomputing it, with a static
+assertion at the knobs as a second line. **When a bound protects against a rig's behaviour, measure
+the rig** — a model of the rig is a second implementation of it, and it can be wrong in the direction
+that makes the bound look safe.
