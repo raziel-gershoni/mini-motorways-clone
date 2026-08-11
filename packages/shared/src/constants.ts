@@ -154,11 +154,16 @@ export const MOTORWAY_CAP = 9
  * rather than importing it, because `render` imports nothing from `shared`
  * (spec §4).
  *
- * **These are drawn from, not simulated on.** The sim's board is the full
- * `GRID_W × GRID_H`; nothing in `sim` reads these, and a building or road
- * outside the rect is legal state that is simply not visible. M2's
- * hand-authored starting city (`game/startingCity.ts`) is placed entirely
- * inside it for that reason.
+ * **These were drawn from and not simulated on until M1e Task 5, and that
+ * sentence has now moved.** The sim's board is still the full `GRID_W ×
+ * GRID_H`, and a building or road outside the rect is still legal state that is
+ * simply not visible — but `sim/src/spawn.ts` READS all four, because nothing
+ * may spawn where the player cannot see it and this rect is the only
+ * description of what is visible. That file is the ONLY reader in `sim`, and it
+ * clips the rect to the board before using it (a 4x4 fixture map misses the
+ * rect entirely). M2's hand-authored starting city
+ * (`game/startingCity.ts`) is placed entirely inside the rect for the same
+ * visibility reason.
  *
  * Why the rect and not the full grid: fitting 24×40 into the measured M0
  * viewport gives `floor(min(406/24, 870/40))` = **16 CSS px** against spec
@@ -242,6 +247,40 @@ export const DESTINATIONS_PER_WEEK = 2
 export const DEST_SPAWN_PERIOD_TICKS = TICKS_PER_WEEK / DESTINATIONS_PER_WEEK
 /** §5.9's "10 s between same-group house spawns", converted here and nowhere else. */
 export const HOUSE_SPAWN_PERIOD_TICKS = 10 * TICKS_PER_SECOND
+
+/** §5.9's "20 s retry on a failed destination", converted here and nowhere else. */
+export const DEST_SPAWN_RETRY_TICKS = 20 * TICKS_PER_SECOND
+/** §5.9's "2 s cooldown on a failed house spawn". */
+export const HOUSE_SPAWN_RETRY_TICKS = 2 * TICKS_PER_SECOND
+/**
+ * How many houses a colour may hold per same-colour destination [OURS]. House
+ * growth follows destination growth rather than the clock: without this,
+ * `firstCity`'s `maxHouses` of 40 fills in about 80 seconds at one attempt per
+ * colour per `HOUSE_SPAWN_PERIOD_TICKS`.
+ *
+ * **This constant times `CARS_PER_HOUSE` is the fleet-per-destination ratio,
+ * and plan Decision 2 shows it is the term that decides whether the demand ramp
+ * can ever bite.** At 2 it is four cars per destination at every week, so the
+ * fleet grows exactly in step with demand and only the round trip can close the
+ * gap. Task 10's gate measures that ratio; do not change this number without
+ * re-running it.
+ */
+export const HOUSES_PER_DESTINATION = 2
+/** §5.9's "future houses of a neighbourhood spawn within ~2 tiles of an existing same-colour house". */
+export const HOUSE_NEIGHBOURHOOD_RADIUS = 2
+/**
+ * Cells examined per spawn attempt [OURS]. Unbounded scanning is up to 308
+ * cells x 4 orientations x `canPlaceDestination` inside one tick, which is a
+ * frame-dropping spike on a phone however cheap the predicate is.
+ *
+ * **Note what bounding it does NOT do.** The first draft claimed it "makes
+ * §5.3.5's blocked-spawn redistribution reachable rather than theoretical". It
+ * does the opposite of what §5.3.5 asks: a bounded window missing is not "no
+ * cell will take one anywhere", and pushing on it fires the redistribution at
+ * the retry cadence rather than the schedule's. `SpawnOutcome` separates the
+ * two and only the board-wide refusal pushes.
+ */
+export const SPAWN_CANDIDATE_LIMIT = 24
 
 // --- The weekly grant (spec §5.10) ---
 /**

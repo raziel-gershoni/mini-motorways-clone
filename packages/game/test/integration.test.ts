@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
+  CARS_PER_HOUSE,
   COST_UNIT_SCALE,
   DIAG_COST,
   FIRST_PIN_DELAY_TICKS,
@@ -20,7 +21,9 @@ import {
   PHASE_RETURNING,
   EnterOutcome,
   canEnter,
+  carparkCell,
   claimCell,
+  destMetaOrientation,
   occupantOf,
   packRouteStep,
   assertOccupancySound,
@@ -412,8 +415,25 @@ const EXPECTED_ROAD_CELLS = 4
 
 /** The car slot house 1 dispatches: house index 1, `CARS_PER_HOUSE` = 2, so slot 2. */
 const TRIP_CAR_SLOT = 2
-/** Every car slot Task 2's seed creates is live from tick 0 — 3 houses x 2 cars. */
+/**
+ * Every car slot Task 2's seed creates is live from tick 0 — 3 houses x 2 cars.
+ *
+ * **This is no longer the fleet size for the whole of a run, and M1e Task 5 is
+ * where it stopped being one.** The spawn phase places houses inside `step`,
+ * and each one creates `CARS_PER_HOUSE` more cars, so any assertion below that
+ * runs past tick 300 has to say WHICH tick's fleet it means. Every such site
+ * now compares the drawn count against `liveCarSlots(state)` — the sim's own
+ * answer, from an independent mechanism (`carPhase`, versus the renderer's
+ * `snapshots.currLive`) — and pins the measured absolute beside it.
+ */
 const LIVE_CAR_SLOTS = 6
+
+/** How many car slots the SIM calls live. The renderer's answer comes from `snapshots.currLive`. */
+function liveCarSlots(state: Game['state']): number {
+  let n = 0
+  for (let i = 0; i < state.carPhase.length; i++) if ((state.carPhase[i] as number) !== PHASE_NONE) n++
+  return n
+}
 
 /** The absolute tick the trip car is dispatched on. See `SEED_FIRST_PIN_TICK`. */
 const DISPATCH_TICK = SEED_FIRST_PIN_TICK
@@ -485,6 +505,8 @@ interface FrameSample {
   readonly gx: number
   readonly gy: number
   readonly cars: number
+  /** The SIM's live-slot count on the same frame — the independent half of the pair. */
+  readonly liveSlots: number
 }
 
 interface TripRecord {
@@ -549,7 +571,17 @@ function runTrip(rig: Rig): TripRecord {
       // car and guard 3 satisfiable by a completely frozen board.
       const gx = (car.x - camera.tileSize / 4 - camera.originX) / camera.tileSize + camera.x0
       const gy = (car.y - camera.tileSize / 4 - camera.originY) / camera.tileSize + camera.y0
-      frames.push({ tick, phase, alpha: game.loop.alpha, x: car.x, y: car.y, gx, gy, cars: cars.length })
+      frames.push({
+        tick,
+        phase,
+        alpha: game.loop.alpha,
+        x: car.x,
+        y: car.y,
+        gx,
+        gy,
+        cars: cars.length,
+        liveSlots: liveCarSlots(state),
+      })
     }
     if (i === 0) blitCells = blits(ctx.log).map((b) => screenToCell(b.dx, b.dy, camera))
   }
@@ -670,6 +702,7 @@ function degenerateRecord(): TripRecord {
       gx: 8,
       gy: 13,
       cars: LIVE_CAR_SLOTS,
+      liveSlots: LIVE_CAR_SLOTS,
     })
   }
   return {
@@ -921,7 +954,40 @@ describe('a full trip, drawn: road in, car out, score up', () => {
     // One frame per tick from the warm start's end to the scoring tick.
     expect(trip.frames.length).toBe(SCORE_TICK - WARM_START_TICKS)
     expect(trip.frames.length).toBe(177)
-    for (const f of trip.frames) expect(f.cars).toBe(LIVE_CAR_SLOTS)
+    // **Re-derived at M1e Task 5: the fleet GROWS inside this record, so one
+    // constant cannot describe it any more.** A colour-0 house spawns at tick
+    // 360 (this is `RUN_SEED`, and the fleet reaches 8 before the trip scores
+    // at 435), which is exactly the behaviour Task 5 shipped. Three assertions
+    // replace the one that used to compare against `LIVE_CAR_SLOTS`, and
+    // together they are stronger than it was:
+    //
+    //   - the DRAWN count equals the SIM's live-slot count on every frame —
+    //     two independent mechanisms (`snapshots.currLive` versus `carPhase`)
+    //     agreeing, which the old constant could not check at all;
+    //   - it never falls, which is the property `resolve.ts`'s slot-reuse
+    //     argument rests on;
+    //   - and the two endpoints are pinned, so a fleet that stopped growing —
+    //     or one that ran away — fails here with a number in the message.
+    for (const f of trip.frames) {
+      expect(f.cars, `tick ${f.tick}: drawn ${f.cars} against sim ${f.liveSlots}`).toBe(f.liveSlots)
+    }
+    for (let i = 1; i < trip.frames.length; i++) {
+      const prev = trip.frames[i - 1] as FrameSample
+      const cur = trip.frames[i] as FrameSample
+      expect(cur.cars, `the fleet shrank at tick ${cur.tick}`).toBeGreaterThanOrEqual(prev.cars)
+    }
+    expect((trip.frames[0] as FrameSample).cars, "the seed's own fleet").toBe(LIVE_CAR_SLOTS)
+    const grewAt = trip.frames
+      .filter((f, i) => i > 0 && f.cars > (trip.frames[i - 1] as FrameSample).cars)
+      .map((f) => `${f.tick}:${f.cars}`)
+    // Measured on `RUN_SEED`: a colour-0 house at tick 360 and a colour-1 house
+    // at 420, each adding `CARS_PER_HOUSE` cars. Both are inside the trip
+    // record, so this is the one place in the file that watches the spawner
+    // through the DRAW path rather than through state.
+    expect(grewAt, 'the ticks the fleet grew on, and to what').toEqual(['360:8', '420:10'])
+    expect((trip.frames[trip.frames.length - 1] as FrameSample).cars).toBe(
+      LIVE_CAR_SLOTS + 2 * CARS_PER_HOUSE,
+    )
     expect(trip.frames.filter((f) => f.phase === PHASE_OUTBOUND).length).toBeGreaterThan(20)
     expect(trip.frames.filter((f) => f.phase === PHASE_RETURNING).length).toBeGreaterThan(20)
     // The car ends where it started — a round trip, not a one-way drive. Within
@@ -1022,7 +1088,16 @@ describe('a 2,000 ms stall', () => {
       if ((rig.game.state.header[H_SCORE] as number) > 0) scoreTick = rig.game.state.header[H_TICK] as number
     }
     expect(scoreTick).toBe(SCORE_TICK)
-    expect(drawnCars(rig.ctx.log, rig.game.shell.camera.tileSize).length).toBe(LIVE_CAR_SLOTS)
+    // The drawn fleet against the sim's own count, not against a constant — see
+    // `LIVE_CAR_SLOTS`. This case runs further than the trip record does (the
+    // 2,000 ms stall costs no simulation, but `runTripSetup` plus the drain
+    // leaves it past two house spawns), so the absolute is 10 rather than 8.
+    expect(drawnCars(rig.ctx.log, rig.game.shell.camera.tileSize).length).toBe(
+      liveCarSlots(rig.game.state),
+    )
+    expect(liveCarSlots(rig.game.state), 'two houses spawned before the score').toBe(
+      LIVE_CAR_SLOTS + 2 * CARS_PER_HOUSE,
+    )
   })
 
   it('is not vacuous: a 2,000 ms PAUSE resumes with no burst at all', () => {
@@ -1523,7 +1598,14 @@ describe('a queued car is drawn inside its own cell, not on top of the car it wa
     for (let i = 0; i < 5; i++) {
       rig.oneTick(ABS_ALPHA)
       const cars = drawnCars(ctx.log, camera.tileSize)
-      expect(cars.length).toBe(LIVE_CAR_SLOTS)
+      // Against the sim's own count rather than a constant — see
+      // `LIVE_CAR_SLOTS`. Measured: 8 across this whole five-frame window,
+      // because the one house that spawns before it lands at tick 360 and this
+      // window opens at 409.
+      expect(cars.length).toBe(liveCarSlots(state))
+      expect(cars.length, 'one house has spawned by tick 409, and none inside the window').toBe(
+        LIVE_CAR_SLOTS + CARS_PER_HOUSE,
+      )
       const car = cars[TRIP_CAR_SLOT] as (typeof cars)[number]
       const blocker = cars[BLOCKER_SLOT] as (typeof cars)[number]
       const toGx = (x: number) => (x - camera.tileSize / 4 - camera.originX) / camera.tileSize + camera.x0
@@ -1912,6 +1994,65 @@ describe('20,000 ticks on a deliberately bad network', () => {
     // The valve genuinely fired, so the run exercised the branch it is here for
     // rather than merely surviving 20,000 quiet ticks.
     expect(valves, 'the valve never fired, so this is not the bad network it claims to be').toBe(98)
+
+    // ---------------------------------------------------------------------
+    // **The spawner ran, and this is the ONLY long-horizon window M1e's spawn
+    // phase gets anywhere in the repo** — 20,000 ticks is four and a half weeks
+    // against the 3,000-tick and 4,500-frame windows every other rig uses.
+    //
+    // M1e Task 5 chose to let this fixture spawn rather than capping its
+    // `maxHouses`/`maxDestinations` to the built counts, precisely for that
+    // coverage, and the choice is only worth anything if something is placed.
+    // **Measured: 3 destinations and 2 houses, taking the board to 4/4
+    // destinations (its `maxDestinations`) and 14 houses.**
+    //
+    // **And the FIVE M1d figures above did not move because of them, which was
+    // predicted to be false and is measured to be true. The reason is NOT the
+    // obvious one, and the obvious one was written here first and was wrong.**
+    // A spawned colour-0 destination does receive pins — `jamFixture` holds
+    // `destPins[0]` at 255, far past `PIN_CAP_SQUARE_HARD`, so every scheduled
+    // colour-0 pin OVERFLOWS onto the first eligible same-colour destination
+    // with room, which is exactly the one the spawner just placed. Measured:
+    // destination 1 sits at its cap of 10.
+    //
+    // What actually excludes them is the OTHER half of `assembleSources`'s
+    // condition: a destination is a flow-field source iff it has a pin **and
+    // its carpark carries a road**. `canPlaceDestination` rejects a road on any
+    // of a candidate's seven cells, so a spawned destination's carpark is
+    // road-free by construction and stays that way on a board where nothing
+    // ever lays another road. It seeds no field, is never dispatched to, and
+    // its pins simply accumulate and then drop. The two spawned houses belong
+    // to colour 1, whose destinations are likewise sourceless, so their four
+    // cars stay `PHASE_IDLE` for the whole run.
+    //
+    // That is why valves 98, minCompletions 2, maxReserved 24 and maxBlocked at
+    // the threshold all survive a live spawner unchanged — a measurement, not
+    // an argument, and the reason this fixture needed no re-derivation at all.
+    // ---------------------------------------------------------------------
+    expect(rig.state.header[H_DEST_COUNT], 'the spawner placed no destination in 20,000 ticks').toBe(
+      4,
+    )
+    expect(rig.state.header[H_HOUSE_COUNT], 'the spawner placed no house in 20,000 ticks').toBe(14)
+    // Vacuity on the exclusion argument itself, on the clause that is actually
+    // load-bearing. If a future task connects a spawned destination to a road,
+    // the four figures above become derived from a different board and this
+    // line is what says so first.
+    for (let d = 1; d < (rig.state.header[H_DEST_COUNT] as number); d++) {
+      const carpark = carparkCell(
+        rig.state.destCell[d] as number,
+        destMetaOrientation(rig.state.destMeta[d] as number),
+        rig.world.w,
+        rig.world.h,
+      )
+      expect(
+        rig.state.roads[carpark] as number,
+        `spawned destination ${d}'s carpark is on a road, so it CAN be dispatched to`,
+      ).toBe(0)
+    }
+    expect(
+      rig.state.destPins[1] as number,
+      'vacuity: destination 1 must actually be receiving the overflow this note describes',
+    ).toBeGreaterThan(0)
 
     // Two identical runs agree, byte for byte, over the whole buffer.
     const second = buildJamRig('long-run', JAM_STARVED_FIRST_HOUSE_Y, JAM_STARVED_HOUSE_COUNT)

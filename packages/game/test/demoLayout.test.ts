@@ -3,6 +3,7 @@ import {
   demoCity,
   firstCity,
   CARS_PER_HOUSE,
+  DEST_SPAWN_PERIOD_TICKS,
   MAX_BLOCKED_TICKS,
   REVEALED_X0,
   REVEALED_Y0,
@@ -21,6 +22,7 @@ import {
   ghostCommittedOf,
   ghostMaskOf,
   hashState,
+  isGameOver,
   placeRoad,
   roadMask,
   step,
@@ -37,8 +39,11 @@ import {
   PHASE_OUTBOUND,
   PHASE_RETURNING,
   H_DEST_COUNT,
+  H_DEST_SPAWN_TIMER,
   H_HOUSE_COUNT,
+  H_PINS_DROPPED,
   H_SCORE,
+  H_SPAWN_COLOUR_CURSOR,
   type GameState,
   type TickAction,
   type WorldData,
@@ -814,5 +819,127 @@ describe('erasing three corridor cells on the demo board', () => {
     expect(drained).toBeGreaterThan(0)
     expect(tilesLeft(rig.state)).toBe(tilesBefore + 3)
     expect(ledger(rig.state, rig.world)).toBe(total)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 7. What M1e's spawn phase does to this board, measured against a control
+// ---------------------------------------------------------------------------
+
+/**
+ * Every pin this board has ever created, which is the quantity the spawner can
+ * move and the pin COUNT is not.
+ *
+ * `runArrivals` decrements `destPins` when a car reaches its destination and
+ * increments `H_SCORE` when it gets home, so a standing pin total is not
+ * conserved and comparing it across two runs says nothing. The conserved
+ * quantity is: pins standing, plus pins dropped, plus pins already consumed —
+ * and a pin is consumed at the outbound arrival, so the consumed count is
+ * `H_SCORE` (round trips finished) plus the cars currently on a return leg.
+ */
+function pinsEverCreated(state: GameState): number {
+  let n = (state.header[H_PINS_DROPPED] as number) + (state.header[H_SCORE] as number)
+  for (let d = 0; d < (state.header[H_DEST_COUNT] as number); d++) n += state.destPins[d] as number
+  for (let c = 0; c < state.carPhase.length; c++) {
+    if ((state.carPhase[c] as number) === PHASE_RETURNING) n++
+  }
+  return n
+}
+
+describe('the demo board under M1e’s spawn phase', () => {
+  /**
+   * **This replaces the shape the plan's first draft asked for, which asserted
+   * `H_HOUSE_COUNT` and `H_DEST_COUNT` on a board that is at both caps from
+   * tick 0** — the only two quantities on it that cannot move. That test passes
+   * while every claim around it is false, and after Task 8 it would pass
+   * *because the sim is frozen*.
+   *
+   * The control is the same rig with the destination timer parked past the
+   * window, so its spawn phase only decrements. It is not "no spawn phase at
+   * all" and does not need to be: on this board the HOUSE half is a genuine
+   * no-op (`H_HOUSE_COUNT >= maxHouses` short-circuits it before the scan), so
+   * parking the destination timer removes the only half that does anything.
+   * That is asserted rather than assumed, below.
+   */
+  it('adds no BUILDING, and pushes exactly the scheduled demand it could not place', () => {
+    const map = demoCity()
+    const live = seededRig()
+    const control = seededRig()
+    // The window is capped BELOW this board's death tick with the margin
+    // stated: Decision 7 puts it at 6,703 under Tasks 7+8, and a frozen sim is
+    // byte-identical from tick to tick, so a longer window would assert over a
+    // corpse. 5,000 leaves 1,703 ticks (25 %) of margin.
+    const WINDOW = 5000
+    for (let i = 0; i < WINDOW; i++) {
+      live.tick(NO_ACTIONS)
+      control.state.header[H_DEST_SPAWN_TIMER] = WINDOW + 2
+      control.tick(NO_ACTIONS)
+    }
+    expect(isGameOver(live.state), 'this window must not reach the shutdown').toBe(false)
+
+    // The buildings genuinely cannot move — but this is the SECONDARY check,
+    // not the test.
+    expect(live.state.header[H_HOUSE_COUNT]).toBe(map.maxHouses)
+    expect(live.state.header[H_DEST_COUNT]).toBe(map.maxDestinations)
+    // ...and the house half really is inert, which is what makes the control a
+    // control: the two runs' house timers are identical, because neither ever
+    // placed anything.
+    expect(Array.from(live.state.houseSpawnTimer)).toEqual(Array.from(control.state.houseSpawnTimer))
+
+    // The primary check: exactly the scheduled pushes, and nothing else.
+    // Attempts land at DEST_SPAWN_PERIOD_TICKS and every period after — the
+    // SCHEDULE, not the retry, because a full board is BOARD_FULL — so the
+    // count is derivable rather than observed.
+    const expectedPushes = Math.floor(WINDOW / DEST_SPAWN_PERIOD_TICKS)
+    expect(expectedPushes, 'vacuity: the window must contain at least two').toBeGreaterThanOrEqual(2)
+    // The scheduled half of demand is identical in both runs — `pinAccum` is
+    // driven by `slotCounts`, which depends only on the destinations, and those
+    // cannot move here. So the whole difference below is 5.3.5's pushes and
+    // nothing else, which is what makes the equality an attribution rather than
+    // a coincidence.
+    expect(Array.from(live.state.pinAccum)).toEqual(Array.from(control.state.pinAccum))
+    expect(pinsEverCreated(live.state)).toBe(pinsEverCreated(control.state) + expectedPushes)
+
+    // And the pushes ROTATE rather than all landing on one colour. The cursor
+    // is written from the chosen colour on every attempt, so after N attempts
+    // on a 3-colour board it reads `N % 3` — 2 here, which is only reachable if
+    // the cursor advanced on both of the two FAILED attempts.
+    expect(live.state.header[H_SPAWN_COLOUR_CURSOR]).toBe(expectedPushes % map.groupCount)
+    expect(control.state.header[H_SPAWN_COLOUR_CURSOR], 'the control attempted nothing').toBe(0)
+
+    // A pushed pin also moves `rotationCursor`, so the schedule itself is
+    // perturbed and not only the count.
+    expect(Array.from(live.state.rotationCursor)).not.toEqual(
+      Array.from(control.state.rotationCursor),
+    )
+
+    // The digest differs, and that is the honest statement: this board is NOT
+    // inert under M1e. It is unchanged in its buildings and moved by exactly
+    // its own unplaceable schedule.
+    expect(hashState(live.state)).not.toBe(hashState(control.state))
+  })
+
+  it('is not vacuous: the pushes are the ONLY thing the control lacks', () => {
+    // The control differs from the live run in one parked header slot, so a
+    // reader is entitled to ask whether the divergence above is that slot
+    // rather than the pushes. Over a window BELOW the first attempt the two
+    // runs must agree on everything except that slot — which is what says the
+    // parking itself changes nothing else.
+    const live = seededRig()
+    const control = seededRig()
+    const SHORT = DEST_SPAWN_PERIOD_TICKS - 1
+    for (let i = 0; i < SHORT; i++) {
+      live.tick(NO_ACTIONS)
+      control.state.header[H_DEST_SPAWN_TIMER] = SHORT + 2
+      control.tick(NO_ACTIONS)
+    }
+    expect(pinsEverCreated(live.state)).toBe(pinsEverCreated(control.state))
+    expect(Array.from(live.state.rotationCursor)).toEqual(Array.from(control.state.rotationCursor))
+    expect(live.state.header[H_SCORE]).toBe(control.state.header[H_SCORE])
+    // ...and the ONE slot that does differ is the parked timer.
+    control.state.header[H_DEST_SPAWN_TIMER] = live.state.header[H_DEST_SPAWN_TIMER] as number
+    expect(hashState(control.state), 'the parking changed something other than its own slot').toBe(
+      hashState(live.state),
+    )
   })
 })

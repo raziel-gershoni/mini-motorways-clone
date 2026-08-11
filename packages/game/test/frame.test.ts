@@ -1016,8 +1016,27 @@ describe('the first frame, and cars that appear later', () => {
    * prose. `resolve.ts` cites reachability as the reason the slot-reuse class is
    * harmless; the catalogue's rule is that a structural defence used to justify
    * not testing something must itself be pinned.
+   *
+   * **RE-DERIVED, NOT DELETED, at M1e Task 5.** This test used to assert that
+   * liveness never changes at all inside `step`, and M1e's spawn phase makes
+   * that false on purpose: a house placed on tick 360 creates `CARS_PER_HOUSE`
+   * cars inside `step`, which is exactly what the old assertion forbade. The
+   * property it was really pinning survives and is stronger than the sentence
+   * it was written as — **liveness only ever GROWS, it grows only where a house
+   * was placed on that same tick, and a slot that becomes live is SNAPPED to
+   * its sim position rather than sliding onto it from wherever the slot was
+   * last used.** That last clause is `advanceDraw`'s rule 1 (`resolve.ts`), and
+   * until Task 5 it had no production caller at all — `resolve.test.ts` reached
+   * `prevLive === 0` by a direct call, in this codebase's
+   * `assertSingleCrossing` idiom for a branch production cannot yet produce.
+   * **It can now, and this is where that is observed.**
+   *
+   * What the old sentence protected against — a slot going live and then DEAD,
+   * or a live slot being reassigned to another house — is what the two
+   * assertions below still forbid, and either one turns the 12.6-cell slide of
+   * the test above into a real defect.
    */
-  it('never changes a car slot’s liveness inside step, over a whole scored trip', () => {
+  it('grows car-slot liveness only where a house spawned, and snaps the new slot', () => {
     const r = rig(true)
     const fb = builderFor(r)
     const queue = createInputQueue()
@@ -1027,22 +1046,74 @@ describe('the first frame, and cars that appear later', () => {
       queue.enqueue('place', path[i] as number, path[i + 1] as number)
     }
     const slots = r.state.carPhase.length
-    const liveAtStart: number[] = []
-    for (let i = 0; i < slots; i++) liveAtStart.push((r.state.carPhase[i] as number) === PHASE_NONE ? 0 : 1)
+    const liveNow: number[] = []
+    const homeNow: number[] = []
+    for (let i = 0; i < slots; i++) {
+      liveNow.push((r.state.carPhase[i] as number) === PHASE_NONE ? 0 : 1)
+      homeNow.push(r.state.carHome[i] as number)
+    }
+    const liveAtStart = liveNow.slice()
+    /** Ticks on which some slot went from dead to live, and how many did. */
+    const births: { tick: number; slot: number; houses: number }[] = []
+    /** Slots whose FIRST drawn frame was not their sim position. */
+    const unsnapped: string[] = []
 
     let now = 0
     for (let f = 0; f < 1000; f++) {
       now += 16.7
       loop.frame(now)
+      const tick = r.state.header[H_TICK] as number
       for (let i = 0; i < slots; i++) {
         const live = (r.state.carPhase[i] as number) === PHASE_NONE ? 0 : 1
-        expect(live, `slot ${i} changed liveness at tick ${r.state.header[H_TICK]}`).toBe(liveAtStart[i])
+        // 1. Liveness NEVER falls, and a live slot never changes house. Those
+        //    two together are what makes the slot-reuse class above
+        //    unreachable, and they are the whole of what `resolve.ts` relies on.
+        if (liveNow[i] === 1) {
+          expect(live, `slot ${i} went DEAD at tick ${tick}`).toBe(1)
+          expect(r.state.carHome[i] as number, `slot ${i} changed house at tick ${tick}`).toBe(
+            homeNow[i],
+          )
+        }
+        if (liveNow[i] === 0 && live === 1) {
+          births.push({ tick, slot: i, houses: r.state.header[H_HOUSE_COUNT] as number })
+          // 3. The snap. A slot that became live inside this drain has its
+          //    drawn position AT its sim position — `advanceDraw` rule 1's
+          //    `prevLive === 0` arm — rather than lerping in from the stale
+          //    coordinates the slot's `drawCurrXY` still held.
+          const drawn = carXY(build(r, fb, 0.5), i)
+          const exact = exactXY(fb, i, 0.5)
+          if (drawn[0] !== exact[0] || drawn[1] !== exact[1]) {
+            unsnapped.push(`slot ${i} at tick ${tick}: drawn ${drawn} vs sim ${exact}`)
+          }
+        }
+        liveNow[i] = live
+        homeNow[i] = r.state.carHome[i] as number
       }
       if ((r.state.header[H_SCORE] as number) > 0) break
     }
     // Vacuity: the run must have gone somewhere, or "nothing changed" is trivial.
     expect(r.state.header[H_SCORE] as number).toBe(1)
     expect(liveAtStart.filter((x) => x === 1).length).toBe(6)
+
+    // 2. Every birth is a house spawn, named by tick and slot. Measured on
+    //    THIS rig's seed (`m2-frame`, not `RUN_SEED`): a colour-0 house lands
+    //    at tick 360 taking slots 6 and 7, and a colour-1 house at 420 taking
+    //    8 and 9 — two colours, because each colour carries its own
+    //    `houseSpawnTimer` and colour 1 is unlocked by the seeded clause rather
+    //    than by the week. The exact figures are asserted because "some slot
+    //    went live at some point" is satisfied by a slot-reuse bug just as well
+    //    as by a spawn.
+    expect(births.map((b) => `${b.tick}:${b.slot}`)).toEqual(['360:6', '360:7', '420:8', '420:9'])
+    expect(new Set(births.map((b) => r.state.houseColour[b.houses - 1] as number)).size).toBe(2)
+    for (const b of births) {
+      expect(b.slot, `slot ${b.slot} is not house ${b.houses - 1}'s`).toBeGreaterThanOrEqual(
+        (b.houses - 1) * CARS_PER_HOUSE,
+      )
+      expect(b.slot).toBeLessThan(b.houses * CARS_PER_HOUSE)
+    }
+    expect(unsnapped, 'a slot that became live slid onto its position instead of snapping').toEqual(
+      [],
+    )
   })
 })
 

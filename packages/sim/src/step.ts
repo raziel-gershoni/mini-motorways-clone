@@ -7,6 +7,7 @@ import type { FlowField, Scratch } from './scratch'
 import { syncFields } from './flowfield'
 import { placeRoad, eraseRoad } from './roads'
 import { runDemand } from './demand'
+import { runSpawn } from './spawn'
 import { assembleSources, runDispatch } from './dispatch'
 import { runMovement } from './cars'
 import { runArrivals } from './trips'
@@ -46,9 +47,10 @@ export interface TickInputs {
  * replaying 2*(N/2) ticks run this exact function the same number of times
  * either way.
  *
- * **The eight phases — seven until M1e Task 2 inserted the week boundary at
- * position 2. Most positions are forced by a constraint; ONE ADJACENT SWAP
- * STILL IS NOT, and this comment says which** (M1c, "The tick order,
+ * **The nine phases — seven until M1e Task 2 inserted the week boundary at
+ * position 2, and eight until M1e Task 5 inserted the spawn phase at position
+ * 4. Most positions are forced by a constraint; ONE ADJACENT SWAP STILL IS NOT,
+ * and this comment says which** (M1c, "The tick order,
  * derived"). An earlier version opened "each justified by the constraint that
  * forces its position rather than by preference — the order is derived; do not
  * reorder it for tidiness", and that was an overstatement in the one comment
@@ -56,9 +58,14 @@ export interface TickInputs {
  * reorderings were run: 11 were caught by tests and **`1 <-> 2` and `2 <-> 3`
  * were 0-detector no-ops**, re-measured at the close of M1d over the complete
  * pairwise set C(7,2) = 21 with the same answer. In the eight-phase numbering
- * those two pairs are **`1 <-> 3` and `3 <-> 4`, and only the second is still
- * inert** — see the disclosure below the table. Do not read it as licence to
- * reorder.
+ * those two pairs were `1 <-> 3` and `3 <-> 4`, and only the second was still
+ * inert. **In today's NINE-phase numbering there are TWO inert pairs, not one:
+ * `3 <-> 5` (inputs versus demand, inherited) and `4 <-> 5` (spawn versus
+ * demand, new in Task 5 and predicted by its brief to have a detector).**
+ * `3 <-> 4` now names *inputs versus spawn*, which is a different pair and does
+ * have one (`spawn.test.ts`'s paving test). Both no-ops are decomposed below,
+ * and they are inert for DIFFERENT reasons. Do not read any of this as licence
+ * to reorder.
  *
  *   1. `H_EPOCH <- tick`; advance `H_TICK`, `H_WEEK`. **The constraint is "the
  *      advance must precede every clock reader below", and as of M1e Task 2 the
@@ -92,36 +99,86 @@ export interface TickInputs {
  *   3. Apply inputs — the only phase that changes `roads`. Must precede the
  *      field sync, or a road drawn on tick T is invisible to this tick's
  *      field.
- *   4. Demand — accumulators, pins, overflow, drops. Mutates `destPins`,
+ *   4. Spawn (`spawn.ts`, M1e Task 5) — the destination timer and the
+ *      per-colour house timers, and whatever they place. AFTER phase 3,
+ *      because §5.9's "nothing spawns on an existing road tile" must see the
+ *      road the player laid THIS tick — that is the whole of spawn-blocking,
+ *      which §5.9 calls a skill expression. BEFORE phase 5, so a destination
+ *      placed on tick T is inside `H_DEST_COUNT` for tick T's rotation, and
+ *      before the sync for the ordinary reason: it writes `destCell`/`destMeta`
+ *      (both FIELD_INPUT) and, through §5.3.5's redistribution, `destPins`.
+ *      It reads `H_TICK` (through `placeDestination`'s `destSpawnTick` stamp)
+ *      and `H_WEEK` (colour unlocks), so its position against phase 1 is an
+ *      off-by-one with a detector.
+ *   5. Demand — accumulators, pins, overflow, drops. Mutates `destPins`,
  *      which decides the source set, so it must precede the sync.
- *   5. Assemble sources, then EXACTLY ONE `syncFields`. Every source-mutating
+ *   6. Assemble sources, then EXACTLY ONE `syncFields`. Every source-mutating
  *      phase is now behind it, and `fieldFor` throws unless the sync ran
  *      against exactly the current sources.
- *   6. Dispatch — the whole tick's only field reader. Mutates `destReserved`
+ *   7. Dispatch — the whole tick's only field reader. Mutates `destReserved`
  *      and car state, never the source set: that is what decision 4 buys, and
  *      it is what makes "no phase between the sync and a field read may mutate
  *      the source set" hold with no in-tick reasoning required.
- *   7. Movement — advances committed routes and reads no field at all
+ *   8. Movement — advances committed routes and reads no field at all
  *      (decision 2). AFTER dispatch, so a car dispatched on tick T also moves
  *      on tick T; the alternative costs every trip one tick and every
  *      exact-tick assertion inherits it.
- *   8. Arrivals — consume the pin, release the reservation, credit the score,
+ *   9. Arrivals — consume the pin, release the reservation, credit the score,
  *      free the car. Mutates `destPins` AFTER the sync, so it must be last.
  *      **Stated residual: the fields are stale from here until the next
  *      tick's sync.** Nothing may call `fieldFor` in that window — not a
  *      renderer, not a debug hash, not a test helper. Under decision 2 the
- *      only in-tick reader is phase 6, so this binds external callers only,
+ *      only in-tick reader is phase 7, so this binds external callers only,
  *      and `loop.test.ts` asserts the throw rather than assuming it.
  *   — `H_EPOCH <- 0` on successful exit.
  *
  * **The one remaining checked no-op, disclosed in `cars.ts`'s idiom for exactly
  * this shape — and the reason recorded for it for three milestones was the
- * WRONG ONE.** `3 <-> 4` (inputs after demand — M1c's `2 <-> 3`) is 0-detector
- * across the whole suite. Every prior version of this comment said that was
+ * WRONG ONE.** `3 <-> 5` (inputs after demand — M1c's `2 <-> 3`, M1e Task 2's
+ * `3 <-> 4`) is 0-detector across the whole suite. Every prior version of this
+ * comment said that was
  * because **no `TickAction` reads `H_TICK`**, and M1e Task 2's review measured
  * that claim directly: with the trigger SATISFIED — `roads.ts` reading `H_TICK`
- * in a live branch — transposing `3 <-> 4` still scores **0**. The clock has
+ * in a live branch — transposing the pair still scores **0**. The clock has
  * nothing to do with it.
+ *
+ * **Task 5's insertion does NOT discharge it, and that is worth saying because
+ * the previous insertion did.** Phase 2 discharged `1 <-> 3` by putting a clock
+ * reader between two phases whose only relationship was the clock. Phase 4 sits
+ * between inputs and demand, so `3 <-> 5` is no longer an ADJACENT
+ * transposition — but the pair still commutes for the disjointness reason
+ * below, and a transposition of two commuting phases is inert however many
+ * phases sit between them.
+ *
+ * **And the insertion ADDED a second checked no-op rather than only removing
+ * one. `4 <-> 5` — spawn versus demand — is also 0-detector, measured over the
+ * whole 1,693-test suite, and Task 5's brief predicted it would have a
+ * detector.** Of the two new adjacent pairs, only `3 <-> 4` (inputs versus
+ * spawn) has one: `spawn.test.ts`'s paving test, 1 detector.
+ *
+ * **`4 <-> 5` has no business commuting and does anyway, for TWO reasons, both
+ * needed.** Spawn writes `destCell`, `destMeta`, `destSpawnTick`,
+ * `H_DEST_COUNT` and — through §5.3.5's push — `destPins`, `rotationCursor` and
+ * `H_PINS_DROPPED`, every one of which demand reads. So this is NOT the
+ * disjointness of `3 <-> 5`; it is:
+ *
+ *   1. **A destination placed on tick T is INELIGIBLE on tick T.** The gate is
+ *      `tick - destSpawnTick >= FIRST_PIN_DELAY_TICKS` and `placeDestination`
+ *      stamps `destSpawnTick = tick`, so `computeSlotCounts`, `resolveCurrent`,
+ *      `advanceCursor` and the overflow walk all skip it whichever side of
+ *      demand it was placed on — including the wrap moduli, which change with
+ *      `H_DEST_COUNT` but only ever skip past the new index.
+ *   2. **The push routes through `fireColour`, exactly as a scheduled pin
+ *      does.** On the rare tick both fire for one colour, the two calls compose
+ *      in either order: same cursor, same overflow walk, same recipient.
+ *
+ * Reason 1 ends if `FIRST_PIN_DELAY_TICKS` reaches 0 or anything backdates a
+ * spawned `destSpawnTick`; reason 2 ends if §5.3.5's push stops going through
+ * `fireColour`. **Both have a tripwire rather than only this paragraph**:
+ * `spawn.test.ts`'s *"a destination is INELIGIBLE on its own spawn tick"* pins
+ * reason 1 at both boundaries of the inequality, and `demand.ts`'s
+ * `pushBlockedSpawnDemand` is one line whose whole body is the `fireColour`
+ * call reason 2 names.
  *
  * **The operative reason is DISJOINTNESS.** `runDemand` writes `destPins`,
  * `pinAccum`, `rotationCursor` and `H_PINS_DROPPED`, and reads those plus
@@ -134,13 +191,14 @@ export interface TickInputs {
  * How the wrong reason survived: it was true of `1 <-> 2`, which the same
  * paragraph used to cover, and it rode along harmlessly on the pair it never
  * explained. Task 2 gave `1 <-> 2` a detector and removed it from the
- * paragraph, which left the borrowed reason standing alone on `3 <-> 4`.
+ * paragraph, which left the borrowed reason standing alone on the inputs/demand
+ * pair.
  *
  * **The failure this enables, named because it is scheduled.** M1f adds §5.9's
  * connectivity rule to `placeRoad`/`eraseRoad`: erasing a road that disconnects
  * a destination drops its pending pins. That gains `roads.ts` no `H_TICK` at
  * all — so the clock-shaped tripwire stays green — while making phase 3 write
- * `destPins`, which phase 4 reads. `3 <-> 4` becomes a real one-tick
+ * `destPins`, which phase 5 reads. `3 <-> 5` becomes a real one-tick
  * pin-accumulation error on every tick a road is drawn or erased, at 0
  * detectors.
  *
@@ -263,13 +321,14 @@ export interface TickInputs {
  * **The phase count went from 7 to 8, and `1 <-> 3` is no longer a member of
  * the inert set. `3 <-> 4` still is.**
  *
- * **This block's numbering is M1e Task 2's EIGHT-phase one, and it changes
- * again.** The same forward note M1d's block above needed: Task 5 inserts the
- * spawn phase at position 4, after which today's `3 <-> 4` (inputs vs demand)
- * becomes `3 <-> 5`, and `3 <-> 4` names *inputs vs spawn* — a different pair
- * with a real detector (the plan's Decision 1 table, and its line 4202, use
- * that final ten-phase numbering). Every `n <-> m` below counts phases as this
- * file lists them TODAY. Re-label, do not re-interpret.
+ * **This block's numbering is M1e Task 2's EIGHT-phase one, which is NO LONGER
+ * this file's — Task 5 has now made the insertion the note below predicted.**
+ * Task 5 inserted the spawn phase at position 4, so Task 2's `3 <-> 4` (inputs
+ * vs demand) is today's `3 <-> 5`, and today's `3 <-> 4` names *inputs vs
+ * spawn* — a different pair with a real detector. Every `n <-> m` in the block
+ * below counts phases as Task 2's version of this file listed them; add one to
+ * any index of 4 or above to reach today's numbering. Re-label, do not
+ * re-interpret.
  *
  * **The predictions were written into the task brief BEFORE the battery ran**,
  * which is the only thing that makes the numbers evidence: a measurement with
@@ -348,6 +407,8 @@ export function step(
       throw new Error(`step: unknown action kind "${String(action.kind)}"`)
     }
   }
+
+  runSpawn(s, world, scratch)
 
   runDemand(s, scratch)
 

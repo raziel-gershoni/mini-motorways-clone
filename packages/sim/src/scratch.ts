@@ -101,7 +101,8 @@ export interface FlowField {
  *     in full by whatever assembles sources each tick (M1c Task 4's
  *     dispatch); NOT reset by `computeFlowField` itself, since they are its
  *     input, not its scratch.
- *   - `counters` (`CT_SYNCS`, `CT_REBUILDS`): cumulative across the whole run,
+ *   - `counters` (`CT_SYNCS`, `CT_REBUILDS`, `CT_BLOCKED_PUSH_DISCARDED`):
+ *     cumulative across the whole run,
  *     never reset by anything — unlike `stats`, which is documented as
  *     carrying nothing between calls, these exist specifically to answer
  *     "did a sync happen this tick" and "did anything rebuild this tick" as
@@ -122,7 +123,7 @@ export interface Scratch {
   readonly sourcesFlat: Int32Array // groupCount * maxDestinations; colour c occupies [c*maxDestinations, c*maxDestinations + sourceCounts[c])
   readonly sourceCounts: Int32Array // groupCount
   readonly slotCounts: Int32Array // groupCount; Task 3's accumulator input
-  readonly counters: Int32Array // CT_SYNCS, CT_REBUILDS — cumulative, never reset
+  readonly counters: Int32Array // CT_SYNCS, CT_REBUILDS, CT_BLOCKED_PUSH_DISCARDED — cumulative, never reset
   readonly fieldInputRanges: Int32Array // (byteOffset, byteLength) pairs, one per FIELD_INPUT region
 }
 
@@ -132,7 +133,14 @@ const STATS_LENGTH = 2
 
 export const CT_SYNCS = 0
 export const CT_REBUILDS = 1
-const COUNTERS_LENGTH = 2
+/**
+ * §5.3.5 pushes that found no eligible destination of their colour and were
+ * therefore DISCARDED (`pushBlockedSpawnDemand`, demand.ts). In `scratch` and
+ * not in the state buffer deliberately: no golden can see it, it costs no
+ * replay bytes, and it is a counter about a rule rather than about the game.
+ */
+export const CT_BLOCKED_PUSH_DISCARDED = 2
+const COUNTERS_LENGTH = 3
 
 /**
  * `computeFlowField`'s queue cursor: `CUR_TOP` is the entry pool's bump

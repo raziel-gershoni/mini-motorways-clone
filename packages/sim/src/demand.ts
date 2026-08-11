@@ -2,6 +2,7 @@ import { PIN_CAP_SQUARE_HARD, PIN_CAP_CIRCLE_HARD, PIN_PERIOD_TICKS, FIRST_PIN_D
 import type { GameState } from './state'
 import { H_TICK, H_DEST_COUNT, H_PINS_DROPPED } from './state'
 import type { Scratch } from './scratch'
+import { CT_BLOCKED_PUSH_DISCARDED } from './scratch'
 import { destMetaColour, destMetaKind, DEST_KIND_CIRCLE } from './buildings'
 
 /**
@@ -328,4 +329,51 @@ export function advanceAccumulators(state: GameState, scratch: Scratch): void {
 export function runDemand(state: GameState, scratch: Scratch): void {
   computeSlotCounts(state, scratch)
   advanceAccumulators(state, scratch)
+}
+
+/** True iff any destination of `colour` has cleared its first-pin delay as of `tick`. */
+export function hasEligibleDestinationOfColour(state: GameState, colour: number, tick: number): boolean {
+  const destCount = state.header[H_DEST_COUNT] as number
+  for (let d = 0; d < destCount; d++) if (isEligibleOfColour(state, d, colour, tick)) return true
+  return false
+}
+
+/**
+ * Spec §5.3.5: a destination that could not be placed ANYWHERE pushes its
+ * scheduled demand into the existing destinations of its colour instead.
+ *
+ * Routed through `fireColour`, so it inherits overflow redistribution and the
+ * `H_PINS_DROPPED` fallback for free rather than reimplementing either. The
+ * guard is required, not defensive: `fireColour` THROWS when no eligible
+ * destination of the colour exists, and a colour whose only destinations are
+ * inside their 4 s first-pin delay is an ordinary, reachable state.
+ *
+ * **`fireColour` also advances `rotationCursor[colour]` (see its own comment
+ * above), so a blocked-spawn pin perturbs the SCHEDULE as well as the count** —
+ * it permanently changes which destination of that colour is next in line for
+ * every subsequent scheduled pin. That is not a bug: a pushed pin is a pin, and
+ * it should take its turn like one. It is written down because the first draft
+ * of the plan asserted that a saturated board was inert under this function,
+ * and the count is only one of the two things it moves.
+ *
+ * Called from the SPAWN phase, which runs before the field sync, so the
+ * `destPins` write it may produce is still ahead of phase 6 exactly as
+ * `runDemand`'s is.
+ */
+export function pushBlockedSpawnDemand(state: GameState, colour: number, scratch: Scratch): void {
+  const tick = state.header[H_TICK] as number
+  if (!hasEligibleDestinationOfColour(state, colour, tick)) {
+    // **Counted, because a silent discard here already hid a dead rule for
+    // twenty-eight weeks.** Measured over 40 weeks on `firstCity` with the
+    // 20-tile opening and the cursor frozen as the first draft wrote it, 232 of
+    // 259 pushes landed on colour 4 — which ends the run with a house and NO
+    // destination, so this guard swallowed every one of them and §5.3.5
+    // delivered literally nothing from week 12 onward. Nothing said so. The
+    // counter lives in `scratch`, not in the state buffer, so no golden can see
+    // it and it costs no bytes; Task 12's per-branch assertions read it.
+    scratch.counters[CT_BLOCKED_PUSH_DISCARDED] =
+      (scratch.counters[CT_BLOCKED_PUSH_DISCARDED] as number) + 1
+    return
+  }
+  fireColour(state, colour, tick)
 }

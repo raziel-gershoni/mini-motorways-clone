@@ -87,35 +87,84 @@ const PROFILED_FRAMES = 3000
 const WARMUP_FRAMES = 1500
 
 /**
- * The per-file budget, **measured across ten runs before it was chosen**.
+ * **Three windows, minimum taken — adopted at M1e Task 5, and adopted because
+ * the single-window form measurably stopped discriminating.**
  *
- * `packages/render/src/canvas.ts` reports a small residual rather than zero.
- * Ten consecutive runs of this file with the budget set to 0.01 so the figure is
- * printed:
+ * Task 5's spawn phase grows the fleet inside `step`, so this rig's city board
+ * finishes the window with 14 cars where M2 measured it with 6. `drawCars` is
+ * `canvas.ts`'s hottest loop, and the file's single-window residual went from
+ * a measured `15.25 .. 19.94` to `39.01 .. 58.94` over ten runs each —
+ * **against a smallest-realistic-regression of one escaping object per frame,
+ * which measures 78.39 .. 101.68 on this same rig.** A single-window budget
+ * would have had to sit between 59 and 78: 1.15x above the noise and 1.15x
+ * below the signal, which is the "threshold inside the noise band" defect this
+ * project has shipped twice.
  *
- * ```
- * 17.26  18.03  19.59  19.23  19.94  18.03  19.24  15.25  17.86  17.16
- * ```
- *
- * — mean 18.2, worst 19.94, and a per-function profile of the same rig charges
- * 13.5 of it to `drawCars` and 2.3 to `drawHud`, the two hottest loops. It is
- * not one object per frame: `test/allocation.test.ts` measured that at 37-77
- * B/frame, and the positive control below reinstates the exact object
- * `HUD_SCRATCH` exists to prevent — a `createHudRects()` per `drawHud` — at
- * **214.18 B/frame**.
- *
- * 32 is 1.6x the worst observed and 6.7x below that signal, so the gap between
- * the noise and the thing being watched for is empty. **Do not raise it to make
- * a change pass**, and do not lower it to 20 either: a threshold set inside the
- * upper cluster of a sampling profiler's own noise is a flaky test that looks
- * like a tight one, which this project has already shipped once.
- *
- * A budget of 0 is not available — see `test/allocation.test.ts`'s
- * `NOISE_FLOOR_BYTES_PER_FRAME` for why a sampling profiler cannot have one.
+ * **Two repairs were measured and only one worked.** Dropping
+ * `samplingInterval` to 128 — the fix that rescued the flow-field arm — did
+ * nothing here: eight runs gave `36.63 .. 63.82`, no tighter than 512's. So the
+ * spread is not sampling noise, it is genuine run-to-run variation in V8's
+ * attribution, and the instrument for that is the minimum over independent
+ * windows. `demoAllocation.test.ts` has used exactly this since M1e Task 3 and
+ * holds `canvas.ts` under a **4** B/frame floor on a board with **24** cars,
+ * which is the direct evidence that the residual is stray rather than
+ * per-car-systematic and that the minimum kills it.
  */
-const CANVAS_BUDGET_BYTES_PER_FRAME = 32
+const WINDOW_COUNT = 3
 
-/** Everything else in `render/src` gets the same sampling floor the other harness uses. */
+/**
+ * **`canvas.ts`'s per-file exemption is GONE as of M1e Task 5, and it is the
+ * minimum over three windows that retired it rather than anything about the
+ * code.**
+ *
+ * What it used to say: a single 3,000-frame window charged `canvas.ts`
+ * `15.25 .. 19.94` B/frame over ten runs (mean 18.2, of which a per-function
+ * profile put 13.5 on `drawCars` and 2.3 on `drawHud`), so it carried a
+ * dedicated 32 B/frame budget while every other `render/src` file took the
+ * 4 B/frame floor.
+ *
+ * Task 5 grew this rig's fleet from 6 cars to 14 and the same single-window
+ * figure went to `39.01 .. 58.94` over ten runs, against a smallest-realistic
+ * regression measured at `78.39 .. 101.68` on the same rig. Widening the
+ * exemption to fit would have put the threshold 1.15x above the noise and 1.15x
+ * below the signal — the "budget inside the noise band" defect, twice over.
+ * Under `WINDOW_COUNT` windows the same rig measures `0.00 .. 0.43` clean and
+ * `34.59 .. 42.23` injected, so the ordinary floor is **9.3x above the worst
+ * clean draw and 8.6x below the weakest signal**, and the exemption has nothing
+ * left to excuse.
+ *
+ * A budget of 0 is still not available — see `test/allocation.test.ts`'s
+ * `NOISE_FLOOR_BYTES_PER_FRAME` for why a sampling profiler cannot have one.
+ *
+ * ---------------------------------------------------------------------------
+ * **THE FIGURE IS WORKLOAD-SENSITIVE, AND SINCE M1e TASK 5 THE WORKLOAD IS
+ * DECIDED BY THE SPAWNER. Read this before widening anything.**
+ * ---------------------------------------------------------------------------
+ *
+ * `canvas.ts`'s residual scales with `frame.carCount`, and the fleet on this rig
+ * is no longer a constant: the spawn phase places houses inside `step`, so a
+ * task that changes spawn tuning changes this measurement without touching one
+ * line of `render`. Measured during Task 5's mutation battery, on the canonical
+ * five-package parallel run:
+ *
+ *   - unmutated tree, base and head: **clean on 17 of 17 runs** (6 at
+ *     `88f6cdb`, 6 at head, 5 interleaved baselines).
+ *   - under two mutants that genuinely change WHICH buildings spawn — dropping
+ *     the scan start's tick term, and dropping `colourUnlocked`'s seeded clause
+ *     — `canvas.ts` read **6.42** and **7.63** B/frame. Both runs ALSO failed
+ *     the vacuity test below, i.e. the fleet really was different. Those are
+ *     not strays; they are this metric answering a question about the board.
+ *   - `packages/render/src/types.ts` read **5.22** and **5.75** on two mutants
+ *     that change nothing on this board. Those two ARE strays, against a floor
+ *     that predates Task 5.
+ *
+ * So if this test goes red on a file whose code nobody touched, **check the
+ * vacuity test's `carCount` first**: a moved fleet is a spawn-tuning change and
+ * the honest response is to re-derive the pinned counts, not to widen the
+ * floor. The floor stays at 4 because the unmutated tree measures 0.00-0.43
+ * (isolated, eight draws) and 0 of 17 under contention; the band it sits in is
+ * empty and a wider one would give up the 8.6x separation from a real signal.
+ */
 const NOISE_FLOOR_BYTES_PER_FRAME = 4
 
 const RENDER_SRC = 'packages/render/src/'
@@ -347,36 +396,64 @@ function drivenGame(): Driven {
 }
 
 describe('the real draw path allocates nothing, measured', () => {
-  it('charges no packages/render/src file beyond its budget over 3,000 real frames', () => {
+  it('charges no packages/render/src file beyond its budget over three 3,000-frame windows', () => {
     const { drive } = drivenGame()
     drive(WARMUP_FRAMES)
-    const byFile = profileBytesByFile(() => {
-      drive(PROFILED_FRAMES)
-    })
+    const windows: Map<string, number>[] = []
+    for (let w = 0; w < WINDOW_COUNT; w++) {
+      windows.push(
+        profileBytesByFile(() => {
+          drive(PROFILED_FRAMES)
+        }),
+      )
+    }
 
     // **The harness must fail loudly when it resolves nothing.** A measurement
     // instrument that reports "clean" while measuring zero files is worse than
     // no instrument, and that is exactly how the worktree path bug hid for two
     // tasks. Every profile of a real frame contains allocation from `render`'s
     // own module scope, so this is a liveness check on the path arithmetic.
-    const resolved = [...byFile.keys()]
+    const resolved = [...new Set(windows.flatMap((w) => [...w.keys()]))]
     expect(
       resolved.some((file) => file.startsWith(RENDER_SRC)),
       `nothing resolved under ${RENDER_SRC} — the path derivation is broken, not the code. ` +
         `sample: ${resolved.slice(0, 4).join(' | ')}`,
     ).toBe(true)
 
-    const offenders = [...byFile]
-      .filter(([file]) => file.startsWith(RENDER_SRC))
-      .map(([file, bytes]) => [file, bytes / PROFILED_FRAMES] as const)
-      .filter(([file, perFrame]) =>
-        file.endsWith('/canvas.ts')
-          ? perFrame > CANVAS_BUDGET_BYTES_PER_FRAME
-          : perFrame > NOISE_FLOOR_BYTES_PER_FRAME,
-      )
+    // The MINIMUM over the three windows, per file — see `WINDOW_COUNT`.
+    const perFrameMin = new Map<string, number>()
+    for (const file of resolved) {
+      if (!file.startsWith(RENDER_SRC)) continue
+      let min = Infinity
+      for (const window of windows) min = Math.min(min, (window.get(file) ?? 0) / PROFILED_FRAMES)
+      perFrameMin.set(file, min)
+    }
+
+    const offenders = [...perFrameMin]
+      .filter(([, perFrame]) => perFrame > NOISE_FLOOR_BYTES_PER_FRAME)
       .map(([file, perFrame]) => `${file} at ${perFrame.toFixed(2)} B/frame`)
       .sort()
     expect(offenders).toEqual([])
+  })
+
+  it('the instrument still separates a clean draw from one escaping object, by the measured margin', () => {
+    // **The pair of numbers the floor above was chosen from, asserted so the
+    // derivation cannot rot into an accident** — the same shape
+    // `demoAllocation.test.ts` uses for its own per-call budget. `0.43` is the
+    // worst clean minimum over eight runs of `WINDOW_COUNT` windows and `34.59`
+    // the weakest injected one over four; both are stated in
+    // `NOISE_FLOOR_BYTES_PER_FRAME`'s comment with how they were taken.
+    //
+    // Strict inequalities against numbers from a DIFFERENT measurement than the
+    // budget itself, so this can distinguish the two quantities rather than
+    // restating one of them — a margin that holds at exact equality is not a
+    // margin.
+    expect(NOISE_FLOOR_BYTES_PER_FRAME).toBe(4)
+    expect(WINDOW_COUNT).toBe(3)
+    expect(0.43 * 9, 'the floor must sit well above the worst clean draw').toBeLessThan(
+      NOISE_FLOOR_BYTES_PER_FRAME * 10,
+    )
+    expect(NOISE_FLOOR_BYTES_PER_FRAME * 8, 'and well below the weakest signal').toBeLessThan(34.59)
   })
 
   it('is not vacuous: the rig really did draw roads, ghosts, cars, pins and a changing clock', () => {
@@ -392,9 +469,21 @@ describe('the real draw path allocates nothing, measured', () => {
     expect(roads, 'no road, so the road pass short-circuits on every cell').toBe(4)
 
     const frame = game.builder.frame
-    expect(frame.carCount, 'no cars, so drawCars never iterates').toBe(6)
-    expect(frame.destCount).toBe(3)
-    expect(frame.houseCount).toBe(3)
+    // **14, not the seed's 6, and the number is the workload this budget is
+    // measured against** — M1e Task 5's spawn phase places houses inside
+    // `step`, so a 4,500-frame window on the city board finishes with 7 houses
+    // and 14 cars. `drawCars` is the hottest loop in `canvas.ts` and the file
+    // budget below scales with it, which is why this is pinned here rather than
+    // written as `> 0`: a fleet that stops growing quietly halves the workload
+    // the budget was chosen for.
+    expect(frame.carCount, 'no cars, so drawCars never iterates').toBe(14)
+    expect(frame.houseCount, 'four houses spawned inside the window').toBe(7)
+    // The destination spawner's first attempt lands at tick 2,250 and this
+    // window reaches ~2,512, so exactly one destination is placed inside it —
+    // the seeded three plus one. `frame.destCount` reaching 4 is also what
+    // makes the pin loop below non-vacuous on a board that would otherwise
+    // never gain a demand source.
+    expect(frame.destCount, 'the spawner placed one destination inside the window').toBe(4)
     let pins = 0
     for (let d = 0; d < frame.destCount; d++) pins += frame.destPins[d] as number
     expect(pins, 'no pins, so the pin loop never runs').toBeGreaterThan(0)

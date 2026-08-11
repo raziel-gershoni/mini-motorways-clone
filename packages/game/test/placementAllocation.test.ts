@@ -1,7 +1,22 @@
 import { describe, it, expect } from 'vitest'
 import { Session } from 'node:inspector'
-import { canPlaceDestination, canPlaceHouse, ORIENTATION_COUNT, H_DEST_COUNT, H_HOUSE_COUNT } from '@laneways/sim'
-import type { GameState, WorldData } from '@laneways/sim'
+import {
+  attemptDestinationSpawn,
+  attemptHouseSpawn,
+  canPlaceDestination,
+  canPlaceHouse,
+  spawnZoneCellAt,
+  spawnZoneCells,
+  ORIENTATION_COUNT,
+  SpawnOutcome,
+  H_DEST_COUNT,
+  H_HOUSE_COUNT,
+  H_PINS_DROPPED,
+  H_TICK,
+  H_WEEK,
+} from '@laneways/sim'
+import { FIRST_PIN_DELAY_TICKS } from '@laneways/shared'
+import type { GameState, Scratch, WorldData } from '@laneways/sim'
 import type { AtlasContext, AtlasSurface } from '@laneways/render'
 import { createGame, type GameContext } from '../src/main'
 import { CITY_LAYOUT_ID, DEMO_LAYOUT_ID } from '../src/layouts'
@@ -491,5 +506,260 @@ describe('placement validity allocates nothing per call, measured', () => {
     expect((CALLS_PER_SCAN * 40) / SAMPLING_INTERVAL_BYTES).toBeGreaterThan(1000)
     expect(WINDOW_COUNT).toBeGreaterThanOrEqual(3)
     expect(CANDIDATE_LIMIT).toBe(24)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The SPAWNER itself, per ATTEMPT — M1e Task 5
+// ---------------------------------------------------------------------------
+
+/**
+ * **`sim/src/spawn.ts` is a per-tick module and NOTHING in this repo could see
+ * an allocation inside it. Measured, not feared.**
+ *
+ * With escaping objects planted at the top of BOTH `attemptHouseSpawn` and
+ * `attemptDestinationSpawn` — into `world` and `scratch` rather than
+ * `globalThis`, which `determinism.test.ts`'s own scan would have caught first
+ * and did — the whole 1,695-test suite stayed **green**. `allocation.test.ts`
+ * profiles `packages/sim/src/` and drives thousands of ticks, and it still
+ * cannot: `attemptHouseSpawn` fires once per colour per 60 ticks and
+ * `attemptDestinationSpawn` once per 2,250, so a 40 B/call regression lands at
+ * ~3 B/tick — under that harness's 4 B floor **by construction**, which is this
+ * project's gated-work defect exactly.
+ *
+ * So the spawner gets the same treatment `canPlaceDestination` got in Task 4: a
+ * per-ATTEMPT rate off a rig that chooses its own call count. Two boards,
+ * because one cannot reach the branches the other does, and both are
+ * REPEATABLE — every attempt below is refused, so the state does not drift
+ * across the three windows and the three measurements are of the same thing:
+ *
+ *   - **saturated** (the demo board, 18/18 destinations): the colour loop, the
+ *     per-colour house and destination counters, the cursor write, the
+ *     `BOARD_FULL` branch and §5.3.5's push through `fireColour`. Every
+ *     `attemptHouseSpawn` short-circuits at `maxHouses`.
+ *   - **paved** (the city board with every zone cell's road byte set): the full
+ *     `SPAWN_CANDIDATE_LIMIT` x `ORIENTATION_COUNT` scan —
+ *     `spawnZoneCellAt`, `destinationFitsSpawnZone`, `carparkCell`,
+ *     `nearSameColourHouse` — every candidate refused at
+ *     `canPlaceDestination`'s road pass, so nothing is ever placed.
+ */
+const SPAWN_FILE = 'packages/sim/src/spawn.ts'
+/** Attempts per profiled window. One escaping object per attempt is ~40 B, so this is ~230 samples at 512 B. */
+const SPAWN_ATTEMPTS = 3000
+
+/**
+ * **The per-attempt budget, measured on this rig before it was chosen.**
+ *
+ * Noise — the statistic asserted below (minimum over `WINDOW_COUNT` windows),
+ * with the budget set to 0.001 so any figure prints:
+ *
+ *   - **0.0000 on 8 of 8 draws**, on both boards and on both arms.
+ *   - one earlier draw read **0.1733** on the unfiltered arm — one stray sample
+ *     in each window. 512 / 3,000 = **0.1707 B/attempt** is exactly one sample,
+ *     so that draw is a single stray and not a rate.
+ *
+ * Signal — escaping objects planted at the top of `attemptHouseSpawn` and
+ * `attemptDestinationSpawn` (into `world` and `scratch`, NOT `globalThis`,
+ * which `determinism.test.ts`'s own scan catches first and did), four draws:
+ *
+ *   - `spawn.ts` itself: **27.51 / 33.01 / 42.96 / 49.15** B/attempt. The
+ *     weakest is 27.51.
+ *   - the unfiltered `packages/` arm, which sees both injections: **73.47 –
+ *     78.79**.
+ *
+ * **2 sits in an empty band: 11.5x above the worst clean value ever observed,
+ * 11.7x above a single stray sample, and 13.8x below the weakest real signal.**
+ * A budget of 0 is not available for a sampling profiler; a budget of 20 would
+ * clear the weakest signal by 1.4x, which is the flake-red disease this file's
+ * placement arm already documents at one level up.
+ */
+const SPAWN_BUDGET_BYTES_PER_ATTEMPT = 2
+
+type SpawnBoard = { state: GameState; world: WorldData; scratch: Scratch }
+
+function spawnBoard(layoutId: string, pave: boolean): SpawnBoard {
+  const game = createGame({
+    canvas: {
+      width: 0,
+      height: 0,
+      style: { width: '', height: '' },
+      getBoundingClientRect: () => ({ left: 11, top: 7 }),
+    },
+    context: stubContext(),
+    createSurface: stubSurface,
+    createFallback: () => null,
+    measure: () => M0_VIEW,
+    settle: (run) => {
+      run()
+    },
+    layoutId,
+  })
+  if (pave) {
+    // A white-box poke, in `jamFixture`'s `state.destPins[0] = 255` idiom: the
+    // point is a board on which every candidate is refused at the road pass, not
+    // a board a player could reach through `placeRoad`'s budget.
+    for (let i = 0; i < spawnZoneCells(game.world); i++) {
+      game.state.roads[spawnZoneCellAt(i, game.world)] = 1
+    }
+  }
+  // Past the first-pin delay, so the saturated board's push is DELIVERED rather
+  // than discarded — the discard path returns before `fireColour`.
+  game.state.header[H_TICK] = FIRST_PIN_DELAY_TICKS + 1
+  game.state.header[H_WEEK] = 4
+  return { state: game.state, world: game.world, scratch: game.scratch }
+}
+
+/** One destination attempt plus one house attempt per colour — the shape `runSpawn` drives. */
+function spawnScan(b: SpawnBoard, escapePerAttempt: boolean): number {
+  let refused = 0
+  const groupCount = b.state.pinAccum.length
+  for (let a = 0; a < SPAWN_ATTEMPTS; a++) {
+    // The tick varies so the scan start walks the zone, exactly as it does in
+    // production — a fixed start would exercise 24 of 308 cells forever.
+    b.state.header[H_TICK] = FIRST_PIN_DELAY_TICKS + 1 + a
+    if (attemptDestinationSpawn(b.state, b.world, b.scratch) !== SpawnOutcome.PLACED) refused++
+    if (!attemptHouseSpawn(b.state, b.world, a % groupCount)) refused++
+    if (escapePerAttempt) {
+      ;(globalThis as Record<string, unknown>).__spawnSink = { a, b: refused }
+    }
+  }
+  return refused
+}
+
+function spawnPerAttemptMin(b: SpawnBoard, pick: (byFile: Map<string, number>) => number): number {
+  let min = Infinity
+  for (let w = 0; w < WINDOW_COUNT; w++) {
+    const byFile = profileBytesByFile(() => {
+      spawnScan(b, false)
+    })
+    min = Math.min(min, pick(byFile) / SPAWN_ATTEMPTS)
+  }
+  return min
+}
+
+describe('the spawn phase allocates nothing per attempt, measured', () => {
+  it('charges spawn.ts nothing on a saturated board and on a paved one, floored over three windows', () => {
+    for (const [name, board] of [
+      ['saturated', spawnBoard(DEMO_LAYOUT_ID, false)],
+      ['paved', spawnBoard(CITY_LAYOUT_ID, true)],
+    ] as const) {
+      spawnScan(board, false) // warm-up, outside every window
+      const perAttempt = spawnPerAttemptMin(board, (byFile) => bytesIn(byFile, SPAWN_FILE))
+      expect(
+        perAttempt,
+        `${SPAWN_FILE} allocates ${perAttempt.toFixed(4)} B per spawn attempt on the ${name} board`,
+      ).toBeLessThan(SPAWN_BUDGET_BYTES_PER_ATTEMPT)
+    }
+  })
+
+  it('charges NOTHING anywhere under packages/, so an inlined regression cannot hide in a neighbour', () => {
+    // The same attribution argument the placement arm above makes: TurboFan can
+    // move an allocation across an inline boundary into a neighbouring FILE, and
+    // a `spawn.ts`-only filter reads that as clean. `spawnScan` allocates
+    // nothing itself, which is what makes the unfiltered total a bound on the
+    // code rather than on the driver.
+    for (const [name, board] of [
+      ['saturated', spawnBoard(DEMO_LAYOUT_ID, false)],
+      ['paved', spawnBoard(CITY_LAYOUT_ID, true)],
+    ] as const) {
+      spawnScan(board, false)
+      const perAttempt = spawnPerAttemptMin(board, bytesUnderPackages)
+      expect(
+        perAttempt,
+        `the ${name} spawn scan charges ${perAttempt.toFixed(4)} B per attempt somewhere under packages/`,
+      ).toBeLessThan(SPAWN_BUDGET_BYTES_PER_ATTEMPT)
+    }
+  })
+
+  it('is not vacuous: both boards refuse every attempt, and each reaches its own branches', () => {
+    // A green harness is a claim about its inputs, and the two boards are here
+    // for DIFFERENT branches. Asserted as properties of the driver, which
+    // survive the work succeeding — a "sim allocated something" guard would not.
+    const saturated = spawnBoard(DEMO_LAYOUT_ID, false)
+    const dBefore = saturated.state.header[H_DEST_COUNT] as number
+    const hBefore = saturated.state.header[H_HOUSE_COUNT] as number
+    const pinsBefore =
+      (saturated.state.header[H_PINS_DROPPED] as number) +
+      Array.from(saturated.state.destPins).reduce((s, n) => s + n, 0)
+    expect(spawnScan(saturated, false), 'every attempt on a full board must be refused').toBe(
+      SPAWN_ATTEMPTS * 2,
+    )
+    expect(saturated.state.header[H_DEST_COUNT], 'the saturated board is not repeatable').toBe(dBefore)
+    expect(saturated.state.header[H_HOUSE_COUNT]).toBe(hBefore)
+    // ...and §5.3.5's push really fired, once per attempt, which is the branch
+    // this board exists to walk.
+    const pinsAfter =
+      (saturated.state.header[H_PINS_DROPPED] as number) +
+      Array.from(saturated.state.destPins).reduce((s, n) => s + n, 0)
+    expect(pinsAfter - pinsBefore, 'the BOARD_FULL push never fired').toBe(SPAWN_ATTEMPTS)
+
+    const paved = spawnBoard(CITY_LAYOUT_ID, true)
+    const pdBefore = paved.state.header[H_DEST_COUNT] as number
+    const phBefore = paved.state.header[H_HOUSE_COUNT] as number
+    const ppins =
+      (paved.state.header[H_PINS_DROPPED] as number) +
+      Array.from(paved.state.destPins).reduce((s, n) => s + n, 0)
+    expect(spawnScan(paved, false)).toBe(SPAWN_ATTEMPTS * 2)
+    expect(paved.state.header[H_DEST_COUNT], 'the paved board is not repeatable').toBe(pdBefore)
+    expect(paved.state.header[H_HOUSE_COUNT]).toBe(phBefore)
+    // The paved board must NOT push: it is SCAN_EXHAUSTED, not BOARD_FULL, and
+    // the two boards covering the same branch would make one of them pointless.
+    expect(
+      (paved.state.header[H_PINS_DROPPED] as number) +
+        Array.from(paved.state.destPins).reduce((s, n) => s + n, 0),
+      'a bounded miss must not push',
+    ).toBe(ppins)
+    // ...and it really does run the deep scan rather than short-circuiting: the
+    // zone is non-empty and larger than the candidate limit, so `limit <
+    // zoneCells` and the outcome is SCAN_EXHAUSTED.
+    expect(spawnZoneCells(paved.world)).toBeGreaterThan(CANDIDATE_LIMIT)
+    paved.state.header[H_TICK] = FIRST_PIN_DELAY_TICKS + 1
+    expect(attemptDestinationSpawn(paved.state, paved.world, paved.scratch)).toBe(
+      SpawnOutcome.SCAN_EXHAUSTED,
+    )
+  })
+
+  it('is not vacuous: the SAME statistic reports one escaping object per attempt', () => {
+    // The control, as a DELTA between two profiles of the same rig. It proves
+    // the per-attempt statistic at this attempt count and this sampling
+    // interval resolves one small escaping object per attempt, which is the
+    // sensitivity the budget's derivation assumes.
+    const board = spawnBoard(DEMO_LAYOUT_ID, false)
+    spawnScan(board, false)
+    const clean = profileBytesByFile(() => {
+      spawnScan(board, false)
+    })
+    const dirty = profileBytesByFile(() => {
+      spawnScan(board, true)
+    })
+    const here = (byFile: Map<string, number>): number => {
+      let bytes = 0
+      for (const [file, n] of byFile) if (file.endsWith('placementAllocation.test.ts')) bytes += n
+      return bytes
+    }
+    const delta = (here(dirty) - here(clean)) / SPAWN_ATTEMPTS
+    expect(delta, `one escaping object per attempt measured ${delta.toFixed(2)} B/attempt`).toBeGreaterThan(
+      SPAWN_BUDGET_BYTES_PER_ATTEMPT * 4,
+    )
+  })
+})
+
+describe('the spawn arm pins its own shape', () => {
+  it('keeps the budget outside the band in both directions, against independently measured bounds', () => {
+    expect(SPAWN_BUDGET_BYTES_PER_ATTEMPT).toBe(2)
+    // Strict inequalities against numbers from a DIFFERENT measurement than the
+    // budget itself, so each can distinguish the two quantities. Weakest real
+    // signal over four draws: 27.51 B/attempt. Worst clean value over nine
+    // draws: 0.1733, which is one 512 B sample over 3,000 attempts.
+    expect(SPAWN_BUDGET_BYTES_PER_ATTEMPT * 13).toBeLessThan(27.51)
+    expect(SPAWN_BUDGET_BYTES_PER_ATTEMPT).toBeGreaterThan(
+      (SAMPLING_INTERVAL_BYTES / SPAWN_ATTEMPTS) * 8,
+    )
+    // The condition a per-event rate does NOT get for free from choosing a
+    // denominator: enough events per window for the sampler to see a ~40 B
+    // signal at the 512 B interval at all.
+    expect(SPAWN_ATTEMPTS).toBe(3000)
+    expect((SPAWN_ATTEMPTS * 40) / SAMPLING_INTERVAL_BYTES).toBeGreaterThan(200)
+    expect(WINDOW_COUNT).toBeGreaterThanOrEqual(3)
   })
 })

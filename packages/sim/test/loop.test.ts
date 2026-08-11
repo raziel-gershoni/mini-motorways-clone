@@ -4,6 +4,8 @@ import { describe, it, expect } from 'vitest'
 import {
   parseMap,
   CARS_PER_HOUSE,
+  DEST_SPAWN_PERIOD_TICKS,
+  HOUSE_SPAWN_PERIOD_TICKS,
   MAX_BLOCKED_TICKS,
   MAX_PATH_LEN,
   PIN_PERIOD_TICKS,
@@ -17,15 +19,20 @@ import {
   restore,
   hashState,
   H_DEST_COUNT,
+  H_DEST_SPAWN_TIMER,
   H_EPOCH,
+  H_FAILED_DEST,
+  H_GAME_OVER,
   H_HOUSE_COUNT,
   H_PINS_DROPPED,
   H_ROUTES_REFUSED,
   H_SCORE,
+  H_SPAWN_COLOUR_CURSOR,
   H_TICK,
   HEADER_LENGTH,
   type GameState,
 } from '../src/state'
+import { spawnZoneCells } from '../src/spawn'
 import { createWorld, type WorldData } from '../src/world'
 import { createFieldInputRanges } from '../src/regions'
 import { createScratch, createFlowFields, type FlowField, type Scratch } from '../src/scratch'
@@ -288,6 +295,68 @@ function makeRig(id: string, rows: readonly string[], tiles: number, groupCount 
     scratch: createScratch(world.cells, map.groupCount, map.maxDestinations, createFieldInputRanges(map)),
     fields: createFlowFields(map.groupCount, world.cells),
   }
+}
+
+/**
+ * **The spawn posture both goldens in this file now carry, and why they carry
+ * it at all.**
+ *
+ * The plan's golden table (line 394) predicted that neither of these two
+ * goldens moves in M1e Task 5, and its derivation was *"every other fixture
+ * runs inside week 0 and below the first spawn attempt at tick 300"*. That is
+ * true and it is not sufficient. `H_DEST_SPAWN_TIMER` and `houseSpawnTimer` are
+ * COUNTDOWNS, not last-spawn stamps (`spawn.ts`'s `runSpawn` says why), so they
+ * decrement on **every tick from tick 1**, whether or not an attempt ever fires
+ * — and both are hashed bytes. A 130-tick fixture on which nothing can possibly
+ * spawn therefore still moves its whole-buffer digest, by exactly two families
+ * of slots and no others.
+ *
+ * So both goldens below were re-blessed in Task 5, and this function is what
+ * makes those re-blesses non-absorbing. It asserts, by hand-computed value:
+ *
+ *   - the destination countdown is `DEST_SPAWN_PERIOD_TICKS - tick`;
+ *   - every house countdown is `HOUSE_SPAWN_PERIOD_TICKS - tick`;
+ *   - the colour cursor has NOT moved, because no attempt fired;
+ *   - nothing was placed — the building counts are the fixture's own;
+ *   - Task 3's two regions and Task 8's two header slots are untouched.
+ *
+ * Together with the splice assertion each golden already carries — which
+ * reproduces the pre-M1e digest and so proves that no byte OUTSIDE Task 1's two
+ * inserted ranges moved — that pins every byte the re-bless could hide.
+ *
+ * The vacuity guard is `tick < HOUSE_SPAWN_PERIOD_TICKS`: past the first
+ * attempt these formulas stop being the arithmetic and this helper would
+ * silently assert the wrong thing.
+ */
+function assertNoSpawnHappened(r: Rig, tick: number, houses: number, dests: number): void {
+  expect(r.state.header[H_TICK], 'the fixture did not reach the tick this posture is stated at').toBe(tick)
+  expect(tick, 'this helper is only correct below the first house attempt').toBeLessThan(
+    HOUSE_SPAWN_PERIOD_TICKS,
+  )
+  // Vacuity in the other direction: the zone is NOT empty on this map, so the
+  // spawner is genuinely being refused by the clock rather than structurally
+  // absent the way it is on `determinism.test.ts`'s 4x4 board.
+  expect(spawnZoneCells(r.world), 'a 20x12 board clips the rect to 14x3, not to nothing').toBe(42)
+  expect(r.state.header[H_DEST_SPAWN_TIMER]).toBe(DEST_SPAWN_PERIOD_TICKS - tick)
+  for (let c = 0; c < r.map.groupCount; c++) {
+    expect(r.state.houseSpawnTimer[c], `colour ${c}`).toBe(HOUSE_SPAWN_PERIOD_TICKS - tick)
+  }
+  expect(r.state.header[H_SPAWN_COLOUR_CURSOR], 'no attempt fired, so no colour was chosen').toBe(0)
+  expect(r.state.header[H_HOUSE_COUNT], 'the spawner placed a house').toBe(houses)
+  expect(r.state.header[H_DEST_COUNT], 'the spawner placed a destination').toBe(dests)
+  expect(r.state.header[H_GAME_OVER]).toBe(0)
+  expect(r.state.header[H_FAILED_DEST]).toBe(0)
+  expect(r.state.destOvercrowd.every((v) => v === 0)).toBe(true)
+  expect(r.state.destOverTicks.every((v) => v === 0)).toBe(true)
+}
+
+/** Header slot indices whose value differs from `before`, in ascending index order. */
+function headerSlotsThatMoved(before: readonly number[], state: GameState): number[] {
+  const moved: number[] = []
+  for (let i = 0; i < HEADER_LENGTH; i++) {
+    if ((state.header[i] as number) !== (before[i] as number)) moved.push(i)
+  }
+  return moved
 }
 
 /** Fresh `fields`/`scratch` for the same map — what a Worker cold-starting a replay holds. */
@@ -778,14 +847,27 @@ describe('the trip loop, end to end through step()', () => {
     const before = Array.from(r.state.header)
     runScripted(r, 46, 47, obs) // the tick a trip completes
 
-    const moved: number[] = []
-    for (let i = 0; i < HEADER_LENGTH; i++) {
-      if ((r.state.header[i] as number) !== (before[i] as number)) moved.push(i)
-    }
-    // H_TICK because time passed; H_SCORE because a trip completed. Nothing
-    // else — a second score counter anywhere in the header shows up here.
-    expect(moved).toEqual([H_TICK, H_SCORE])
+    const movedOnTheTripTick = headerSlotsThatMoved(before, r.state)
+    // H_TICK and H_DEST_SPAWN_TIMER because TIME PASSED — the spawn countdown
+    // decrements on every tick from tick 1 (M1e Task 5), exactly as the tick
+    // counter increments, and neither is a score. H_SCORE because a trip
+    // completed. Nothing else.
+    expect(movedOnTheTripTick).toEqual([H_TICK, H_SCORE, H_DEST_SPAWN_TIMER])
     expect((r.state.header[H_SCORE] as number) - (before[H_SCORE] as number)).toBe(1)
+
+    // **The claim in this test's NAME is the difference between the two sets,
+    // not the first one** — and stating it that way is what keeps it as strong
+    // as it was before the countdown joined the time-driven slots. On the very
+    // next tick no trip completes, and exactly the two time-driven slots move.
+    // So `H_SCORE` is the only header slot in the game that answers to a
+    // completed trip, which is what a second score counter would break.
+    const beforeQuietTick = Array.from(r.state.header)
+    runScripted(r, 47, 48, obs)
+    expect(
+      (r.state.header[H_SCORE] as number) - (beforeQuietTick[H_SCORE] as number),
+      'vacuity: tick 48 must NOT complete a trip, or the contrast says nothing',
+    ).toBe(0)
+    expect(headerSlotsThatMoved(beforeQuietTick, r.state)).toEqual([H_TICK, H_DEST_SPAWN_TIMER])
   })
 
   it('has exactly one shared-cell event in 150 ticks — cars 0 and 1 on cell 113, ticks 73-76, in opposite lanes', () => {
@@ -1051,10 +1133,20 @@ describe('golden replay: the whole trip loop', () => {
     // it in the same commit as the change, never separately.
     //
     // **Re-blessed in M1e Task 1 (was 2942219448 at M1d Task 5; 452702392 at
-    // M1d Task 2; 3896659943 at M1c). Task 1 is the ONLY shape change in M1e**
-    // and this golden moves in no other task of the milestone: the fixture runs
-    // 150 ticks, entirely inside week 0 and below the first spawn attempt, so
-    // nothing M1e adds can fire in it.
+    // M1d Task 2; 3896659943 at M1c), and AGAIN in M1e Task 5 (was
+    // 3806414869).**
+    //
+    // **The Task 5 move was NOT predicted, and the prediction's error is worth
+    // more than the number.** The plan's golden table and the previous version
+    // of this paragraph both said this golden moves in no other task of the
+    // milestone, on the reasoning that *"the fixture runs inside week 0 and
+    // below the first spawn attempt, so nothing M1e adds can fire in it"*.
+    // Nothing did fire — and the digest moved anyway, because the two spawn
+    // timers are COUNTDOWNS and count down on every tick from tick 1 whether an
+    // attempt fires or not. The derivation asked "does anything spawn" when the
+    // question a whole-buffer digest asks is "does any byte move".
+    // `assertNoSpawnHappened` above pins every byte that did, by hand-computed
+    // value, so this re-bless can absorb nothing.
     //
     // **PURE LAYOUT, proved by an exact byte splice** (see `m1eSplice.ts`) —
     // and **this is the fixture that proves it hardest**, because unlike the
@@ -1078,13 +1170,14 @@ describe('golden replay: the whole trip loop', () => {
     // from one that moved purely for layout.
     expect(r.state.ghostMask.every((b) => b === 0), 'the loop fixture erases nothing').toBe(true)
     expect(r.state.ghostCommitted.every((b) => b === 0)).toBe(true)
+    assertNoSpawnHappened(r, GOLDEN_TICK, 2, 2)
     const m1e = m1eInsertedRanges(r.map)
     expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 1676, 1824])
     const spliced = spliceM1eInsertions(r.state, r.map)
     expect(spliced.length, "the splice must land on M1d's buffer size").toBe(8068)
     expect(m1e.totalBytes).toBe(8232)
     expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(2942219448)
-    expect(hashState(r.state)).toBe(3806414869)
+    expect(hashState(r.state)).toBe(1877236894)
   })
 
   it('leaves the three existing goldens alone — this task adds a golden, it does not move one', () => {
@@ -1117,9 +1210,11 @@ describe('golden replay: the whole trip loop', () => {
     // **M1e Task 2 moved the state golden a second time — 3507307907 ->
     // 883875991 — and this needle is the cross-file half of that re-bless.**
     // Task 1's move was pure layout; Task 2's is the weekly tile grant, which
-    // this 13,499-tick fixture takes twice. It is the LAST licensed move of
-    // this number before Task 5; a third one from an unlisted task is a defect.
-    expect(determinism, 'the state golden moved').toContain('expect(hashState(s)).toBe(883875991)')
+    // this 13,499-tick fixture takes twice.
+    // **M1e Task 5 moved it a third and final time — 883875991 -> 1058753394 —
+    // for the spawn timers cycling, which is the last move the plan's golden
+    // table licenses in this milestone. A fourth from any task is a defect.**
+    expect(determinism, 'the state golden moved').toContain('expect(hashState(s)).toBe(1058753394)')
     expect(rollback, 'the road-network golden moved').toContain(
       'expect(hashState(state)).toBe(2312109239)',
     )
@@ -2058,20 +2153,28 @@ describe('golden replay: a jammed same-direction queue', () => {
     // iteration order — as well as for everything the loop golden already
     // covers.
     //
-    // **Re-blessed once, in M1e Task 1 (was 294084758 at M1d Task 6), and in
-    // no other task of the milestone.** PURE LAYOUT, proved by the same exact
-    // byte splice as the loop golden above (`m1eSplice.ts`): removing the two
-    // inserted ranges reproduces 294084758 bit-for-bit with no slot zeroed.
+    // **Re-blessed in M1e Task 1 (was 294084758 at M1d Task 6) for PURE
+    // LAYOUT, and AGAIN in M1e Task 5 (was 1007037587).** The layout proof
+    // still holds and still says what it always said: the same exact byte
+    // splice as the loop golden above (`m1eSplice.ts`) reproduces 294084758
+    // bit-for-bit with no slot zeroed, so not one byte outside Task 1's two
+    // inserted ranges has moved across 130 ticks of a contended queue.
     // Same map shape as the loop fixture, so the same offsets and the same
-    // 8,068 -> 8,232 B; this fixture runs 130 ticks, inside week 0 and below
-    // the first spawn attempt, so nothing behavioural in M1e can reach it.
+    // 8,068 -> 8,232 B.
+    //
+    // **What Task 5 moved, and why the plan did not expect it**: see
+    // `assertNoSpawnHappened` and the loop golden's own note. Nothing spawned
+    // here either; the two spawn COUNTDOWNS ticked, and a countdown is a hashed
+    // byte. Every slot that moved is asserted by hand-computed value on the
+    // line below, so this re-bless can absorb nothing.
     // ---------------------------------------------------------------------
+    assertNoSpawnHappened(r, Q_GOLDEN_TICK, 2, 1)
     const m1e = m1eInsertedRanges(r.map)
     expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 1676, 1824])
     const spliced = spliceM1eInsertions(r.state, r.map)
     expect(spliced.length, "the splice must land on M1d's buffer size").toBe(8068)
     expect(m1e.totalBytes).toBe(8232)
     expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(294084758)
-    expect(hashState(r.state)).toBe(1007037587)
+    expect(hashState(r.state)).toBe(307910575)
   })
 })

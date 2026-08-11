@@ -2,8 +2,24 @@ import { describe, it, expect } from 'vitest'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { TICKS_PER_WEEK, WEEKLY_TILE_GRANT, parseMap } from '@laneways/shared'
-import { createState, hashState, H_TILES } from '../src/state'
+import {
+  HOUSE_SPAWN_PERIOD_TICKS,
+  HOUSE_SPAWN_RETRY_TICKS,
+  TICKS_PER_WEEK,
+  WEEKLY_TILE_GRANT,
+  parseMap,
+} from '@laneways/shared'
+import {
+  createState,
+  hashState,
+  H_DEST_COUNT,
+  H_DEST_SPAWN_TIMER,
+  H_FAILED_DEST,
+  H_GAME_OVER,
+  H_HOUSE_COUNT,
+  H_SPAWN_COLOUR_CURSOR,
+  H_TILES,
+} from '../src/state'
 import { createWorld } from '../src/world'
 import { createFlowFields, createScratch } from '../src/scratch'
 import { createFieldInputRanges } from '../src/regions'
@@ -357,6 +373,13 @@ describe('sim source obeys the determinism rules', () => {
       'sim/src/rng.ts',
       'sim/src/roads.ts',
       'sim/src/scratch.ts',
+      // M1e Task 5: the spawn phase, `step` phase 4 and the first module in
+      // `sim` to read `REVEALED_*`. Named here for the same reason every other
+      // entry is — a new source file must be added deliberately, and a module
+      // that skips this scan skips every determinism rule below it, which for
+      // the one module that introduces new randomness and new iteration order
+      // is the worst possible omission.
+      'sim/src/spawn.ts',
       'sim/src/state.ts',
       'sim/src/step.ts',
       'sim/src/trips.ts',
@@ -608,9 +631,19 @@ describe('golden replay', () => {
     // 1,416 -> 1,472, not `firstCity`'s 148 B and 13,828 -> 13,992. The
     // assertions below are the derivation; this paragraph only reads them out.
     //
-    // This number moves ONCE MORE in this milestone and in no other task:
-    // Task 5 (the spawn timers cycling), which carries a direct assertion on
-    // the changed slots beside the digest exactly as this one does.
+    // **That last move has now happened: M1e Task 5, 883875991 -> 1058753394**,
+    // for the spawn timers cycling, with direct hand-computed assertions on
+    // every changed slot beside the digest exactly as Task 2's is.
+    //
+    // **And the plan's golden table was wrong about the OTHER fixtures, which
+    // matters here because this file is where that table is quoted.** It said
+    // this was the only golden Task 5 could reach, deriving that from *"every
+    // other fixture runs below the first spawn attempt at tick 300"*. Both
+    // `loop.test.ts` goldens moved as well: the spawn timers are COUNTDOWNS, so
+    // they move on every tick from tick 1 whether or not an attempt ever fires,
+    // and a whole-buffer digest asks "did a byte move", not "did anything
+    // spawn". Those two carry the same shape of direct assertion this one does
+    // (`loop.test.ts`'s `assertNoSpawnHappened`).
     //
     // This fixture still places no building and therefore has no car, so the
     // grant is the ONLY behaviour it can exhibit — and both ghost regions are
@@ -619,6 +652,50 @@ describe('golden replay', () => {
     expect(s.ghostMask.every((b) => b === 0), 'no fixture cell is a ghost').toBe(true)
     expect(s.ghostCommitted.every((b) => b === 0), 'no fixture cell has a committed count').toBe(true)
     expect(s.header[H_TILES]).toBe(GOLDEN_MAP.startingTiles + 2 * WEEKLY_TILE_GRANT)
+
+    // ---------------------------------------------------------------------
+    // M1e Task 5 moves this number too, and the plan said so in advance. This
+    // fixture's clipped spawn zone is EMPTY (4x4 board against a rect at
+    // x >= 5), so no building is placed and the ONLY bytes that moved are the
+    // spawn timers. Hand-computed and asserted, so the digest is not the only
+    // evidence: the destination timer is armed at 2,250, fires and fails at
+    // tick 2,250, and re-fires every DEST_SPAWN_RETRY_TICKS = 600 ticks after
+    // that (neither NO_ELIGIBLE_COLOUR nor ZONE_EMPTY is BOARD_FULL, so both
+    // take the retry); the last attempt at or before tick 13,499 is 13,050, so
+    // 13,499 finds it at 600 - (13,499 - 13,050) = 151.
+    //
+    // **Which of the two refusals this fixture actually takes, corrected from
+    // the brief.** The brief's Step 11 prose says `attemptDestinationSpawn`
+    // "returns ZONE_EMPTY after the cursor write". It does not: the colour
+    // loop runs FIRST, this board has no house, so no colour is eligible and
+    // the function returns `NO_ELIGIBLE_COLOUR` BEFORE the cursor write. The
+    // timer arithmetic is identical either way (both take the retry) and the
+    // cursor assertion below is the one the brief itself derives correctly.
+    expect(s.header[H_DEST_COUNT], 'an empty zone places nothing').toBe(0)
+    expect(s.header[H_HOUSE_COUNT]).toBe(0)
+    expect(s.header[H_DEST_SPAWN_TIMER]).toBe(151)
+    // The cursor is written before the ZONE_EMPTY return, but only when a
+    // colour was chosen — and a colour needs a house, of which this board has
+    // none. So it must NOT have moved, and that is a real assertion rather
+    // than a restatement of zero.
+    expect(s.header[H_SPAWN_COLOUR_CURSOR], 'no colour is eligible with no houses').toBe(0)
+    for (let c = 0; c < GOLDEN_MAP.groupCount; c++) {
+      // Hand-computed: the first attempt is at tick HOUSE_SPAWN_PERIOD_TICKS =
+      // 300 and every failure takes HOUSE_SPAWN_RETRY_TICKS = 60, so attempts
+      // land at 300 + 60k, the last at or before 13,499 is 13,440, and the
+      // timer reads 60 - (13,499 - 13,440) = 1.
+      const firstAttempt = HOUSE_SPAWN_PERIOD_TICKS
+      const lastAttempt = firstAttempt + Math.floor((ticks - firstAttempt) / HOUSE_SPAWN_RETRY_TICKS) * HOUSE_SPAWN_RETRY_TICKS
+      expect(lastAttempt, 'the house ladder lands at 13,440').toBe(13440)
+      expect(s.houseSpawnTimer[c], `colour ${c}`).toBe(HOUSE_SPAWN_RETRY_TICKS - (ticks - lastAttempt))
+      expect(s.houseSpawnTimer[c], `colour ${c}`).toBe(1)
+    }
+    // The two M1e header slots this task does not touch, asserted so the
+    // re-bless below cannot absorb a stray write to either.
+    expect(s.header[H_GAME_OVER]).toBe(0)
+    expect(s.header[H_FAILED_DEST]).toBe(0)
+    expect(s.destOvercrowd.every((v) => v === 0), 'Task 3 owns this region, not Task 5').toBe(true)
+    expect(s.destOverTicks.every((v) => v === 0)).toBe(true)
     const m1e = m1eInsertedRanges(GOLDEN_MAP)
     expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 404, 444])
     // Back the grant out for the splice, then put it back. `H_TILES` sits at
@@ -640,6 +717,6 @@ describe('golden replay', () => {
     expect(spliced.length, "the splice must land on M1d's buffer size").toBe(1416)
     expect(m1e.totalBytes).toBe(1472)
     expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(340556353)
-    expect(hashState(s)).toBe(883875991)
+    expect(hashState(s)).toBe(1058753394)
   })
 })
