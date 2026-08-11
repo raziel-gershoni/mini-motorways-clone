@@ -621,11 +621,21 @@ destination unconnected at any week boundary, 62 tiles spent of 210 granted.
 Two things generalise.
 
 **"It survives longer" and "it is a better game" are the same number until the
-gate separates them.** Every survival-shaped metric — weeks lived, trips, cars,
-population — moved the right way under the lever. The only measurement that
-noticed was the *shape* one: does a connected destination's pin count climb
-through a gradient to its timer cap. That is the metric M1d's own post-mortem
-implies and the one nobody had written down as a gate.
+gate separates them.** Weeks lived, delivery fraction and dropped pins all moved
+the right way under the lever. **Two kinds of measurement noticed, and I got
+this wrong the first time I wrote it down here.** A *load* floor did: cars in
+motion fell 11 → 4, so a gate asserting `maxInFlight >= 6` fires. And a *shape*
+check did: a connected destination's pin count must climb through a gradient to
+its timer cap, and under the lever it is flat at 1 in all twelve weeks.
+
+The original version of this entry claimed cars moved the right way too and that
+only the shape gate noticed. Both halves are false, and the entry **refuted
+itself eight lines above** — where its own measurement reads *"four cars in
+flight"* against a baseline of eleven. So: **pair every survival threshold with a
+floor on the load that makes survival hard** (cars in motion, queue length,
+backlog reaching a cap) *and* with a shape check. Either alone is weaker than the
+pair, and a summary written from a conclusion rather than from the table is how
+the load half went missing.
 
 **A brief's measurements have a tree attached, and the tree moves under them.**
 These figures were taken before Tasks 7 and 8 existed; the round-robin/nearest
