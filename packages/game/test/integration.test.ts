@@ -1996,13 +1996,28 @@ describe('20,000 ticks on a deliberately bad network', () => {
     expect(valves, 'the valve never fired, so this is not the bad network it claims to be').toBe(98)
 
     // ---------------------------------------------------------------------
-    // **The spawner ran, and this is the ONLY long-horizon window M1e's spawn
-    // phase gets anywhere in the repo** — 20,000 ticks is four and a half weeks
-    // against the 3,000-tick and 4,500-frame windows every other rig uses.
+    // **The spawner ran here, and the benefit Task 5 claimed for letting it is
+    // NARROWER than Task 5 wrote down. Corrected rather than restated.**
     //
-    // M1e Task 5 chose to let this fixture spawn rather than capping its
-    // `maxHouses`/`maxDestinations` to the built counts, precisely for that
-    // coverage, and the choice is only worth anything if something is placed.
+    // Step 12 chose (a) — let this fixture spawn — over (b) — cap its
+    // `maxHouses`/`maxDestinations` to the built counts — on the argument that
+    // (b) "gives up the only long-horizon invariant coverage the spawner will
+    // ever get". Measured, what this sweep covers is **placement over a long
+    // horizon and nothing downstream of it**: every building placed below is
+    // provably inert, so no spawned car ever moves and `assertOccupancySound`
+    // never sees one. The choice was still the right one — (b) buys a smaller
+    // re-derivation and does not even buy inertness — but the sentence
+    // overstated it.
+    //
+    // **The gap that claim would have papered over is closed elsewhere**, by
+    // `sim/test/spawn.test.ts`'s *"drives cars from SPAWNED houses for 20,000
+    // ticks with assertOccupancySound on every one"*: a corridor rig that wires
+    // each new building as it appears and puts **26 spawned cars** on the road.
+    // Without it, a change to how a newly created car claims its first
+    // occupancy slot would regress for spawned cars only, and nothing in the
+    // repo would notice — every rig where new cars appear (this file at tick
+    // 435, `frame.test.ts` at the first score, `drawAllocation` at ~2,512)
+    // stops early and asserts draw counts rather than sim invariants.
     // **Measured: 3 destinations and 2 houses, taking the board to 4/4
     // destinations (its `maxDestinations`) and 14 houses.**
     //

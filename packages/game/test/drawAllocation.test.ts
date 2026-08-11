@@ -450,8 +450,16 @@ describe('the real draw path allocates nothing, measured', () => {
     // margin.
     expect(NOISE_FLOOR_BYTES_PER_FRAME).toBe(4)
     expect(WINDOW_COUNT).toBe(3)
+    // **Both sides are the FLOOR ITSELF, not a multiple of it — the first form
+    // of this line read `0.43 * 9 < NOISE_FLOOR * 10`, which is `3.87 < 40` and
+    // encodes ~90x rather than the 9.3x its own comment claimed.** The failure
+    // that matters is not that it was loose: a later task chasing a red could
+    // lower the floor to 1, update the `toBe` pin, and BOTH arms would still
+    // pass while the floor sat 2.3x above the worst measured clean draw —
+    // inside the flake band this file was rewritten to escape. Same class as
+    // commit 88f6cdb's "an equality is not a margin", one iteration later.
     expect(0.43 * 9, 'the floor must sit well above the worst clean draw').toBeLessThan(
-      NOISE_FLOOR_BYTES_PER_FRAME * 10,
+      NOISE_FLOOR_BYTES_PER_FRAME,
     )
     expect(NOISE_FLOOR_BYTES_PER_FRAME * 8, 'and well below the weakest signal').toBeLessThan(34.59)
   })

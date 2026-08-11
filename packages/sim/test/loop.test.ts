@@ -342,6 +342,13 @@ function assertNoSpawnHappened(r: Rig, tick: number, houses: number, dests: numb
     expect(r.state.houseSpawnTimer[c], `colour ${c}`).toBe(HOUSE_SPAWN_PERIOD_TICKS - tick)
   }
   expect(r.state.header[H_SPAWN_COLOUR_CURSOR], 'no attempt fired, so no colour was chosen').toBe(0)
+  // **These two cannot fail on either fixture and are kept as a statement of
+  // posture, not as evidence.** Checked directly: with the house timers forced
+  // to fire from tick 50, this 20x12 board still places nothing — colour 0 is
+  // capped at 2 houses against 2 destinations (1 against 1 on the queue
+  // fixture), and no other colour is unlocked inside week 0. **The TIMER arms
+  // above are what carry the "nothing was placed" claim**; these two would only
+  // start discriminating on a fixture where a spawn is possible.
   expect(r.state.header[H_HOUSE_COUNT], 'the spawner placed a house').toBe(houses)
   expect(r.state.header[H_DEST_COUNT], 'the spawner placed a destination').toBe(dests)
   expect(r.state.header[H_GAME_OVER]).toBe(0)
@@ -2158,7 +2165,12 @@ describe('golden replay: a jammed same-direction queue', () => {
     // still holds and still says what it always said: the same exact byte
     // splice as the loop golden above (`m1eSplice.ts`) reproduces 294084758
     // bit-for-bit with no slot zeroed, so not one byte outside Task 1's two
-    // inserted ranges has moved across 130 ticks of a contended queue.
+    // inserted ranges has moved across this fixture's run. **`Q_GOLDEN_TICK`
+    // ticks, which is 25 — not the 130 an earlier version of this sentence
+    // claimed.** 130 is `Q_RUN_TICKS`, the window the behavioural assertions
+    // above are stated over; the DIGEST is taken mid-jam at 25, which is what
+    // `assertNoSpawnHappened` below is passed and what its timer arithmetic
+    // (2,250 - 25 = 2,225 and 300 - 25 = 275) is computed from.
     // Same map shape as the loop fixture, so the same offsets and the same
     // 8,068 -> 8,232 B.
     //

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  CARS_PER_HOUSE,
   DEST_SPAWN_PERIOD_TICKS,
   DEST_SPAWN_RETRY_TICKS,
   FIRST_PIN_DELAY_TICKS,
@@ -24,6 +25,7 @@ import {
   H_DEST_SPAWN_TIMER,
   H_HOUSE_COUNT,
   H_PINS_DROPPED,
+  H_SCORE,
   H_SPAWN_COLOUR_CURSOR,
   H_TICK,
   H_WEEK,
@@ -52,6 +54,9 @@ import {
   placeDestination,
   placeHouse,
 } from '../src/buildings'
+import { assertOccupancySound } from '../src/blocking'
+import { roadMask } from '../src/roads'
+import { PHASE_OUTBOUND, PHASE_RETURNING } from '../src/buildings'
 import { hasEligibleDestinationOfColour, pushBlockedSpawnDemand } from '../src/demand'
 import {
   SpawnOutcome,
@@ -181,6 +186,21 @@ describe('the spawn zone is the revealed rect, clipped to the board', () => {
       seen.has((REVEALED_Y0 + REVEALED_H - 1) * world.w + REVEALED_X0 + REVEALED_W - 1),
     ).toBe(true)
     expect(inSpawnZone(0, world), 'cell 0 is outside the rect').toBe(false)
+  })
+
+  it('throws rather than returning a NaN cell when the zone is empty', () => {
+    // `zoneIndex % 0` is NaN and a NaN index into a typed array is a SILENT
+    // no-op, so an unguarded `spawnZoneCellAt` on a board the rect misses turns
+    // a spawn attempt into nothing at all with no error anywhere. Every
+    // in-repo caller tests `spawnZoneCells(world)` first; this function is
+    // exported, so the caller that does not has not been written yet.
+    const tiny = createWorld(testMap(4, 4))
+    expect(spawnZoneCells(tiny)).toBe(0)
+    expect(() => spawnZoneCellAt(0, tiny)).toThrow(/clipped spawn zone is empty/)
+    // ...and it does NOT throw where the zone is real, or the guard is just a
+    // ban on the function.
+    const full = createWorld(firstCity())
+    expect(() => spawnZoneCellAt(0, full)).not.toThrow()
   })
 
   it('varies the scan start by seed and by tick, and consumes no RNG draw', () => {
@@ -1108,6 +1128,206 @@ describe('packing the whole zone with the spawner', () => {
       let n = 0
       for (let d = 0; d < count; d++) if (((r.state.destMeta[d] as number) >> 4 & 0x3) === o) n++
       expect(n / count, `orientation ${o} took ${n} of ${count}`).toBeLessThan(0.75)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 9. A long horizon on which SPAWNED CARS ACTUALLY DRIVE
+// ---------------------------------------------------------------------------
+
+/**
+ * **This block exists because Step 12(a)'s stated benefit did not materialise,
+ * and the review measured that rather than accepting it.**
+ *
+ * `jamFixture` was left free to spawn instead of being capped, on the argument
+ * that its 20,000-tick sweep is "the only long-horizon invariant coverage the
+ * spawner will ever get". It places 3 destinations and 2 houses over that
+ * sweep and **every one of them is provably inert**: a spawned destination's
+ * carpark carries no road, so it never becomes a flow-field source; and the two
+ * spawned houses belong to a colour with no reachable destination, so their
+ * four cars sit at `PHASE_IDLE` for all 20,000 ticks. The sweep covers
+ * PLACEMENT over a long horizon and nothing downstream of it.
+ *
+ * **`assertOccupancySound` runs per tick on that sweep and nowhere else**, and
+ * every rig in which new cars really appear stops early — `integration.test.ts`
+ * at tick 435, `frame.test.ts` at the first score, `drawAllocation` at ~2,512 —
+ * and asserts draw counts rather than sim invariants. So a change to how a
+ * newly-created car claims its first occupancy slot (M1f's connectivity rule,
+ * or a Task 7/8 change to the `carPhase` lifecycle) would regress for SPAWNED
+ * cars only, and nothing in the repo would notice.
+ *
+ * **A spawned house cannot drive on its own**, which is why this needs a rig
+ * rather than a longer window: `canPlaceHouse` refuses a cell that carries a
+ * road, and `computeFlowField` relaxes over the ROAD GRAPH only, so
+ * `dist[houseCell]` is `INF` for every freshly spawned house and `runDispatch`
+ * skips it forever. A car leaves a new house exactly when a player connects it.
+ * This rig is that player: after every tick it lays an L-shaped path from any
+ * unconnected house to the opening corridor, out of the same weekly tile grant
+ * a real run has.
+ */
+describe('spawned cars drive, over a long horizon, with occupancy sound every tick', () => {
+  /** The corridor: column 8 from the carpark row down past the houses. */
+  const CORRIDOR_X = 8
+  const CORRIDOR_TOP = 10
+  const CORRIDOR_BOTTOM = 28
+
+  /**
+   * An all-land 24x40 board rather than `firstCity`, and that is a fixture
+   * choice with a reason. `firstCity`'s river runs down column 12 and its trees
+   * are scattered through the zone, so the reactive connector below fails on
+   * some strokes for terrain reasons and the rig stops being about the spawner;
+   * and its 30 starting tiles run out before 22 spawned buildings can be wired,
+   * which strands most of them. This board is the same size, the same zone and
+   * the same rules, with a budget the connector can actually spend.
+   */
+  function longRig(): Rig {
+    const r = rig('spawn-long-horizon', testMap(24, 40, 40, 16, 5))
+    // Two colour-0 destinations at the top of the corridor and two colour-0
+    // houses at the bottom, so the round trip is ~18 cells and many cars are in
+    // flight at once — which is what puts spawned cars on the road at all.
+    expect(placeDestination(r.state, r.world, cellIn(r.world, 9, CORRIDOR_TOP), ORIENTATION_W, 0, DEST_KIND_SQUARE)).toBe(true)
+    expect(placeDestination(r.state, r.world, cellIn(r.world, 9, CORRIDOR_TOP + 4), ORIENTATION_W, 0, DEST_KIND_SQUARE)).toBe(true)
+    expect(placeHouse(r.state, r.world, cellIn(r.world, CORRIDOR_X, CORRIDOR_BOTTOM), 0)).toBe(true)
+    expect(placeHouse(r.state, r.world, cellIn(r.world, CORRIDOR_X, CORRIDOR_BOTTOM - 2), 0)).toBe(true)
+    return r
+  }
+
+  function openingActions(world: WorldData): TickAction[] {
+    const out: TickAction[] = []
+    for (let y = CORRIDOR_TOP; y < CORRIDOR_BOTTOM; y++) {
+      out.push({ kind: 'place', a: cellIn(world, CORRIDOR_X, y), b: cellIn(world, CORRIDOR_X, y + 1) })
+    }
+    return out
+  }
+
+  /**
+   * One cell joined to the corridor: vertically to a row the corridor covers,
+   * then horizontally onto column 8. A stroke that cannot be afforded or
+   * legally placed simply lays fewer cells — a real player's experience — which
+   * is why the caller ROUND-ROBINS rather than retrying the same target: a
+   * connector that always picks the first unconnected building stalls on the
+   * first unaffordable one and never reaches the rest. Measured: that stall is
+   * the difference between 4 spawned cars in motion and the figure below.
+   */
+  function connectActions(world: WorldData, cell: number): TickAction[] {
+    const cx = cell % world.w
+    const cy = (cell / world.w) | 0
+    const targetY = cy < CORRIDOR_TOP ? CORRIDOR_TOP : cy > CORRIDOR_BOTTOM ? CORRIDOR_BOTTOM : cy
+    const out: TickAction[] = []
+    const stepY = targetY > cy ? 1 : -1
+    for (let y = cy; y !== targetY; y += stepY) {
+      out.push({ kind: 'place', a: cellIn(world, cx, y), b: cellIn(world, cx, y + stepY) })
+    }
+    const stepX = CORRIDOR_X > cx ? 1 : -1
+    for (let x = cx; x !== CORRIDOR_X; x += stepX) {
+      out.push({ kind: 'place', a: cellIn(world, x, targetY), b: cellIn(world, x + stepX, targetY) })
+    }
+    return out
+  }
+
+  it('drives cars from SPAWNED houses for 20,000 ticks with assertOccupancySound on every one', () => {
+    const r = longRig()
+    const seededHouses = r.state.header[H_HOUSE_COUNT] as number
+    step(r.state, r.world, r.fields, r.scratch, { actions: openingActions(r.world) })
+
+    const RUN = 20000
+    const everFlew = new Uint8Array(r.state.carPhase.length)
+    let queued: TickAction[] = []
+    let cursor = 0
+    for (let t = 1; t < RUN; t++) {
+      step(r.state, r.world, r.fields, r.scratch, queued.length > 0 ? { actions: queued } : NO_INPUT)
+      queued = []
+      // **The invariant, on every one of the 20,000 ticks.** Throws by name, so
+      // a failure names the cell and the car rather than returning a count.
+      assertOccupancySound(r.state, r.world)
+      for (let c = 0; c < r.state.carPhase.length; c++) {
+        const p = r.state.carPhase[c] as number
+        if (p === PHASE_OUTBOUND || p === PHASE_RETURNING) everFlew[c] = 1
+      }
+
+      const houses = r.state.header[H_HOUSE_COUNT] as number
+      const dests = r.state.header[H_DEST_COUNT] as number
+      // The player, one stroke per tick, ROUND-ROBIN over every building.
+      // **Destinations as well as houses**: a spawned destination whose carpark
+      // carries no road is not a flow-field source, so connecting only the
+      // houses grows the fleet while the demand that would move it stays
+      // stranded.
+      const total = houses + dests
+      for (let k = 0; k < total && queued.length === 0; k++) {
+        const i = (cursor + k) % total
+        const target =
+          i < houses
+            ? (r.state.houseCell[i] as number)
+            : carparkCell(
+                r.state.destCell[i - houses] as number,
+                (r.state.destMeta[i - houses] as number) >> 4 & 0x3,
+                r.world.w,
+                r.world.h,
+              )
+        if (target >= 0 && roadMask(r.state, target) === 0) {
+          queued = connectActions(r.world, target)
+          cursor = i + 1
+        }
+      }
+
+      // **Demand written directly, exactly as `jamFixture` does** — and for the
+      // same reason, stated because it is the difference between this rig
+      // working and not. An authored schedule delivers about one pin per colour
+      // per 50 ticks against a ~60-tick round trip, so service outruns arrival
+      // and the SEEDED houses absorb every dispatch: dispatch picks
+      // `argmin (dist[houseCell], houseIndex)` and they sit on the corridor.
+      // Measured on `firstCity` with the natural schedule: 22 houses, 10
+      // destinations, 184 trips — and exactly ONE spawned car in motion across
+      // the whole run. That is M1d's own "service is 4.3x faster than arrival"
+      // arithmetic reproduced by a spawner, and it is why this rig saturates
+      // demand to reach the cars it exists to exercise.
+      for (let d = 0; d < dests; d++) {
+        if ((r.state.destPins[d] as number) >= 60) continue
+        const carpark = carparkCell(
+          r.state.destCell[d] as number,
+          (r.state.destMeta[d] as number) >> 4 & 0x3,
+          r.world.w,
+          r.world.h,
+        )
+        if (carpark >= 0 && roadMask(r.state, carpark) !== 0) r.state.destPins[d] = 255
+      }
+    }
+
+    // ---- the board really grew, and the new cars really drove ---------------
+    const houses = r.state.header[H_HOUSE_COUNT] as number
+    const dests = r.state.header[H_DEST_COUNT] as number
+    expect(houses, 'the spawner placed no house').toBeGreaterThan(seededHouses)
+    expect(dests, 'the spawner placed no destination').toBeGreaterThan(2)
+    let spawnedFlyers = 0
+    for (let c = seededHouses * CARS_PER_HOUSE; c < r.state.carPhase.length; c++) {
+      if (everFlew[c] === 1) spawnedFlyers++
+    }
+    // **The assertion the whole block is for.** Cars belonging to houses the
+    // SPAWNER placed — index at or past the seed's own car range — must have
+    // left their driveway. Without this the 20,000 ticks are another
+    // placement-only sweep, which is precisely what `jamFixture`'s is.
+    // Measured on this rig, this seed and this window: **21 houses, 10
+    // destinations, 339 trips and 26 of the 38 spawned car slots in motion.**
+    // The threshold sits at roughly three quarters of that so ordinary drift
+    // does not fail it and a collapse back to a placement-only sweep does — the
+    // weaker rigs this replaced scored 1 and 4 on the same assertion.
+    expect(
+      spawnedFlyers,
+      `houses ${houses}, destinations ${dests}, score ${r.state.header[H_SCORE]}, spawned flyers ${spawnedFlyers}`,
+    ).toBeGreaterThanOrEqual(20)
+    expect(r.state.header[H_SCORE], 'no trip completed at all').toBeGreaterThan(100)
+    // "Spawned" has to be a real distinction, so the seed's own cars must have
+    // flown too — otherwise the index split above is separating nothing.
+    let seededFlyers = 0
+    for (let c = 0; c < seededHouses * CARS_PER_HOUSE; c++) if (everFlew[c] === 1) seededFlyers++
+    expect(seededFlyers, "the seed's own cars never moved either").toBe(seededHouses * CARS_PER_HOUSE)
+    // Vacuity on the counter widths this sweep is also watching: nothing wrapped.
+    for (let c = 0; c < r.state.carPhase.length; c++) {
+      expect(r.state.carBlockedTicks[c] as number, `carBlockedTicks[${c}] wrapped`).toBeGreaterThanOrEqual(0)
+    }
+    for (let d = 0; d < dests; d++) {
+      expect(r.state.destReserved[d] as number, `destReserved[${d}]`).toBeLessThan(255)
     }
   })
 })

@@ -93,8 +93,26 @@ export function spawnZoneCells(world: WorldData): number {
   return spawnZoneW(world.w) * spawnZoneH(world.h)
 }
 
+/**
+ * The zone index -> cell conversion, and **the guard is in the signature rather
+ * than in every caller.**
+ *
+ * `zoneIndex % 0` is `NaN`, and a `NaN` index into a typed array is a SILENT
+ * no-op — the quietest failure available, and the reason every entry point in
+ * this file tests the cell count first. Every in-repo caller does; this
+ * function is EXPORTED, so the one that does not has not been written yet, and
+ * "validate where the caller's mistake is made" (buildings.ts's
+ * `assertColourInRange`) says the check belongs here. A throw costs one integer
+ * compare on a path that runs at most `SPAWN_CANDIDATE_LIMIT` times per attempt.
+ */
 export function spawnZoneCellAt(zoneIndex: number, world: WorldData): number {
   const zw = spawnZoneW(world.w)
+  if (zw <= 0) {
+    throw new Error(
+      `spawnZoneCellAt: the clipped spawn zone is empty on a ${world.w}x${world.h} board, so zone ` +
+        `index ${zoneIndex} names no cell — callers must test spawnZoneCells(world) first`,
+    )
+  }
   const zx = zoneIndex % zw
   const zy = (zoneIndex / zw) | 0
   return (REVEALED_Y0 + zy) * world.w + (REVEALED_X0 + zx)
@@ -300,7 +318,15 @@ export function attemptHouseSpawn(state: GameState, world: WorldData, colour: nu
  * nobody would think to re-check it against. `spawn.test.ts` pins the
  * equivalence and the board-subset property the argument rests on.
  *
- * @internal Exported for `spawn.test.ts` only.
+ * @internal Exported for testing only — this is not part of the module's
+ * public surface, on the precedent of `spacingViolated` (buildings.ts) and
+ * `assertPlaceCost` (roads.ts). **Note what that convention does NOT buy**: the
+ * brief had this function module-private, and a module-private function cannot
+ * be imported by `spawn.test.ts`, which reaches into `../src/spawn` directly.
+ * `index.ts` re-exports this module with `export *`, so exporting it for a test
+ * also puts it on the PACKAGE surface — true of both siblings above as well.
+ * The tag is a statement of intent to readers, not a boundary the build
+ * enforces.
  */
 export function destinationFitsSpawnZone(
   destCell: number,
