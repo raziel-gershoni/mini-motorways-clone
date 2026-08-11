@@ -437,3 +437,38 @@ So an acceptance gate reading "the board reaches N houses and M destinations" is
 where nothing new ever moves. **Gate on the behaviour, not on the population** — cars in motion, trips
 completed, queues formed — because the population is the input to the thing you care about, not
 evidence of it.
+
+## An assertion placed above another can make the second unreachable
+
+M1e Task 6 replaced a hard-coded bound with a derived one and wrote a test to prove the derivation
+still holds as the maps change. **The test had no teeth**, and the implementer only found out by
+attacking it: raising `maxDestinations` to 84 failed on `expected 168 to be 36` — an *identity pin*
+sitting above the bound check, which fires for **any** map change at all. The bound it was written to
+guard never ran.
+
+Both assertions were correct. Their order made one of them dead. And the failure message named the
+identity, so a maintainer reading the red would have concluded the bound was fine.
+
+The fix is the diagnostic: **reorder, then prove the two assertions discriminate** — 84 must fire the
+bound with *"that label is no longer true"*, and 20 must fire only the pins with *"a map grew
+safely"*. Two different mutations, two different messages. If every mutation you can think of
+produces the same red, the assertions after the first are decoration.
+
+This generalises past ordering: **a broad assertion upstream of a specific one is a coverage hole
+that reads as depth.** Count detectors per *mutation*, not per test — and check that the mutation you
+care about produces the message you expect, not merely a red.
+
+## A prediction written before the measurement is worth more than the measurement
+
+Task 6's implementer derived where its new invariant would break, predicted the binding case would
+fall at week 19, and wrote the assertion. **The assertion caught it at week 18.**
+
+The reasoning was plausible and wrong in an instructive way: the 0→1 transition is the largest drop
+absolutely, so it looks like the binding one — but it also has the largest period available to absorb
+it. The tight case is the *last* drop before the cap, where the drop is small and the headroom is
+smaller. `min(2·P_w − P_{w−1} + 1) = 167` against `min P_w = 172`.
+
+Nothing about the shipped behaviour changed. What changed is that a wrong mental model was caught by
+an artefact rather than carried forward — and it was only catchable because the prediction was
+written down **before** the number came back. A measurement taken without a prediction confirms
+whatever it finds.
