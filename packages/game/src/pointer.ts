@@ -216,6 +216,8 @@ export const PointerOutcome = Object.freeze({
   REFUSED_PAUSED: 7,
   /** A `pointerdown` refused because another pointer already owns the drag. */
   REFUSED_SECOND_POINTER: 8,
+  /** A tap while the run is over; a new run was requested (§5.8, M1e Task 9). */
+  RESTART_REQUESTED: 9,
 } as const)
 
 /** A `PointerOutcome` value, derived from the const rather than hand-written. */
@@ -252,6 +254,25 @@ export interface PointerHost {
    */
   readonly paused: () => boolean
   readonly setPaused: (paused: boolean) => void
+  /**
+   * True once the run has ended (§5.8). Read from the LOOP rather than from
+   * `sim`, because `pointer` is in `game` and must not grow a `sim` import for
+   * one boolean — and because the loop is already the authority on `paused`
+   * for exactly the same reason.
+   */
+  readonly gameOver: () => boolean
+  /**
+   * Starts a new run. Injected, and `main.ts` passes
+   * `() => { location.reload() }`.
+   *
+   * A seamless in-place restart needs a `resetState` in `sim` that M3 owns; a
+   * reload is the one path in this codebase known to produce a correct boot,
+   * and it is byte-identical to a cold start by construction rather than by
+   * argument. It is a dependency rather than a direct `location.reload()` call
+   * so that this branch has a Node-side detector — the same reason
+   * `createFallbackButton` and `createBootFailureSurface` are injected.
+   */
+  readonly restart: () => void
 }
 
 /** The pointer state machine. One per run; `main.ts` wires the DOM events to it. */
@@ -354,6 +375,36 @@ export function createPointerInput(host: PointerHost): PointerInput {
   }
 
   function down(pointerId: number, clientX: number, clientY: number): PointerOutcomeCode {
+    // **§5.8's shutdown is terminal, and this is the only branch that says so.**
+    //
+    // ONE early return rather than a guard on the clock toggle plus a guard on
+    // the grid: two guards can disagree, and the clock guard alone would still
+    // leave `Game.setPaused` — exported, and forwarded from `main.ts` — able to
+    // resume a dead sim from outside this module. `Loop.end()` closes that door
+    // from the other side; this one closes the tap.
+    //
+    // **A terminal state obliges a recovery path, and the guard is what removes
+    // the accidental one.** Before this branch a clock tap un-paused the loop
+    // and re-opened `HitRegion.GRID` — refused *while paused* and by nothing
+    // else — so the player drew roads that never appeared, spent no tiles and
+    // got no message.
+    //
+    // **First statement, above the `dragging` block, deliberately.** A city can
+    // die mid-stroke: the run ends inside `advance` while finger 1 still owns
+    // the drag, and with this below the single-pointer rule finger 2's tap
+    // would come back REFUSED_SECOND_POINTER in front of a screen reading "TAP
+    // TO PLAY AGAIN".
+    //
+    // `move` needs no companion guard and must not grow one: `Loop.end()` sets
+    // `paused`, `move` already refuses every board sample while paused, and a
+    // second independently sufficient structure would leave neither half with a
+    // detector. `up`/`cancel` stay live so a captured pointer can still be
+    // released on a dead board.
+    if (host.gameOver()) {
+      host.restart()
+      return PointerOutcome.RESTART_REQUESTED
+    }
+
     if (dragging) {
       // The single-pointer rule: while a drag is live, a second finger cannot
       // start a second drag AND cannot reach the HUD.

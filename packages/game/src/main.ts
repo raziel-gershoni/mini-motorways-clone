@@ -184,6 +184,23 @@ export interface GameDeps {
    * for why the escape hatch is here at all.
    */
   readonly preferFallback?: boolean
+  /**
+   * Starts a new run after §5.8's shutdown. Defaults to
+   * `() => { location.reload() }`, which IS the production path — so unlike
+   * M2's `createFallback`, omitting this degrades to the correct behaviour
+   * rather than to none, and optional is the honest shape.
+   *
+   * It exists as a dependency at all so the restart branch has a Node-side
+   * detector: `location.reload()` is the same irreducible
+   * one-DOM-call-with-no-detector shape `createFallbackButton` has, isolated to
+   * one arrow function for that reason.
+   *
+   * **A test that boots a game, reaches game over and taps MUST pass this.**
+   * There is no `location` in Node, so the default throws a `ReferenceError`
+   * there — loudly, which is the right failure for a test that meant to
+   * exercise the restart and forgot to inject one.
+   */
+  readonly restart?: () => void
 }
 
 /**
@@ -380,6 +397,18 @@ export function createGame(deps: GameDeps): Game {
     setPaused: (next: boolean) => {
       loop.setPaused(next)
     },
+    // The loop, not `sim`: `pointer.ts` is in `game` and must not grow a `sim`
+    // import for one boolean, and `loop.over` is sticky and already the
+    // authority `end()` writes.
+    gameOver: () => loop.over,
+    // **The way out of a terminal state, and the reason a reload is the right
+    // one today.** A seamless in-place restart needs a `resetState` in `sim`
+    // that M3 owns; a reload re-runs `createGame` from module scope, which is
+    // the one path in this codebase known to produce a correct boot and is
+    // byte-identical to a cold start by construction rather than by argument.
+    restart: deps.restart ?? ((): void => {
+      location.reload()
+    }),
   })
 
   const erase = createEraseControl({

@@ -155,11 +155,22 @@ interface Rig {
   readonly paused: boolean
   /** Pauses from outside the pointer — `main.ts`'s Telegram `deactivated` path. */
   readonly forcePaused: (next: boolean) => void
+  /** How many times the host was asked for a new run (M1e Task 9). */
+  readonly restarts: number
+  /**
+   * Ends the run the way `main.ts` does. **It pauses too, and that is not
+   * convenience** — `Loop.end()` sets `paused = true`, so `gameOver` without
+   * `paused` is a state production cannot be in, and a fixture that produced it
+   * would let a guard pass here and fail on a phone.
+   */
+  readonly endRun: () => void
 }
 
 function rig(camera: Camera = phone390()): Rig {
   const queue = createInputQueue()
   let paused = false
+  let over = false
+  let restarts = 0
   const setPausedCalls: boolean[] = []
   const host: PointerHost = {
     camera: () => camera,
@@ -171,6 +182,10 @@ function rig(camera: Camera = phone390()): Rig {
     setPaused: (next: boolean) => {
       setPausedCalls.push(next)
       paused = next
+    },
+    gameOver: () => over,
+    restart: () => {
+      restarts++
     },
   }
   const input = createPointerInput(host)
@@ -184,6 +199,13 @@ function rig(camera: Camera = phone390()): Rig {
     },
     forcePaused: (next: boolean) => {
       paused = next
+    },
+    get restarts(): number {
+      return restarts
+    },
+    endRun: () => {
+      over = true
+      paused = true
     },
   }
 }
@@ -1358,5 +1380,98 @@ describe('the outcome codes', () => {
     const values = Object.values(PointerOutcome)
     expect(new Set(values).size).toBe(values.length)
     for (const v of values) expect(v).not.toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Game over is terminal at the input boundary — M1e Task 9
+// ---------------------------------------------------------------------------
+
+describe('once the city has shut down', () => {
+  it('a tap anywhere starts a new run', () => {
+    const r = rig()
+    r.endRun()
+    expect(r.input.down(1, CLOCK_X, CLOCK_Y)).toBe(PointerOutcome.RESTART_REQUESTED)
+    expect(r.input.down(2, T9_14_X, T9_14_Y)).toBe(PointerOutcome.RESTART_REQUESTED)
+    // The letterbox too — every region, not merely the two interactive ones.
+    expect(r.input.down(3, 1 + CANVAS_LEFT, ORIGIN_Y + 10 + CANVAS_TOP)).toBe(
+      PointerOutcome.RESTART_REQUESTED,
+    )
+    expect(r.restarts).toBe(3)
+    // The negative that matters: the clock tap must not ALSO have toggled
+    // pause. Before this guard a clock tap un-paused a dead sim, the pause bars
+    // vanished, `HitRegion.GRID` re-opened — it is refused *while paused* and by
+    // nothing else — and the player drew roads that never appeared, spent no
+    // tiles and got no message.
+    expect(r.setPausedCalls, 'the clock toggle must be unreachable').toEqual([])
+    expect(queued(r.queue), 'and no road may be queued').toEqual([])
+  })
+
+  it('is inert before the run is over — pause still toggles and the board still draws', () => {
+    // The other side of the guard. Without this the early return is
+    // indistinguishable from `down()` returning RESTART_REQUESTED always.
+    const r = rig()
+    expect(r.input.down(1, CLOCK_X, CLOCK_Y)).toBe(PointerOutcome.PAUSE_TOGGLED)
+    expect(r.restarts).toBe(0)
+    const b = rig()
+    expect(b.input.down(1, T9_14_X, T9_14_Y)).toBe(PointerOutcome.DRAG_START)
+    expect(b.restarts).toBe(0)
+  })
+
+  it('outranks the single-pointer rule, so a second finger can still restart', () => {
+    // **The guard is the FIRST statement of `down()`, above the `dragging`
+    // block, and this is why.** A city can die mid-stroke: the run ends inside
+    // `advance`, the drag is still live and still owned by finger 1. With the
+    // guard placed after the single-pointer rule, finger 2's tap comes back
+    // REFUSED_SECOND_POINTER and the player is left tapping a frozen board with
+    // "TAP TO PLAY AGAIN" written across it.
+    const r = rig()
+    expect(r.input.down(1, T9_14_X, T9_14_Y)).toBe(PointerOutcome.DRAG_START)
+    expect(r.input.dragging).toBe(true)
+    r.endRun()
+    expect(r.input.down(2, T11_15_X, T11_15_Y)).toBe(PointerOutcome.RESTART_REQUESTED)
+    expect(r.restarts).toBe(1)
+    // Vacuity: while the run is LIVE the same second finger is refused, so this
+    // test is about the shutdown and not about a rule that never applied.
+    const live = rig()
+    expect(live.input.down(1, T9_14_X, T9_14_Y)).toBe(PointerOutcome.DRAG_START)
+    expect(live.input.down(2, T11_15_X, T11_15_Y)).toBe(PointerOutcome.REFUSED_SECOND_POINTER)
+  })
+
+  it('needs no second guard in `move`, because the shutdown pauses and pause already refuses', () => {
+    // **Why there is ONE guard and not three**, recorded so nobody adds the
+    // other two on the strength of this file having no test for them.
+    // `Loop.end()` sets `paused`, and `move` refuses every board sample while
+    // paused. A `gameOver` guard in `move` would be a second INDEPENDENTLY
+    // SUFFICIENT structure, which by this repo's own catalogue leaves neither
+    // half with a detector — the shape to write down rather than to cover.
+    //
+    // The outcome code is what makes this assertable at all: "nothing was
+    // queued" is satisfied by six different causes and REFUSED_PAUSED names the
+    // one that actually fired.
+    const r = rig()
+    expect(r.input.down(1, T9_14_X, T9_14_Y)).toBe(PointerOutcome.DRAG_START)
+    r.endRun()
+    expect(r.input.move(1, T11_15_X, T11_15_Y)).toBe(PointerOutcome.REFUSED_PAUSED)
+    expect(queued(r.queue)).toEqual([])
+    // And the drag can still be ended, so nothing latches: `up` is the one
+    // handler that must keep working on a dead board, or a restart-by-reload
+    // would be the only way to clear a captured pointer.
+    expect(r.input.up(1)).toBe(PointerOutcome.DRAG_END)
+    expect(r.input.dragging).toBe(false)
+  })
+
+  it('asks for exactly one new run per tap, not one per frame', () => {
+    // `restart` reloads the page in production. A guard that called it from a
+    // getter, or twice per event, would reload mid-reload.
+    const r = rig()
+    r.endRun()
+    r.input.down(1, CLOCK_X, CLOCK_Y)
+    expect(r.restarts).toBe(1)
+    // Reading the machine's state must not ask for another one.
+    expect(r.input.dragging).toBe(false)
+    expect(r.input.lastCell).toBe(-1)
+    expect(r.input.eraseMode).toBe(false)
+    expect(r.restarts).toBe(1)
   })
 })

@@ -554,6 +554,14 @@ function buildRig(draw: (frame: RenderFrame) => void): Rig {
     setPaused: (next: boolean) => {
       loop.setPaused(next)
     },
+    // M1e Task 9. This rig's board never dies inside the profiled window, so
+    // the branch is never taken — and `restart` throwing rather than counting
+    // is deliberate: if a future rig DOES reach a shutdown tap in here, it
+    // stops loudly instead of silently profiling a restart.
+    gameOver: () => loop.over,
+    restart: () => {
+      throw new Error('the allocation rig reached a shutdown tap — it is no longer measuring a live board')
+    },
   })
   // Precomputed OUTSIDE the profiled window: `hudRects` writes into a
   // caller-owned object, but building one per frame would charge this file's own

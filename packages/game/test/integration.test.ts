@@ -257,6 +257,17 @@ function stubSurface(widthPx: number, heightPx: number): AtlasSurface {
 interface Rig {
   readonly game: Game
   readonly ctx: RecordingContext
+  /**
+   * How many times the game asked for a new run (M1e Task 9).
+   *
+   * **Every rig injects `deps.restart`, and it has to.** The production default
+   * is `() => { location.reload() }` and there is no `location` in Node, so a
+   * case that reaches a shutdown tap without one dies with
+   * `ReferenceError: location is not defined` — which is the right failure for
+   * a test that meant to exercise the restart, and a useless one for the twenty
+   * cases that only meant to boot a board.
+   */
+  readonly restarts: number
   /** Client CSS x of the centre of board column `gx`. */
   readonly cx: (gx: number) => number
   readonly cy: (gy: number) => number
@@ -302,7 +313,11 @@ function buildRig(
 ): Rig {
   const ctx = new RecordingContext()
   let view: (typeof M0_VIEW) | (typeof NARROW_VIEW) = M0_VIEW
+  let restarts = 0
   const game = createGame({
+    restart: () => {
+      restarts++
+    },
     canvas: {
       width: 0,
       height: 0,
@@ -340,6 +355,9 @@ function buildRig(
   return {
     game,
     ctx,
+    get restarts(): number {
+      return restarts
+    },
     cx: (gx) => {
       const c = camera()
       return CANVAS_LEFT + c.originX + (gx - c.x0) * c.tileSize + c.tileSize / 2
@@ -2568,14 +2586,192 @@ describe('the demo board stops dead, and stays a still image', () => {
     // it: a real `pointerdown` on a real board cell, through the real pointer
     // machine, after a real shutdown — and it is refused for the RIGHT reason,
     // named by the outcome code rather than inferred from an empty queue.
+    // ---------------------------------------------------------------------
+    // **The grid is shut, and there is now a way out — M1e Task 9.**
+    // ---------------------------------------------------------------------
+    // Until this task a tap did nothing at all: the board was frozen, input was
+    // refused, no message was drawn, and closing the app was the only exit.
+    // Now every tap asks for a new run, named by its own outcome code rather
+    // than inferred from an empty queue.
     const before = rig.game.queue.inputs.actions.length
-    expect(rig.game.pointer.down(1, rig.cx(9), rig.cy(20))).toBe(PointerOutcome.REFUSED_PAUSED)
+    expect(rig.game.pointer.down(1, rig.cx(9), rig.cy(20))).toBe(
+      PointerOutcome.RESTART_REQUESTED,
+    )
+    expect(rig.restarts, 'one tap, one new run').toBe(1)
+    // The drag never started, so the move and the up are the no-ops they should
+    // be and nothing reaches the queue on a dead board.
     rig.game.pointer.move(1, rig.cx(9), rig.cy(21))
     rig.game.pointer.up(1)
     expect(rig.game.queue.inputs.actions.length, 'and nothing reached the queue').toBe(before)
-    // Task 9 replaces this refusal with a RESTART_REQUESTED early return above
-    // the HUD test; until then a tap does nothing at all, which is the cost
-    // stated in the report and the reason Task 9 is the next commit.
+    expect(rig.game.pointer.dragging).toBe(false)
+  })
+
+  it('draws the shutdown screen the player actually reads, on the board that ships', () => {
+    // **The acceptance criterion, end to end, on the default board with no
+    // input of any kind.** Every prior task in this milestone could honestly
+    // answer "a human sees nothing"; this is the case that makes that false.
+    const rig = buildRig({ layoutId: undefined })
+    expect(rig.game.layoutId).toBe(DEFAULT_LAYOUT_ID)
+    let frames = 0
+    while (!isGameOver(rig.game.state) && frames < 20000) {
+      rig.advance(TICK_MS)
+      frames++
+    }
+    expect(rig.game.state.header[H_TICK]).toBe(DEMO_DEATH_TICK)
+
+    rig.ctx.log = []
+    rig.advance(TICK_MS)
+    const frame = rig.game.builder.frame
+    expect(frame.gameOver, 'the frame must be able to SAY the run ended').toBe(true)
+    const failed = frame.failedDest
+    expect(failed, 'and which destination did it').toBeGreaterThanOrEqual(0)
+
+    // 1. The board goes dark: one scrim fill, over the grid rect, not into the
+    //    HUD band.
+    const camera = rig.game.shell.camera
+    const scrims = rig.ctx.log.filter(
+      (c): c is FillCommand => c.op === 'fill' && c.style === PALETTE.scrim,
+    )
+    expect(scrims.length, 'exactly one scrim').toBe(1)
+    const scrim = scrims[0] as FillCommand
+    expect(scrim.y).toBeLessThanOrEqual(camera.originY)
+    expect(scrim.y + scrim.h).toBeGreaterThanOrEqual(camera.originY + camera.rows * camera.tileSize)
+    expect(scrim.y + scrim.h, 'the HUD stays legible').toBeLessThanOrEqual(camera.hudTop)
+
+    // 2. It says which destination, how many trips, and how to start again —
+    //    read off the commands AFTER the scrim, because `drawHud` prints the
+    //    score unconditionally and a whole-frame match is a 0-detector.
+    const scrimIndex = rig.ctx.log.findIndex(
+      (c) => c.op === 'fill' && c.style === PALETTE.scrim,
+    )
+    const said = rig.ctx.log
+      .slice(scrimIndex + 1)
+      .filter((c): c is TextCommand => c.op === 'text')
+      .map((c) => c.text)
+    expect(said).toEqual([
+      `DESTINATION ${failed} OVERCROWDED`,
+      `${rig.game.state.header[H_SCORE] as number} TRIPS`,
+      'TAP TO PLAY AGAIN',
+    ])
+
+    // 3. And the ring is still there under the scrim, around the destination
+    //    that did it — which is what makes "which one" a thing the player can
+    //    SEE rather than a number they have to count buildings for.
+    const rings = rig.ctx.log.filter((c): c is ArcCommand => c.op === 'arc')
+    expect(rings.length, 'at least the failed destination is ringed').toBeGreaterThan(0)
+    // §5.8's hidden grace: the killer's meter is at the FAIL threshold, folded
+    // against FULL, so its ring is 249/255 — nearly closed and never closed.
+    expect(frame.destOvercrowd[failed] as number).toBe(249)
+    const widest = Math.max(...rings.map((r) => r.sweep))
+    expect(widest).toBeCloseTo((249 / 255) * Math.PI * 2, 6)
+    expect(widest, 'the ring is NOT full at the moment it kills you').toBeLessThan(Math.PI * 2)
+  })
+
+  it('the restart tap mutates not one byte of sim state, so a new run is a COLD BOOT', () => {
+    // **The determinism half of Task 9, and the reason `restart` is a reload.**
+    //
+    // Two claims, and they need different evidence.
+    //
+    // 1. *The tap changes nothing.* `hashState` over the whole state buffer,
+    //    before and after — the same digest the goldens are taken with, so this
+    //    covers every region rather than the ones a hand-written list would
+    //    remember. A guard that reset a counter, cleared the queue or nudged
+    //    the loop would move it.
+    // 2. *What replaces the run is a cold boot.* Production's `restart` is
+    //    `() => { location.reload() }`, which re-evaluates the module and calls
+    //    `createGame` from scratch — so "byte-identical to a cold boot" is true
+    //    by CONSTRUCTION rather than by argument, and the thing that has to be
+    //    checked is that a cold boot on the same seed is itself deterministic.
+    //    That is the second half below, and it is the same property the seed
+    //    golden pins, re-taken through the whole `createGame` assembly.
+    const rig = buildRig({ layoutId: undefined })
+    let frames = 0
+    while (!isGameOver(rig.game.state) && frames < 20000) {
+      rig.advance(TICK_MS)
+      frames++
+    }
+    expect(isGameOver(rig.game.state)).toBe(true)
+
+    const before = hashState(rig.game.state)
+    const tiles = rig.game.state.header[H_TILES] as number
+    expect(rig.game.pointer.down(1, rig.cx(9), rig.cy(20))).toBe(PointerOutcome.RESTART_REQUESTED)
+    expect(rig.game.pointer.down(2, rig.cx(11), rig.cy(14))).toBe(PointerOutcome.RESTART_REQUESTED)
+    rig.game.pointer.move(2, rig.cx(12), rig.cy(14))
+    rig.game.pointer.up(2)
+    rig.game.pointer.cancel(2)
+    rig.advance(TICK_MS)
+    expect(hashState(rig.game.state), 'the restart path touched sim state').toBe(before)
+    expect(rig.game.state.header[H_TILES], 'and it cost the player no tiles').toBe(tiles)
+    expect(rig.restarts).toBe(2)
+
+    // Cold boot, twice, on the same layout and the same seed: identical after
+    // the warm start and identical again after a thousand more ticks. This is
+    // what the reload produces.
+    const a = buildRig({ layoutId: undefined })
+    const b = buildRig({ layoutId: undefined })
+    expect(hashState(b.game.state), 'two cold boots must agree at frame 0').toBe(
+      hashState(a.game.state),
+    )
+    for (let i = 0; i < 1000; i++) {
+      a.advance(TICK_MS)
+      b.advance(TICK_MS)
+    }
+    expect(hashState(b.game.state), 'and after a thousand ticks').toBe(hashState(a.game.state))
+    // Non-vacuous: the digest MOVES when the sim runs, so "equal" is not "equal
+    // to the same frozen buffer".
+    expect(hashState(a.game.state)).not.toBe(hashState(buildRig({ layoutId: undefined }).game.state))
+  })
+
+  it('the ring fills long before the city dies, so the warning arrives in time to act', () => {
+    // **The other half of the acceptance criterion, and the one that decides
+    // whether the ring is a WARNING or an epitaph.** A ring that appears at
+    // 3:40 on a board that dies at 3:43 tells the player nothing they can use.
+    //
+    // Measured rather than asserted loosely: the tick the first ring is drawn,
+    // and the fraction of the run that has a ring on screen.
+    const rig = buildRig({ layoutId: undefined })
+    let firstRingTick = -1
+    let ringFrames = 0
+    let frames = 0
+    while (!isGameOver(rig.game.state) && frames < 20000) {
+      rig.advance(TICK_MS)
+      frames++
+      const drawn = rig.ctx.log.some((c) => c.op === 'arc')
+      if (drawn) {
+        ringFrames++
+        if (firstRingTick < 0) firstRingTick = rig.game.state.header[H_TICK] as number
+      }
+    }
+    expect(isGameOver(rig.game.state)).toBe(true)
+    // **Measured on the shipped demo board, and these reproduce exactly** — the
+    // sim is deterministic and this rig's frame cadence is fixed, so none of
+    // these is a statistical figure:
+    //
+    // ```
+    //   first ring      tick 3,492   1 min 56 s
+    //   death           tick 6,703   3 min 43 s
+    //   warning         3,211 ticks  1 min 47 s
+    //   ring on screen  3,212 of 5,504 frames — 58.4 % of the run
+    // ```
+    //
+    // The bounds below are looser than the measurements on purpose: what has to
+    // hold is "the warning arrives with time to act", not "at tick 3,492", and
+    // pinning the tick would turn every spawn-tuning change into a failure that
+    // says nothing about the ring.
+    expect(firstRingTick, 'a ring must appear at all').toBeGreaterThan(0)
+    expect(
+      DEMO_DEATH_TICK - firstRingTick,
+      'the warning must arrive at least a minute before the end',
+    ).toBeGreaterThan(30 * 60)
+    expect(
+      ringFrames / frames,
+      'a ring is on screen for most of the run, not only at the end',
+    ).toBeGreaterThan(0.5)
+    // Vacuity: the very first frames have NO ring, so this is measuring the
+    // meter rather than a ring that is always drawn.
+    const fresh = buildRig({ layoutId: undefined })
+    fresh.advance(TICK_MS)
+    expect(fresh.ctx.log.some((c) => c.op === 'arc')).toBe(false)
   })
 
   it('a game whose state is ALREADY over at boot ends its loop too', () => {
@@ -2604,8 +2800,13 @@ describe('the demo board stops dead, and stays a still image', () => {
     expect(dead.game.loop.paused).toBe(true)
 
     // And the consequence, which is the whole reason the line exists: the grid
-    // is shut on the very first interaction, with no frame having run at all.
-    expect(dead.game.pointer.down(1, dead.cx(9), dead.cy(20))).toBe(PointerOutcome.REFUSED_PAUSED)
+    // is shut on the very first interaction, with no frame having run at all —
+    // and since M1e Task 9 that same first tap is the way out, so a restored
+    // game-over save is recoverable rather than a wall.
+    expect(dead.game.pointer.down(1, dead.cx(9), dead.cy(20))).toBe(
+      PointerOutcome.RESTART_REQUESTED,
+    )
+    expect(dead.restarts).toBe(1)
     expect(dead.game.queue.inputs.actions.length).toBe(0)
 
     // It is still sticky, and it still draws.

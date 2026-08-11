@@ -367,6 +367,12 @@ describe('wired to the real PointerInput', () => {
       setPaused: (next: boolean) => {
         paused = next
       },
+      // M1e Task 9. This file is about the erase MODE, which is unreachable
+      // once the run ends, so the run never ends here.
+      gameOver: () => false,
+      restart: () => {
+        throw new Error('the erase-control rig has no shutdown; this call means the guard inverted')
+      },
     })
     return { pointer, queue }
   }
