@@ -105,9 +105,10 @@ describe('rule constants', () => {
 
   it('reveals a 14 x 22 rect centred in the 24 x 40 board, entirely in bounds', () => {
     // Spec §3 decision row 4, "~24×40 grid revealed from 14×22", frozen by M2
-    // plan Decision 5 and to be made dynamic by M1e — NOT by M1d, which declined
-    // board expansion in its Out table, and this comment said "made dynamic by
-    // M1d" in the past tense while the four literals below never moved. The
+    // plan Decision 5 and to be made dynamic by M1f — NOT by M1d and NOT by
+    // M1e, both of which declined board expansion, and this comment has now
+    // named a passed milestone in the past tense twice while the four literals
+    // below never moved. The
     // integer/finite/non-negative
     // assertions above already cover these four automatically (the registry is
     // derived from the module's real exports); what they cannot see is the

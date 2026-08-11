@@ -126,9 +126,14 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
  * disagree, on purpose. `speedUnits`'s own comment used to cite that divergence
  * as the reason M1c applied no multipliers at all; M1d accepts it, because the
  * alternative is either a turn-aware product graph (reason 1) or a recalibration
- * of the whole cost model (reason 2), and neither is an M1d-sized change. M1e's
- * motorway tier is the next thing that touches this, and it is a cost-model
- * change rather than a movement one.
+ * of the whole cost model (reason 2), and neither is an M1d-sized change.
+ * **M1f's motorway tier is the next thing that touches this**, and it is a
+ * cost-model change rather than a movement one. Repointed from M1e: motorways
+ * are an upgrade CARD, M1e shipped only §5.10's tile grant, and the card modal
+ * went to M1f with every item in the table. **The disagreement itself is not a
+ * defect and must not be "fixed"** — spec §1/§6 make a congestion-free path
+ * cost the game, and `flowfield.test.ts`'s congestion-blindness arms (M1e Task
+ * 11) exist to fail if anyone closes it.
  *
  * The rule itself is decision 7 and it lives in `laneSpeedMul` below.
  *

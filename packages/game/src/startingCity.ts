@@ -301,9 +301,13 @@ export function seedStartingCity(state: GameState, world: WorldData): void {
  * seed's first-pin tick, so if either the city or the constants move, this
  * number fails rather than silently becoming wrong.
  *
- * **What it is not:** a substitute for M1e's authored spawn schedule. A run that
- * begins at tick 258 is still the out-of-band, non-replayable seed
- * `startingCity.ts` documents; M2 submits nothing to a leaderboard either way.
+ * **What it is not:** a substitute for the authored spawn schedule, which
+ * M1e Task 5 shipped as `sim/spawn.ts` and which runs inside `step`. A run that
+ * begins at tick 258 is still the out-of-band, non-replayable SEED this file
+ * documents — the warm start replays fine (it is 258 real `step` calls), but
+ * the six placements before it do not travel in the input log, so a Worker
+ * still cannot reproduce the board. That is the one thing M1e's spawner did not
+ * fix and M3's persistence depends on.
  */
 export const SEED_FIRST_PIN_TICK = 378
 

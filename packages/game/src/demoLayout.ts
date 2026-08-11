@@ -232,9 +232,11 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  *      redrawing pays whatever the erase deferred, so the tile counter nets
  *      exactly zero. `demoLayout.test.ts` §6 is the detector for both branches.
  *   5. **Two cars crossing inside one junction cell.** It happens at the three
- *      corridor mouths, and it is a KNOWN GAP, not a feature: `roads.ts:160-167`
- *      states in source that two lanes do not model an intersection crossing and
- *      names M1e's traffic lights and roundabouts as the work. Showing it
+ *      corridor mouths, and it is a KNOWN GAP, not a feature: `roads.ts`'s
+ *      `LANE_OF_DIR` note states in source that two lanes do not model an
+ *      intersection crossing and names **M1f's** traffic lights and roundabouts
+ *      as the work (repointed at the close of M1e, which shipped neither —
+ *      both are §5.10 item cards and the card modal is M1f's). Showing it
  *      silently, on a board built to demonstrate that cars block each other, is
  *      the misleading option; naming it is not.
  *   6. **THE CITY SHUTS DOWN AT 3 MINUTES 43 SECONDS, on tick 6,703, with no

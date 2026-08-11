@@ -26,13 +26,19 @@ import type { WorldData } from './world'
  * any statement runs), so neither module's top level ever observes the other
  * mid-initialisation.
  *
- * **Nothing here is called from inside `step()` in this task** (Task 2's own
- * file list does not touch `step.ts`) — building placement is an explicit,
- * out-of-band call the M1e spawner will eventually drive, mirroring how
- * `placeRoad` had no production caller until M1c Task 1. The one exception,
- * `carparkCell`, IS a per-tick call site once Task 4 lands, and is written
- * allocation-free for exactly that reason: it returns a bare number, never
- * an object.
+ * **SATISFIED, and the warning it carried has been inverted.** This used to
+ * read "nothing here is called from inside `step()` in this task — building
+ * placement is an explicit, out-of-band call the M1e spawner will eventually
+ * drive". The spawner landed: `spawn.ts` (M1e Task 5) is the caller, it runs
+ * inside `step`'s spawn phase, and `canPlaceHouse`/`canPlaceDestination` are
+ * therefore both on a PER-TICK path — the thing the old note explicitly warned
+ * against. What made that safe is M1e Task 4, which made both predicates
+ * allocation-free: the 7-cell footprint arrays are gone, every `return` is a
+ * frozen module singleton, and `placementAllocation.test.ts` measures 0.0000 B
+ * per call for both, on the demo board's 18 incumbents. `carparkCell` was
+ * already written allocation-free for the same reason and returns a bare
+ * number, never an object. Keep every new predicate in this file to that rule;
+ * there is no longer an out-of-band path to fall back on.
  */
 
 // --- Orientation: names the side the carpark attaches to (decision 5) ---

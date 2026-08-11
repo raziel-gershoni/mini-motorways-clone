@@ -72,9 +72,14 @@ export function createWorld(map: MapData): WorldData {
  * with no throw anywhere. Folding these three closes it the same way
  * `w`/`h`/terrain already close the analogous M1b gap.
  *
- * Building spawn zones are deliberately NOT folded here: they are the M1e
- * spawner's input, not the board's, and do not exist on `MapData` yet. When
- * they land, they must be folded in for exactly the reason above.
+ * Building spawn zones landed in M1e (Task 5's `spawn.ts`) and **still need no
+ * fold, because they are not on `MapData`** — this note predicted they would
+ * be. The zone the spawner scans is the SHARED revealed rect (`REVEALED_X0`
+ * and friends, `shared/constants.ts`), identical for every map, so there is no
+ * per-map byte for `mapIdHash` to disagree about across a replay. **A PER-MAP
+ * zone would still need folding, for exactly the reason above**: two maps that
+ * differ only in where buildings may spawn would produce the same `MI_MAP`,
+ * pass both of `restore`'s guards, and replay a different game.
  *
  * The byte recipe is exact, not incidental, because two engines (browser and
  * Worker) must agree on it bit-for-bit: the id's length as 4 LE bytes, then

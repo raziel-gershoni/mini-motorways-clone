@@ -164,7 +164,9 @@ export const OPPOSITE = Object.freeze([4, 5, 6, 7, 0, 1, 2, 3] as const)
  * to occupy the same cell simultaneously. They cross paths inside that cell and
  * nothing stops them. That is the spec's own model (§5.5 prices intersections
  * with a *speed* multiplier and a *wait*, not with mutual exclusion) and it is
- * what M1e's traffic lights and roundabouts are for.
+ * what **M1f's** traffic lights and roundabouts are for. Repointed from M1e,
+ * which shipped neither: both are §5.10 item cards and the card modal is M1f's,
+ * so the gap is unchanged and still unowned by anything in the tree.
  */
 export const LANE_OF_DIR = Object.freeze([1, 0, 0, 0, 0, 1, 1, 1] as const)
 

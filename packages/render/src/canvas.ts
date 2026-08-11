@@ -595,7 +595,7 @@ function carparkIsRoadless(frame: RenderFrame, d: number): boolean {
  * the playfield reads as a hard rectangle. The two letterbox columns are painted
  * *before* the content, so a car at the left or right edge still straddles it —
  * asymmetric, inherited rather than introduced, and 0 CSS px wide on the M0
- * device anyway. This also implements half of what the note below says M1e must
+ * device anyway. This also implements half of what the note below says M1f must
  * do when the revealed rect becomes dynamic.
  *
  * **The band edges are snapped to whole device pixels, and that is a fix for a
@@ -618,11 +618,15 @@ function carparkIsRoadless(frame: RenderFrame, d: number): boolean {
  * iterating it, buildings and cars by testing their anchor cell against it. A
  * building whose anchor is outside is not drawn at all, even if its footprint
  * would reach inside — correct for M2, where the rect is frozen and Task 2's
- * seed places every building well within it, and the thing M1e must revisit when
+ * seed places every building well within it, and the thing M1f must revisit when
  * the rect becomes dynamic (the fix then is a `clip` around phases 3-8, which
  * would also stop a partially-visible building painting into the HUD band).
- * **Repointed from M1d at the close of M1d**, which declined board expansion in
- * its Out table; the rect is still frozen and this is still open.
+ * **Repointed from M1d at the close of M1d and from M1e at the close of M1e**,
+ * both of which declined board expansion; the rect is still frozen and this is
+ * still open. M1e did sharpen the claim in one way: `sim/spawn.ts` now places
+ * buildings by scanning the same frozen rect, so nothing can spawn outside it
+ * and the "anchor outside, footprint inside" case stays as rare as the seed
+ * made it.
  *
  * **Cars are culled by their own position and not by anything the buildings do,
  * and a car near the rect's last column or row overhangs it by up to
@@ -944,7 +948,7 @@ function drawDestinations(ctx: DrawContext, frame: RenderFrame, palette: Palette
     // `-1 % w` is `-1` and `floor(-1 / w)` is `-1` in JavaScript, so a -1
     // carpark decomposes to (-1, -1), which `insideRevealed` rejects for **any
     // `x0 >= 0`** — not merely for M2's frozen `x0 = 5`, so the equivalence
-    // survives M1e making the rect dynamic all the way down to column 0.
+    // survives M1f making the rect dynamic all the way down to column 0.
     // Deleting this line **outright** (`if (true)`) therefore passes the whole
     // suite, which is stronger evidence of equivalence than widening it to
     // `>= -1` and is the form to reach for when re-checking. It stays because

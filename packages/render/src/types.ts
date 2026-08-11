@@ -121,10 +121,11 @@ export interface ViewportMetrics {
  * "Revealed grid" has no representation in any code — `MapData` has `w`/`h`
  * only — so Task 3 freezes it as four integer constants in `shared`
  * (`REVEALED_X0` = 5, `REVEALED_Y0` = 9, `REVEALED_W` = 14, `REVEALED_H` = 22),
- * which `game` reads and passes in here. **M1e owns making it dynamic** —
- * repointed at the close of M1d, which declined the work in its Out table; when
- * it does, `game` reads state instead of the constants and nothing in `render`
- * moves.
+ * which `game` reads and passes in here. **M1f owns making it dynamic** —
+ * repointed at the close of M1d and again at the close of M1e, both of which
+ * declined the work; when it does, `game` reads state instead of the constants
+ * and nothing in `render` moves. Note that `sim`'s spawner reads the same four
+ * constants as of M1e, so the change has two readers now, not one.
  */
 export interface RevealedRect {
   readonly x0: number
@@ -194,7 +195,14 @@ export interface Point {
  * pause.
  *
  * `tiles` is the tiles-left readout standing in for §7.2's inventory chip row —
- * a substitution, not §7.2 compliance. There is nothing to spend until M1e.
+ * a substitution, not §7.2 compliance. **Half satisfied by M1e, and the halves
+ * are worth separating**: there IS now something to spend, because §5.10's
+ * weekly tile grant lands `WEEKLY_TILE_GRANT` tiles at every week boundary and
+ * this readout is where the player watches it arrive. There is still no
+ * INVENTORY — no bridge, tunnel, roundabout, traffic light or motorway to hold
+ * — because every one of those is an item card and the card modal is M1f's. So
+ * the chip row stays deferred and this readout stops being a stand-in for
+ * nothing.
  */
 export interface HudRects {
   /** Week/day clock, which doubles as the pause control. */

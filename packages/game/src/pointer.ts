@@ -305,11 +305,13 @@ export interface PointerInput {
   /** The cell the drag is currently standing on, or -1 when no drag is active. */
   readonly lastCell: number
   /**
-   * Ends any drag in progress, unconditionally. The out-of-band recovery path:
-   * `main.ts` calls it on a Telegram `deactivated` event or a
-   * `visibilitychange` to hidden, where the webview may never deliver the
-   * `pointerup`. Returns `DRAG_END` if a drag was ended, `IGNORED` otherwise,
-   * and is idempotent.
+   * Ends any drag in progress, unconditionally. The out-of-band recovery path,
+   * and it has exactly ONE production caller: `attachVisibility` (`main.ts`)
+   * calls it on a `visibilitychange` to hidden, where the webview may never
+   * deliver the `pointerup`. **There is no Telegram `deactivated` handler
+   * anywhere in `packages/`** — this comment named one for two milestones, and
+   * `deactivated` now appears only in prose. Returns `DRAG_END` if a drag was
+   * ended, `IGNORED` otherwise, and is idempotent.
    */
   readonly abort: () => PointerOutcomeCode
 }
@@ -438,8 +440,12 @@ export function createPointerInput(host: PointerHost): PointerInput {
         return PointerOutcome.PAUSE_TOGGLED
       }
       // The score and tiles readouts, and the band's own padding. Consumed, so
-      // the board never sees them, and inert: there is nothing to spend or
-      // choose until M1e.
+      // the board never sees them, and inert — but the two halves of that split
+      // in M1e and only one is still open. There IS now something to SPEND:
+      // §5.10's weekly grant lands `WEEKLY_TILE_GRANT` tiles at every week
+      // boundary and the tiles readout is where the player watches it arrive.
+      // There is still nothing to CHOOSE — the two-card modal and every item
+      // card are M1f's — so tapping a readout still correctly does nothing.
       return PointerOutcome.HUD_INERT
     }
 
@@ -472,10 +478,22 @@ export function createPointerInput(host: PointerHost): PointerInput {
     if (!dragging || pointerId !== (slots[D_POINTER_ID] as number)) return PointerOutcome.IGNORED
     // Unreachable through the DOM today — pause can only be toggled by a
     // `pointerdown` on the clock, and the single-pointer rule refuses that
-    // while a drag is live, so no drag can survive into a paused state. Kept
-    // because `setPaused` is also callable from `main.ts` (a Telegram
-    // `deactivated` event, M3's hard pause) and because the rule is "no board
-    // input while paused", not "no board taps while paused".
+    // while a drag is live, so no drag can survive into a paused state.
+    //
+    // **Kept, and the RULE is the reason, not the caller list this used to
+    // give.** It said "`setPaused` is also callable from `main.ts` (a Telegram
+    // `deactivated` event, M3's hard pause)". Checked at the close of M1e:
+    // there is no `deactivated` handler in `packages/` and never has been, and
+    // `visibilitychange` (`attachVisibility`, `main.ts`) calls `pointer.abort()`
+    // and nothing else. The real caller set of `setPaused` today is exactly two
+    // — the HUD clock tap 40 lines above, and `Loop.end()` on §5.8's shutdown —
+    // plus `Game.setPaused`, which `main.ts` exports and nothing in `packages/`
+    // calls. So this guard is kept because the rule is **"no board input while
+    // paused", not "no board taps while paused"**: an exported pause is
+    // reachable from outside this module by construction, and a guard that
+    // depends on enumerating its callers is a guard with a shelf life. The rule
+    // was always the right justification; the caller list was decoration that
+    // happened to be false.
     if (host.paused()) return PointerOutcome.REFUSED_PAUSED
 
     const camera = host.camera()

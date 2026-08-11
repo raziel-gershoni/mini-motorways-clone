@@ -61,16 +61,23 @@ import { assertWorldMatches, mapIdHash, type WorldData } from './world'
  *   H_DEST_SPAWN_TIMER   11  ticks to the next destination attempt        M1e
  *   H_SPAWN_COLOUR_CURSOR 12 round-robin colour cursor for spawning       M1e
  *
- * **The four M1e slots are declared in Task 1 and nothing reads them yet.**
+ * **The four M1e slots were declared empty in Task 1 and all four are now
+ * live** — this paragraph said "nothing reads them yet" for the whole of the
+ * milestone that filled them. `H_GAME_OVER`/`H_FAILED_DEST` are written by
+ * `runOvercrowd` (overcrowd.ts, Task 7) and read by `isGameOver`/
+ * `failedDestination` below; `H_DEST_SPAWN_TIMER`/`H_SPAWN_COLOUR_CURSOR` are
+ * both read and written by `spawn.ts` (Task 5).
  * Two of them are FUNCTIONALLY PAIRED and must not be read apart:
  * `H_FAILED_DEST` is only meaningful while `H_GAME_OVER` is 1, so
  * `failedDestination` below is the only correct reader — the slot is
  * zero-initialised and 0 is a real destination index.
  *
  * `H_TILES` stays in the mutable `header`, not `mapIdentity`: `placeRoad`/
- * `eraseRoad` write it, and it must not be a field input (M1e's upgrade
- * cards grant tiles with no road change, which would spuriously rebuild
- * every colour).
+ * `eraseRoad` write it, and it must not be a field input. **That prediction
+ * came true in M1e** — `runWeekBoundary` (week.ts) grants `WEEKLY_TILE_GRANT`
+ * tiles with no road change, which under a `mapIdentity` slot would rebuild
+ * every colour's field at every week boundary for a number no route depends
+ * on. M1f's remaining §5.10 cards do the same thing again.
  *
  * mapIdentity slots:
  *
@@ -554,11 +561,14 @@ export function failedDestination(s: GameState): number {
  * arrivals) — an object literal here would be a per-tick allocation this
  * milestone's "nothing allocates inside a tick" rule forbids.
  *
- * Note for M1e: destination *removal* will need an explicit hole marker for
+ * Note for M1f: destination *removal* will need an explicit hole marker for
  * a slot in the middle of a live prefix that becomes invalid without
  * shifting every later index. This accessor and `destAt` below are the one
- * place that check must land, so M1e does not invent a second liveness
- * convention at some other call site.
+ * place that check must land, so removal does not invent a second liveness
+ * convention at some other call site. **Repointed from M1e, which adds
+ * destinations and removes none** — `spawn.ts` only ever appends, and §5.8's
+ * failure ends the run rather than freeing a slot, so the append-only prefix
+ * is intact and this is still entirely open.
  */
 export function houseAt(s: GameState, h: number): number {
   const count = s.header[H_HOUSE_COUNT] as number

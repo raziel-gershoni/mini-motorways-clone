@@ -744,8 +744,9 @@ describe('the queue across frames', () => {
    *
    * So X-Y is laid **out of band**, and the budget is granted out of band too —
    * which is not a contrivance: `H_TILES` is deliberately in the mutable header
-   * rather than in `mapIdentity` precisely because "M1e's upgrade cards grant
-   * tiles with no road change" (`sim/state.ts`).
+   * rather than in `mapIdentity` precisely because a grant moves tiles with no
+   * road change (`sim/state.ts`), and M1e made that real — `runWeekBoundary`
+   * lands `WEEKLY_TILE_GRANT` tiles at every week boundary.
    */
   it('does not resurrect a budget-refused placement once tiles are granted later', () => {
     const sim = simRig()

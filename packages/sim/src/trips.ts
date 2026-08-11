@@ -69,8 +69,11 @@ import { ROUTE_BYTES } from './dispatch'
  * pin remaining: whichever the loop reaches first consumes it. Under decision
  * 4's proved `destReserved <= destPins` both cars hold reservations and both
  * find a pin, so the order is not outcome-visible today — but the invariant
- * that makes it invisible is exactly what M1e's destination removal breaks, so
- * it is pinned now, off the reachable manifold, in `trips.test.ts`.
+ * that makes it invisible is exactly what **M1f's** destination removal breaks,
+ * so it is pinned now, off the reachable manifold, in `trips.test.ts`.
+ * Repointed from M1e, which removes no destination: `spawn.ts` appends only,
+ * and §5.8's failure ends the run rather than freeing a slot, so the property
+ * is still inert and still pinned.
  *
  * **Nothing here allocates.** No object literal, no array, no closure, no
  * `.map`/`.filter`/`.slice`; every value is a bare number and the only buffer

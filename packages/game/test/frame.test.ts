@@ -236,10 +236,11 @@ describe('the terrain fold', () => {
     expect(frame.terrainClass[cellOf(10, 16)] as number).toBe(TerrainClass.LAND)
   })
 
-  it('folds cells OUTSIDE the revealed rect too, so M1e’s expansion needs no change here', () => {
+  it('folds cells OUTSIDE the revealed rect too, so board expansion needs no change here', () => {
     // The mountain cluster (rows 5-7, columns 3-4) is entirely outside the
     // revealed rect. Folding only the drawn rect would pass every visible
-    // assertion and break the day M1e reveals more board.
+    // assertion and break the day the rect grows — M1f's, repointed from M1e,
+    // which declined expansion exactly as M1d did.
     const r = rig()
     const frame = build(r, builderFor(r))
     expect(cellOf(3, 5) % GRID_W).toBeLessThan(REVEALED_X0)
@@ -266,16 +267,20 @@ describe('the terrain fold', () => {
    * back out makes the WRITE the observable rather than the value, and it works
    * at both ends regardless of what the terrain there happens to be.
    *
-   * **A trap this sets for M1e, recorded now while the reason is fresh.** The
-   * two markers are cells (0, 0) and (23, 39) — **diagonal corners**, which is
-   * exactly the placement that produced Task 5's seven surviving mutants. It is
-   * sufficient here only because the fold is a flat 1-D `for c < cells` loop,
-   * where "past one bound" is not a distinct case: shrinking either end of a
-   * single range reaches a corner immediately. **The moment M1e makes this fold
-   * 2-D over a dynamic revealed rect, these two markers stop being sufficient**
-   * — a corner sits past two bounds at once, so extending any single bound by
-   * one cell reaches nothing — and each of the four half-plane bounds will need
-   * its own marker, one cell past exactly one of them.
+   * **A trap this sets for whoever makes the fold 2-D, recorded while the
+   * reason is fresh, and still entirely open at the close of M1e.** The two
+   * markers are cells (0, 0) and (23, 39) — **diagonal corners**, which is
+   * exactly the placement that produced M2 Task 5's seven surviving mutants. It
+   * is sufficient here only because the fold is a flat 1-D `for c < cells`
+   * loop, where "past one bound" is not a distinct case: shrinking either end
+   * of a single range reaches a corner immediately. **The moment this fold
+   * becomes 2-D over a dynamic revealed rect, these two markers stop being
+   * sufficient** — a corner sits past two bounds at once, so extending any
+   * single bound by one cell reaches nothing — and each of the four half-plane
+   * bounds will need its own marker, one cell past exactly one of them.
+   * (Addressed to M1e when written; M1e declined board expansion and the rect
+   * is still the four frozen constants, so the trap is unchanged and now
+   * M1f's.)
    */
   it('rewrites the first and last cell every frame, whatever terrain they carry', () => {
     const r = rig()
@@ -528,9 +533,10 @@ describe('the dense car array', () => {
    * unrepresentable at the interface rather than merely undrawn.
    *
    * The fixture puts a DEAD slot between two live ones, which is off the
-   * reachable manifold today (`placeHouse` only ever appends) and is exactly
-   * what M1e's building removal produces. Without a gap in the middle, "copy
-   * slot i to dense i" passes.
+   * reachable manifold today (`placeHouse` only ever appends, and M1e's spawner
+   * appends through the same function) and is exactly what **M1f's** building
+   * removal produces. Without a gap in the middle, "copy slot i to dense i"
+   * passes.
    */
   it('packs live cars at the front, skipping a dead slot in the middle', () => {
     const r = rig()
@@ -1018,7 +1024,9 @@ describe('the first frame, and cars that appear later', () => {
     loop.frame(0)
     loop.frame(200) // several ticks
 
-    // Out-of-band placement, exactly as M1e's spawner will do it in-band.
+    // Out-of-band placement. M1e's spawner does the same thing in-band, on the
+    // spawn phase inside `step`; the out-of-band call is kept here because it
+    // reaches the case on a chosen tick with nothing else moving.
     expect(placeHouse(r.state, r.world, cellOf(15, 26), 2)).toBe(true)
     const newSlot = 3 * CARS_PER_HOUSE
     expect(r.state.carPhase[newSlot] as number).toBe(PHASE_IDLE)
@@ -1033,12 +1041,13 @@ describe('the first frame, and cars that appear later', () => {
   /**
    * The snap rule itself, driven through the sequence that produces it.
    *
-   * **Its production trigger does not exist yet, and that is worth stating
-   * plainly.** `prevLive[i] === 0 && currLive[i] === 1` requires a slot to
-   * become live BETWEEN `snapshotPrev` and `snapshotCurr` — i.e. inside a
-   * `step`. Nothing in `step`'s seven phases creates a car today; M1e's
-   * in-`step` spawner is what will. Out-of-band placement happens between
-   * frames, so `snapshotPrev` already sees the new car (the test above).
+   * **Its production trigger EXISTS as of M1e Task 5, and that is worth stating
+   * plainly because this comment said the opposite.** `prevLive[i] === 0 &&
+   * currLive[i] === 1` requires a slot to become live BETWEEN `snapshotPrev`
+   * and `snapshotCurr` — i.e. inside a `step` — and `spawn.ts`'s spawn phase
+   * does exactly that, measured at tick 360 on `firstCity`. Out-of-band
+   * placement happens between frames, so `snapshotPrev` already sees the new
+   * car (the test above); the in-band path is the one this covers.
    *
    * Testing it here, through the same two calls the loop makes in the same
    * order, is the `assertSingleCrossing` idiom: make the branch reachable from

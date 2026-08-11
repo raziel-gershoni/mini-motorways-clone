@@ -164,8 +164,13 @@ export const FIELD_INPUT_REGIONS = Object.freeze(['mapIdentity', 'destCell', 'ro
  *   - destSpawnTick:  rotation eligibility only.
  *   - carHome, carCell, carProgress, carTargetDest, carRouteLen,
  *     carRouteCursor, carPhase, carRoute: irrelevant while no edge cost
- *                      depends on occupancy (dated: M1e's demand-actuated
- *                      lights make car positions a field input).
+ *                      depends on occupancy. Dated: M1f's demand-actuated
+ *                      lights, IF they price waiting as an edge weight —
+ *                      repointed from M1e, which shipped no lights (its §5.10
+ *                      half is the tile grant; every item card is M1f's).
+ *                      `flowfield.test.ts`'s congestion-blindness arms are the
+ *                      detector that this stays true, added M1e Task 11
+ *                      because no golden's fixture has a car on it.
  *   - cleared:        records destroyed trees; `neighbours` reads `roads`,
  *                      terrain lives in immutable `world`.
  *   - houseColour:    see houseCell.
@@ -186,8 +191,15 @@ export const FIELD_INPUT_REGIONS = Object.freeze(['mapIdentity', 'destCell', 'ro
  *                      `carCell`: no edge cost, source set or `dir` read
  *                      depends on it (`edgeCost` is pure length; routes are
  *                      committed once at dispatch and never re-pathed). Dated:
- *                      M1e's demand-actuated lights make car positions a field
- *                      input. **What classifying it FIELD_INPUT would cost,
+ *                      M1f's demand-actuated lights, IF they price waiting as
+ *                      an edge weight — repointed from M1e, which shipped none.
+ *                      **This is a spec REQUIREMENT and not a deferral** (§1,
+ *                      §6: path cost carries no congestion term, "this omission
+ *                      is deliberate and load-bearing; it is the game"), so a
+ *                      future light must be priced as a per-CELL cost with the
+ *                      signature change `scratch.ts`'s NB note describes, never
+ *                      as a read of this region from inside the pathfinder.
+ *                      **What classifying it FIELD_INPUT would cost,
  *                      measured:** occupancy changes on any tick any car
  *                      crosses a cell, so `syncFields` would run a full
  *                      960-cell Dijkstra for all five colours on nearly every
@@ -204,7 +216,7 @@ export const FIELD_INPUT_REGIONS = Object.freeze(['mapIdentity', 'destCell', 'ro
  *                      refused an entry — the same "rebuild every colour every
  *                      tick forever, silently, with correct answers" failure
  *                      `H_TICK` was split out of a hashed region to avoid.
- *                      Dated: M1e, with occupancy, if lights ever make waiting
+ *                      Dated: M1f, with occupancy, if lights ever make waiting
  *                      cars a routing input.
  *
  * M1d Task 5 adds the last two, and BOTH are FIELD_IRRELEVANT for one shared
@@ -220,15 +232,16 @@ export const FIELD_INPUT_REGIONS = Object.freeze(['mapIdentity', 'destCell', 'ro
  *
  *   - ghostMask:      see above. It changes only on an erase or a place, both
  *                     of which move `roads` in the same call, so it carries no
- *                     information the hashed region does not. Dated: M1e, if
+ *                     information the hashed region does not. Dated: M1f, if
  *                     ghosts ever become traversable-but-costly rather than
  *                     un-routable — at which point they are an edge weight and
- *                     `edgeCost` would have to see them.
+ *                     `edgeCost` would have to see them. Repointed from M1e,
+ *                     which left ghost semantics exactly as M1d shipped them.
  *   - ghostCommitted: the same, and MORE so — it changes on car CROSSINGS, so
  *                     classifying it FIELD_INPUT would rebuild every colour on
  *                     nearly every tick a ghost exists, with byte-identical
  *                     output. That is the `H_TICK` failure and the occupancy
- *                     failure a third time. Dated: M1e, with occupancy.
+ *                     failure a third time. Dated: M1f, with occupancy.
  *
  * M1e Task 1 adds the last three, and all three are FIELD_IRRELEVANT:
  *
@@ -246,6 +259,15 @@ export const FIELD_INPUT_REGIONS = Object.freeze(['mapIdentity', 'destCell', 'ro
  *                      set or `dir` read depends on it. Dated: never.
  *   - destOverTicks:   as above, and MORE so — it moves on every tick a
  *                      destination is over capacity. Dated: never.
+ *
+ * **All five "dated: M1e" reasons above are now "dated: M1f", repointed at the
+ * close of M1e by Task 11, and the date moved for one reason rather than
+ * five:** every one of them was waiting on demand-actuated traffic lights, and
+ * lights are an item CARD. M1e shipped the load-bearing half of §5.10 — the
+ * weekly tile grant — and left the two-card choice, and therefore every item in
+ * the table, to M1f. Nothing about the classification's ARGUMENT changed; only
+ * the milestone that could end it. A comment naming a milestone that has passed
+ * reads as satisfied, which is how a handoff dies.
  */
 export const FIELD_IRRELEVANT_REGIONS = Object.freeze([
   'rng',

@@ -6,8 +6,9 @@ import { parseMap, type MapData } from '../mapFormat'
  * a mountain cluster, and scattered trees — not to be good level design.
  *
  * `w`/`h` here (24x40) are the map's *final* extent per design decision 5:
- * expansion (M1e — M1d declined it) reveals cells within this grid, it never
- * resizes the buffer, so this is the largest this board ever gets.
+ * expansion (M1f — M1d and M1e both declined it) reveals cells within this
+ * grid, it never resizes the buffer, so this is the largest this board ever
+ * gets.
  *
  * Row data is `Object.freeze([...] as const)` at module scope — required by
  * Task 1's AST rule (`as const` alone is a type-level assertion with no

@@ -433,6 +433,24 @@ export function createEraseControl(deps: EraseControlDeps): EraseControl {
       // Set BEFORE the surface calls, so a `hide()` that throws on a partial
       // client still leaves the control refusing every later render rather than
       // half-retired and re-showable.
+      //
+      // **What retire does NOT do, recorded at the close of M1e (Task 11) so it
+      // is a known residual rather than a discovered one: it never UNSUBSCRIBES
+      // the click handler.** `offClick` is declared on the `MainButton` shape
+      // (`telegram.ts`) and is called nowhere in `packages/`, and the DOM
+      // fallback's `click` listener is never removed either. On every client
+      // this ships to that is unreachable — a hidden `MainButton` delivers no
+      // clicks and `display: none` takes the pill out of the hit test — so the
+      // consequence is bounded and cosmetic. It is still wrong in one specific
+      // way worth naming: `press()` calls `host.toggleEraseMode()` BEFORE
+      // `render()`'s terminal guard runs, so a press that did somehow arrive on
+      // a retired control would flip the player's erase mode with no label to
+      // show it. **Handed to M1f with the rest of the shutdown surface**
+      // (`docs/superpowers/m1f-carry-forward.md`) rather than fixed here: the
+      // fix is either an `offClick`/`removeEventListener` pair — which means
+      // holding the handler reference and widening the shape re-check — or
+      // moving the `retired` guard into `press`, and choosing between those is
+      // a decision, not a line.
       retired = true
       // `hide()` and not `setParams({ is_visible: false })`: the params object
       // is preallocated and frozen, and a second pair of them for one call is

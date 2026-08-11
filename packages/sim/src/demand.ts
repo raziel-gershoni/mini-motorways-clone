@@ -131,7 +131,9 @@ import { destMetaColour, destMetaKind, DEST_KIND_CIRCLE } from './buildings'
  *
  * **Overflow** (decision 1): if the rotation's chosen destination is at its
  * hard cap (`PIN_CAP_SQUARE_HARD`/`PIN_CAP_CIRCLE_HARD`, [OURS]; the *timer*
- * thresholds are M1e's problem), the pin redirects to the next DISTINCT
+ * thresholds shipped in M1e Task 7 and live in `overcrowd.ts`, which reads
+ * `PIN_CAP_*_TIMER` and never this file), the pin redirects to the next
+ * DISTINCT
  * same-colour, eligible, uncapped destination — walking DESTINATIONS, not
  * slots (a slot-walk could hand a capped circle its own overflow via its
  * second slot), starting at the one after the chosen, wrapping at

@@ -109,15 +109,17 @@ import {
  * buffers are not. A house placed mid-run gives its cars slots
  * `[h * CARS_PER_HOUSE, ...)`, which is always past every existing house's
  * cars, so today a dense prev would only ever be appended to. That is a
- * property of `placeHouse`, not of the interpolator, and M1e's building removal
- * ends it: one freed slot would shift every later car's dense index by one and
+ * property of `placeHouse`, not of the interpolator, and **M1f's** building
+ * removal ends it (repointed from M1e, which adds buildings and removes none —
+ * `spawn.ts` appends and §5.8's failure ends the run rather than freeing a
+ * slot): one freed slot would shift every later car's dense index by one and
  * lerp each of them against a DIFFERENT car's previous position. A board-wide
  * teleport with no phase transition anywhere and nothing in this file's rule to
  * catch it. Slot indexing costs `maxCars * 2` floats (640 B at `firstCity`) and
  * removes that class.
  *
  * **Scoped precisely, because the wider claim would discharge an obligation
- * that is M1e's.** Slot indexing removes the dense-*shift* class. It does NOT
+ * that is M1f's.** Slot indexing removes the dense-*shift* class. It does NOT
  * remove the slot-*reuse* class: slot `i` owned by car A in `prev` and car B in
  * `curr`. There `prevLive[i]` reads 1, so the snap rule does not fire, there is
  * no distance guard, and the car is drawn on the segment between two different
@@ -129,7 +131,11 @@ import {
  * **An in-`step` spawner that reuses a freed slot re-opens it, and nothing here
  * will catch it.** The fix then is either a car-identity term in the snapshot
  * (`prevHome[i]`, compared before lerping) or a spawner that never reuses a
- * slot within one step. Recorded here rather than left for M1e to rediscover.
+ * slot within one step. **M1e shipped the in-`step` spawner and did NOT reopen
+ * it**, for a reason worth naming rather than leaving to luck: `spawn.ts` only
+ * ever appends a house at the next free index, so slot `i`'s owner never
+ * changes for the life of the buffer. It is removal, not spawning, that reuses
+ * a slot — so this stays open and belongs to M1f with the rest of it.
  *
  * **Nothing here allocates.** Every buffer is caller-owned and every write is
  * into a preallocated typed array.
@@ -302,13 +308,54 @@ export function resolveCar(
 //
 // `MAX_DRAW_LAG_CELLS` is enforced by a clamp on every tick, so the maximum
 // divergence between the drawn and the sim position is a property of the code
-// rather than of the tuning: **no car is ever drawn more than 0.2 cells from
-// where the sim says it is, on any board, at any frame rate, through any
-// discontinuity.** The free ramp only ever needs 0.135 of that (see
-// `MAX_DRAW_LAG_CELLS`), so the clamp is a floor under the proof and not part
-// of the normal path.
+// rather than of the tuning: **at a TICK BOUNDARY, no car is ever drawn more
+// than 0.2 cells from where the sim says it is, on any board, at any frame
+// rate, through any discontinuity.** The free ramp only ever needs 0.135 of
+// that (see `MAX_DRAW_LAG_CELLS`), so the clamp is a floor under the proof and
+// not part of the normal path.
 //
-// Three things the bound is what makes safe:
+// **That sentence used to have no "at a tick boundary" in it, and the missing
+// scope made it false of what is actually on screen.** Measured at the close of
+// M1e (Task 11), on the demo board after its warm start, maximised over every
+// live car and over alphas {0, 0.1, 0.25, 0.5, 0.75, 0.9, 1}:
+//
+// ```
+//   schedule                       max |drawCar - lerpCar|      at alpha 1
+//   1 tick per frame, 3,000 frames        0.1320 (0.66x)          0.132002
+//   one 7-tick drain in ten, 3,000        0.9240 (4.62x)          0.200010
+//   every frame drains 7 ticks, 800       0.9920 (4.96x)          0.200010
+// ```
+//
+// The alpha-1 column is the bound doing its job — it reaches 0.200010, which
+// IS `MAX_DRAW_LAG_CELLS`, and never exceeds it. The other column is the same
+// two functions sampled mid-frame, and it is 4.96x the bound.
+//
+// **The mechanism, which is in `frame.ts` rather than here.** `beforeStep` runs
+// `snapshotPrev` per TICK, so `prevXY -> currXY` spans only the LAST tick of a
+// drain; `afterDrain` runs `snapshotCurr` once, so `drawPrevXY -> drawCurrXY`
+// spans the WHOLE drain. The two interpolants therefore cover different
+// intervals and coincide only at alpha 1 — and alpha 1 is the one value the
+// loop never passes (`alpha = accumulator / TICK_MS` is in `[0, 1)`), so the
+// reachable worst case is the near-alpha-0 end, not the endpoint the clamp
+// bounds. `carSmoothing.test.ts`'s 30 s survey cannot see any of this because
+// at 60 fps against a 30 Hz tick every drain is 0 or 1 tick, and at one tick
+// per frame the two interpolants span the same interval.
+//
+// **This is a documentation fix and not a regression**, and the reason is worth
+// stating so nobody "fixes" it: a multi-tick drain means the tab was starved,
+// the car really did move that far, and the drawn car covers the ground
+// smoothly where the exact interpolant covers it in one jump — measured, the
+// worst single-frame drawn displacement under a sustained 7-tick drain is
+// 1.1240 cells against the exact interpolant's 0.9240, i.e. the chase adds at
+// most its own outstanding lag and never teleports.
+//
+// Three things the bound is what makes safe. **All three are stated at a tick
+// boundary and inherit the scope above** — in particular, over a multi-tick
+// drain the drawn car lerps along a chord spanning the whole drain, so the
+// "never leaves the road" argument's corner case is wider than 0.2 cells.
+// That widening is NOT measured here and should not be quoted as if it were;
+// the reproduction is the table above with a route that turns inside one
+// drain.
 //
 //   - **The drawn car never leaves the road.** It is within 0.2 cells of a
 //     point on the route's centreline, and a cell's half-width is 0.5. At a
@@ -321,8 +368,8 @@ export function resolveCar(
 //     `dot(u, v) >= |u|^2 - 0.4|u| > 0` whenever `|u| > 0.4`. Measured on the
 //     demo board, no pair ever inverts (`test/carSmoothing.test.ts`), and the
 //     pairs that get inside 0.4 cells at all are the opposite-lane ones the sim
-//     ALREADY draws on top of each other — a known M1e gap that this code
-//     neither creates nor widens.
+//     ALREADY draws on top of each other — a known gap (M1f's; `roads.ts`'s
+//     `LANE_OF_DIR` note owns it) that this code neither creates nor widens.
 //   - **A discontinuity self-heals in one tick.** A route change, an erase
 //     under an in-flight car or a restored snapshot moves `currXY` by an
 //     unbounded distance; the clamp puts `drawCurrXY` within 0.2 cells of the
@@ -473,12 +520,18 @@ export function snapshotPrev(snap: CarSnapshots, state: GameState, world: WorldD
  *      needed and each has a case the other misses. `drawLive === 0` is the
  *      reachable one — a house placed between two frames (`frame.test.ts` drives
  *      it), where `prevLive` reads 1 and the drawn slot has never been written.
- *      `prevLive === 0` is the slot that became live INSIDE a `step`, which
- *      `step`'s seven phases cannot produce today and M1e's in-`step` spawner
- *      will; it is exercised by a direct call in `resolve.test.ts`, which is
- *      this codebase's `assertSingleCrossing` idiom for a branch production
- *      cannot yet reach. The rule lives HERE rather than in `drawCar` so there
- *      is exactly one copy of it with exactly one mutation target.
+ *      `prevLive === 0` is the slot that became live INSIDE a `step`.
+ *      **REACHED: M1e Task 5's spawner produces it, measured at tick 360 on
+ *      `firstCity`** — this used to read "which `step`'s seven phases cannot
+ *      produce today and M1e's in-`step` spawner will". The branch was already
+ *      written and already correct (it snaps), and `resolve.test.ts` still
+ *      drives it by direct call because that is the sharper test. What changed
+ *      is that it stopped being a defensive branch and became a PRODUCTION
+ *      path: nobody may delete it on the strength of its own survival, and a
+ *      mutation of it now has a real player-visible consequence — a car
+ *      streaking in from wherever the slot's unwritten float happened to be.
+ *      The rule lives HERE rather than in `drawCar` so there is exactly one
+ *      copy of it with exactly one mutation target.
  *   2. **The drawn speed moves by at most one step per tick, and may exceed the
  *      sim's own speed by at most one step.** `vs` is read as the length of the
  *      last tick's sim displacement rather than recomputed from `carProgress`

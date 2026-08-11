@@ -38,8 +38,10 @@ export const DIAG_COST = 14
  * are selected per crossing by `laneSpeedMul` (`packages/sim/src/cars.ts`) and
  * scale a car's per-tick progress; `LANE_SPEED_DEFAULT` is the identity, applied
  * when none of the three does. `MOTORWAY_SPEED_MAX` and `ROUNDABOUT_SPEED_MUL`
- * are still uncalled — both are M1e upgrade cards, and there is no card
- * mechanism yet.
+ * are still uncalled — both are **M1f** upgrade cards, and there is still no
+ * card mechanism. Repointed from M1e, which shipped the load-bearing half of
+ * §5.10 (`WEEKLY_TILE_GRANT`) and left the two-card CHOICE, and therefore every
+ * item in the table, to M1f.
  *
  * **They are applied in MOVEMENT and never in `edgeCost`.** A turn multiplier is
  * a property of the pair of edges either side of a cell and cannot be expressed
@@ -102,9 +104,26 @@ export const SHARP_TURN_SPEED_MUL = 333
  *      below the threshold makes the valve unreachable, and a ceiling above it
  *      is bytes nothing reads.
  *
- * Whether 45 s is the right wait is unvalidated in play — it is the spec's
- * number, and under two lanes it fires far less often than it would have under
- * one undirected slot per cell. M1e's tuning is the first real evidence.
+ * **Whether 45 s is the right wait now has evidence, and the evidence is that
+ * NOTHING THAT SHIPS CAN REACH IT.** Measured at the close of M1e by driving
+ * each shipped layout from boot to its §5.8 death with no player input:
+ *
+ * ```
+ *   city  5,580 ticks   0 refusals      max carBlockedTicks    0   0 valve firings
+ *   demo  6,703 ticks   7,544 refusals  max carBlockedTicks   55   0 valve firings
+ * ```
+ *
+ * `city` refuses nothing because a board nobody draws on has no route, so no
+ * car ever moves; `demo` refuses constantly and its worst wait is **55 ticks,
+ * 1.8 s — a factor of 24.5 below this threshold.** So this constant is not
+ * "unvalidated"; it is unreachable outside purpose-built fixtures
+ * (`game/test/jamFixture.ts`'s STARVED variant: 17 firings over 3,000 ticks at
+ * twelve houses, 2 at eight; `sim/test/blocking.test.ts`'s hand-built gridlock
+ * ring). **Read that as a statement about the boards, not about the number** —
+ * the valve is an anti-deadlock backstop and a board that never deadlocks
+ * should never fire it. What it does mean is that lowering this constant is a
+ * change no shipped board can observe, and raising it is free; the first real
+ * tuning evidence needs a board that jams, which is M1f's.
  */
 export const MAX_BLOCKED_TICKS = 45 * TICKS_PER_SECOND
 
@@ -185,17 +204,27 @@ export const MOTORWAY_CAP = 9
  * *"portrait-native, ~24×40 grid revealed from 14×22"*, centred in the 24×40
  * board (`(24 - 14) / 2 = 5`, `(40 - 22) / 2 = 9`).
  *
- * **Frozen constants, and M1e owns making them dynamic — repointed from M1d at
- * the close of M1d, which DECLINED the work.** Expansion (§5.1) is a per-map,
- * per-week schedule that still does not exist: `MapData` carries `w` and `h`
- * only, and every "reveal" mention in `packages/` is still a comment deferring
- * it. M1d's Out table declines it by name, for two stated reasons — no M1d task
- * needed it, and a revealed region in state would have been a THIRD change to
- * buffer shape in a milestone that budgeted exactly two. When M1e lands it, the
- * camera reads state instead of these four numbers and nothing else moves —
- * `render/camera.ts` already takes the rect as a parameter (`RevealedRect`)
- * rather than importing it, because `render` imports nothing from `shared`
- * (spec §4).
+ * **Frozen constants, and M1f owns making them dynamic — repointed from M1d at
+ * the close of M1d and from M1e at the close of M1e, and BOTH declined the
+ * work.** Expansion (§5.1) is a per-map, per-week schedule that still does not
+ * exist: `MapData` carries `w` and `h` only, and every "reveal" mention in
+ * `packages/` is still a comment deferring it. M1d's Out table declines it by
+ * name, for two stated reasons — no M1d task needed it, and a revealed region
+ * in state would have been a THIRD change to buffer shape in a milestone that
+ * budgeted exactly two. M1e declined it for the first reason alone: its buffer
+ * budget was one shape change (Task 1) and no task needed a growing rect. When
+ * it lands, the camera reads state instead of these four numbers and nothing
+ * else moves — `render/camera.ts` already takes the rect as a parameter
+ * (`RevealedRect`) rather than importing it, because `render` imports nothing
+ * from `shared` (spec §4).
+ *
+ * **`sim` DOES read these, and this block used to say it did not.** `spawn.ts`
+ * (M1e Task 5) scans `REVEALED_X0`/`Y0`/`W`/`H` to decide where a house or a
+ * destination may be placed — that is the shared spawn zone `world.ts`'s
+ * `mapIdHash` note refers to. So the handoff is no longer "the camera reads
+ * state instead of four constants"; it is "the camera AND the spawner read
+ * state instead of four constants", and a dynamic rect that only the camera
+ * honours would let the spawner place buildings the player cannot see.
  *
  * **These were drawn from and not simulated on until M1e Task 5, and that
  * sentence has now moved.** The sim's board is still the full `GRID_W ×
@@ -412,7 +441,7 @@ export const WEEKLY_TILE_GRANT = 30
  * that constant for the two constraints that pin the pair.
  *
  * **Re-derive this WITH `NB`, `DISTINCT_EDGE_COSTS` and
- * `CAR_SPEED_UNITS_PER_TICK` when `edgeCost`'s value set changes** (M1e's
+ * `CAR_SPEED_UNITS_PER_TICK` when `edgeCost`'s value set changes** (**M1f's**
  * motorway tier, or any lane-speed term entering the cost). They are one
  * calibration, not four independent numbers.
  *
@@ -421,6 +450,11 @@ export const WEEKLY_TILE_GRANT = 30
  * per-tick progress rather than entering `edgeCost` — so the value set is still
  * `{10, 14}`, all four numbers stand, and the field golden does not move.
  * `graph.test.ts` pins the value set as the tripwire for the other answer.
+ *
+ * **M1e did not fire it either, and the milestone name is repointed rather than
+ * ticked**: motorways are an item card, and M1e shipped §5.10's tile grant
+ * without the card modal. `scratch.ts`'s `NB` note carries the full derivation
+ * of what a new cost tier has to re-check.
  */
 export const COST_UNIT_SCALE = 250
 

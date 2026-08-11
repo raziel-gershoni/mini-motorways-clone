@@ -37,32 +37,101 @@ export const INF = 0x40000000
  * untouched, so the value set is still `{10, 14}` and NB was never approached.
  * That was a deliberate choice with its reasons written out in `cars.ts` — a
  * turn penalty is a property of a DIRECTION PAIR, which `edgeCost(dir)` is
- * structurally unable to price. **M1e's upgrade cards remain the live threat**,
- * and a motorway tier is the one that would actually change the value set.
+ * structurally unable to price. **M1e did not exceed it either, and this
+ * comment has now made the same wrong prediction twice**: the upgrade CARDS it
+ * named need a card mechanism, and M1e shipped only §5.10's tile grant (see
+ * `WEEKLY_TILE_GRANT` in `shared/constants.ts` for why the modal is M1f's). So
+ * `DISTINCT_EDGE_COSTS` is still 2 and the value set is still `{10, 14}`.
+ * **M1f's motorway tier is the live threat** — it is the one item in the §5.10
+ * table that changes the value set rather than a speed multiplier, and it
+ * arrives with the card mechanism that makes any of them placeable.
  *
- * **Penalty-routing note, for whoever adds the first penalty.** `NB =
- * DIAG_COST + 1 = 15` is the exact minimum — the instrumented maximum spread
- * of pending distances is 14 (see `computeFlowField`'s module comment) — and
+ * ---------------------------------------------------------------------------
+ * PENALTY-ROUTING NOTE, FOR WHOEVER ADDS THE FIRST PENALTY
+ * ---------------------------------------------------------------------------
+ *
+ * Three things, and the first one is a correction.
+ *
+ * **1. `NB = DIAG_COST + 1 = 15` is NOT the exact minimum. The minimum is
+ * `DIAG_COST = 14`, and the `+ 1` is one bucket of slack in the safe
+ * direction.** An earlier version of this note said "the exact minimum, with
+ * zero slack — not a comfortable margin", which was itself a correction of a
+ * worse claim (that pending distances "differ by at most `DIAG_COST -
+ * ORTHO_COST` (4)", a 3.5x overestimate of headroom). The 14 is right and the
+ * conclusion drawn from it was off by one. The bound is
+ * `M >= max edge cost`, derived rather than measured: while bucket `d` drains,
+ * every push has distance `x` in `[d, d + DIAG_COST]`, and bucket `x % M` must
+ * next be drained at iteration exactly `x`. The next iteration `>= d` congruent
+ * to `x` is `d + ((x - d) mod M)`, so the requirement is `x - d <= M`, not
+ * `x - d < M` — because `x - d = M` lands in the CURRENT bucket, which
+ * `computeFlowField` has already detached (`bucketHead[b] = -1` is written
+ * before the walk, so the entry sits in a freshly-emptied bucket and is drained
+ * on its next visit, at `d + M = x`).
+ *
+ * Measured over the canonical whole-suite invocation (1,833 tests), mutating
+ * only the modulus and leaving `NB` alone so `createScratch`'s assert does not
+ * pre-empt the queue:
+ *
+ * ```
+ *   d % 14   0 detectors                 a genuine equivalent mutant
+ *   d % 13   31, incl. the field golden  the first modulus that aliases
+ *   d % 16   1, and it is `createScratch allocates bucketHead sized NB`
+ *   NB = 16  1, and it is `NB is exactly one more than the largest edge cost`
+ * ```
+ *
+ * i.e. **everything at or above 14 is behaviourally inert, and the only things
+ * that notice 16 are a structural pin and a constant pin.** 13 aliases exactly
+ * as this note's second paragraph describes: a push at `d + 14` lands in the
+ * bucket drained at `d + 1`, where the drain loop's `dist[cur] !== d` staleness
+ * check DISCARDS it and decrements `CUR_PENDING` — wrong paths, no crash.
+ *
+ * **What the spare bucket actually buys, since "slack" on its own is not a
+ * reason to keep it: independence from the detach ordering, and that was
+ * measured too.** Move `bucketHead[b] = -1` from before the walk to after it
+ * and at modulus 15 it is a **0-detector no-op across all 1,833 tests** — no
+ * push during `d`'s own walk can target `d % 15` at all. Do the same at modulus
+ * 14 and `computeFlowField` **does not terminate**: the `d + 14` pushes land in
+ * the bucket the trailing clear then discards, `CUR_PENDING` never falls to 0,
+ * and the drain loop spins (`flowfield.test.ts` alone, which normally finishes
+ * in 0.55 s, produced no output in 70 s and had to be killed). So at 14 the
+ * queue's correctness is a joint property of the modulus AND one statement's
+ * position; at 15 it is a property of the modulus alone. **Keep the `+ 1`, and
+ * size any future NB as `maxEdgeCost + 1` for the same reason** — not because
+ * `maxEdgeCost` would be wrong, but because it would be correct for a reason
+ * nobody re-derives when they touch the drain loop.
+ *
+ * **2. The assert cannot see a penalty applied inside the pathfinder.**
  * `assertBucketCountExceedsEveryEdgeCost` only inspects `edgeCost(k)`. If a
  * penalty is applied INSIDE `computeFlowField` rather than through the cost
- * function, the assert keeps passing while the Dial queue silently aliases
- * two distances into one bucket: wrong paths, no crash. A *per-cell* penalty
- * makes cost depend on more than direction, so `edgeCost(dir)` and
- * everything derived from it (including this constant) goes structurally
- * blind — the signature is the thing that has to change, not just the value.
+ * function, the assert keeps passing while the Dial queue silently aliases two
+ * distances into one bucket — the `d % 13` row above is what that looks like:
+ * wrong paths, no crash, and 31 tests that all fail for reasons that read like
+ * a routing regression rather than a queue bug.
+ *
+ * **3. A per-CELL penalty changes the signature, not the value.** It makes cost
+ * depend on more than direction, so `edgeCost(dir)` and everything derived from
+ * it (this constant, `DISTINCT_EDGE_COSTS`, `entryPoolCapacity`,
+ * `COST_UNIT_SCALE`, `CAR_SPEED_UNITS_PER_TICK`) goes structurally blind. And
+ * note what else it would break, which is the whole of Task 11's detector: a
+ * per-cell penalty keyed on OCCUPANCY is forbidden outright by spec §1/§6, and
+ * `flowfield.test.ts`'s congestion-blindness arms exist to fail loudly if one
+ * is ever added.
  */
 export const NB = DIAG_COST + 1
 
 /**
- * Distinct values `edgeCost` can return. Sets the entry-pool bound; **M1e's
- * motorway tier makes it 3 — this said M1d's, and M1d shipped without one.**
- * M1d's Out table defers motorways to M1e (they are upgrade CARDS and there is
- * no card mechanism yet), and M1d Task 7's lane-speed multipliers went into
- * movement rather than into `edgeCost`, so this constant is still 2 and the
- * value set is still `{10, 14}`. `graph.test.ts` and `scratch.test.ts` both pin
- * this against `edgeCost`'s real output (see the linkage test in
- * `scratch.test.ts`, added M1c), so adding a cost tier without updating this
- * constant fails a test rather than silently under-sizing the pool.
+ * Distinct values `edgeCost` can return. Sets the entry-pool bound; **M1f's
+ * motorway tier makes it 3 — this said M1d's, then M1e's, and neither shipped
+ * one.** M1d's Out table deferred motorways to M1e because they are upgrade
+ * CARDS with no card mechanism; M1e shipped §5.10's tile grant and left the
+ * two-card choice — and therefore every item card — to M1f, so the deferral
+ * moved with it rather than being discharged. M1d Task 7's lane-speed
+ * multipliers and M1e Task 7's overcrowd meter both went somewhere other than
+ * `edgeCost`, so this constant is still 2 and the value set is still
+ * `{10, 14}`. `graph.test.ts` and `scratch.test.ts` both pin this against
+ * `edgeCost`'s real output (see the linkage test in `scratch.test.ts`, added
+ * M1c), so adding a cost tier without updating this constant fails a test
+ * rather than silently under-sizing the pool.
  */
 export const DISTINCT_EDGE_COSTS = 2
 
@@ -159,12 +228,13 @@ const CURSOR_LENGTH = 2
  * per distinct edge-cost value a cell can be improved by, plus one source
  * insertion. Conservative by construction — a source cell can never also be
  * improvement-pushed, since its distance (0) can never improve — and it is
- * the formulation that survives M1e's motorway ÷3 tier and flags M1e's
+ * the formulation that survives M1f's motorway ÷3 tier and flags M1f's
  * traffic-light penalties as requiring a revisit (both change
  * `DISTINCT_EDGE_COSTS`, which this derives from rather than a literal). M1c
- * adds neither, and **M1d added neither either** — its intersection penalty is a
- * movement multiplier rather than an edge weight, so the value set never moved.
- * See `NB` above, where the same prediction was made and is now refuted.
+ * added neither, **M1d added neither** — its intersection penalty is a movement
+ * multiplier rather than an edge weight — and **M1e added neither**, because
+ * both items are cards and the card modal is M1f's. See `NB` above, where the
+ * same prediction has now been made and refuted twice.
  *
  * The reviewed draft's `cells * 9` bound ("8 relaxations per cell plus one
  * source insertion") was wrong in both directions: expansions occur in

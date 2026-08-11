@@ -165,8 +165,9 @@ export function routeStep(s: GameState, carIndex: number, i: number): number {
  * contradicting this task's own required behaviour ("refunds on the tick that
  * car crosses off the cell, not before and not later") and the plan's stated
  * `maxCars` bound. It is written down here, with the derivation, rather than
- * silently chosen: M1e owns the question if ghost lifetime ever becomes
- * something a player can see going wrong.
+ * silently chosen: **M1f** owns the question if ghost lifetime ever becomes
+ * something a player can see going wrong. Repointed from M1e, which changed no
+ * ghost semantics at all.
  *
  * Walks with `stepCell` and `routeStep`, allocating nothing: two scalar locals
  * and an indexed loop. Called once per in-flight car per erase, and once per
@@ -684,9 +685,11 @@ function dispatchColour(
  * this loop does not influence.
  *
  * **What WOULD end it**, stated so the next reader has a real trigger rather
- * than a milestone name: a dispatch-time read of a shared, non-commutative
- * resource — M1e's destination removal, or any rule that lets one colour's
- * dispatch refuse another's. Ascending is kept anyway, because it is the
+ * than a milestone name — and the trigger is the load-bearing half, not the
+ * date: **a dispatch-time read of a shared, non-commutative resource.**
+ * Destination removal is one instance and it is now M1f's (M1e appends
+ * destinations and frees none); any rule that lets one colour's dispatch refuse
+ * another's is another, and it needs no removal to arrive. Ascending is kept anyway, because it is the
  * specified order and free. The finding this paragraph closes was the SILENCE,
  * not the order: without it the next reader has no record that anyone checked.
  */

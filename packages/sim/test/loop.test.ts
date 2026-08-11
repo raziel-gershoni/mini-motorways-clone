@@ -406,8 +406,14 @@ function freshDerived(map: MapData, world: WorldData): { fields: FlowField[]; sc
 }
 
 /**
- * Buildings, placed out of band at tick 0 (the authored spawn schedule is
- * M1e). Destinations first, then houses, then the roads — road placement is
+ * Buildings, placed out of band at tick 0. **The authored spawn schedule
+ * shipped in M1e as `sim/spawn.ts` and this fixture deliberately does not use
+ * it**: every ladder below is stated at exact ticks, and a spawner adding a
+ * house mid-run would move them. What keeps the spawner out is the fixtures'
+ * LENGTH rather than anything about this function — see the spawn-posture note
+ * immediately below, which derives it and also records the part that
+ * derivation misses. Destinations first, then houses, then the roads — road
+ * placement is
  * the only part that goes through `step`, and it has to come last because
  * `canPlaceHouse`/`canPlaceDestination` both reject a cell that already
  * carries road.

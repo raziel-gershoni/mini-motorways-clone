@@ -18,16 +18,19 @@ export type TerrainCode = 0 | 1 | 2 | 3
 
 export interface MapData {
   readonly id: string
-  /** Maximum extent. Expansion (§5.1, M1e) reveals cells; it never resizes the buffer. */
+  /** Maximum extent. Expansion (§5.1, M1f — M1d and M1e both declined it) reveals cells; it never resizes the buffer. */
   readonly w: number
   readonly h: number
   readonly terrain: readonly TerrainCode[] // index = y * w + x
   readonly startingTiles: number
   /**
    * The three limits M1c's buffer regions size from (`regions.ts`,
-   * `sim`). Building-spawn zones are deliberately NOT here — they are the
-   * M1e spawner's input, not the board's; when they land, they must be
-   * folded into `mapIdHash` for the same reason these three are (below).
+   * `sim`). Building-spawn zones are still deliberately NOT here, and M1e's
+   * spawner shipped without needing them: `spawn.ts` scans the SHARED revealed
+   * rect (`REVEALED_*`, `constants.ts`), which is the same on every map and so
+   * has no per-map byte to fold. **A PER-MAP zone would have to be folded into
+   * `mapIdHash`** for the same reason these three are (below) — see
+   * `sim/world.ts`'s `mapIdHash` comment, which carries the derivation.
    */
   readonly maxHouses: number
   readonly maxDestinations: number

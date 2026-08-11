@@ -382,11 +382,16 @@ describe('the bound, the cap and the two snap arms', () => {
     expect(f.snap.drawSpeed[0] as number).toBe(0)
   })
 
-  it('snaps a slot that became live INSIDE a step, which nothing in step can do yet', () => {
-    // The `prevLive === 0` arm. `step`'s seven phases contain no spawner, so
-    // this is unreachable in production today and M1e's in-`step` spawner is
-    // what will reach it. Exercised directly rather than left as the one branch
-    // nothing executes — `resolve.ts`'s `assertSingleCrossing` idiom.
+  it('snaps a slot that became live INSIDE a step, which the spawner now really does', () => {
+    // The `prevLive === 0` arm. **REACHED: M1e Task 5's spawner produces it,
+    // measured at tick 360 on `firstCity`** — this test's name and comment said
+    // "which nothing in step can do yet". It is still exercised by a direct
+    // call rather than by a spawner run, deliberately: the direct call reaches
+    // the branch in two lines with nothing else moving, where a spawn-driven
+    // fixture would reach it 360 ticks in with a board full of other causes.
+    // What changed is why it may not be deleted — it is a production path now,
+    // not a defensive branch surviving on `resolve.ts`'s `assertSingleCrossing`
+    // idiom.
     const f = eastboundFixture(0)
     for (let t = 0; t < 5; t++) driveOneTick(f)
     const j = 1 // a dead slot
@@ -784,7 +789,8 @@ function survey(): { exact: Survey; smoothed: Survey } {
         const vy = (dr[i * 2 + 1] as number) - (dr[k * 2 + 1] as number)
         const sep = Math.hypot(ux, uy)
         // Two cars in the SAME cell in opposite lanes are drawn on top of each
-        // other by the sim itself — the M1e gap `demoLayout.ts` §5 names. A
+        // other by the sim itself — the gap `demoLayout.ts` §5 names, now M1f's
+        // (traffic lights and roundabouts are §5.10 item cards). A
         // "queue pair" is the case ordering means anything for: different
         // cells, travelling the same way.
         const sameCell = (game.state.carCell[i] as number) === (game.state.carCell[k] as number)
