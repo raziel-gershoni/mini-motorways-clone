@@ -280,6 +280,35 @@ export const RING_START_ANGLE = -Math.PI / 2
 /** The frame's meter is a byte; this is the value a closed ring would need. */
 export const RING_FULL = 255
 
+/**
+ * The smallest sweep the ring is DRAWN at, in meter units of 255. The gate on
+ * `meter !== 0` is untouched: an empty board still draws no rings at all, and
+ * this floor only applies once a meter has left zero.
+ *
+ * **Why a floor at all.** A meter of 1 sweeps `1/255 * TAU` = 0.0246 rad. On the
+ * three tile sizes `fitCamera` produces the ring radius is `3 * tile * 0.62`, so
+ * the painted arc is:
+ *
+ * ```
+ * tile 27  r = 50.22  arc = 1.24 CSS px   stroke 4
+ * tile 29  r = 53.94  arc = 1.33 CSS px   stroke 5
+ * tile 30  r = 55.80  arc = 1.37 CSS px   stroke 5
+ * ```
+ *
+ * An arc a THIRD of its own stroke width is a round cap and nothing else — an
+ * anti-aliased dot on a 5 px pen, which is indistinguishable from a rendering
+ * speck. At 8 the same three tiles give 9.90 / 10.63 / 11.00 CSS px, roughly
+ * 2-2.75x the stroke, which reads as a tick mark on a dial.
+ *
+ * **What it costs.** The ring stops being a faithful readout of the meter over
+ * `[1, 8]` — 8 values of 255, 3.1 % of the range. It is bought back in the only
+ * currency that matters here: measured on the board a plain load opens, the
+ * first *visible* moment of every destination's ring arrives **327 ticks
+ * (10.9 s) earlier**, because 8/255 of the meter is 327 ticks of climbing at
+ * this board's rate. The ring's job is "act now", not "read off a number".
+ */
+export const RING_MIN_SWEEP = 8
+
 /** One turn. Named so the ring's sweep is not `Math.PI * 2` written twice. */
 const TAU = Math.PI * 2
 
@@ -537,6 +566,14 @@ function failedText(d: number, roadless: boolean): string {
  *
  * `-1` is `carparkCell`'s off-grid sentinel and counts as roadless — a bay that
  * is not on the board is not one anything can drive to.
+ *
+ * **Two callers, and that is the point of it being a function.** `drawShutdown`
+ * picks the ending's sentence with it, and `drawDestinations` picks the live
+ * bay's colour with it. Restating the predicate at the second site would let the
+ * red bay and `NO ROAD REACHES DESTINATION n` drift apart, which is precisely
+ * the disagreement a player would read as the game lying to them. The
+ * limitations of the predicate are written at the `drawDestinations` call site,
+ * where the colour makes them look stronger than they are.
  */
 function carparkIsRoadless(frame: RenderFrame, d: number): boolean {
   // **The index is guarded as well as the cell, and fails CLOSED.** `failedDest`
@@ -966,7 +1003,38 @@ function drawDestinations(ctx: DrawContext, frame: RenderFrame, palette: Palette
       const cx = carpark % frame.gridW
       const cy = Math.floor(carpark / frame.gridW)
       if (insideRevealed(camera, cx, cy)) {
-        ctx.fillStyle = palette.roadEdge
+        // **The bay is painted in the alarm colour when no road reaches it, and
+        // this is the same predicate the shutdown screen splits its sentence
+        // on** — `carparkIsRoadless`, called from here and from `drawShutdown`
+        // rather than restated, so the live signal and the ending's sentence
+        // cannot disagree about which destination was unreachable. (Inside this
+        // branch the function reduces to `roads[carpark] === 0`: `d` is below
+        // `destCount` by the loop bound and `carpark >= 0` by the test above.)
+        //
+        // **Why the bay rather than a new sprite.** A destination whose carpark
+        // carries no road takes zero arrivals for as long as that holds — a car
+        // drives ONTO the bay and the flow field relaxes over the road graph —
+        // so it is doomed from the frame it appears, and until this line it was
+        // pixel-identical to a healthy one for the 95-107 s its meter needed
+        // before the ring painted its first pixel. The fill already happens;
+        // this is zero extra draw calls, and both palette strings are
+        // preallocated, so it is zero allocations.
+        //
+        // **What it does NOT detect, stated here because the colour looks more
+        // certain than it is.** `roads[carpark] !== 0` is NECESSARY for service
+        // and not SUFFICIENT for it, in two directions:
+        //
+        // - A disconnected stub laid on the bay alone sets the road bit, so the
+        //   bay turns grey while nothing can still reach it. The player is told
+        //   they fixed it and they did not.
+        // - It says nothing about the CONNECTED-but-unserved failure — a bay on
+        //   the network that still receives too little — which is the greedy
+        //   arm's own killer and the demo board's.
+        //
+        // So it detects the dominant failure shape (every seeded and every
+        // spawned carpark is bare by construction) exactly, and nothing else.
+        // A grey bay is not a promise; a red one is a fact.
+        ctx.fillStyle = carparkIsRoadless(frame, d) ? palette.overcrowd : palette.roadEdge
         ctx.fillRect(
           gridToScreenX(camera, cx) + carparkInset,
           gridToScreenY(camera, cy) + carparkInset,
@@ -1042,12 +1110,17 @@ function strokeRing(
   // joins the previous one's subpath and the board grows a web of straight
   // lines between destinations.
   ctx.beginPath()
+  // **Floored at `RING_MIN_SWEEP`, not gated by it** — see that constant. The
+  // caller's `meter !== 0` test is what decides whether a ring exists; this only
+  // decides how short the shortest drawn one is allowed to be.
+  const meter = frame.destOvercrowd[d] as number
+  const sweep = meter > RING_MIN_SWEEP ? meter : RING_MIN_SWEEP
   ctx.arc(
     px + (footprintW * tile) / 2,
     py + (footprintH * tile) / 2,
     span * tile * RING_RADIUS_FRACTION,
     RING_START_ANGLE,
-    RING_START_ANGLE + ((frame.destOvercrowd[d] as number) / RING_FULL) * TAU,
+    RING_START_ANGLE + (sweep / RING_FULL) * TAU,
   )
   // `arc` alone appends to the path and paints nothing.
   ctx.stroke()

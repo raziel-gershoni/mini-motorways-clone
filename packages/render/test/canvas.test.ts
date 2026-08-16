@@ -17,6 +17,8 @@ import {
   HUD_FONT,
   PAUSE_BAR_FRACTION,
   MAX_DRAWN_PINS,
+  RING_MIN_SWEEP,
+  RING_RADIUS_FRACTION,
   RING_WIDTH_FRACTION,
   SHUTDOWN_RING_WIDTH_SCALE,
   SHUTDOWN_TEXT_INSET_CSS,
@@ -961,6 +963,12 @@ const WATER = PALETTE.water
 const MOUNTAIN = PALETTE.mountain
 const TREE = PALETTE.tree
 const ROAD_EDGE = PALETTE.roadEdge
+/**
+ * The carpark bay's OTHER colour — the one it takes when no road reaches it —
+ * and the ring's stroke. `fillsStyled` filters `fillRect` only, so a ring on the
+ * same frame cannot be mistaken for a bay by anything in this file.
+ */
+const OVERCROWD = PALETTE.overcrowd
 const UI_TEXT = PALETTE.uiText
 const GROUP = PALETTE.groups
 
@@ -1929,10 +1937,66 @@ describe('destinations: the footprint, the carpark and the waiting pins', () => 
   it('draws the carpark cell the frame names, not one it computes', () => {
     const frame = frameB()
     frame.destCarpark[0] = 3 * B_W + 5 // move it to (5, 3)
+    // ...and a road bit UNDER it, so the bay keeps the reachable colour and this
+    // test stays about the CELL. Without it the bay moves to a cell with no road
+    // and turns red, which is a different rule's business (see the two
+    // "paints the bay in the alarm colour" tests below).
+    frame.roads[3 * B_W + 5] = 1
     const log = draw(frame, atlasesAt(B_TILE_DEVICE))
     expect(fillsStyled(log, ROAD_EDGE)).toEqual([
       fill(ROAD_EDGE, bx(5) + 16.5, by(3) + 16.5, 33, 33),
     ])
+  })
+
+  it('paints the bay in the alarm colour when NO ROAD reaches it, and grey when one does', () => {
+    // **The whole point of the signal, on one fixture with a destination on each
+    // side of the predicate.** A destination whose carpark carries no road takes
+    // zero arrivals, so it is doomed from the frame it appears — and until this
+    // line it was pixel-identical to a healthy one until its ring painted, which
+    // on the shipped board is 95-107 s later.
+    //
+    // Fixture B's dest 0 sits on road mask 16 at (3, 1); dest 1's bay at (4, 1)
+    // is bare. Two live destinations, so "colours the bay" and "colours the
+    // RIGHT bay" are separable — a fixture with one of each is the only kind
+    // that can tell a working split from a constant.
+    const frame = { ...frameB(), destCount: 2 }
+    expect(frame.roads[frame.destCarpark[0] as number], 'dest 0 IS reachable').toBe(16)
+    expect(frame.roads[frame.destCarpark[1] as number], 'dest 1 is NOT').toBe(0)
+    const log = draw(frame, atlasesAt(B_TILE_DEVICE))
+    expect(fillsStyled(log, ROAD_EDGE)).toEqual([fill(ROAD_EDGE, bx(3) + 16.5, by(1) + 16.5, 33, 33)])
+    expect(fillsStyled(log, OVERCROWD)).toEqual([fill(OVERCROWD, bx(4) + 16.5, by(1) + 16.5, 33, 33)])
+  })
+
+  it('follows the ROAD and not the index — paving a bare bay turns its bay grey', () => {
+    // The arm has to track the road bit rather than the destination number, or a
+    // player who draws the road the shutdown screen asked for gets no
+    // acknowledgement. Same fixture, same indices, one byte different.
+    const paved = { ...frameB(), destCount: 2, roads: new Uint8Array(frameB().roads) }
+    paved.roads[paved.destCarpark[1] as number] = 4
+    const log = draw(paved, atlasesAt(B_TILE_DEVICE))
+    expect(fillsStyled(log, OVERCROWD), 'nothing is unreachable now').toEqual([])
+    expect(fillsStyled(log, ROAD_EDGE).length, 'both bays are grey').toBe(2)
+    // ...and back, so this is a predicate and not a latch: the unpaved fixture
+    // still reds exactly one.
+    expect(fillsStyled(draw({ ...frameB(), destCount: 2 }, atlasesAt(B_TILE_DEVICE)), OVERCROWD).length).toBe(1)
+  })
+
+  it('says the same thing as the shutdown sentence, because it is the same predicate', () => {
+    // **The failure this guards is a disagreement, not a wrong colour.** The bay
+    // and `failedText`'s split are one function (`carparkIsRoadless`); restating
+    // the predicate at the second site would let a red bay sit under
+    // "DESTINATION 1 WENT UNSERVED", which reads as the game lying. Both arms,
+    // both observables, one frame each.
+    const bare = { ...gameOverFrame({ failedDest: 1, destCount: 2 }) }
+    const bareLog = drawWith(bare)
+    expect(fillsStyled(bareLog, OVERCROWD).length, 'a red bay').toBe(1)
+    expect(shutdownTexts(bareLog)).toContain('NO ROAD REACHES DESTINATION 1')
+
+    const paved = gameOverFrame({ failedDest: 1, destCount: 2 })
+    paved.roads[paved.destCarpark[1] as number] = 4
+    const pavedLog = drawWith(paved)
+    expect(fillsStyled(pavedLog, OVERCROWD), 'no red bay').toEqual([])
+    expect(shutdownTexts(pavedLog)).toContain('DESTINATION 1 WENT UNSERVED')
   })
 
   it('draws no carpark OUTSIDE the revealed rect, even when its building is inside', () => {
@@ -1945,6 +2009,10 @@ describe('destinations: the footprint, the carpark and the waiting pins', () => 
     frame.destCarpark[0] = 1 * B_W + 7 // (7, 1): on the board, outside the rect
     const log = draw(frame, atlasesAt(B_TILE_DEVICE))
     expect(fillsStyled(log, ROAD_EDGE)).toEqual([])
+    // **Both colours, or the assertion above stopped meaning "no bay".** (7, 1)
+    // carries no road, so a bay drawn here would come out in the ALARM colour
+    // and a ROAD_EDGE-only assertion would pass while the bay was on screen.
+    expect(fillsStyled(log, OVERCROWD), 'a red bay is still a bay').toEqual([])
     // Non-vacuity: the building it belongs to IS still drawn.
     expect(groupFills(log, 198, 132).length).toBe(1)
   })
@@ -1955,7 +2023,11 @@ describe('destinations: the footprint, the carpark and the waiting pins', () => 
     // -1 would otherwise be drawn as a cell at the far top-left.
     const frame = frameB()
     frame.destCarpark[0] = -1
-    expect(fillsStyled(draw(frame, atlasesAt(B_TILE_DEVICE)), ROAD_EDGE)).toEqual([])
+    const log = draw(frame, atlasesAt(B_TILE_DEVICE))
+    expect(fillsStyled(log, ROAD_EDGE)).toEqual([])
+    // A -1 carpark IS roadless by `carparkIsRoadless`, so the alarm colour is
+    // the arm it would take if the `>= 0` guard were dropped. Assert both.
+    expect(fillsStyled(log, OVERCROWD), 'a red bay is still a bay').toEqual([])
   })
 
   it('draws one pin per waiting customer, capped, and none at zero', () => {
@@ -2780,8 +2852,13 @@ describe('the overcrowd ring', () => {
   it('sweeps proportionally to the meter, from 12 o’clock, and closes only at 255', () => {
     // Three values rather than one: a sweep that ignored the meter, one that
     // used a fixed fraction, and one that inverted it are all separable here.
+    //
+    // The low value is `RING_MIN_SWEEP + 1` rather than 1, because below the
+    // floor the sweep is deliberately NOT proportional — that rule and its own
+    // non-vacuity live in the next test. Nine is one unit above the floor, so a
+    // mutation that widened the floor by one is caught here as well.
     for (const [meter, turns] of [
-      [1, 1 / 255],
+      [RING_MIN_SWEEP + 1, (RING_MIN_SWEEP + 1) / 255],
       [64, 64 / 255],
       [255, 1],
     ] as const) {
@@ -2881,6 +2958,54 @@ describe('the overcrowd ring', () => {
     // two live destinations would be drawn either way.
     expect(arcs(drawWith(frameWithOvercrowd([0, 0]))).length).toBe(0)
     expect(arcs(drawWith(frameWithOvercrowd([0, 1]))).length, 'and 1 is enough').toBe(1)
+  })
+
+  it('floors the SWEEP at RING_MIN_SWEEP without gating on it — 1 draws, and draws legibly', () => {
+    // **The floor and the gate are different rules and the fixture separates
+    // them.** Deleting the floor leaves every meter in [1, 8] painting an arc a
+    // third of its own stroke width — a dot. Turning the floor INTO a gate
+    // (`meter > RING_MIN_SWEEP` at the call site) leaves those meters painting
+    // nothing at all, which is the defect the floor exists to fix, one step
+    // worse. Both are caught below and by different assertions.
+    const floorTurn = RING_MIN_SWEEP / 255
+    for (const meter of [1, 4, RING_MIN_SWEEP]) {
+      const arc = onlyArc(drawWith(frameWithOvercrowd([0, meter])))
+      expect(arc.endAngle - arc.startAngle, `meter ${meter} draws the floor`).toBeCloseTo(
+        floorTurn * Math.PI * 2,
+        9,
+      )
+    }
+    // ...and it is a FLOOR rather than a clamp: one unit above it is
+    // proportional again, so `sweep = RING_MIN_SWEEP` outright is separable.
+    const above = onlyArc(drawWith(frameWithOvercrowd([0, RING_MIN_SWEEP + 1])))
+    expect(above.endAngle - above.startAngle).toBeCloseTo(((RING_MIN_SWEEP + 1) / 255) * Math.PI * 2, 9)
+    // The gate is untouched: zero still draws nothing, on the same fixture.
+    expect(arcs(drawWith(frameWithOvercrowd([0, 0]))).length, 'the gate still gates').toBe(0)
+  })
+
+  it('is not vacuous: the unfloored first byte really is a dot, and the floored one is a mark', () => {
+    // **The floor is a legibility claim, so it is asserted in CSS pixels of
+    // painted arc rather than in meter units.** `arcLen = radius * sweep`, and
+    // the thing it has to beat is the ring's own stroke width — an arc shorter
+    // than its pen is a round cap and nothing else.
+    //
+    // Measured across the three tile sizes `fitCamera` produces. `ringWidth` and
+    // `RING_RADIUS_FRACTION` are read from the source; the arc lengths are not.
+    for (const [tile, unflooredPx, flooredPx] of [
+      [27, 1.24, 9.9],
+      [29, 1.33, 10.63],
+      [30, 1.37, 11.0],
+    ] as const) {
+      const radius = 3 * tile * RING_RADIUS_FRACTION
+      const stroke = ringWidth(tile)
+      const unfloored = radius * (1 / 255) * Math.PI * 2
+      const floored = radius * (RING_MIN_SWEEP / 255) * Math.PI * 2
+      expect(unfloored, `tile ${tile} unfloored`).toBeCloseTo(unflooredPx, 2)
+      expect(floored, `tile ${tile} floored`).toBeCloseTo(flooredPx, 2)
+      // The two sides of the legibility line, and neither is close to it.
+      expect(unfloored, `tile ${tile}: the first byte was shorter than its pen`).toBeLessThan(stroke / 2)
+      expect(floored, `tile ${tile}: the floor must clear twice the pen`).toBeGreaterThan(2 * stroke)
+    }
   })
 })
 
