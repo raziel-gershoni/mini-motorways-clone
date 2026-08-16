@@ -3978,7 +3978,17 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
   it('the greedy arm survives to week 6 and dies on a destination it HAD connected', () => {
     const r = armRun('greedy')
 
-    expect(r.deathTick, "Task 10's greedy arm — 17 min 29 s").toBe(31456)
+    // **17:29 is the UN-SUBTRACTED clock and this comment used to imply
+    // otherwise.** `31456 / 30` = 1,048.5 s = 17:28.5, which rounds to the
+    // 17:29 the carry-forward's §12 quotes. But §14 defines every time in this
+    // repo as `(tick - warmStart) / 30`, and the city's warm start is 258
+    // ticks: **(31456 - 258) / 30 = 1,039.9 s = 17:19.9**. A player holding a
+    // stopwatch sees 17:19.9; only a reader of the tick counter sees 17:29.
+    // Both numbers are defensible and they are different counters, so the
+    // sentence says which is which — see the catalogue's "a unit change inside
+    // one sentence".
+    expect(r.deathTick, "Task 10's greedy arm — tick 31,456: 17:28.5 raw, 17:19.9 on a stopwatch").toBe(31456)
+    expect(Math.round(((31456 - 258) / 30) * 10) / 10, 'the stopwatch figure').toBe(1039.9)
     expect(r.deathWeek, 'week 6 of 12; the window is not what ends it').toBe(6)
     expect(r.weeks.length, 'seven weeks, 0 through 6').toBe(7)
     expect(r.failedDest).toBe(6)

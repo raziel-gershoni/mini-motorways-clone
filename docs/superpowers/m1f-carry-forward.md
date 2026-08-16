@@ -40,6 +40,25 @@ silently and the document reads exactly as well as it did when it was true.
 it.** If M1f is quoting one to justify a change, re-run it — most have a named
 rig or a named assertion beside them now, which is what makes that cheap.
 
+### The M1f wave-1 pass re-ran six of them, and four moved
+
+Taking the paragraph above at its word, the wave-1 render pass re-derived the
+figures it needed on a rig that first reproduced **5,580 / 8,661 / 31,456**,
+their killers **D2 / D3 / D6**, trips **0 / 71 / 747**, twelve destinations and
+`H_ROUTES_REFUSED` **0** — the reproduce-before-you-contradict step, which is
+the only reason the disagreements below read as findings. What changed:
+
+| § | was | is | why it moved |
+|---|---|---|---|
+| §5, §10 | the board cannot jam under shipped constants | **the shipped SEED, drawn WITH the column-8 trunk, does not jam; 6 of 8 seeds do, and so does the same policy without the trunk** | the claim was about one arm on one seed and read as a claim about the board |
+| §5, §15.3 | `H_ROUTES_REFUSED` = 0 offered as evidence about traffic | **it cannot measure traffic at all and will stay 0 under every lever** | it counts route WALKS, not entry refusals |
+| §12, §14 | greedy dies at **17:29** | **17:19.9 on §14's own stopwatch convention**; 17:28.5 is `tick / 30` | two counters, one sentence |
+| §11 | the column-8 corridor "buys zero ticks" | still true, **and it also buys 21 trips and a climbing score** | "zero ticks" was read as "no effect", which is what makes it a trap |
+| §16 | — | **a new class: constants that move digests with no behavioural content** | a re-bless authorisation for that class is a different authorisation |
+| §15 | — | **seed variance dwarfs most single-constant effects (≥20x)** | any single-seed claim below 2x is inside the noise |
+
+**Every row was measured, not read.** The rigs are named at each site.
+
 ---
 
 ## 1. Everything waiting on the §5.10 card modal
@@ -136,11 +155,32 @@ The fix is a choice, not a line: either hold the handler reference and widen
 `mainButton()`'s shape re-check to cover `offClick`, or move the `retired` guard
 into `press`. Recorded at the site in `eraseControl.ts` as well as here.
 
-## 5. `MAX_BLOCKED_TICKS` is unreachable on everything that ships
+## 5. `MAX_BLOCKED_TICKS` is unreachable on the arms M1e drove — NOT on the board
 
-The anti-deadlock valve's 45-second threshold has never fired on a board a
-player can open. Measured at the close of M1e by driving each shipped layout
-from boot to its §5.8 death with no input:
+**The heading used to read "unreachable on everything that ships", and that is
+false.** Every measurement in this section is real and none of them is about the
+board; they are about three arms on one seed. The wave-1 pass drove the same
+board with the same constants and reached the valve two ways:
+
+```
+  same seed, connect-on-sight WITHOUT the 20-tile opening
+      max carBlockedTicks 1,350   longest queue 9   valve fires 11x
+      first firing tick 19,957; a car blocked on every tick of a 3,424-tick
+      (114 s) window; one car held the full 45 s threshold
+
+  the SHIPPED arm (opening + connect-on-sight), nothing changed but RUN_SEED
+      valve firings across 8 seeds: 0, 5, 2, 4, 11, 0, 13, 4
+      -> 6 of 8 fire. `laneways-m2` is one of the two that do not.
+```
+
+Which half of the opening matters is measurable and it is the trunk: column 8
+alone gives 32/queue 4/no valve, column 17 alone gives 1,350/queue 8/4 firings.
+**So read every figure below as "on this arm, on this seed"** — the sentence a
+reader takes away must not be "the board cannot jam", because it can.
+
+The anti-deadlock valve's 45-second threshold never fires **on the three arms
+M1e drove on the shipped seed**. Measured at the close of M1e by driving each
+shipped layout from boot to its §5.8 death with no input:
 
 ```
   city  5,580 ticks   0 refusals      max carBlockedTicks    0   0 valve firings
@@ -164,11 +204,22 @@ below the threshold** (confirmed: 55 measured, 55/1350 = 24.5). The only things 
 (`game/test/jamFixture.ts`'s STARVED variant, `sim/test/blocking.test.ts`'s
 hand-built gridlock ring).
 
-**Read that as a statement about the boards, not about the number** — a valve
-that never fires on a board that never deadlocks is a backstop doing its job.
-What it means operationally is that lowering the constant is a change no shipped
-board can observe and raising it is free. The first real tuning evidence needs a
-board that jams, which is M1f's.
+**Read that as a statement about the ARMS, not about the number and not about
+the boards** — the sentence that used to stand here said "a valve that never
+fires on a board that never deadlocks is a backstop doing its job", and
+concluded that lowering the constant is a change no shipped board can observe.
+**Both halves are wrong**: the board deadlocks on 6 of 8 seeds under the shipped
+arm, and lowering the constant would be observable on all six. Raising it is
+still free on the shipped seed and is not free in general. The first real tuning
+evidence does not need a new board — it needs a seed sweep, and the numbers at
+the top of this section are one.
+
+**And the "refusals" column above is not evidence about blocking at all.** See
+§15.3: `H_ROUTES_REFUSED` counts route WALKS that exceed `MAX_PATH_LEN` or come
+back degenerate, and nothing in this module can reach it. It is 0 on all sixteen
+seed x arm runs the wave-1 pass drove, and it will be 0 on the next sixteen. The
+columns that measure blocking are `carBlockedTicks`, blocked car-ticks, the
+longest queue and valve firings.
 
 **This is the NO-INPUT path and it is NOT the blocking finding. See §10**, which
 is a different claim on a different arm: on the *played* default, under the
@@ -388,6 +439,28 @@ must not be read as one**: §5 measures the valve on the **no-input** path, wher
 the default has zero refusals for the different and duller reason that no road
 exists at all.
 
+**Narrowed by the M1f wave-1 pass, and the narrowing is the point of the item.**
+Every figure in the quotation above reproduces exactly, and none of them is a
+property of the board:
+
+- **It is a property of the 20-tile opening.** The same connect-on-sight policy
+  with the opening removed reaches `carBlockedTicks` **1,350** — the valve
+  threshold itself — with longest queue **9** and **11** firings, first at tick
+  19,957. Drawing only column 17 also valves (1,350 / queue 8 / 4 firings).
+  Drawing only column 8 does not (32 / queue 4 / 0). **The trunk is the thing
+  that prevents the jam.**
+- **It is a property of `laneways-m2`.** On the shipped arm, nothing changed,
+  **6 of 8 `RUN_SEED` values fire the valve** (0, 5, 2, 4, 11, 0, 13, 4).
+
+So "M1d's headline feature cannot fire on the board that ships" is not what was
+measured. What was measured is that it does not fire *on this seed when the
+player draws the trunk*. Written as the board-level claim it tells M1f the board
+cannot jam, and M1f would then have no reason to look — which is the same shape
+as the milestone-scale defect this item exists to remember.
+
+**Home in the source:** `packages/sim/src/blocking.ts`'s module comment, whose
+heading now reads *"on the arm that draws column 8"* and carries the table.
+
 The shape to notice is the previous milestone's: M1d shipped a headline feature
 that could not fire on the board that shipped, and nobody found out until a
 human opened it. The flip has re-created that condition for blocking
@@ -414,14 +487,40 @@ the visible tick. On a stopwatch, minus the 258-tick warm start: **1:10** and
 2:57. The 750 ticks and the two death ticks are confirmed — 6,330 and 5,580,
 both now asserted, see §15.7.)*
 
+*("Buys zero ticks" is too strong and the M1f wave-1 pass measured how. Drawing
+the corridor and nothing else agrees with drawing nothing on the death tick
+(5,580), the killer (D2) and the first-ring tick (2,369) — and it produces **21
+completed trips and a climbing score**, against 0 on the no-input arm. The score
+is the only feedback the HUD gives, so the wrong first road does not read as
+nothing happening; it reads as the game working. That is what makes it a trap
+rather than a waste, and it is now the sentence beside the four-row table in
+`startingCity.ts`. `startingCity.test.ts:928` already asserts `score > 0` on that
+arm, labelled *vacuity* — it was doing more than that all along.)*
+
 This is the same open question Task 9 left and Task 10 restated, and it is a
 **design gap, not a bug**. It has no code artefact of its own, which is why it
 is written at the site of the number that makes it true.
+
+**Wave 1 closes part of it.** A destination whose carpark carries no road now
+paints its bay in the alarm colour from the frame it appears, so *where* is
+answered at boot rather than at 1:19 — three red bays on the opening screen, and
+after the corridor exactly one of the three, which is D2, the one that kills the
+run 5,321 ticks (2:57) later. It does not answer *which five tiles*; it answers
+*which building*.
 
 **Home in the source:** `packages/game/src/startingCity.ts`, in the four-row
 death-tick table.
 
 ## 12. The first ten minutes are unloseable, and greedy play dies at 17:29
+
+**17:29 is the un-subtracted clock, and this section's own §14 forbids it.**
+`31456 / 30` = 1,048.5 s = 17:28.5, which is what rounds to 17:29. §14 defines
+every time in this repo as `(tick − warmStart) / 30`, and the city's warm start
+is 258 ticks: **(31,456 − 258) / 30 = 1,039.9 s = 17:19.9.** A player holding a
+stopwatch reads 17:19.9. The heading is left at 17:29 because that is the phrase
+Task 10's concern was written in and the quotation below is verbatim; every
+other use should be the stopwatch figure, and `integration.test.ts:3981` now
+carries both with a note saying which counter each is.
 
 *Task 10's concern 1:* **"The board is easy for six minutes and then it is not,
 and under greedy play it is dead at 17:29. The gate says the curve exists; it
@@ -499,7 +598,12 @@ when the board appears reads *less*:
                 warm start   dies at   source says   YOUR STOPWATCH WILL SAY
   city (default)   258        5,580      3:06                2:57
   demo             1,200      6,703      3:43                3:03
+  city, greedy     258       31,456     17:29               17:19.9
 ```
+
+**The third row was missing and §12 quoted its `source says` column as though it
+were the stopwatch one.** It is the same 258-tick offset as row 1; the row is
+here so the arithmetic is in the table rather than in a reader's head.
 
 If the demo board goes dark at 3:03 rather than 3:43, **nothing is wrong** — the
 1,200 warm-start ticks are 40 seconds the player never sees. Do not file that as
@@ -527,9 +631,23 @@ parked, an empty grid. That is exactly what a failed asset load looks like, and
 the person judging it is the person who will decide whether the app works.
 
 - **At 0:00** you should see: a green field with a river running through it, a
-  handful of trees, **three grey destination blocks** (two squares on the left at
+  handful of trees, **three destination blocks** (two squares on the left at
   grid rows 10 and 18, one circle right of the river at row 14), **three houses**,
   six small cars sitting still, and a HUD reading **30 tiles** and score 0.
+- **At 0:00, each of those three destinations has a RED parking bay** — the
+  half-tile square beside it, in the same alarm red as the overcrowd ring
+  (`#e8412e`), because no road reaches it. **This is new in M1f wave 1 and it is
+  the answer to this question**: an empty board with three red bays on it is a
+  board asking for something, where an empty board with three grey bays is a
+  board that failed to load. Every seeded and every spawned carpark is bare by
+  construction, so the count at boot is exactly three. *Watch for the failure
+  mode: if it reads as "three things are broken" rather than "three things need
+  a road", that is a finding.*
+- **A bay turns grey the tick a road touches it.** Draw column 8 (the long clear
+  column on the left) and the two left-hand bays go grey while the circle's stays
+  red — one red bay on the board, and it is the destination that ends the run
+  5,321 ticks (2:57) later. Each later spawn arrives with its own red bay: at
+  1:06 (tick 2,250), 2:21 (4,500) and 3:56 (7,350) on the opening arm.
 - **At 0:01.4** (tick 300) a **fourth house** appears next to one already there.
   *Does it read as an event, or does it just appear?* This is the only "the city
   is growing" signal the game has.
@@ -560,6 +678,20 @@ Do this on the **default board, doing nothing at all**:
   `canvas.ts` draws nothing while the scaled byte is 0, and that takes 178 more
   ticks. If you are holding a stopwatch, 1:04 is six seconds early and you will
   look at an empty destination and file a bug.)*
+- **1:10 is now the first LEGIBLE tick, which it was not before M1f wave 1.** The
+  ring painted from 2,369, but at a meter of 1 the arc is 1.24–1.37 CSS px on
+  the three tile sizes `fitCamera` produces, against a 4–5 px stroke — an arc a
+  third of its own pen is a round cap and reads as a speck. `RING_MIN_SWEEP = 8`
+  floors the drawn sweep at 8/255, so the first painted arc is 9.90–11.00 CSS
+  px. **The first visible moment therefore advances by 326 ticks (10.87 s) per
+  destination** — measured, and the same 326 on 12 of the 14 destinations across
+  four arms; the two exceptions are destinations whose meter drains and
+  re-climbs. Before wave 1 the first legible tick was 2,695, i.e. **1:21**.
+  *(326 is the advance; the ring is legible on 327 ticks it previously was not.
+  Two counters, one sentence — say which.)*
+- The `meter !== 0` gate is untouched: a board with no overcrowding anywhere
+  still draws no rings at all. The floor changes the shortest drawn arc, not
+  whether one is drawn.
 - **By about 1:34** (tick ~3,090) it should be unmistakable at arm's length.
   **UNVERIFIED** — "unmistakable" has no instrument in this tree and ~3,090 is
   not reproduced by anything; treat it as the reporter's estimate, not a
@@ -709,6 +841,37 @@ each figure from scratch, which is how a handoff becomes a rumour.
 `shared/constants.ts`.** Several of them are coupled in ways no single site
 records, and three are `rulesVersion` bumps that invalidate stored replays.
 
+### FIRST: seed variance dwarfs most single-constant effects, so most of the numbers below cannot be compared across one run each
+
+Measured by the M1f wave-1 pass. **Eight `RUN_SEED` values, nothing else changed
+at all** — same board, same constants, same greedy arm, driven to death or 12
+weeks. The enumeration, because a span quoted without its seed list is not a
+measurement: `laneways-m2` (the shipped one), `s1`, `s2`, `s3`, `s4`, `s5`,
+`s6`, `s7`.
+
+```
+  blocked car-ticks   1,298 - 42,381   (32.7x)
+  trips                 181 -  1,737   ( 9.6x)
+  death tick         16,122 - 51,275   ( 3.2x)
+  longest queue           4 -     13
+  valve firings           0 -     13   (6 of 8 seeds fire at all)
+  H_ROUTES_REFUSED        0 -      0   (see 15.3; it is not an instrument)
+```
+
+**The operational rule: a single-seed claim smaller than 2x is inside the
+noise.** Almost every figure in §15.1 through §15.9 is a single-seed reading,
+and several of the levers they discuss are being judged on differences far
+below 2x. Before adopting one, run it across a seed set and compare
+distributions, not runs — and state the seed list, because these endpoints are a
+property of *these eight seeds* and a different eight will give different ones.
+The ratios are the durable half; the endpoints are not.
+
+Two consequences that bite immediately. **A tuning change that "improves" one
+seed by 30 % has not been measured.** And **the shipped seed is not typical** —
+it is the quietest of the eight on blocked car-ticks and one of only two that
+never valve, so any claim of the form "the board does X" that was taken on
+`laneways-m2` alone is a claim about `laneways-m2`.
+
 ## 15.1 The demand ramp's three numbers, and why the shipped board cannot judge them
 
 Spec §5.3 calls `spawnScale` *"the single most important tuning unknown in the
@@ -783,6 +946,42 @@ no message, no ring, no colour, nothing on the HUD.
 
 M1f should either surface it or bound it. Surfacing is the cheaper half: the
 refusal count is already in the header.
+
+### `H_ROUTES_REFUSED` IS NOT A BLOCKING INSTRUMENT, and this document has quoted it as one
+
+**Measured by the M1f wave-1 pass, because §5's table and this section both lean
+on it and neither says what it counts.** `dispatch.ts:619` increments it in
+exactly one place, for three conditions that are all about the route WALK:
+
+1. the walk exceeded `MAX_PATH_LEN`,
+2. the route came back zero-length (the house cell IS a carpark),
+3. the walk did not terminate on a colour-matching carpark.
+
+**Nothing in `blocking.ts` can reach it.** A car refused entry keeps its
+committed route and waits; no counter here is touched. So its being 0 is
+evidence about route geometry and about nothing else, and reading a 0 in a
+column headed "refusals" as "traffic flows freely" is the same error §5 already
+records under *two quantities under one column heading*.
+
+Two measurements settle it:
+
+- On the shipped seed's greedy arm the **longest route ever walked is 21 steps**
+  against the 96-step ceiling — 75 steps of headroom, on the widest arm this
+  board produces.
+- Setting `MAX_PATH_LEN` to **24** leaves the run behaviourally unchanged: tick
+  31,456, 747 trips, refusals still **0**. A ceiling four times lower is still
+  not binding.
+
+It is 0 on all sixteen seed × arm runs measured. **It will stay 0 under every
+traffic lever M1f can pull, for a reason unrelated to traffic.** The observables
+that measure blocking are `carBlockedTicks`, blocked car-ticks, `longestQueue`
+and valve firings; §5's table now says so, and so does `blocking.ts`.
+
+**And lowering it is not free even though it changes nothing.** See §16's
+digest-mover class: `ROUTE_BYTES = MAX_PATH_LEN / 2` sizes the `carRoute`
+region, so 96 → 24 shrinks `firstCity`'s state buffer from 13,992 to 11,112
+bytes and turns **8 of the 9 goldens red** on an identical run. Surfacing the
+ceiling costs nothing; changing it costs a nine-site re-bless for no behaviour.
 
 ## 15.4 Whether `DESTINATIONS_PER_WEEK` = 2 and `HOUSES_PER_DESTINATION` = 2 pace the city
 
@@ -1044,6 +1243,64 @@ tick moves the boundaries from 4,500/9,000 to 4,501/9,001 — still exactly two
 grants inside the state fixture's 13,499 ticks, so the digest is unmoved and the
 final `H_TILES` is identical. A golden that folds a whole buffer looks like it
 must catch an off-by-one in the clock, and here it does not.
+
+## A THIRD CLASS OF RE-BLESS: constants that move digests with no behavioural content
+
+The rule above names *which task owns each move*. It implicitly assumes every
+move is behavioural — somebody changed what the sim does, and the digest
+followed. **There is a second kind, and authorising it is a different act.**
+
+Five constants either **size a region of the state buffer** or are **written
+into it at boot**, so editing one moves every whole-buffer digest whether or not
+a single tick behaves differently:
+
+| constant | how it reaches the buffer | site |
+|---|---|---|
+| `MAX_PATH_LEN` | `ROUTE_BYTES = MAX_PATH_LEN / 2` sizes `carRoute` | `dispatch.ts:55`, used at `regions.ts:35` |
+| `CARS_PER_HOUSE` | sizes every per-car region | `regions.ts:1` |
+| `LANE_COUNT` | `occupancy` is `cells * LANE_COUNT` slots | `regions.ts:89` |
+| `DEST_SPAWN_PERIOD_TICKS` | written to `H_DEST_SPAWN_TIMER` at boot | `state.ts:479` |
+| `HOUSE_SPAWN_PERIOD_TICKS` | `houseSpawnTimer.fill(...)` at boot | `state.ts:480` |
+
+Two measured instances, both from the wave-1 pass, both **behaviourally
+identical runs** on the shipped seed's greedy arm — same death tick 31,456, same
+747 trips, same 0 refusals:
+
+- **`MAX_PATH_LEN` 96 → 24** moves **8 of the 9 goldens**. The ninth, `field`
+  (`252514232`), survives because it hashes flow fields rather than the state
+  buffer — which is exactly the property that makes it the odd one out.
+- **`WEEKLY_TILE_GRANT` 30 → 15** moves **2** — `state` (`1058753394` →
+  `1818598576`) and `demand-pin` (`894844668` → `1829584893`). It is a sixth
+  member of the class by a different route: it enters the buffer through
+  `H_TILES` at each week grant rather than at boot.
+
+**Two cautions, and the second is the one that cost the measurement twice.**
+
+*A red golden test is not a moved digest.* Under `MAX_PATH_LEN` = 24, eight
+golden tests go red and **only two of them reach their `expect(hashState(...))`
+line** — the other six abort on a buffer-length pin sitting above it, and a
+count taken off the red tests would have been a count of something else. The
+digests do move (the buffer length changed by construction and the two that got
+there both moved), but that was established by relaxing the pins and re-running,
+not by reading the failure list. This is the catalogue's *"a green golden proves
+the digest; a red golden TEST proves only that something in it failed"*, hit
+again, and the asymmetry still holds: every `yes` needs a digest.
+
+*"Bit-identical" is the wrong word for any of these.* The runs are
+behaviourally identical; the buffers are not, which is the whole reason the
+goldens move. Say "behaviourally identical, different buffer" — a reader told
+"bit-identical" and then "moves 8 goldens" has been handed a contradiction and
+will believe whichever half suits them.
+
+**Why this deserves its own paragraph in a ledger about re-blessing.** An
+authorisation of the form *"this task re-blesses the state golden"* normally
+carries a behavioural claim a reviewer can check against the diff. An
+authorisation for this class carries none — the digest moves because the buffer
+is a different shape, and a genuine behavioural regression landing in the same
+commit is absorbed with no trace. **So a re-bless in this class must state which
+of the five (or six) constants moved, and the run's behavioural observables must
+be asserted unchanged in the same commit** — death tick, trips, refusals — or
+the re-bless is a blank cheque.
 
 **And one durable non-golden.** `integration.test.ts`'s two 20,000- and
 25,200-tick jam sweeps compare `hashState` between two identical runs and

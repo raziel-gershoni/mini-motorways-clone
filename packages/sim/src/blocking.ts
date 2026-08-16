@@ -29,8 +29,12 @@ import { isCommittedTo } from './dispatch'
  * written; nothing else should compute it inline.
  *
  * ---------------------------------------------------------------------------
- * ON THE BOARD THAT SHIPS, THIS IS A ONE-SECOND HESITATION AND NOT A JAM
+ * ON THE ARM THAT DRAWS COLUMN 8, THIS IS A ONE-SECOND HESITATION AND NOT A JAM
  * ---------------------------------------------------------------------------
+ *
+ * **Read the heading. It used to say "on the board that ships", and that is a
+ * claim about the BOARD which the measurements below do not support** — they
+ * are a claim about one arm on one seed, and both qualifiers are load-bearing.
  *
  * **Measured, not presumed, at M1e Task 10 on the PLAYED default** (the starting
  * city under the greedy connector, which is the arm where cars actually run):
@@ -38,14 +42,39 @@ import { isCommittedTo } from './dispatch'
  * `carBlockedTicks` is **32 against a 1,350-tick valve — 42x from firing**.
  * Cars do stand behind each other (longest queue 4, 597 blocked ticks a week
  * from week 5), but nothing is ever refused a route and the valve cannot fire.
+ * All of that reproduces exactly.
  *
- * **So M1d's headline feature is now DEMO-ONLY**, because M1e Task 10 flipped
- * the default from `demoCity` to the starting city. For this module
- * specifically the flip is a trade and it was made with that stated: the demo
- * board is the only place blocking bites, and it is now behind
- * `?startapp=demo`. For the user's actual complaint the flip is not a trade —
- * 3 houses become 25, 3 destinations become 12, 747 trips, and the outcome
- * depends on what they drew.
+ * **What it rests on is the 20-tile opening stroke, and specifically the
+ * COLUMN-8 half of it.** The greedy arm draws that opening on its first tick
+ * and then connects on sight; drive the identical connect-on-sight policy with
+ * the opening removed and the same board, same seed, same constants reaches:
+ *
+ * ```
+ *   opening + connect-on-sight  max carBlockedTicks    32  queue 4  valve x0
+ *   column 17 link only         max carBlockedTicks 1,350  queue 8  valve x4
+ *   connect-on-sight only       max carBlockedTicks 1,350  queue 9  valve x11
+ *   column 8 trunk only         max carBlockedTicks    32  queue 4  valve x0
+ * ```
+ *
+ * The first valve firing on the connect-on-sight-only arm is tick **19,957**,
+ * with a car blocked on **every tick of a 3,424-tick (114 s) window** and one
+ * car held for the full 45-second threshold. **The trunk is what prevents the
+ * jam, not the board** — the two arms that draw column 8 are the two that never
+ * block past 32 ticks, and the two that do not are the two that valve.
+ *
+ * **And the seed is doing the other half of the work. On the SHIPPED arm,
+ * unchanged in every respect, 6 of 8 `RUN_SEED` values fire the valve** —
+ * 0, 5, 2, 4, 11, 0, 13, 4 firings across `laneways-m2` and seven others, with
+ * `carBlockedTicks` saturating at 1,350 on six of them. `laneways-m2` is one of
+ * the two quiet ones. So "the board cannot jam under shipped constants" is
+ * false, and the honest statement is **"this seed, drawn this way, does not"**.
+ *
+ * **So M1d's headline feature is now DEMO-ONLY on the shipped seed's played
+ * arm**, because M1e Task 10 flipped the default from `demoCity` to the
+ * starting city. For this module specifically the flip is a trade and it was
+ * made with that stated. For the user's actual complaint the flip is not a
+ * trade — 3 houses become 25, 3 destinations become 12, 747 trips, and the
+ * outcome depends on what they drew.
  *
  * Recorded here rather than only in a report because this is the module the
  * claim is about, and because the previous milestone's post-mortem is the
@@ -55,6 +84,30 @@ import { isCommittedTo } from './dispatch'
  * read `MAX_BLOCKED_TICKS`'s own note as this one** — that measures the
  * NO-INPUT path, where the default has zero refusals for the different and
  * duller reason that no road exists.
+ *
+ * ---------------------------------------------------------------------------
+ * `H_ROUTES_REFUSED` IS NOT AN INSTRUMENT FOR ANY OF THIS
+ * ---------------------------------------------------------------------------
+ *
+ * It is quoted above, and in `m1f-carry-forward.md` §5 and §15.3, as though its
+ * being 0 said something about traffic. **It does not, and it never will.**
+ * `dispatch.ts` increments it in exactly one place, for three conditions that
+ * are all about the route WALK and none about the road being busy: a walk past
+ * `MAX_PATH_LEN`, a zero-length route, and a walk that does not terminate on a
+ * colour-matching carpark. Blocking cannot reach it — a car refused entry
+ * keeps its committed route and waits.
+ *
+ * Measured rather than argued: on the shipped seed's greedy arm the **longest
+ * route ever walked is 21 steps** against a ceiling of 96, so the length arm
+ * has 75 steps of headroom; and setting `MAX_PATH_LEN` to **24** leaves the run
+ * behaviourally unchanged — tick 31,456, 747 trips, refusals still **0**. It is
+ * 0 on all sixteen seed x arm runs measured. **It will stay 0 under every
+ * traffic lever, for a reason that has nothing to do with traffic.**
+ *
+ * The counters that do measure blocking are the ones in this module:
+ * `carBlockedTicks` (per car, saturating), the count of blocked car-ticks, the
+ * longest queue, and valve firings. Every figure in the table above is one of
+ * those.
  *
  * ---------------------------------------------------------------------------
  * THE FIVE LIFECYCLE EVENTS, IN FULL — DECISION 3

@@ -93,6 +93,16 @@ import {
  *     the road this paragraph calls natural. Read the sentence above as a
  *     description of what a player is *drawn to*, never as advice.
  *
+ *     **"Zero ticks" is not "no effect", and the difference is the whole trap.**
+ *     Corridor-only agrees with no-road-at-all on the death tick (5,580), the
+ *     killer (D2) and even the tick the first ring appears (2,369) — but it
+ *     produces **21 completed trips and a score that climbs**, and the score is
+ *     the only feedback the HUD gives. So the wrong first road does not look
+ *     like nothing happening; it looks like the game working, right up to the
+ *     shutdown screen. `startingCity.test.ts`'s corridor case asserts
+ *     `score > 0` for exactly this reason and is labelled *vacuity* — it is
+ *     doing more than that, and this is the sentence it is protecting.
+ *
  *     **And the five-tile save is UNDISCOVERABLE IN GAME — carried to M1f
  *     (`docs/superpowers/m1f-carry-forward.md` §11), recorded here because this
  *     is where the measurement lives.** Nothing in the shipped UI tells a
