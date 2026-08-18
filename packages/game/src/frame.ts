@@ -321,6 +321,11 @@ export function labelRoadComponents(state: GameState, world: WorldData, reach: R
     const cell = state.houseCell[h] as number
     if (cell < 0 || cell >= cells) continue
     const comp = label[cell] as number
+    // A CHECKED equivalent mutant, like the two in `destinationIsReachable`:
+    // `compColour[-1] |= bit` is a silently discarded out-of-range write on a
+    // typed array, so deleting this line changes no answer. It stays because
+    // the discard is the engine's decision and not this function's, and it
+    // would stop being one the day `compColour` became a plain array.
     if (comp < 0) continue
     const colour = state.houseColour[h] as number
     if (colour > MAX_MASKABLE_COLOUR) continue
@@ -348,11 +353,22 @@ export function labelRoadComponents(state: GameState, world: WorldData, reach: R
  *     whose own colour has no house in its component takes zero arrivals for
  *     as long as that holds.
  *
- * The `label[carpark] < 0` case is unreachable *given* arm 2 on any board the
- * sim can produce — a cell with a road bit always seeds a component — and it is
- * written anyway because it fails CLOSED where the alternative (`compColour[-1]`
- * reading `undefined`, `undefined & mask` being `0`) happens to agree today by
- * accident rather than by design.
+ * **Two of those three arms are CHECKED equivalent mutants, and that is
+ * recorded here so nobody reads their survival as a coverage hole.**
+ *
+ * - Deleting arm 1 changes no answer: every read at index -1 comes back
+ *   `undefined`, so `roads[-1] === 0` is false, `label[-1] < 0` is false, and
+ *   `compColour[undefined] & mask` is 0 — the same 0, reached by accident of
+ *   typed-array indexing rather than by decision.
+ * - Deleting the `comp < 0` arm changes no answer either, for the same reason:
+ *   `compColour[-1]` is `undefined` and `undefined & mask` is 0.
+ *
+ * Arm 2 is NOT equivalent, and the board that separates it from `comp < 0` is
+ * one `placeRoad` cannot make: a bit written straight into `state.roads` with
+ * no mirror drags a BARE bay into a labelled component, so `label[carpark] >= 0`
+ * while `roads[carpark] === 0`. `assembleSources` skips exactly that
+ * destination, and this arm is what agrees with it. `frame.test.ts` builds that
+ * board.
  */
 export function destinationIsReachable(
   state: GameState,

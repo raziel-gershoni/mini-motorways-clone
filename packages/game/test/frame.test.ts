@@ -1952,10 +1952,20 @@ describe('the reachability fold', () => {
     expect(frame.destReachable[1] as number, 'while the genuinely connected one is grey').toBe(1)
   })
 
-  it('answers 0 for a bay that is off the grid', () => {
+  it('answers 0 for a bay that is off the grid — a CHECKED 0-detector for the branch', () => {
     // `carparkCell` returns -1 for a footprint whose bay would fall off the
     // board. Placement never stores one — `canPlaceDestination` refuses it — so
     // this is the fail-closed arm, reached by asking the predicate directly.
+    //
+    // **Deleting `if (carpark < 0) return 0` leaves this green, measured, and
+    // that is recorded here so nobody reads its survival as a coverage hole.**
+    // Every read the function would then make at index -1 comes back
+    // `undefined`: `roads[-1] === 0` is false, `label[-1] < 0` is false,
+    // `compColour[undefined] & mask` is 0. The wrong answer and the right one
+    // coincide *by an accident of typed-array indexing*, which is exactly why
+    // the line stays — the agreement is not a property anyone decided. This
+    // case pins the CONTRACT (the documented answer for a -1 bay), and no test
+    // can pin the branch.
     const r = destAndOwnHouse()
     pave(r, [BAY, COL[0], COL[1], COL[2], OWN_HOUSE])
     const fb = builderFor(r)
@@ -1975,6 +1985,34 @@ describe('the reachability fold', () => {
     expect(r.state.roads[BAY] as number, 'the bay is bare').toBe(0)
     expect(r.state.roads[COL[0]] as number, 'and the road it does not touch is not').not.toBe(0)
     expect(reachableOf(r)).toEqual([0])
+  })
+
+  it('still answers 0 for a bare bay a ONE-WAY bit has dragged into a component', () => {
+    // **The case that gives the bare-bay arm its own detector.** On every board
+    // `placeRoad` can produce, `roads[carpark] === 0` and `label[carpark] < 0`
+    // say the same thing — bits are mirrored, so a cell reached across an edge
+    // always carries one — and the case above therefore kills neither arm on
+    // its own. Two independently sufficient guards, which is the shape where a
+    // per-arm detector needs a board the production writer cannot make.
+    //
+    // Here the neighbour's N bit is written STRAIGHT into `state.roads` with no
+    // mirror on the bay, exactly as `graph.test.ts`'s bounds cases do. The BFS
+    // follows it and labels the bay; `roads[BAY]` is still 0.
+    //
+    // **The right answer is 0, and it is `assembleSources` that says so**:
+    // `if (roadMask(state, carpark) === 0) continue` — the destination is never
+    // a flow-field source, so it takes zero arrivals whatever the graph looks
+    // like around it. The arm exists to agree with that line and this is the
+    // board on which the agreement is visible.
+    const r = destAndOwnHouse()
+    pave(r, [COL[0], COL[1], COL[2], OWN_HOUSE])
+    const fb = builderFor(r)
+    expect([...build(r, fb).destReachable].slice(0, 1), 'vacuity: bare and unlabelled').toEqual([0])
+    r.state.roads[COL[0] as number] = (r.state.roads[COL[0] as number] as number) | 1 // N, unmirrored
+    expect(r.state.roads[BAY] as number, 'the bay still carries nothing').toBe(0)
+    expect(labelRoadComponents(r.state, r.world, fb.reach), 'one component').toBe(1)
+    expect(fb.reach.label[BAY] as number, 'and the one-way bit HAS labelled the bay').toBeGreaterThanOrEqual(0)
+    expect([...build(r, fb).destReachable].slice(0, 1), 'a source assembleSources would skip').toEqual([0])
   })
 
   it('counts the components it labelled, so a bare cell is not one', () => {
