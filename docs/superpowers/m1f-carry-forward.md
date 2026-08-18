@@ -395,10 +395,24 @@ and the gate around UNREACHABILITY, not congestion."**
 
 A spawned destination's carpark is road-free by construction, so it is never a
 flow-field source, takes zero arrivals, and its §5.8 meter only ever fills.
-Task 9's shutdown copy is keyed to exactly this (`NO ROAD REACHES DESTINATION n`
-rather than `OVERCROWDED`, chosen because it is computable from whether any road
-reaches the carpark), which makes the ENDING legible without making the DANGER
+Task 9's shutdown copy is keyed to exactly this (`NOTHING CAN REACH DESTINATION n`
+rather than `OVERCROWDED`, chosen because it is computable from the board rather
+than from run history), which makes the ENDING legible without making the DANGER
 visible while there is still time to act.
+
+**Updated M1f.** That copy read `NO ROAD REACHES DESTINATION n` and was decided
+by `roads[carpark] !== 0` — a test one tile on the bay satisfies. The first
+person to play the shipped build reported it inside a minute: *"the red dot
+turns black when i start drawing a road from it and when i remove it turns red
+again."* The predicate is now **"a house of this destination's colour is in the
+same road component as its bay"**, folded in `game/frame.ts` and carried to
+`render` as `RenderFrame.destReachable`; the sentence was re-worded with it. The
+fix is a widening — every bay that was red is still red, because a bare carpark
+is never a field source — so nothing about the danger-vs-ending gap above
+changed. **The gap is still open**: the bay is red from the frame a destination
+appears, which on the default board is **2,110 ticks (70.3 s) before the ring's
+first byte** at tick 2,369, and neither says anything while there is still a
+board worth saving on a run the player is actually playing.
 
 **The obvious fix is not free and was refused with measurements.** M1e's plan
 proposed tiering the spawn scan by proximity to the spawning colour's own
@@ -501,11 +515,16 @@ This is the same open question Task 9 left and Task 10 restated, and it is a
 **design gap, not a bug**. It has no code artefact of its own, which is why it
 is written at the site of the number that makes it true.
 
-**Wave 1 closes part of it.** A destination whose carpark carries no road now
-paints its bay in the alarm colour from the frame it appears, so *where* is
-answered at boot rather than at 1:19 — three red bays on the opening screen, and
-after the corridor exactly one of the three, which is D2, the one that kills the
-run 5,321 ticks (2:57) later. It does not answer *which five tiles*; it answers
+**Wave 1 closes part of it.** A destination **no car can drive to** now paints
+its bay in the alarm colour from the frame it appears, so *where* is answered at
+boot rather than at 1:19 — three red bays on the opening screen, and after the
+corridor exactly one of the three, which is D2, the one that kills the run 5,321
+ticks (2:57) later. *(M1f corrected the predicate behind that colour: it was
+`roads[carpark] !== 0`, which one tile on the bay satisfies, and it is now "a
+house of this destination's colour is in the same road component as its bay".
+Every count in this section is re-measured against the corrected predicate and
+none of them moved — the fix only widens the red arm, and the corridor genuinely
+joins both left-hand bays to colour-0 houses at (8, 13) and (8, 24).)* It does not answer *which five tiles*; it answers
 *which building*.
 
 **Home in the source:** `packages/game/src/startingCity.ts`, in the four-row
@@ -643,10 +662,14 @@ the person judging it is the person who will decide whether the app works.
   construction, so the count at boot is exactly three. *Watch for the failure
   mode: if it reads as "three things are broken" rather than "three things need
   a road", that is a finding.*
-- **A bay turns grey the tick a road touches it.** Draw column 8 (the long clear
-  column on the left) and the two left-hand bays go grey while the circle's stays
-  red — one red bay on the board, and it is the destination that ends the run
-  5,321 ticks (2:57) later. Each later spawn arrives with its own red bay: at
+- **A bay turns grey the tick a road CONNECTS it — not the tick a road touches
+  it.** Draw column 8 (the long clear column on the left) and the two left-hand
+  bays go grey while the circle's stays red — one red bay on the board, measured,
+  and it is the destination that ends the run 5,321 ticks (2:57) later. Column 8
+  runs from D0's bay at (8, 10) past D1's at (8, 18) down to (8, 24), and it
+  passes through colour-0 houses at (8, 13) and (8, 24), which is what makes both
+  bays go grey; a stroke that stopped at (8, 12) would leave all three red. See
+  Q3b for the ten-second version of that experiment. Each later spawn arrives with its own red bay: at
   1:06 (tick 2,250), 2:21 (4,500) and 3:56 (7,350) on the opening arm.
 - **At 0:01.4** (tick 300) a **fourth house** appears next to one already there.
   *Does it read as an event, or does it just appear?* This is the only "the city
@@ -714,11 +737,14 @@ Same run, keep watching.
   appear:
 
   ```
-  NO ROAD REACHES DESTINATION 2
+  NOTHING CAN REACH DESTINATION 2
   CONNECT EVERY DESTINATION WITH A ROAD
   <your trip count>
   TAP TO PLAY AGAIN
   ```
+
+  (`NO ROAD REACHES DESTINATION 2` until M1f. Same arm, same board, wider
+  predicate — see Q3b below.)
 
   Trip count will be **0** if you drew nothing.
 - **Nothing on the board is labelled "2".** The frozen board behind the scrim
@@ -729,6 +755,34 @@ Same run, keep watching.
 - On the **demo** board (`?startapp=demo`, dies at **3:03** on your stopwatch)
   the first line is the other arm: `DESTINATION 2 WENT UNSERVED`. Both arms ship
   and they differ by two words. Do they read as different situations?
+
+## Q3b — Draw ONE tile on a red bay and watch what the dot does
+
+**This is the M1f fix, and it is the one question on this list a person can
+answer in ten seconds.** Before it, one tile of road on a destination's parking
+bay turned the bay from red to grey while nothing could still reach it. The
+predicate now asks whether a house of that destination's colour is in the same
+road component as the bay.
+
+On a fresh default load, D2's bay is at grid **(17, 14)** — the red square just
+right of the colour-1 circle.
+
+1. Drag one tile down from the bay, to (17, 15). **The bay must stay red.**
+2. Keep dragging to (17, 18), the colour-1 house. **The bay turns grey on the
+   tile that lands on the house cell, and not before.** One cell short is not
+   connected — a house whose own cell carries no road bit has `dist = INF`
+   forever.
+3. Erase any middle segment. **Red again, immediately.**
+
+Question for the person holding the phone: **at step 2, is the moment the dot
+changes legible as "you just connected it", or does it read as a flicker?** The
+signal is now true; whether it is *noticeable* has never been looked at, and the
+whole point of the change is that a player learns what the colour means by
+causing it.
+
+Also worth an eye: on the default board **all five** destinations are red at the
+end, and three of them are red from the first frame. Is five red squares a
+useful warning or wallpaper?
 
 ## Q4 — The ghost art: 182 assertions (UNVERIFIED count), zero human minutes
 

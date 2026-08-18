@@ -270,11 +270,39 @@ const MAX_MASKABLE_COLOUR = 31
  * ---------------------------------------------------------------------------
  *
  * Every cell is labelled at most once and pushed at most once, so the pass is
- * O(cells) with a small constant, and there is no cache and no dirty flag —
- * the same trade this file already makes for the terrain fold, for the same
- * reason. A tick-keyed cache is available and was measured as cheaper; it was
- * declined because `H_TICK` is not monotonic across a `restore`, and a
- * staleness class of bug is not worth 15 microseconds.
+ * O(cells + edges) and allocates nothing.
+ *
+ * **Measured, on the rig it was measured on**, because a ratio taken through
+ * vite-transformed ESM is not a ratio in a production bundle: vitest 3.2.7 /
+ * Node 26 on an M-series Mac, `buildFrame` and this function timed in the same
+ * process over the same board.
+ *
+ * | board | road cells | ns/call | vs `buildFrame` | of a 16.67 ms frame |
+ * |---|---|---|---|---|
+ * | the city at boot, no input | 0 | 693 | 0.011x | 0.004 % |
+ * | the whole revealed rect paved, every legal segment (887 of them) | 270 | 74,261 | 0.540x | 0.45 % |
+ *
+ * The second row is the worst board a player can draw: `placeRoad` is the only
+ * writer, so 14x22 cells with all their legal diagonals is the ceiling.
+ *
+ * **The ratio is inflated here and the inflation is NOT shared with the
+ * denominator, which is why the table says which rig it came from.** This
+ * function makes one cross-package call — `neighbours` — *per cell*, and under
+ * vite those are live-binding getter reads; `buildFrame`'s own cross-package
+ * calls are per DESTINATION, at most 16. So the transform penalises the
+ * numerator ~60x harder than the denominator and the true production ratio is
+ * far smaller than 0.540. An earlier hand-rolled measurement of this pass, with
+ * the bit walk inlined instead of calling `neighbours`, came out about 12x
+ * faster on a comparable board — consistent with that being the whole
+ * difference. Inlining is the available optimisation and it costs the one
+ * property that makes this pass trustworthy (see above), so it is not taken.
+ *
+ * There is no cache and no dirty flag, which is the same trade this file
+ * already makes for the terrain fold and for the same reason. A key on
+ * `state.header[H_TICK]` would halve the work at 60 Hz and zero it while
+ * paused; it is declined because `H_TICK` is not monotonic across a `restore`,
+ * and 0.45 % of a frame on the worst board a finger can draw does not buy a
+ * staleness class of bug.
  */
 export function labelRoadComponents(state: GameState, world: WorldData, reach: ReachScratch): number {
   const cells = world.cells
