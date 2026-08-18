@@ -65,9 +65,8 @@ import { pushBlockedSpawnDemand } from './demand'
  * this (`NOTHING CAN REACH DESTINATION n`, chosen over `OVERCROWDED` precisely
  * because it is computable from the board rather than from run history — as of
  * M1f, from whether a house of the destination's colour is in the same road
- * component as its bay), which
- * makes the ending legible but does not make the danger visible while there is
- * still time to act.
+ * component as its bay), which makes the ending legible but does not make the
+ * danger visible while there is still time to act.
  *
  * **Design the ring and any future gate around UNREACHABILITY, not congestion.**
  * And note what the obvious fix costs: M1e's plan proposed tiering the spawn

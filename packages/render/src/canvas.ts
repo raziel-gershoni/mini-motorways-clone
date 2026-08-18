@@ -591,11 +591,14 @@ function failedText(d: number, unreachable: boolean): string {
  */
 function destinationIsUnreachable(frame: RenderFrame, d: number): boolean {
   // **The index is guarded and fails CLOSED.** `failedDest` is -1 on a live
-  // frame and is bounded above only by `destCount`, and without this line
-  // `destReachable[-1]` is `undefined` — which is `!== 1`, so it happens to
-  // take the same arm today. It is written anyway because that agreement is an
-  // accident of the sentinel rather than a decision: a slot with no destination
-  // in it is one nothing can drive to, and this line is what says so.
+  // frame and is bounded above only by `destCount`. An OUT-OF-RANGE read is
+  // `undefined`, which is already `!== 1`, so that half of the guard agrees
+  // with its absence by accident — but a DEAD SLOT is a real index holding a
+  // real byte: `destReachable` is preallocated for every slot and `game` folds
+  // only `[0, destCount)`, so a slot that was live under a longer prefix still
+  // holds its old 1. Without this line that stale byte answers for a
+  // destination that no longer exists. `canvas.test.ts` builds exactly that
+  // frame.
   if (d < 0 || d >= frame.destCount) return true
   // `!== 1` rather than `=== 0`, so every byte the fold does not set is
   // unreachable. A freshly allocated `Uint8Array` is all zeroes, which means a
