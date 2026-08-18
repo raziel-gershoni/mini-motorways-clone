@@ -64,6 +64,8 @@ import {
   createFrameBuilder,
   buildFrame,
   createFrameDriver,
+  destinationIsReachable,
+  labelRoadComponents,
   terrainClassOf,
   type FrameBuilder,
 } from '../src/frame'
@@ -1750,5 +1752,355 @@ describe('the frame driver follows the sim into game over', () => {
     const ok = createFrameDriver({ ...deps, onGameOver: (): void => {} })
     expect(typeof driver.advance).toBe('function')
     expect(typeof ok.advance).toBe('function')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// N. The reachability fold — M1f
+// ---------------------------------------------------------------------------
+
+/**
+ * `destReachable`: whether a car can actually DRIVE to each destination.
+ *
+ * ---------------------------------------------------------------------------
+ * THE BUG THIS SECTION EXISTS FOR
+ * ---------------------------------------------------------------------------
+ *
+ * M1e Task 9 painted a bay red when `roads[carpark] === 0`. The first person to
+ * play the shipped build broke it inside a minute: *"the red dot turns black
+ * when i start drawing a road from it and when i remove it turns red again."*
+ * One tile on the bay, connected to nothing, and the game said the destination
+ * was fine.
+ *
+ * The end-to-end reproduction — the recorded `fillRect` count, on the
+ * production boot path — is in `integration.test.ts`. This section is the fold
+ * itself, on hand-built boards, one case per branch.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE FIXTURE IS SHAPED THE WAY IT IS
+ * ---------------------------------------------------------------------------
+ *
+ * Every case below uses **one colour-1 destination whose bay is at (17, 14)**
+ * and **its own colour-1 house at (17, 18)**, the geometry the shipped city
+ * actually has (`cityArms.ts`'s `D2_LINK` is this exact column). The interesting
+ * failures all live in the four cells between them, which is what a player is
+ * dragging through when the signal has to be right.
+ *
+ * **A wrong-colour house is planted on the same column** for the case that
+ * separates "the bay is joined to a house" from "the bay is joined to a house
+ * OF ITS OWN COLOUR" — without it, dropping the colour mask entirely is a
+ * 0-detector edit.
+ */
+describe('the reachability fold', () => {
+  /** The colour-1 destination's origin. Orientation E, so the bay is three cells east. */
+  const D_ORIGIN = cellOf(14, 14)
+  const BAY = cellOf(17, 14)
+  /** The four cells between the bay and the house, in the order a finger crosses them. */
+  const COL = [cellOf(17, 15), cellOf(17, 16), cellOf(17, 17)] as const
+  const OWN_HOUSE = cellOf(17, 18)
+  /** Same column, between bay and house: the colour-0 house that makes case C separable. */
+  const WRONG_HOUSE = cellOf(17, 16)
+
+  /** `1` iff a road of at least one cell joins `from` to `to` along the column. */
+  function pave(r: Rig, cells: readonly number[]): void {
+    for (let i = 0; i + 1 < cells.length; i++) {
+      expect(
+        placeRoad(r.state, r.world, cells[i] as number, cells[i + 1] as number),
+        `road ${cells[i]} -> ${cells[i + 1]}`,
+      ).toBe(true)
+    }
+  }
+
+  /** The colour-1 destination alone, with no road and no house anywhere. */
+  function destOnly(): Rig {
+    const r = rig()
+    expect(
+      placeDestination(r.state, r.world, D_ORIGIN, ORIENTATION_E, 1, DEST_KIND_CIRCLE),
+      'the fixture destination must actually be placeable',
+    ).toBe(true)
+    const frame = build(r, builderFor(r))
+    expect(frame.destCarpark[0] as number, 'the bay is (17, 14)').toBe(BAY)
+    return r
+  }
+
+  /** The destination plus its own colour-1 house at (17, 18), still with no road. */
+  function destAndOwnHouse(): Rig {
+    const r = destOnly()
+    expect(placeHouse(r.state, r.world, OWN_HOUSE, 1), 'the own-colour house').toBe(true)
+    return r
+  }
+
+  function reachableOf(r: Rig): readonly number[] {
+    const frame = build(r, builderFor(r))
+    return [...frame.destReachable].slice(0, frame.destCount)
+  }
+
+  it('A: a stub on the bay alone reaches nothing — the user’s report, at the fold', () => {
+    // The whole bug in three lines. `roads[BAY] !== 0` is TRUE here and the
+    // answer is still 0; the shipped predicate returned 1.
+    const r = destAndOwnHouse()
+    pave(r, [BAY, COL[0]])
+    expect(r.state.roads[BAY] as number, 'the road bit really is on the bay').not.toBe(0)
+    expect(reachableOf(r)).toEqual([0])
+  })
+
+  it('B: a dead-end corridor off the bay with no building on it reaches nothing', () => {
+    // One cell short of the house. The stub case scaled up, and the case that
+    // says the answer is not "is this bay on a road of length >= 2".
+    const r = destAndOwnHouse()
+    pave(r, [BAY, COL[0], COL[1], COL[2]])
+    expect(reachableOf(r)).toEqual([0])
+  })
+
+  it('C: a corridor that reaches a house of the WRONG colour reaches nothing', () => {
+    // The colour mask's only detector. Without it this board reads reachable,
+    // and a colour-1 destination would go grey because a colour-0 house
+    // happened to be on its road.
+    const r = destAndOwnHouse()
+    expect(placeHouse(r.state, r.world, WRONG_HOUSE, 0), 'the wrong-colour house').toBe(true)
+    pave(r, [BAY, COL[0], WRONG_HOUSE])
+    expect(r.state.roads[WRONG_HOUSE] as number, 'the road really does reach it').not.toBe(0)
+    expect(reachableOf(r)).toEqual([0])
+  })
+
+  it('D: a corridor that stops one cell short of the house reaches nothing', () => {
+    // **Verified against the sim, not only against this fold.** A house whose
+    // own cell carries no road bit is unroutable: `neighbours` only follows road
+    // bits, so `computeFlowField` never relaxes into it and `dist[houseCell]`
+    // stays INF forever. Adjacency is not connection.
+    const r = destAndOwnHouse()
+    pave(r, [BAY, COL[0], COL[1], COL[2]])
+    expect(r.state.roads[OWN_HOUSE] as number, 'the house cell itself is bare').toBe(0)
+    expect(reachableOf(r)).toEqual([0])
+  })
+
+  it('E: a corridor that reaches the house cell INCLUSIVE is reachable', () => {
+    // The control. Without it every case above is satisfied by "always 0".
+    const r = destAndOwnHouse()
+    pave(r, [BAY, COL[0], COL[1], COL[2], OWN_HOUSE])
+    expect(reachableOf(r)).toEqual([1])
+  })
+
+  it('F: two disjoint components answer independently — one connected, one stubbed', () => {
+    // The case the flow fields structurally cannot answer: `computeFlowField` is
+    // multi-source over a whole colour's carparks, so two same-colour
+    // destinations in different components read `dist < INF` in ONE field and
+    // the merge erases which is which. Here the colours differ too, but the
+    // shape is the point — the answer is per destination, from a per-component
+    // label, not from a field.
+    const r = destAndOwnHouse()
+    const D0_ORIGIN = cellOf(14, 20)
+    const D0_BAY = cellOf(17, 20)
+    const D0_HOUSE = cellOf(17, 22)
+    expect(
+      placeDestination(r.state, r.world, D0_ORIGIN, ORIENTATION_E, 0, DEST_KIND_SQUARE),
+      'the second destination',
+    ).toBe(true)
+    expect(placeHouse(r.state, r.world, D0_HOUSE, 0)).toBe(true)
+    pave(r, [D0_BAY, cellOf(17, 21), D0_HOUSE])
+    pave(r, [BAY, COL[0]])
+    const frame = build(r, builderFor(r))
+    expect(frame.destCarpark[1] as number).toBe(D0_BAY)
+    // Order matters as much as the values: a fold that answered "some component
+    // is connected" would give [1, 1], and one that answered "the last one
+    // wins" would give [0, 0].
+    expect([...frame.destReachable].slice(0, 2)).toEqual([0, 1])
+  })
+
+  it('G: erasing the stub leaves it unreachable, and erasing the LINK takes it back', () => {
+    // The second half of the user's sentence — *"and when i remove it turns red
+    // again"* — plus the direction that matters more: the signal is a predicate
+    // recomputed every frame, not a latch. Both directions on one rig.
+    const r = destAndOwnHouse()
+    pave(r, [BAY, COL[0], COL[1], COL[2], OWN_HOUSE])
+    expect(reachableOf(r)).toEqual([1])
+    expect(eraseRoad(r.state, r.world, COL[1] as number, COL[2] as number)).toBe(true)
+    expect(reachableOf(r), 'one segment out of the middle disconnects it').toEqual([0])
+    pave(r, [COL[1], COL[2]])
+    expect(reachableOf(r), 'and putting it back reconnects it').toEqual([1])
+  })
+
+  it('H: every bay the OLD predicate called red is still red — the fix only widens', () => {
+    // `assembleSources` skips a destination whose carpark carries no road bit,
+    // so a bare bay is never a field source and takes zero arrivals by
+    // construction. The old predicate was therefore exact on its red arm and
+    // wrong only on its grey one, and this asserts the implication rather than
+    // describing it: over a board with every interesting shape on it, nothing
+    // the old test called unreachable is called reachable now.
+    const r = destAndOwnHouse()
+    const D0_ORIGIN = cellOf(14, 20)
+    expect(placeDestination(r.state, r.world, D0_ORIGIN, ORIENTATION_E, 0, DEST_KIND_SQUARE)).toBe(true)
+    expect(placeHouse(r.state, r.world, cellOf(17, 22), 0)).toBe(true)
+    pave(r, [cellOf(17, 20), cellOf(17, 21), cellOf(17, 22)])
+    pave(r, [BAY, COL[0]])
+    const frame = build(r, builderFor(r))
+    let bare = 0
+    for (let d = 0; d < frame.destCount; d++) {
+      const carpark = frame.destCarpark[d] as number
+      const oldRed = carpark < 0 || (r.state.roads[carpark] as number) === 0
+      if (oldRed) {
+        bare++
+        expect(frame.destReachable[d] as number, `destination ${d} was red and must stay red`).toBe(0)
+      }
+    }
+    // Non-vacuous in BOTH directions, or "the implication holds" is a statement
+    // about an empty set: this board has a bay the old test called red, and a
+    // bay the old test called grey that the new one calls red.
+    expect(bare, 'a bay the old predicate called red').toBe(0)
+    expect(r.state.roads[BAY] as number, 'D0’s bay carries a road bit — old: grey').not.toBe(0)
+    expect(frame.destReachable[0] as number, 'and the new predicate calls it red').toBe(0)
+    expect(frame.destReachable[1] as number, 'while the genuinely connected one is grey').toBe(1)
+  })
+
+  it('answers 0 for a bay that is off the grid', () => {
+    // `carparkCell` returns -1 for a footprint whose bay would fall off the
+    // board. Placement never stores one — `canPlaceDestination` refuses it — so
+    // this is the fail-closed arm, reached by asking the predicate directly.
+    const r = destAndOwnHouse()
+    pave(r, [BAY, COL[0], COL[1], COL[2], OWN_HOUSE])
+    const fb = builderFor(r)
+    build(r, fb)
+    expect(destinationIsReachable(r.state, fb.reach, -1, 1), 'no bay, nothing to drive to').toBe(0)
+    // Non-vacuous: the same call with the real bay answers 1, so the -1 arm is
+    // being taken rather than the whole function returning 0.
+    expect(destinationIsReachable(r.state, fb.reach, BAY, 1)).toBe(1)
+  })
+
+  it('answers 0 for a bay with no road bit, exactly as assembleSources does', () => {
+    // The arm the shipped predicate WAS, kept verbatim. A carpark with no road
+    // bit is never a flow-field source, so the destination takes zero arrivals
+    // however well connected the rest of the board is.
+    const r = destAndOwnHouse()
+    pave(r, [COL[0], COL[1], COL[2], OWN_HOUSE])
+    expect(r.state.roads[BAY] as number, 'the bay is bare').toBe(0)
+    expect(r.state.roads[COL[0]] as number, 'and the road it does not touch is not').not.toBe(0)
+    expect(reachableOf(r)).toEqual([0])
+  })
+
+  it('counts the components it labelled, so a bare cell is not one', () => {
+    // The seed guard's only observable. `labelRoadComponents` starts a component
+    // at a cell that carries a road bit and at no other, which is the same test
+    // `assembleSources` applies to a carpark. Without it every one of the 960
+    // cells on this board is its own single-cell component — the destination
+    // answers happen to survive that, so the count is what pins the line.
+    const r = destAndOwnHouse()
+    pave(r, [BAY, COL[0], COL[1], COL[2], OWN_HOUSE])
+    pave(r, [cellOf(5, 30), cellOf(5, 31)])
+    const fb = builderFor(r)
+    expect(labelRoadComponents(r.state, r.world, fb.reach), 'two roads, two components').toBe(2)
+    expect(r.world.cells, 'and the board has far more cells than that').toBe(960)
+  })
+
+  it('clears each component’s colour mask, so last frame’s houses cannot answer this frame', () => {
+    // `compColour` is scratch that survives between frames. Component 0 here is
+    // the connected column on one frame and a lone stub on the next, and without
+    // the per-component reset the stub inherits the colour bit the column left
+    // behind — a stale grey bay that no road on the board justifies.
+    const r = destAndOwnHouse()
+    pave(r, [BAY, COL[0], COL[1], COL[2], OWN_HOUSE])
+    const fb = builderFor(r)
+    expect([...build(r, fb).destReachable].slice(0, 1)).toEqual([1])
+    expect(eraseRoad(r.state, r.world, COL[0] as number, COL[1] as number)).toBe(true)
+    expect(eraseRoad(r.state, r.world, COL[1] as number, COL[2] as number)).toBe(true)
+    expect(eraseRoad(r.state, r.world, COL[2] as number, OWN_HOUSE)).toBe(true)
+    // The SAME builder, so the same scratch: this is a staleness test and a
+    // fresh builder would defeat it.
+    expect([...build(r, fb).destReachable].slice(0, 1), 'the stub cannot inherit the column').toEqual([0])
+  })
+
+  it('drops a house colour too wide for the mask instead of aliasing it onto another', () => {
+    // `houseColour` is a `Uint8Array`, so 32 is representable; `1 << 32` is `1`
+    // in JavaScript, which is colour 0's bit. Without the width guard a
+    // hand-written colour-32 house makes every colour-0 destination on its road
+    // read reachable — the "an out-of-contract input must never brick the thing"
+    // shape, pointed at a shift.
+    const r = rig()
+    expect(placeDestination(r.state, r.world, D_ORIGIN, ORIENTATION_E, 0, DEST_KIND_SQUARE)).toBe(true)
+    expect(placeHouse(r.state, r.world, OWN_HOUSE, 0)).toBe(true)
+    pave(r, [BAY, COL[0], COL[1], COL[2], OWN_HOUSE])
+    const fb = builderFor(r)
+    expect([...build(r, fb).destReachable].slice(0, 1), 'vacuity: colour 0 reaches it').toEqual([1])
+    r.state.houseColour[0] = 32
+    expect(
+      [...build(r, fb).destReachable].slice(0, 1),
+      'colour 32 is not colour 0 and must not answer for it',
+    ).toEqual([0])
+  })
+
+  it('leaves the scratch a typed array under a house cell off the board', () => {
+    // A hand-corrupted `houseCell` indexes `compColour[undefined]`, which is not
+    // a canonical numeric index — so the write lands as an ORDINARY PROPERTY on
+    // the typed array, changing its shape and deoptimising every later read.
+    // The bounds guard is what stops that, and the property count is what sees
+    // it: the reachability answers are unchanged either way, so an
+    // outcome-keyed assertion would score zero here.
+    const r = destAndOwnHouse()
+    pave(r, [BAY, COL[0], COL[1], COL[2], OWN_HOUSE])
+    const fb = builderFor(r)
+    r.state.houseCell[0] = r.world.cells + 5
+    build(r, fb)
+    expect(
+      Object.getOwnPropertyNames(fb.reach.compColour).length,
+      'a stray property was added to compColour',
+    ).toBe(r.world.cells)
+  })
+
+  it('is preallocated: every buffer is the same object frame after frame', () => {
+    // The frame path allocates nothing, and a fold that re-allocated its label
+    // array per frame would be ~4 kB a frame at 60 Hz. Identity is the cheap
+    // structural check; `drawAllocation.test.ts` is the measured one.
+    const r = destAndOwnHouse()
+    const fb = builderFor(r)
+    const a = build(r, fb)
+    const b = build(r, fb)
+    expect(b.destReachable).toBe(a.destReachable)
+    expect(a.destReachable).toBeInstanceOf(Uint8Array)
+    expect(a.destReachable.length, 'one slot per destination slot, like its seven siblings').toBe(
+      r.state.destCell.length,
+    )
+    expect(fb.reach.label.length).toBe(r.world.cells)
+    expect(fb.reach.queue.length).toBe(r.world.cells)
+    expect(fb.reach.compColour.length).toBe(r.world.cells)
+    expect(fb.reach.nbrCell.length, 'neighbours’ contract is 8').toBe(8)
+    expect(fb.reach.nbrDir.length).toBe(8)
+  })
+
+  it('walks the same edges the router does, including the row seam', () => {
+    // The traversal calls `sim`'s own `neighbours`, so it cannot disagree with
+    // `computeFlowField` about what an edge is. The sharpest case is the row
+    // seam: cell `y*w + (w-1)` and cell `(y+1)*w + 0` are adjacent in the
+    // BUFFER and not on the BOARD, and a hand-rolled `ni = cur + DX[k]` walk
+    // with no bounds test joins them.
+    //
+    // **The two bits are written straight into `state.roads`**, exactly as
+    // `graph.test.ts`'s own bounds-guard cases do and for the same reason:
+    // `placeRoad` validates adjacency through `dirBetween`, so it will never
+    // create an east bit on the board's last column and the seam is
+    // unreachable through the production writer. Without the direct write this
+    // case exercises nothing and a hand-rolled walk passes it.
+    const r = rig()
+    const EAST_EDGE = cellOf(23, 32)
+    const NEXT_ROW = cellOf(0, 33)
+    expect(NEXT_ROW - EAST_EDGE, 'the two cells really are adjacent in the buffer').toBe(1)
+    expect(
+      placeDestination(r.state, r.world, cellOf(20, 32), ORIENTATION_E, 0, DEST_KIND_SQUARE),
+      'a destination whose bay is the row’s last cell',
+    ).toBe(true)
+    const fb = builderFor(r)
+    expect(build(r, fb).destCarpark[0] as number).toBe(EAST_EDGE)
+    expect(placeHouse(r.state, r.world, NEXT_ROW, 0)).toBe(true)
+    // E on the last column, W on the first column of the next row: a mirrored
+    // pair that a bounds-blind walk reads as one component.
+    r.state.roads[EAST_EDGE] = 1 << 2
+    r.state.roads[NEXT_ROW] = 1 << 6
+    expect([...build(r, fb).destReachable].slice(0, 1), 'the seam is not an edge').toEqual([0])
+    // Non-vacuous: the same house one cell up — a REAL neighbour of the bay —
+    // is reached, so the fold is walking bits at all rather than refusing this
+    // board for some other reason.
+    const REAL = cellOf(23, 31)
+    r.state.houseCell[0] = REAL
+    r.state.roads[EAST_EDGE] = (r.state.roads[EAST_EDGE] as number) | 1
+    r.state.roads[REAL] = 1 << 4
+    expect([...build(r, fb).destReachable].slice(0, 1), 'a real neighbour IS an edge').toEqual([1])
   })
 })
