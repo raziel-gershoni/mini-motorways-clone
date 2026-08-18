@@ -3164,6 +3164,35 @@ describe('the shutdown screen', () => {
     expect(shutdownTexts(drawWith(stubbed))).toContain('NOTHING CAN REACH DESTINATION 1')
   })
 
+  it('ignores a LIVE-looking byte in a dead slot — the index guard, with teeth', () => {
+    // The fail-closed index guard needs a fixture where the two answers differ,
+    // and `destReachable[9]` being `undefined` is not one: `undefined !== 1` is
+    // already true, so an out-of-range read agrees with the guard by accident.
+    // The board that separates them is a slot the fold has not rewritten this
+    // frame — `destReachable` is preallocated for every slot and only
+    // `[0, destCount)` is folded, so a dead slot holds whatever a longer prefix
+    // last left in it. Here index 1 holds a stale 1 while `destCount` is 1.
+    const stale = {
+      ...gameOverFrame({ failedDest: 1 }),
+      destReachable: new Uint8Array([1, 1]),
+    }
+    expect(stale.destCount, 'index 1 is outside the live prefix').toBe(1)
+    expect(shutdownTexts(drawWith(stale))).toContain('NOTHING CAN REACH DESTINATION 1')
+  })
+
+  it('treats any byte that is not 1 as unreachable, so an unwritten slot reads RED', () => {
+    // `!== 1` rather than `=== 0`: a `destReachable` byte the fold never wrote
+    // must take the arm that overstates the problem, not the one that hides it.
+    // Only a value outside {0, 1} can tell the two spellings apart, and the
+    // frame type cannot forbid one — `Uint8Array` carries 0..255.
+    const odd = {
+      ...gameOverFrame({ failedDest: 1, destCount: 2 }),
+      destReachable: new Uint8Array([1, 2]),
+    }
+    expect(fillsStyled(drawWith(odd), OVERCROWD).length, 'byte 2 is not a promise').toBe(1)
+    expect(shutdownTexts(drawWith(odd))).toContain('NOTHING CAN REACH DESTINATION 1')
+  })
+
   it('takes the unreachable arm for an index outside the LIVE prefix, failing closed', () => {
     // `failedDest` is -1 on a live frame and bounded above only by `destCount`.
     // The guard is what makes the answer a decision rather than an accident of
