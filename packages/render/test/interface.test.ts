@@ -92,6 +92,10 @@ function handBuiltFrame(): RenderFrame {
   // instance in this fixture too and the length check below is not the only
   // thing holding the array in place.
   const destOvercrowd = new Uint8Array([128, 0, 255])
+  // The EIGHTH parallel dense array (M1f), extended with the dead slot for the
+  // same reason as the other seven. Live slot 0 reads reachable and live slot 1
+  // does not, so both arms of the bay's colour have a live instance here.
+  const destReachable = new Uint8Array([1, 0, 1])
 
   // Eight car slots allocated, two live; the tail holds a stale in-bounds
   // position rather than (0, 0).
@@ -126,6 +130,7 @@ function handBuiltFrame(): RenderFrame {
     destPins,
     destCarpark,
     destOvercrowd,
+    destReachable,
     carCount: 2,
     carXY,
     carColour,
@@ -176,15 +181,16 @@ describe('RenderFrame is constructible from plain typed arrays and scalars alone
     expect(frame.carCount).toBe(2)
   })
 
-  it('keeps all seven destination arrays the same length, so one slot index addresses all of them', () => {
+  it('keeps all eight destination arrays the same length, so one slot index addresses all of them', () => {
     // `render` reads destCell/destColour/destKind/destOrientation/destPins/
-    // destCarpark/destOvercrowd by the same slot number. A short array hands
+    // destCarpark/destOvercrowd/destReachable by the same slot number. A short array hands
     // `undefined` to a fillStyle, a coordinate or a ring sweep on the last live
     // destination — and under `noUncheckedIndexedAccess` that is a type error in
     // `render` but not in a hand-built fixture, so the fixture is where it has
     // to be caught.
     //
-    // **Seven since M1e Task 9, and the SET IS DERIVED FROM THE FRAME rather
+    // **Eight since M1f, seven since M1e Task 9, and the SET IS DERIVED FROM
+    // THE FRAME rather
     // than written out.** The first version of this test carried a hand-written
     // six-element literal and asserted `parallel.length === 6` — tautologically
     // true, and it would have said nothing about an eighth array. It also
@@ -214,6 +220,7 @@ describe('RenderFrame is constructible from plain typed arrays and scalars alone
       'destOrientation',
       'destOvercrowd',
       'destPins',
+      'destReachable',
     ])
     for (const [name, array] of parallel) expect(array.length, name).toBe(n)
     // Non-vacuous on the filter itself: `destCount` is a NUMBER and must not be

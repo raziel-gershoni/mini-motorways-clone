@@ -386,6 +386,7 @@ function frameA(paused = false): RenderFrame {
     destPins: new Uint8Array(0),
     destCarpark: new Int32Array(0),
     destOvercrowd: new Uint8Array(0),
+    destReachable: new Uint8Array(0),
     carCount: 1,
     carXY,
     carColour: new Uint8Array([3]),
@@ -580,6 +581,12 @@ function frameB(paused = false): RenderFrame {
   // Both meters at zero, so the whole-log literal below stays a LIVE frame with
   // no ring in it. `frameWithOvercrowd` is what gives this fixture a ring.
   const destOvercrowd = new Uint8Array([0, 0])
+  // The reachability fold (M1f), one byte per slot. Slot 0 is REACHABLE and
+  // slot 1 is not, which is the pair the bay-colour cases split on — and it is
+  // set independently of `roads` on purpose: `render` no longer derives this,
+  // `game` folds it, and a fixture that recomputed it from the road bits would
+  // be a second implementation of the thing the boundary exists to move.
+  const destReachable = new Uint8Array([1, 0])
 
   // Two live cars, six dead slots at (1, 1). Every coordinate is dyadic and so
   // exact in a Float32Array.
@@ -611,6 +618,7 @@ function frameB(paused = false): RenderFrame {
     destPins,
     destCarpark,
     destOvercrowd,
+    destReachable,
     carCount: 2,
     carXY,
     carColour,
@@ -1967,36 +1975,60 @@ describe('destinations: the footprint, the carpark and the waiting pins', () => 
     expect(fillsStyled(log, OVERCROWD)).toEqual([fill(OVERCROWD, bx(4) + 16.5, by(1) + 16.5, 33, 33)])
   })
 
-  it('follows the ROAD and not the index — paving a bare bay turns its bay grey', () => {
-    // The arm has to track the road bit rather than the destination number, or a
-    // player who draws the road the shutdown screen asked for gets no
+  it('follows destReachable and not the index — connecting a bare bay turns it grey', () => {
+    // The arm has to track the fold's byte rather than the destination number,
+    // or a player who draws the road the shutdown screen asked for gets no
     // acknowledgement. Same fixture, same indices, one byte different.
-    const paved = { ...frameB(), destCount: 2, roads: new Uint8Array(frameB().roads) }
-    paved.roads[paved.destCarpark[1] as number] = 4
-    const log = draw(paved, atlasesAt(B_TILE_DEVICE))
+    //
+    // **The byte, and NOT `roads`.** Until M1f this case pushed a road bit onto
+    // the bare bay and expected grey — which is precisely the bug a player
+    // reported in the shipped build, written down here as a requirement. One
+    // tile on a bay reaches nothing; `game` decides what a road amounts to and
+    // `render` is not allowed to guess.
+    const connected = { ...frameB(), destCount: 2, destReachable: new Uint8Array([1, 1]) }
+    const log = draw(connected, atlasesAt(B_TILE_DEVICE))
     expect(fillsStyled(log, OVERCROWD), 'nothing is unreachable now').toEqual([])
     expect(fillsStyled(log, ROAD_EDGE).length, 'both bays are grey').toBe(2)
-    // ...and back, so this is a predicate and not a latch: the unpaved fixture
-    // still reds exactly one.
+    // ...and back, so this is a predicate and not a latch: the unconnected
+    // fixture still reds exactly one.
     expect(fillsStyled(draw({ ...frameB(), destCount: 2 }, atlasesAt(B_TILE_DEVICE)), OVERCROWD).length).toBe(1)
+  })
+
+  it('ignores the road bit entirely — a paved bay that reaches nothing stays RED', () => {
+    // **The user's report, at the renderer's own boundary.** A road bit on the
+    // bay with `destReachable[1] = 0` is exactly the stub case: the fold says
+    // nothing can get there and the colour must say so, however much road is
+    // sitting on the cell. This is the mutation guard for "someone puts the
+    // `roads` test back", and it is a different case from the one above —
+    // there the byte changed, here it deliberately does not.
+    const stubbed = { ...frameB(), destCount: 2, roads: new Uint8Array(frameB().roads) }
+    stubbed.roads[stubbed.destCarpark[1] as number] = 4
+    expect(stubbed.destReachable[1] as number, 'the fold still says no').toBe(0)
+    const log = draw(stubbed, atlasesAt(B_TILE_DEVICE))
+    expect(fillsStyled(log, OVERCROWD).length, 'the bay is still red').toBe(1)
+    expect(fillsStyled(log, ROAD_EDGE).length, 'and only the reachable one is grey').toBe(1)
   })
 
   it('says the same thing as the shutdown sentence, because it is the same predicate', () => {
     // **The failure this guards is a disagreement, not a wrong colour.** The bay
-    // and `failedText`'s split are one function (`carparkIsRoadless`); restating
-    // the predicate at the second site would let a red bay sit under
+    // and `failedText`'s split are one function (`destinationIsUnreachable`);
+    // restating the predicate at the second site would let a red bay sit under
     // "DESTINATION 1 WENT UNSERVED", which reads as the game lying. Both arms,
-    // both observables, one frame each.
+    // both observables, one frame each. The M1f bug is the argument for sharing
+    // made in the other direction: because there was one predicate, one fix
+    // corrected the colour and the sentence together.
     const bare = { ...gameOverFrame({ failedDest: 1, destCount: 2 }) }
     const bareLog = drawWith(bare)
     expect(fillsStyled(bareLog, OVERCROWD).length, 'a red bay').toBe(1)
-    expect(shutdownTexts(bareLog)).toContain('NO ROAD REACHES DESTINATION 1')
+    expect(shutdownTexts(bareLog)).toContain('NOTHING CAN REACH DESTINATION 1')
 
-    const paved = gameOverFrame({ failedDest: 1, destCount: 2 })
-    paved.roads[paved.destCarpark[1] as number] = 4
-    const pavedLog = drawWith(paved)
-    expect(fillsStyled(pavedLog, OVERCROWD), 'no red bay').toEqual([])
-    expect(shutdownTexts(pavedLog)).toContain('DESTINATION 1 WENT UNSERVED')
+    const connected = {
+      ...gameOverFrame({ failedDest: 1, destCount: 2 }),
+      destReachable: new Uint8Array([1, 1]),
+    }
+    const connectedLog = drawWith(connected)
+    expect(fillsStyled(connectedLog, OVERCROWD), 'no red bay').toEqual([])
+    expect(shutdownTexts(connectedLog)).toContain('DESTINATION 1 WENT UNSERVED')
   })
 
   it('draws no carpark OUTSIDE the revealed rect, even when its building is inside', () => {
@@ -3068,17 +3100,17 @@ describe('the shutdown screen', () => {
   })
 
   it('names the destination that shut the city down, as a whole line', () => {
-    // Fixture B's destination 0 has its carpark at (3, 1), which carries road
-    // mask 16 — so this is the SERVED-BUT-NOT-ENOUGH arm.
+    // Fixture B's destination 0 reads `destReachable[0] = 1` — a car CAN get
+    // there — so this is the CONNECTED-BUT-NOT-SERVED-ENOUGH arm.
     expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 0 })))).toContain(
       'DESTINATION 0 WENT UNSERVED',
     )
     // The index is what varies, so vary it — a fixture on one value cannot tell
     // the label apart from a constant string, and the memo makes a stale cache
-    // the likeliest way to get one. Destination 1's carpark is (4, 1), which
-    // carries no road, so this also crosses to the other arm.
+    // the likeliest way to get one. Destination 1 reads `destReachable[1] = 0`,
+    // so this also crosses to the other arm.
     expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 1, destCount: 2 })))).toContain(
-      'NO ROAD REACHES DESTINATION 1',
+      'NOTHING CAN REACH DESTINATION 1',
     )
   })
 
@@ -3096,44 +3128,61 @@ describe('the shutdown screen', () => {
     }
   })
 
-  it('splits the line on whether ANY road reaches the carpark, both arms on one fixture', () => {
-    // The two arms want different remedies — "draw a road to it" against "serve
-    // it faster" — so the fixture puts one destination on each side of the
+  it('splits the line on whether anything can REACH the destination, both arms on one fixture', () => {
+    // The two arms want different remedies — "connect it" against "serve it
+    // faster" — so the fixture puts one destination on each side of the
     // predicate and flips only the index between the two draws. Both arms are
     // reachable on the boards that ship: every starting-city carpark is bare,
     // and the demo board's killer is on the network and still receives nothing.
     const frame = frameB()
-    expect(frame.roads[frame.destCarpark[0] as number] as number, 'dest 0 IS reachable').toBe(16)
-    expect(frame.roads[frame.destCarpark[1] as number] as number, 'dest 1 is NOT').toBe(0)
+    expect(frame.destReachable[0] as number, 'dest 0 IS reachable').toBe(1)
+    expect(frame.destReachable[1] as number, 'dest 1 is NOT').toBe(0)
     expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 0, destCount: 2 })))).toContain(
       'DESTINATION 0 WENT UNSERVED',
     )
     expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 1, destCount: 2 })))).toContain(
-      'NO ROAD REACHES DESTINATION 1',
+      'NOTHING CAN REACH DESTINATION 1',
     )
-    // ...and the arm follows the ROAD, not the index: put a road under dest 1's
-    // carpark and the same index crosses over.
-    const paved = gameOverFrame({ failedDest: 1, destCount: 2 })
-    paved.roads[paved.destCarpark[1] as number] = 4
-    expect(shutdownTexts(drawWith(paved))).toContain('DESTINATION 1 WENT UNSERVED')
+    // ...and the arm follows the FOLD, not the index: set dest 1's byte and the
+    // same index crosses over.
+    const connected = {
+      ...gameOverFrame({ failedDest: 1, destCount: 2 }),
+      destReachable: new Uint8Array([1, 1]),
+    }
+    expect(shutdownTexts(drawWith(connected))).toContain('DESTINATION 1 WENT UNSERVED')
   })
 
-  it('takes the roadless arm for an index outside the LIVE prefix, failing closed', () => {
+  it('says a road bit is not a connection: a paved but unreachable bay still gets the REACH line', () => {
+    // **The user's report, at the sentence rather than at the colour.** Until
+    // M1f this arm was `roads[carpark] === 0`, so one tile laid on the bay
+    // flipped the shutdown screen from "connect it" to "serve it faster" while
+    // the destination still took zero cars — the exact opposite of the advice
+    // the player needed. The road bit is present here and the fold says no.
+    const stubbed = gameOverFrame({ failedDest: 1, destCount: 2 })
+    stubbed.roads[stubbed.destCarpark[1] as number] = 4
+    expect(stubbed.destReachable[1] as number).toBe(0)
+    expect(shutdownTexts(drawWith(stubbed))).toContain('NOTHING CAN REACH DESTINATION 1')
+  })
+
+  it('takes the unreachable arm for an index outside the LIVE prefix, failing closed', () => {
     // `failedDest` is -1 on a live frame and bounded above only by `destCount`.
-    // Without the index guard, `destCarpark[-1]` is `undefined` — neither `< 0`
-    // nor `=== 0` once it has indexed `roads` — so an out-of-range index took
-    // the REACHABLE arm and asserted that a destination which does not exist was
-    // on the road network.
+    // The guard is what makes the answer a decision rather than an accident of
+    // the sentinel: `destReachable[-1]` and `destReachable[9]` are both
+    // `undefined`, which is `!== 1` and happens to agree today — so the case
+    // that gives the guard teeth is the LIVE one below it, and the two are
+    // asserted together on purpose.
     for (const failedDest of [-1, 1, 9]) {
       expect(
         shutdownTexts(drawWith(gameOverFrame({ failedDest }))),
         `failedDest ${failedDest} on a one-destination frame`,
-      ).toContain(`NO ROAD REACHES DESTINATION ${failedDest}`)
+      ).toContain(`NOTHING CAN REACH DESTINATION ${failedDest}`)
     }
     // Non-vacuous: index 1 crosses to the other arm the moment it is LIVE and
-    // paved, so the guard is about the prefix and not about the number 1.
-    const live = gameOverFrame({ failedDest: 1, destCount: 2 })
-    live.roads[live.destCarpark[1] as number] = 4
+    // reachable, so the guard is about the prefix and not about the number 1.
+    const live = {
+      ...gameOverFrame({ failedDest: 1, destCount: 2 }),
+      destReachable: new Uint8Array([1, 1]),
+    }
     expect(shutdownTexts(drawWith(live))).toContain('DESTINATION 1 WENT UNSERVED')
   })
 
@@ -3316,13 +3365,13 @@ describe('failedText: the fourth single-slot cache in this file', () => {
     // cannot.
     drawWith(gameOverFrame({ failedDest: 4 }))
     expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: -1 })))).toContain(
-      'NO ROAD REACHES DESTINATION -1',
+      'NOTHING CAN REACH DESTINATION -1',
     )
     expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 0 })))).toContain(
       'DESTINATION 0 WENT UNSERVED',
     )
     expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 5 })))).toContain(
-      'NO ROAD REACHES DESTINATION 5',
+      'NOTHING CAN REACH DESTINATION 5',
     )
     // ...and back, so the cache is keyed rather than one-shot.
     expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 0 })))).toContain(
@@ -3331,17 +3380,19 @@ describe('failedText: the fourth single-slot cache in this file', () => {
   })
 
   it('is keyed on the ARM as well as the index, so the pair cannot go half-stale', () => {
-    // The `roadless` arm can flip for a fixed index, and a cache keyed on the
-    // index alone would keep the old sentence forever. Same index, twice, with
-    // only the road under the carpark changing.
+    // The `unreachable` arm can flip for a fixed index, and a cache keyed on
+    // the index alone would keep the old sentence forever. Same index, twice,
+    // with only the fold's byte changing.
     const bare = gameOverFrame({ failedDest: 1, destCount: 2 })
-    expect(shutdownTexts(drawWith(bare))).toContain('NO ROAD REACHES DESTINATION 1')
-    const paved = gameOverFrame({ failedDest: 1, destCount: 2 })
-    paved.roads[paved.destCarpark[1] as number] = 4
-    expect(shutdownTexts(drawWith(paved))).toContain('DESTINATION 1 WENT UNSERVED')
+    expect(shutdownTexts(drawWith(bare))).toContain('NOTHING CAN REACH DESTINATION 1')
+    const connected = {
+      ...gameOverFrame({ failedDest: 1, destCount: 2 }),
+      destReachable: new Uint8Array([1, 1]),
+    }
+    expect(shutdownTexts(drawWith(connected))).toContain('DESTINATION 1 WENT UNSERVED')
     // ...and back again, so it is a cache rather than a one-way latch.
     expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 1, destCount: 2 })))).toContain(
-      'NO ROAD REACHES DESTINATION 1',
+      'NOTHING CAN REACH DESTINATION 1',
     )
   })
 })

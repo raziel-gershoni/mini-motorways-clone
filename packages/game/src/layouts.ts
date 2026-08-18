@@ -115,8 +115,11 @@ export const DEMO_LAYOUT_ID = 'demo'
  *
  * **What a plain load does NOT do is survive.** With no input at all the city
  * shuts down on tick **5,580** (3 min 06 s) on D2, whose carpark carries no
- * road — so the shutdown screen reads `NO ROAD REACHES DESTINATION 2`, which
- * is the OTHER arm from the one the demo board produced. That change is
+ * road — so the shutdown screen reads `NOTHING CAN REACH DESTINATION 2`, which
+ * is the OTHER arm from the one the demo board produced. (The line read `NO
+ * ROAD REACHES DESTINATION 2` until M1f widened the predicate behind it from
+ * "a road bit is on the bay" to "a car can get there"; the arm this board takes
+ * did not change, only the sentence.) That change is
  * player-visible copy and it is asserted in `integration.test.ts`. Five tiles
  * on column 17 remove that death entirely (`startingCity.test.ts`), and the
  * latest draw that still saves it is tick 5,550 — 95 % of the run.

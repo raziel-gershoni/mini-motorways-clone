@@ -272,10 +272,13 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  *      it again**, from a cold boot, on the same seed and therefore the same
  *      board. Nothing before that tap is recoverable: the sim is frozen, the
  *      grid refuses input, and the erase button is taken off the screen.
- *      The first line is the `WENT UNSERVED` arm because D2's carpark IS on
- *      the network; the starting city with no input produces the other arm,
- *      `NO ROAD REACHES DESTINATION 2`, and both are reachable on shipped
- *      boards.
+ *      The first line is the `WENT UNSERVED` arm because D2's carpark is on
+ *      the network AND joined to a house of its own colour; the starting city
+ *      with no input produces the other arm, `NOTHING CAN REACH DESTINATION
+ *      2`, and both are reachable on shipped boards. (M1f widened that
+ *      predicate from "a road bit is on the bay" to "a car can get there" and
+ *      re-worded the line to match; this board still takes the arm it always
+ *      took, and `integration.test.ts` asserts both.)
  *   7. **NOT the anti-deadlock valve**, by design. It fires at 1,350 consecutive
  *      blocked ticks — 45 seconds of one car being refused every single tick —
  *      and on this layout it never fires at all over 20,000 ticks. That is the

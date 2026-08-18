@@ -532,6 +532,7 @@ describe('the five matte fills tile the backing store the shell actually created
       destPins: new Uint8Array(0),
       destCarpark: new Int32Array(0),
       destOvercrowd: new Uint8Array(0),
+      destReachable: new Uint8Array(0),
       carCount: 0,
       carXY: new Float32Array(0),
       carColour: new Uint8Array(0),

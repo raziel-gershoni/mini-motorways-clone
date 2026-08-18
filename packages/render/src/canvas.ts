@@ -491,18 +491,25 @@ function tilesText(tilesLeft: number): string {
  * So the line says which of the two things happened, and it is decided from
  * data `render` already holds rather than from new state:
  *
- * - **`NO ROAD REACHES DESTINATION n`** when the destination's carpark carries
- *   no road bit. A car drives *onto* the carpark and the flow field relaxes over
- *   the road graph, so a bare carpark is a destination nothing can ever serve —
- *   which is the shape a spawned building has by construction, and the shape
- *   **all five** of the starting city's have. The remedy is literally a road.
- *   (Both counts in this comment read *"four"* until M1e's closing sweep.
- *   Measured on the no-input city driven to its 5,580: **three** seeded, a
- *   fourth spawned at tick 2,250 and a fifth at 4,500, so **five** at the death
- *   tick — five bare carparks, five meters that climb and not one that ever
- *   drains. *"Four"* is the count for the 2,250 ticks between those two spawns
- *   and for no part of the run this comment is about; the spawner had been live
- *   for thirty commits when the sentence was written.)
+ * - **`NOTHING CAN REACH DESTINATION n`** when no car can drive to it —
+ *   `frame.destReachable[n] !== 1`. A car drives *onto* the carpark and the
+ *   flow field relaxes over the road graph, so a destination with no road
+ *   component joining its bay to a house of its own colour is one nothing can
+ *   ever serve — which is the shape a spawned building has by construction, and
+ *   the shape **all five** of the starting city's have. The remedy is literally
+ *   a road. (Both counts in this comment read *"four"* until M1e's closing
+ *   sweep. Measured on the no-input city driven to its 5,580: **three** seeded,
+ *   a fourth spawned at tick 2,250 and a fifth at 4,500, so **five** at the
+ *   death tick — five bare carparks, five meters that climb and not one that
+ *   ever drains. *"Four"* is the count for the 2,250 ticks between those two
+ *   spawns and for no part of the run this comment is about; the spawner had
+ *   been live for thirty commits when the sentence was written.)
+ *
+ *   **The line reads `NOTHING CAN REACH` and not `NO ROAD REACHES` since M1f**,
+ *   because the predicate stopped being about roads. Under the old wording a
+ *   player who laid one tile on the bay was told the road had arrived — the bug
+ *   report that produced this change — and the sentence would have been
+ *   literally false the moment the widened predicate started catching the stub.
  * - **`DESTINATION n WENT UNSERVED`** otherwise. Not "overcrowded": the meter
  *   integrates time spent over pin capacity, so what it measures is demand that
  *   went unmet, in the congested case as much as in the abandoned one. This is
@@ -545,47 +552,56 @@ function tilesText(tilesLeft: number): string {
 let cachedFailedKey = -2
 let cachedFailedText = ''
 
-function failedText(d: number, roadless: boolean): string {
+function failedText(d: number, unreachable: boolean): string {
   // One key for both inputs, so the pair cannot go half-stale: `d * 2 + arm`.
-  // The `roadless` arm can genuinely flip for a fixed `d` — the player may lay
-  // a road across the carpark while the shutdown screen is up on a future
-  // in-place restart — and a cache keyed on the index alone would keep the old
-  // sentence forever.
-  const key = d * 2 + (roadless ? 1 : 0)
+  // The `unreachable` arm can genuinely flip for a fixed `d` — the player may
+  // connect the carpark while the shutdown screen is up on a future in-place
+  // restart — and a cache keyed on the index alone would keep the old sentence
+  // forever.
+  const key = d * 2 + (unreachable ? 1 : 0)
   if (key !== cachedFailedKey) {
     cachedFailedKey = key
-    cachedFailedText = roadless
-      ? `NO ROAD REACHES DESTINATION ${d}`
+    cachedFailedText = unreachable
+      ? `NOTHING CAN REACH DESTINATION ${d}`
       : `DESTINATION ${d} WENT UNSERVED`
   }
   return cachedFailedText
 }
 
 /**
- * Does destination `d`'s carpark carry no road? See `failedText`.
+ * Can nothing drive to destination `d`? See `failedText`.
  *
- * `-1` is `carparkCell`'s off-grid sentinel and counts as roadless — a bay that
- * is not on the board is not one anything can drive to.
+ * **It reads one byte and derives nothing.** Until M1f this function tested
+ * `frame.roads[carpark] !== 0`, which is *necessary* for service and nowhere
+ * near sufficient — a single tile laid on the bay, joined to nothing, turned
+ * the bay grey and told the player they had fixed a destination that still took
+ * zero arrivals. That was the shipped build's first user-reported bug. The
+ * question needs the road GRAPH and the house colours, which `render` is
+ * forbidden to reach for (spec §4), so `game` folds the answer into
+ * `destReachable` and this function reads it. See `RenderFrame.destReachable`
+ * for what the fold does and does not know.
  *
  * **Two callers, and that is the point of it being a function.** `drawShutdown`
  * picks the ending's sentence with it, and `drawDestinations` picks the live
  * bay's colour with it. Restating the predicate at the second site would let the
- * red bay and `NO ROAD REACHES DESTINATION n` drift apart, which is precisely
- * the disagreement a player would read as the game lying to them. The
- * limitations of the predicate are written at the `drawDestinations` call site,
- * where the colour makes them look stronger than they are.
+ * red bay and `NOTHING CAN REACH DESTINATION n` drift apart, which is precisely
+ * the disagreement a player would read as the game lying to them — and the bug
+ * above proves the point in the other direction: because they shared one
+ * predicate, one fix corrected both at once.
  */
-function carparkIsRoadless(frame: RenderFrame, d: number): boolean {
-  // **The index is guarded as well as the cell, and fails CLOSED.** `failedDest`
-  // is -1 on a live frame and is bounded above only by `destCount`, and without
-  // this line `destCarpark[-1]` is `undefined` — which is neither `< 0` nor,
-  // after indexing `roads` with it, `=== 0`, so an out-of-range index quietly
-  // took the *reachable* arm and asserted that a destination which does not
-  // exist was on the road network. A slot with no carpark is one nothing can
-  // drive to, which is the roadless arm by definition.
+function destinationIsUnreachable(frame: RenderFrame, d: number): boolean {
+  // **The index is guarded and fails CLOSED.** `failedDest` is -1 on a live
+  // frame and is bounded above only by `destCount`, and without this line
+  // `destReachable[-1]` is `undefined` — which is `!== 1`, so it happens to
+  // take the same arm today. It is written anyway because that agreement is an
+  // accident of the sentinel rather than a decision: a slot with no destination
+  // in it is one nothing can drive to, and this line is what says so.
   if (d < 0 || d >= frame.destCount) return true
-  const carpark = frame.destCarpark[d] as number
-  return carpark < 0 || (frame.roads[carpark] as number) === 0
+  // `!== 1` rather than `=== 0`, so every byte the fold does not set is
+  // unreachable. A freshly allocated `Uint8Array` is all zeroes, which means a
+  // frame built before the fold ran reads RED — the arm that overstates a
+  // problem rather than the arm that hides one.
+  return (frame.destReachable[d] as number) !== 1
 }
 
 // ---------------------------------------------------------------------------
@@ -832,7 +848,7 @@ function drawShutdown(
   //
   // `maxWidth` on every line, so a long label condenses instead of leaving the
   // canvas — the same construction guarantee `fillCentred` gives the HUD.
-  ctx.fillText(failedText(failed, carparkIsRoadless(frame, failed)), cx, top, maxWidth)
+  ctx.fillText(failedText(failed, destinationIsUnreachable(frame, failed)), cx, top, maxWidth)
   ctx.fillText(ADVICE_TEXT, cx, top + SHUTDOWN_LINE_STRIDE_CSS, maxWidth)
   ctx.fillText(scoreText(frame.score), cx, top + 2 * SHUTDOWN_LINE_STRIDE_CSS, maxWidth)
   ctx.fillText(RESTART_TEXT, cx, top + 3 * SHUTDOWN_LINE_STRIDE_CSS, maxWidth)
@@ -1003,38 +1019,45 @@ function drawDestinations(ctx: DrawContext, frame: RenderFrame, palette: Palette
       const cx = carpark % frame.gridW
       const cy = Math.floor(carpark / frame.gridW)
       if (insideRevealed(camera, cx, cy)) {
-        // **The bay is painted in the alarm colour when no road reaches it, and
-        // this is the same predicate the shutdown screen splits its sentence
-        // on** — `carparkIsRoadless`, called from here and from `drawShutdown`
-        // rather than restated, so the live signal and the ending's sentence
-        // cannot disagree about which destination was unreachable. (Inside this
-        // branch the function reduces to `roads[carpark] === 0`: `d` is below
-        // `destCount` by the loop bound and `carpark >= 0` by the test above.)
+        // **The bay is painted in the alarm colour when nothing can reach the
+        // destination, and this is the same predicate the shutdown screen
+        // splits its sentence on** — `destinationIsUnreachable`, called from
+        // here and from `drawShutdown` rather than restated, so the live signal
+        // and the ending's sentence cannot disagree about which destination was
+        // unreachable. (Inside this branch the index guard is redundant: `d` is
+        // below `destCount` by the loop bound.)
         //
-        // **Why the bay rather than a new sprite.** A destination whose carpark
-        // carries no road takes zero arrivals for as long as that holds — a car
-        // drives ONTO the bay and the flow field relaxes over the road graph —
-        // so it is doomed from the frame it appears, and until this line it was
+        // **Why the bay rather than a new sprite.** A destination nothing can
+        // drive to takes zero arrivals for as long as that holds, so it is
+        // doomed from the frame it appears, and until M1e Task 9 it was
         // pixel-identical to a healthy one for the 95-107 s its meter needed
         // before the ring painted its first pixel. The fill already happens;
         // this is zero extra draw calls, and both palette strings are
         // preallocated, so it is zero allocations.
         //
-        // **What it does NOT detect, stated here because the colour looks more
-        // certain than it is.** `roads[carpark] !== 0` is NECESSARY for service
-        // and not SUFFICIENT for it, in two directions:
+        // **The predicate was `roads[carpark] !== 0` and that was WRONG, in the
+        // one direction a player can produce with a finger.** A stub laid on
+        // the bay alone set the road bit, so the bay turned grey while nothing
+        // could still reach the destination — reported by the first person to
+        // play the shipped build, inside a minute. It now reads `game`'s
+        // `destReachable` fold: bay and house of the same colour in one road
+        // component. Every bay that was red before is still red; only the grey
+        // arm was ever lying.
         //
-        // - A disconnected stub laid on the bay alone sets the road bit, so the
-        //   bay turns grey while nothing can still reach it. The player is told
-        //   they fixed it and they did not.
-        // - It says nothing about the CONNECTED-but-unserved failure — a bay on
-        //   the network that still receives too little — which is the greedy
-        //   arm's own killer and the demo board's.
+        // **What it still does not detect, stated here because the colour looks
+        // more certain than it is.** Reachability is topological. It says
+        // nothing about the CONNECTED-but-under-served failure — a bay on the
+        // network that receives too little, which is the greedy arm's killer
+        // (D6, one arrival per 436 ticks) and the demo board's — nor about
+        // gridlock, nor about a route longer than `MAX_PATH_LEN`. The overcrowd
+        // ring carries pressure and covers those: measured, it is legible 131.9
+        // s before the greedy arm's death. **The bay stays two-state
+        // deliberately.** A third state would be a second threshold on the same
+        // fact the ring already draws, and it would make one mark mean two
+        // things — which is how the predicate this replaced went wrong.
         //
-        // So it detects the dominant failure shape (every seeded and every
-        // spawned carpark is bare by construction) exactly, and nothing else.
         // A grey bay is not a promise; a red one is a fact.
-        ctx.fillStyle = carparkIsRoadless(frame, d) ? palette.overcrowd : palette.roadEdge
+        ctx.fillStyle = destinationIsUnreachable(frame, d) ? palette.overcrowd : palette.roadEdge
         ctx.fillRect(
           gridToScreenX(camera, cx) + carparkInset,
           gridToScreenY(camera, cy) + carparkInset,

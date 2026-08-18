@@ -1811,7 +1811,7 @@ describe('the survivability gate the default board is flipped behind', () => {
     // spawner put a building somewhere you could not reach" — the failure shape
     // that killed three fixtures at Task 8. It is also the arm of Task 9's
     // shutdown copy that a competent player gets: `WENT UNSERVED`, not
-    // `NO ROAD REACHES`.
+    // `NOTHING CAN REACH`.
     expect(greedy.deathTick, 'the greedy arm must actually end within the window').toBeGreaterThan(0)
     expect(greedy.failedDest, 'and name a destination').toBeGreaterThanOrEqual(0)
     expect(

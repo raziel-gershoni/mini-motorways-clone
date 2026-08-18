@@ -69,6 +69,7 @@ import {
   armPathActions,
   firesSoFar,
   CITY_OPENING,
+  D2_LINK,
   GREEDY_PERIOD_TICKS,
   type CityArm,
 } from './cityArms'
@@ -3267,8 +3268,17 @@ describe('the demo board stops dead, and stays a still image', () => {
  *
  * | board a plain load opens | dies | killer | its carpark | first line |
  * |---|---|---|---|---|
- * | demo (M1d - M1e Task 9) | 6,703 | D2, corridor C | ON the network | `DESTINATION 2 WENT UNSERVED` |
- * | city (M1e Task 10 on)   | 5,580 | D2, colour-1 circle | BARE | `NO ROAD REACHES DESTINATION 2` |
+ * | demo (M1d - M1e Task 9) | 6,703 | D2, corridor C | ON the network, joined to its own colour | `DESTINATION 2 WENT UNSERVED` |
+ * | city (M1e Task 10 on)   | 5,580 | D2, colour-1 circle | BARE | `NOTHING CAN REACH DESTINATION 2` |
+ *
+ * **The wording changed at M1f and the arms did not.** The line used to read
+ * `NO ROAD REACHES DESTINATION n` and was decided by `roads[carpark] !== 0`,
+ * which a single tile on the bay satisfies — so a player who started the stroke
+ * was told the road had arrived. The predicate is now "a house of this
+ * destination's colour is in the same road component as its bay", and the
+ * sentence says what the predicate means. Both boards still produce the arm
+ * they always did: the demo's D2 is joined to its own colour and reads
+ * `WENT UNSERVED`; the city's D2 is bare and reads `NOTHING CAN REACH`.
  *
  * Task 9's own comment says both arms are reachable on the shipped boards; this
  * is the case that says which arm the DEFAULT produces, and it is the one that
@@ -3277,8 +3287,8 @@ describe('the demo board stops dead, and stays a still image', () => {
  * in four `place` actions, and `startingCity.test.ts` proves those four remove
  * this death entirely.
  */
-describe('the board a plain load opens stops dead, and says the roadless thing', () => {
-  it('dies unprompted at 3 min 06 s and blames a destination NO ROAD REACHES', () => {
+describe('the board a plain load opens stops dead, and says the unreachable thing', () => {
+  it('dies unprompted at 3 min 06 s and blames a destination NOTHING CAN REACH', () => {
     // `layoutId: undefined` reaches `createGame` with the property genuinely
     // absent — see `buildRig`'s note — so this is what a player who taps the
     // bot link with no parameters gets.
@@ -3313,7 +3323,8 @@ describe('the board a plain load opens stops dead, and says the roadless thing',
     // about the board. D2's carpark is (17, 14) and no input laid anything.
     const carpark = frame.destCarpark[failed] as number
     expect(carpark, 'D2 opens EAST, so its carpark is (17, 14)').toBe(14 * 24 + 17)
-    expect(rig.game.state.roads[carpark] as number, 'nothing reaches it').toBe(0)
+    expect(rig.game.state.roads[carpark] as number, 'not a tile of road on it').toBe(0)
+    expect(frame.destReachable[failed] as number, 'and so nothing can reach it').toBe(0)
 
     const scrimIndex = rig.ctx.log.findIndex(
       (c) => c.op === 'fill' && c.style === PALETTE.scrim,
@@ -3324,7 +3335,7 @@ describe('the board a plain load opens stops dead, and says the roadless thing',
       .filter((c): c is TextCommand => c.op === 'text')
       .map((c) => c.text)
     expect(said).toEqual([
-      `NO ROAD REACHES DESTINATION ${failed}`,
+      `NOTHING CAN REACH DESTINATION ${failed}`,
       'CONNECT EVERY DESTINATION WITH A ROAD',
       `${rig.game.state.header[H_SCORE] as number} TRIPS`,
       'TAP TO PLAY AGAIN',
@@ -3406,6 +3417,112 @@ describe('the board a plain load opens stops dead, and says the roadless thing',
     expect(rig.game.pointer.down(1, rig.cx(9), rig.cy(20))).toBe(PointerOutcome.RESTART_REQUESTED)
     expect(rig.restarts, 'one tap, one new run').toBe(1)
     expect(rig.game.queue.inputs.actions.length, 'and nothing reached the queue').toBe(0)
+  })
+})
+
+/**
+ * M1f — THE RED BAY MEANS "NOTHING CAN REACH THIS", NOT "A ROAD BIT IS HERE"
+ * ---------------------------------------------------------------------------
+ *
+ * **This block is a user's bug report, transcribed.** M1e Task 9 painted a
+ * destination's bay in the alarm colour when its carpark carried no road bit,
+ * and documented at the call site that the predicate is *necessary and not
+ * sufficient*. It shipped, and the first person to play it broke it inside a
+ * minute:
+ *
+ * > *"the red dot turns black when i start drawing a road from it and when i
+ * > remove it turns red again, no matter how many dots are on the parking lot."*
+ *
+ * One road tile on the bay, connected to nothing, and the game says the
+ * destination is fine. It is not: `assembleSources` (dispatch.ts) seeds a
+ * colour's flow field from carparks, `dispatch` reads `dist[houseCell]`, and a
+ * house that is not in the same road component as the bay has `dist = INF`
+ * forever. The stub buys **zero** arrivals — asserted below, not asserted
+ * about.
+ *
+ * The observable is the recorded `fillRect` in `PALETTE.overcrowd`, which is
+ * the bay and nothing else in the whole draw path (`canvas.ts` uses that colour
+ * for one fill and one stroke; the stroke is the overcrowd ring and is recorded
+ * as an `arc`). Read off the draw log rather than off `RenderFrame`, so a fold
+ * that computes the right byte and a renderer that ignores it still fails here.
+ */
+describe('the red bay says nothing can REACH the destination, not that a road bit is on it', () => {
+  const CITY_W = 24
+  /** D2 opens EAST, so its bay is (17, 14). Pinned by the case below, not assumed. */
+  const D2_BAY = 14 * CITY_W + 17
+  /** (17, 15) — the second cell of the stroke a player starts at the bay. */
+  const D2_BELOW = 15 * CITY_W + 17
+  /** The S bit: DIRS is N-clockwise, so index 4, `1 << 4`. */
+  const ROAD_S = 16
+
+  const redBays = (rig: Rig): number =>
+    rig.ctx.log.filter((c) => c.op === 'fill' && c.style === PALETTE.overcrowd).length
+
+  it('does NOT turn the bay grey for a single road tile that reaches nothing', () => {
+    const rig = buildRig({ layoutId: undefined })
+    rig.oneTick(0.5)
+    const state = rig.game.state
+    expect(state.header[H_DEST_COUNT] as number, 'the city seeds three destinations').toBe(3)
+    expect(rig.game.builder.frame.destCarpark[2] as number, 'D2 opens EAST').toBe(D2_BAY)
+    expect(state.roads[D2_BAY] as number, 'and no input has laid anything on it').toBe(0)
+    expect(redBays(rig), 'every seeded bay is bare, so every one of the three is red').toBe(3)
+
+    // *"i start drawing a road from it"* — one `place`, the bay and the cell
+    // below it, through the queue `pointer.ts` writes to.
+    rig.game.queue.enqueue('place', D2_BAY, D2_BELOW)
+    rig.oneTick(0.5)
+    expect(state.roads[D2_BAY] as number, 'the stub really did land on the bay').toBe(ROAD_S)
+    expect(
+      redBays(rig),
+      'a stub that reaches no house of D2’s colour must leave the bay RED',
+    ).toBe(3)
+
+    // *"and when i remove it turns red again"* — the second half of the report
+    // is about a signal that flips, so the erase is driven too. It must be a
+    // no-op on the colour, because the stub never changed anything.
+    rig.game.queue.enqueue('erase', D2_BAY, D2_BELOW)
+    rig.oneTick(0.5)
+    expect(state.roads[D2_BAY] as number, 'the stub is gone').toBe(0)
+    expect(redBays(rig), 'and the bay was red the whole time').toBe(3)
+  })
+
+  it('turns the bay grey for a road that actually reaches a house of its own colour', () => {
+    // The non-vacuity half, and the reason the case above is not satisfied by
+    // "the bay is always red". `D2_LINK` is the five-cell column from D2's bay
+    // to its own colour-1 house at (17, 18) — the stroke the shutdown screen is
+    // asking the player for.
+    const rig = buildRig({ layoutId: undefined })
+    rig.oneTick(0.5)
+    expect(redBays(rig)).toBe(3)
+    for (let i = 0; i + 1 < D2_LINK.length; i++) {
+      rig.game.queue.enqueue('place', D2_LINK[i] as number, D2_LINK[i + 1] as number)
+    }
+    rig.oneTick(0.5)
+    expect(rig.game.state.roads[D2_BAY] as number, 'the link starts at the bay').not.toBe(0)
+    expect(redBays(rig), 'D2 is connected now, so only D0 and D1 stay red').toBe(2)
+  })
+
+  it('is not a promise about pins: the stub buys zero arrivals and the run still ends on D2', () => {
+    // The second clause of the report — *"no matter how many dots are on the
+    // parking lot"* — is a different expectation, and this is the case that
+    // says the colour is right to ignore it. Pins are demand; the bay is
+    // reachability. What makes the RED honest is that the stub changes nothing
+    // the sim does: same killer, same death tick, zero score.
+    const rig = buildRig({ layoutId: undefined })
+    rig.oneTick(0.5)
+    rig.game.queue.enqueue('place', D2_BAY, D2_BELOW)
+    rig.oneTick(0.5)
+    expect(rig.game.state.roads[D2_BAY] as number).toBe(ROAD_S)
+    let frames = 0
+    while (!isGameOver(rig.game.state) && frames < 20000) {
+      rig.advance(TICK_MS)
+      frames++
+    }
+    expect(isGameOver(rig.game.state), 'the stubbed board still dies').toBe(true)
+    expect(rig.game.state.header[H_TICK] as number, 'on the very same tick').toBe(CITY_DEATH_TICK)
+    expect(failedDestination(rig.game.state), 'killed by the destination the stub touched').toBe(2)
+    expect(rig.game.state.header[H_SCORE] as number, 'and it never took a single trip').toBe(0)
+    expect(redBays(rig), 'the bay it lied about is red on the frame the run ends').toBeGreaterThan(0)
   })
 })
 

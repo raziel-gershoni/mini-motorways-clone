@@ -62,8 +62,10 @@ import { pushBlockedSpawnDemand } from './demand'
  * hits it the first time they do not connect a spawned building, and nothing in
  * the UI can explain it** — what they see is a building they never asked for
  * killing a city that looks fine. Task 9's shutdown copy is keyed to exactly
- * this (`NO ROAD REACHES DESTINATION n`, chosen over `OVERCROWDED` precisely
- * because it is computable from whether any road reaches the carpark), which
+ * this (`NOTHING CAN REACH DESTINATION n`, chosen over `OVERCROWDED` precisely
+ * because it is computable from the board rather than from run history — as of
+ * M1f, from whether a house of the destination's colour is in the same road
+ * component as its bay), which
  * makes the ending legible but does not make the danger visible while there is
  * still time to act.
  *

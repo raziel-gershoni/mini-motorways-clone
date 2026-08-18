@@ -7,6 +7,7 @@ import {
   destMetaOrientation,
   failedDestination,
   isGameOver,
+  neighbours,
   step,
   tilesLeft,
   weekOfTick,
@@ -100,6 +101,29 @@ export type MutableRenderFrame = { -readonly [K in keyof RenderFrame]: RenderFra
 export interface FrameBuilder {
   readonly frame: MutableRenderFrame
   readonly snapshots: CarSnapshots
+  /** The reachability pass's scratch. Allocated once; see `ReachScratch`. */
+  readonly reach: ReachScratch
+}
+
+/**
+ * Every buffer the reachability fold touches, allocated once at boot.
+ *
+ * `Int32Array(cells)` x 3 plus 16 bytes of neighbour scratch — 11,536 B on the
+ * 24x40 board, for the whole life of the run. Nothing here is resized and
+ * nothing here is read across frames: `label` is refilled and `compColour` is
+ * written before it is read, so the pass carries no state between frames and
+ * cannot go stale.
+ */
+export interface ReachScratch {
+  /** Per cell: the index of its road component, or -1. */
+  readonly label: Int32Array
+  /** The BFS frontier. Each cell is pushed at most once, so `cells` is exact. */
+  readonly queue: Int32Array
+  /** Per component: a bitmask of the house colours it contains. */
+  readonly compColour: Int32Array
+  /** `neighbours`' two out-parameters, sized 8 as its contract requires. */
+  readonly nbrCell: Int32Array
+  readonly nbrDir: Int8Array
 }
 
 /**
@@ -162,6 +186,7 @@ export function createFrameBuilder(state: GameState, world: WorldData, camera: C
     destPins: new Uint8Array(maxDest),
     destCarpark: new Int32Array(maxDest),
     destOvercrowd: new Uint8Array(maxDest),
+    destReachable: new Uint8Array(maxDest),
     carCount: 0,
     carXY: new Float32Array(slots * 2),
     carColour: new Uint8Array(slots),
@@ -173,7 +198,173 @@ export function createFrameBuilder(state: GameState, world: WorldData, camera: C
     gameOver: false,
     failedDest: -1,
   }
-  return { frame, snapshots: createCarSnapshots(slots) }
+  return {
+    frame,
+    snapshots: createCarSnapshots(slots),
+    reach: {
+      label: new Int32Array(world.cells),
+      queue: new Int32Array(world.cells),
+      compColour: new Int32Array(world.cells),
+      nbrCell: new Int32Array(8),
+      nbrDir: new Int8Array(8),
+    },
+  }
+}
+
+/**
+ * The widest house colour `compColour` can record. A colour outside `[0, 31]`
+ * cannot be represented in an `Int32Array` bitmask, so `labelRoadComponents`
+ * drops it — which is the right answer rather than a lossy one, because
+ * `destMetaColour` masks a destination's colour to three bits, so no
+ * destination can ever ask about a colour above 7.
+ */
+const MAX_MASKABLE_COLOUR = 31
+
+/**
+ * Labels every road component and records which house colours each one
+ * contains. Returns the number of components found.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY A FLOOD FILL, AND WHY HERE
+ * ---------------------------------------------------------------------------
+ *
+ * The question the bay's colour asks is *"can a car drive to this
+ * destination"*, and **the flow fields cannot answer it.** `computeFlowField`
+ * is multi-source over a whole colour's carparks, so two colour-`c`
+ * destinations in different road components produce ONE field in which both
+ * components read `dist < INF` — the merge erases which destination a cell can
+ * reach. Worse, `assembleSources` only seeds destinations with `destPins > 0`,
+ * and `FIRST_PIN_DELAY_TICKS` is 120: for the first four seconds of a
+ * destination's life, which is exactly the window the signal exists for, the
+ * field knows nothing about it at all.
+ *
+ * So the pass is computed here, from `state.roads`, `state.houseCell` and
+ * `state.houseColour` — bytes `buildFrame` already has. **`sim` gains nothing
+ * and no golden can move**: `hashState` is taken over the whole state buffer,
+ * so a per-destination flag stored in `sim` would move the state golden for a
+ * cosmetic signal.
+ *
+ * ---------------------------------------------------------------------------
+ * IT WALKS `neighbours`, AND THAT IS THE POINT
+ * ---------------------------------------------------------------------------
+ *
+ * The traversal calls `sim`'s own `neighbours` rather than re-reading the bits,
+ * so this pass and `computeFlowField` follow the same edges by construction —
+ * including the row-seam guard, which a hand-rolled bit walk gets wrong on the
+ * grid's right edge. A second implementation of the road graph is exactly the
+ * "instrument that rebuilds a key the system already stores" this repo has been
+ * bitten by.
+ *
+ * **It does NOT re-check `roads[ni] !== 0` on the far side of an edge, and that
+ * is deliberate.** `neighbours` does not, on the mirrored-bit invariant
+ * `placeRoad` owns, and `computeFlowField` relaxes into whatever `neighbours`
+ * returns. Matching that exactly is what makes this pass agree with the router
+ * on every state the sim can reach. On a hand-corrupted mask — a bit written
+ * straight into `state.roads` with no mirror — the two can differ, and the
+ * divergence is bounded to a colour, never to a crash: the seed loop below only
+ * starts a component at a cell that carries a bit, so a bare cell reached
+ * across a one-way bit joins the first component that finds it.
+ *
+ * ---------------------------------------------------------------------------
+ * COST
+ * ---------------------------------------------------------------------------
+ *
+ * Every cell is labelled at most once and pushed at most once, so the pass is
+ * O(cells) with a small constant, and there is no cache and no dirty flag —
+ * the same trade this file already makes for the terrain fold, for the same
+ * reason. A tick-keyed cache is available and was measured as cheaper; it was
+ * declined because `H_TICK` is not monotonic across a `restore`, and a
+ * staleness class of bug is not worth 15 microseconds.
+ */
+export function labelRoadComponents(state: GameState, world: WorldData, reach: ReachScratch): number {
+  const cells = world.cells
+  const { label, queue, compColour, nbrCell, nbrDir } = reach
+  label.fill(-1)
+
+  let comps = 0
+  for (let c = 0; c < cells; c++) {
+    // A cell with no road bit is not a component seed. This is the same test
+    // `assembleSources` applies to a carpark before making it a field source,
+    // and dropping it here would make every bare cell on the board its own
+    // one-cell component.
+    if ((state.roads[c] as number) === 0) continue
+    if ((label[c] as number) !== -1) continue
+    const comp = comps
+    comps++
+    compColour[comp] = 0
+    label[c] = comp
+    let head = 0
+    let tail = 0
+    queue[tail] = c
+    tail++
+    while (head < tail) {
+      const cur = queue[head] as number
+      head++
+      const n = neighbours(state, world, cur, nbrCell, nbrDir)
+      for (let k = 0; k < n; k++) {
+        const ni = nbrCell[k] as number
+        if ((label[ni] as number) !== -1) continue
+        label[ni] = comp
+        queue[tail] = ni
+        tail++
+      }
+    }
+  }
+
+  // Every house ORs its colour into its component. A house whose own cell
+  // carries no road bit is in NO component, and that is not an approximation:
+  // `computeFlowField` relaxes over road edges, so `dist[houseCell]` is `INF`
+  // for such a house forever and `dispatch` can never send a car from it. A
+  // road that stops one cell short of a house serves nobody.
+  const houseCount = state.header[H_HOUSE_COUNT] as number
+  for (let h = 0; h < houseCount; h++) {
+    const cell = state.houseCell[h] as number
+    if (cell < 0 || cell >= cells) continue
+    const comp = label[cell] as number
+    if (comp < 0) continue
+    const colour = state.houseColour[h] as number
+    if (colour > MAX_MASKABLE_COLOUR) continue
+    compColour[comp] = (compColour[comp] as number) | (1 << colour)
+  }
+  return comps
+}
+
+/**
+ * `1` iff a car can drive to the destination whose bay is `carpark` and whose
+ * colour is `colour`, given a labelled board. `0` otherwise.
+ *
+ * Three ways to be unreachable, and each is its own statement because each is
+ * its own editable line:
+ *
+ *  1. **No bay.** `carparkCell` returns -1 for a footprint whose bay would fall
+ *     off the grid. Nothing can drive to a cell that is not on the board.
+ *  2. **A bare bay.** `assembleSources` skips a destination whose carpark
+ *     carries no road bit, so it is never a field source and takes zero
+ *     arrivals. This is the arm the shipped predicate was, and it stays
+ *     verbatim — the fix WIDENS the red arm and never narrows it.
+ *  3. **A bay in a component with no house of this colour.** The new arm, and
+ *     the user's bug: a stub on the bay sets the road bit and reaches nothing.
+ *     `dispatch` reads `dist[houseCell]` and refuses `INF`, so a destination
+ *     whose own colour has no house in its component takes zero arrivals for
+ *     as long as that holds.
+ *
+ * The `label[carpark] < 0` case is unreachable *given* arm 2 on any board the
+ * sim can produce — a cell with a road bit always seeds a component — and it is
+ * written anyway because it fails CLOSED where the alternative (`compColour[-1]`
+ * reading `undefined`, `undefined & mask` being `0`) happens to agree today by
+ * accident rather than by design.
+ */
+export function destinationIsReachable(
+  state: GameState,
+  reach: ReachScratch,
+  carpark: number,
+  colour: number,
+): number {
+  if (carpark < 0) return 0
+  if ((state.roads[carpark] as number) === 0) return 0
+  const comp = reach.label[carpark] as number
+  if (comp < 0) return 0
+  return ((reach.compColour[comp] as number) & (1 << colour)) !== 0 ? 1 : 0
 }
 
 /**
@@ -200,6 +391,13 @@ export function buildFrame(
     terrainClass[c] = terrainClassOf(world.terrain[c] as number, state.cleared[c] as number)
   }
 
+  // --- road components, before the buildings that ask about them ---
+  //
+  // Runs unconditionally, exactly like the terrain fold above and for the same
+  // reason: a dirty flag would be cheaper and would carry a staleness bug
+  // waiting for the first road the player draws.
+  labelRoadComponents(state, world, builder.reach)
+
   // --- buildings ---
   frame.houseCount = state.header[H_HOUSE_COUNT] as number
   const destCount = state.header[H_DEST_COUNT] as number
@@ -210,7 +408,12 @@ export function buildFrame(
     frame.destKind[d] = destMetaKind(meta)
     frame.destOrientation[d] = orientation
     frame.destPins[d] = state.destPins[d] as number
-    frame.destCarpark[d] = carparkCell(state.destCell[d] as number, orientation, world.w, world.h)
+    const carpark = carparkCell(state.destCell[d] as number, orientation, world.w, world.h)
+    frame.destCarpark[d] = carpark
+    // The bay's colour, and the shutdown screen's first line. Folded from the
+    // SAME `carpark` the renderer draws at, rather than recomputed, so the byte
+    // and the rectangle cannot describe different cells.
+    frame.destReachable[d] = destinationIsReachable(state, builder.reach, carpark, destMetaColour(meta))
     // §5.8's meter, folded to a byte for the ring. Against
     // OVERCROWD_FULL_MILLITICKS (90 s) and not OVERCROWD_FAIL_MILLITICKS
     // (88 s), which is what makes the spec's last two seconds a *hidden* grace:

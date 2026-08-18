@@ -354,6 +354,44 @@ export interface RenderFrame {
    * zero-drain measurement so the claim has an observer.
    */
   readonly destOvercrowd: Uint8Array
+  /**
+   * Per destination, `1` iff a car can actually DRIVE to it, `0` otherwise —
+   * `game`'s fold, dense over `[0, destCount)`.
+   *
+   * **This byte replaced a road-bit test, because a road bit is not an answer
+   * to the question the bay's colour asks.** M1e Task 9 painted the bay red
+   * when `roads[carpark] === 0` and documented at the call site that the
+   * predicate was *necessary and not sufficient*. The first person to play the
+   * shipped build broke it inside a minute: *"the red dot turns black when i
+   * start drawing a road from it and when i remove it turns red again."* One
+   * tile on the bay, connected to nothing, and the game said the destination
+   * was fine.
+   *
+   * **What `game` computes, and it is exactly what `sim` can serve.**
+   * `assembleSources` (dispatch.ts) seeds a colour's flow field from carparks
+   * that carry a road bit; `computeFlowField` relaxes over the road graph;
+   * `dispatch` reads `dist[houseCell]` and refuses an `INF`. So a destination
+   * takes an arrival iff its carpark carries a road bit AND some house of its
+   * own colour sits in the same road component. That is the fold, and
+   * `game/frame.ts` owns it.
+   *
+   * **One-sided, and the direction matters.** Every bay that was red under the
+   * old test is still red: a bare carpark is never a field source, so it is
+   * unreachable by construction. The fix widens the red arm only — it never
+   * paints a working destination red.
+   *
+   * **What it still does not say**, written here rather than at the draw site
+   * so the field carries its own limits: it is topological, so it says nothing
+   * about a destination that is connected and starved (the ring carries that),
+   * nothing about gridlock, nothing about a route longer than `MAX_PATH_LEN`,
+   * and nothing about whether any car is free to be sent. It ignores pins
+   * entirely, on purpose — pins are demand, and folding them in is how the
+   * predicate it replaced ended up meaning two things at once.
+   *
+   * A grey bay is still not a promise. A red one is still a fact, and now it is
+   * the right fact.
+   */
+  readonly destReachable: Uint8Array
   /** Live cars only. */
   readonly carCount: number
   /**
