@@ -1,9 +1,8 @@
-import { DIAG_COST } from '@laneways/shared'
 import { hashInt32 } from './hash'
 import { nonZeroWord, type GameState } from './state'
 import type { WorldData } from './world'
 import { neighbours, edgeCost } from './graph'
-import { OPPOSITE } from './roads'
+import { DIR_COUNT, OPPOSITE } from './roads'
 import {
   CT_REBUILDS,
   CT_SYNCS,
@@ -14,6 +13,7 @@ import {
   ST_EXPANSIONS,
   ST_PUSHES,
   assertPushWithinBucketWindow,
+  edgeCostMask,
   type FlowField,
   type Scratch,
 } from './scratch'
@@ -195,6 +195,12 @@ export function computeFlowField(
 ): void {
   const { cells } = world
   const { dist, dir } = out
+  // Built here rather than at module scope: `roads.ts` -> `dispatch.ts` ->
+  // `scratch.ts` -> `roads.ts` is a real import cycle, and a module-scope
+  // derivation reads `DIR_COUNT` as `undefined` through it. Eight `edgeCost`
+  // calls per REBUILD (not per relaxation), against thousands of relaxations —
+  // and it allocates nothing, which `allocation.test.ts` covers.
+  const legalCostMask = edgeCostMask(DIR_COUNT, edgeCost)
   const { bucketHead, entryCell, entryNext, nbrCell, nbrDir, stats, pushesPerCell } = scratch
 
   dist.fill(INF)
@@ -281,7 +287,7 @@ export function computeFlowField(
           // of the bucket being drained and `nd` the candidate; anything but a
           // direction's own cost between them throws by name instead of
           // silently aliasing into a bucket the staleness check discards.
-          assertPushWithinBucketWindow(nd, d, NB, DIAG_COST)
+          assertPushWithinBucketWindow(nd, d, NB, legalCostMask)
           push(scratch, ni, nd)
         }
       }

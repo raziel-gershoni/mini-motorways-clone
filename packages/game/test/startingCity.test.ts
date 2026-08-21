@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeAll } from 'vitest'
 import {
   firstCity,
   TERRAIN,
@@ -1567,6 +1567,31 @@ function gateRun(arm: CityArm): GateRun {
 }
 
 describe('the survivability gate the default board is flipped behind', () => {
+  /**
+   * **Warms all three memoised arms, so no CASE pays for a drive.**
+   *
+   * `gateRun` memoises at module scope, so before this hook existed the FIRST
+   * case in this block silently paid for whichever arms it touched — and after
+   * M1f Task 1 added two per-tick census passes over all 960 cells, that bill
+   * grew ~6x. The case that paid it here was the one with nothing to do with the
+   * census, and it was measured at 71-95% of vitest's 5 s default with one run
+   * in nine timing out at 6,337 ms. A red there reads as "the default board
+   * stopped passing its gate", which is a diagnosis pointing at the wrong file.
+   *
+   * **A hook rather than a per-case budget, because ordering is not an
+   * interlock.** Budgeting whichever case happens to be first is correct only
+   * until someone reorders the block or runs `it.only` on a different one; the
+   * hook runs for every case in every order, including under `it.only`. It also
+   * puts the whole cost in ONE budgeted place, which lets every case stay on the
+   * 5 s default — so a future slowdown INSIDE a case still fails loudly instead
+   * of hiding under a generous per-case allowance.
+   */
+  beforeAll(() => {
+    gateRun('no-input')
+    gateRun('opening')
+    gateRun('greedy')
+  }, 120000)
+
   it('is measuring the board a plain load opens, on the real boot path', () => {
     // **The named assertion, first, so a flip of `DEFAULT_LAYOUT_ID` fails here
     // with the id in the message rather than as an arithmetic surprise three
@@ -1780,7 +1805,7 @@ describe('the survivability gate the default board is flipped behind', () => {
     expect(idle.conflicts).toBe(0)
     expect(idle.firstRuleEventTick).toBe(-1)
     expect(idle.firstConflictTick).toBe(-1)
-  }, 30000)
+  })
 
   it('GATE A — trips and CARS IN MOTION, including cars the spawner put there', () => {
     // **The clause M1d failed and the clause Task 5 failed, in one case.**
@@ -1864,7 +1889,7 @@ describe('the survivability gate the default board is flipped behind', () => {
     // do not read its passing as evidence about the spawner.
     expect(greedy.outsideRect, 'a building spawned outside the revealed rect').toBe(0)
     expect(idle.outsideRect).toBe(0)
-  }, 30000)
+  })
 
   it('GATE B — the delivery fraction falls when the player stops keeping up', () => {
     // **`trips / fires`, and the two arms say different things on purpose.**
@@ -1947,7 +1972,7 @@ describe('the survivability gate the default board is flipped behind', () => {
       expect(wk.tilesLeft, `week ${wk.week} ran out of tiles`).toBeGreaterThan(0)
     }
     expect(greedy.unaffordable, 'no connect decision was unaffordable on this seed').toBe(0)
-  }, 30000)
+  })
 
   it('GATE C — peak destPins on a CONNECTED destination climbs to its timer cap', () => {
     // **The shape, not the level.** A board where a connected destination sits
@@ -2025,7 +2050,7 @@ describe('the survivability gate the default board is flipped behind', () => {
     expect(Math.max(...idle.weeks.map((w) => w.peakPinsRoadless))).toBeGreaterThan(
       PIN_CAP_CIRCLE_TIMER,
     )
-  }, 30000)
+  })
 
   it('rejects a one-week jump from 1 to the cap, which the two-clause form did not', () => {
     // **The artefact for the paragraph above, and it exists because the
@@ -2156,5 +2181,5 @@ describe('the survivability gate the default board is flipped behind', () => {
     expect(blocked, 'M1d blocking never fired on this board at all').toBeGreaterThan(1000)
     expect(longest, 'and cars really do stand behind each other').toBeGreaterThanOrEqual(3)
     expect(greedy.weeks[0]?.blockedTicks, 'but not in the first week — it is a late property').toBe(0)
-  }, 30000)
+  })
 })

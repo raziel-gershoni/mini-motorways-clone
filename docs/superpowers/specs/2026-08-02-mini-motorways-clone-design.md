@@ -202,16 +202,42 @@ Implementation constraints: preallocate every buffer at boot; never allocate ins
 > **The rule, which supersedes the clause above:** path cost is a function of the
 > DIRECTION of a step and of nothing else. `edgeCost(dir: number): number` is the
 > whole cost model. Junction cost lives in MOVEMENT — `laneSpeedMul`, which scales
-> a car's per-tick progress — and in ENTRY — `canEnter`, which refuses a crossing
-> and, from M1f, obeys a traffic light. Neither is visible to Dijkstra,
-> deliberately.
+> a car's per-tick progress — and in ENTRY — `canEnter`, which refuses a crossing.
+> Neither is visible to Dijkstra, deliberately.
+>
+> **What ENTRY means here is M1f's mutual exclusion, NOT a traffic light, and this
+> paragraph said "traffic light" until it was corrected.** M1f measured a
+> demand-actuated light and **deferred** it, shipping a single-cell JUNCTION
+> UPGRADE instead — a flag that changes a car's RIGHT TO ENTER a cell, leaving the
+> cell's speed and the distance of a step untouched. The authority for that is the
+> M1f plan's **Amendment 2** (`docs/superpowers/plans/2026-08-20-m1f-junctions-and-cards.md`,
+> commit `33d57cd`), which is a real document; an earlier draft of this amendment
+> and of `regions.ts` both cited an "amendment to spec §5.6, 2026-08-21" that was
+> never written. **§5.6 is still unamended**, and the sentence quoted from it —
+> *"Lights place only on an existing road junction, never plain road, and cost 0
+> tiles"* — still describes a metered light rather than the object M1f ships. The
+> named recipient for closing that gap is **the task that lands the junction
+> upgrade (M1f Task 9)**, not "whoever owns the spec".
 >
 > **What it would cost to reverse this**, measured on the shipped board's greedy
 > arm at M1f Task 2 under the WIDE rule (both lanes free at any degree-3 cell):
 > junction exclusion produces 45,986 blocked car-ticks. The narrower CROSSING-ONLY
 > rule that M1f Task 3 is predicted to ship measures 29,267 on the same arm. The
 > arm is chosen two tasks after this amendment is written, which is why both
-> numbers are here and why neither is quoted bare. Priced
+> numbers are here and why neither is quoted bare.
+>
+> **Neither figure was measured by the task that wrote them here, and both are
+> now permanent in a spec with nothing running them.** They are M1f Task 2's and
+> Task 3's, quoted from the plan. This is the shape this repo's catalogue calls *a
+> figure that nothing runs is a figure that comes back* — and the milestone that
+> wrote them had already proved another figure from the same plan wrong by 2x.
+> **Named recipients, because "whoever owns this" is a synonym for "no one":**
+> M1f **Task 2** owns 45,986 and M1f **Task 3** owns 29,267; each must re-derive
+> its own number on the arm it actually ships and correct this paragraph if it
+> moves. The durable repair the catalogue prescribes — assert both arms in one
+> test — belongs to Task 3, which is the first task that holds both.
+>
+> Priced
 > as edge weight instead, cars route around the junctions and the player never sees
 > one, and every traffic light M1f ships is relieving a jam that no longer forms.
 > The milestone would be correct, tested, deployed and invisible.

@@ -18,6 +18,7 @@ import {
   entryPoolCapacity,
   assertBucketCountExceedsEveryEdgeCost,
   assertPushWithinBucketWindow,
+  edgeCostMask,
 } from '../src/scratch'
 
 describe('createFlowField / createFlowFields', () => {
@@ -171,32 +172,144 @@ describe('INF', () => {
   })
 })
 
+/**
+ * The mask `computeFlowField` builds on every rebuild. Computed here the same
+ * way it is computed there — from `edgeCost`, inside a function — rather than
+ * imported as a constant, because a module-scope derivation reads `DIR_COUNT` as
+ * `undefined` through the roads/dispatch/scratch import cycle. See
+ * `edgeCostMask`'s own comment; the guard for that is asserted below.
+ */
+const LEGAL_EDGE_COST_MASK = edgeCostMask(DIR_COUNT, edgeCost)
+
+describe('edgeCostMask', () => {
+  it('is derived from edgeCost, not written out: {10, 14} today', () => {
+    expect(LEGAL_EDGE_COST_MASK).toBe((1 << ORTHO_COST) | (1 << DIAG_COST))
+    // Spelled out once, so a tier added to `edgeCost` without a thought about
+    // this mask fails here rather than widening the membership test silently.
+    expect(LEGAL_EDGE_COST_MASK).toBe(17408)
+  })
+
+  it('sets one bit per DISTINCT cost, so the mask and DISTINCT_EDGE_COSTS agree', () => {
+    let bits = 0
+    for (let c = 0; c <= 30; c++) bits += (LEGAL_EDGE_COST_MASK >>> c) & 1
+    expect(bits).toBe(DISTINCT_EDGE_COSTS)
+  })
+
+  it('throws on an absent dirCount, so the import cycle cannot produce an empty mask', () => {
+    // The regression this guard exists for: a module-scope `const mask =
+    // edgeCostMask(DIR_COUNT, edgeCost)` inside the roads -> dispatch -> scratch
+    // cycle read `DIR_COUNT` as `undefined` and returned 0, which means "no cost
+    // is legal". Asserted with the value the cycle actually produced.
+    expect(() => edgeCostMask(undefined as unknown as number, edgeCost)).toThrow(
+      /dirCount must be a positive integer/,
+    )
+    expect(() => edgeCostMask(0, edgeCost)).toThrow(/dirCount must be a positive integer/)
+    expect(edgeCostMask(DIR_COUNT, edgeCost), 'and a real one is never 0').not.toBe(0)
+  })
+
+  it('throws for a cost that cannot be a bit, rather than wrapping the shift silently', () => {
+    // 31 is the first cost whose `1 << c` is negative; 32 wraps to 1 and would
+    // make cost 32 test as "legal" because cost 0 happens to be. Proven with a
+    // doctored cost function rather than by trusting today's 14.
+    expect(() => edgeCostMask(1, () => 31)).toThrow(/outside \[0, 30\]/)
+    expect(() => edgeCostMask(1, () => 32)).toThrow(/outside \[0, 30\]/)
+    expect(() => edgeCostMask(1, () => -1)).toThrow(/outside \[0, 30\]/)
+    expect(() => edgeCostMask(1, () => 30)).not.toThrow()
+  })
+})
+
 describe('assertPushWithinBucketWindow — trap 2, converted from wrong paths into a named throw', () => {
   it('accepts every real edge cost', () => {
     for (let k = 0; k < DIR_COUNT; k++) {
-      expect(() => assertPushWithinBucketWindow(1000 + edgeCost(k), 1000, NB, DIAG_COST)).not.toThrow()
+      expect(() =>
+        assertPushWithinBucketWindow(1000 + edgeCost(k), 1000, NB, LEGAL_EDGE_COST_MASK),
+      ).not.toThrow()
     }
   })
 
   it('accepts a push exactly at the maximum legal edge cost', () => {
-    expect(() => assertPushWithinBucketWindow(100 + DIAG_COST, 100, NB, DIAG_COST)).not.toThrow()
+    expect(() =>
+      assertPushWithinBucketWindow(100 + DIAG_COST, 100, NB, LEGAL_EDGE_COST_MASK),
+    ).not.toThrow()
   })
 
   it('THE ARM THE PREVIOUS DRAFT DID NOT HAVE: throws on the SMALLEST possible added term', () => {
     // A junction surcharge of +1 on a diagonal is `d + 15`. Under a single
     // aliasing bound of `delta <= NB` that is ACCEPTED, because NB is 15 — so the
     // guard would have been silent on precisely the mutation it exists to catch.
-    expect(() => assertPushWithinBucketWindow(100 + DIAG_COST + 1, 100, NB, DIAG_COST)).toThrow(
-      /is not a legal edge cost.*max 14/s,
-    )
+    expect(() =>
+      assertPushWithinBucketWindow(100 + DIAG_COST + 1, 100, NB, LEGAL_EDGE_COST_MASK),
+    ).toThrow(/is not a legal edge cost.*\{10, 14\}/s)
+  })
+
+  /**
+   * **The window a `delta <= maxEdge` bound left open, and the one membership
+   * still cannot see — as a table, because a guard's blind spot has to be
+   * derived rather than discovered.**
+   *
+   * The legality arm used to be `delta > maxEdge`. Since `NB = DIAG_COST + 1`
+   * always and the aliasing arm runs first, its reachable window was exactly
+   * `delta === 15`: every surcharge below that passed in silence. The rows below
+   * are every surcharge `p` in 1..5 applied to each kind of step.
+   *
+   * `caught: false` appears exactly once, and it is derivable rather than
+   * incidental: `10 + 4 === DIAG_COST`, so an orthogonal-only `+4` produces a
+   * value the cost model genuinely emits. Any surcharge touching a DIAGONAL is
+   * caught for every `p >= 1`, which is what matters — a junction penalty is a
+   * property of the CELL, so it applies to whichever direction enters it, and a
+   * uniform surcharge always trips the diagonal row.
+   */
+  const SURCHARGES: readonly (readonly [number, number, boolean])[] = [
+    // [base cost, surcharge, caught?]
+    [ORTHO_COST, 1, true], //  11 — not in {10, 14}
+    [ORTHO_COST, 2, true], //  12 — the old bound accepted this
+    [ORTHO_COST, 3, true], //  13 — and this
+    [ORTHO_COST, 4, false], // 14 — collides with a legal diagonal. The one hole.
+    [ORTHO_COST, 5, true], //  15
+    [DIAG_COST, 1, true], //   15
+    [DIAG_COST, 2, true], //   16 — over NB, so the ALIASING arm answers
+    [DIAG_COST, 3, true], //   17
+    [DIAG_COST, 4, true], //   18
+    [DIAG_COST, 5, true], //   19
+  ]
+
+  for (const [base, p, caught] of SURCHARGES) {
+    it(`${caught ? 'catches' : 'CANNOT see'} a +${p} surcharge on a ${base === ORTHO_COST ? 'orthogonal' : 'diagonal'} step (delta ${base + p})`, () => {
+      const call = (): void =>
+        assertPushWithinBucketWindow(100 + base + p, 100, NB, LEGAL_EDGE_COST_MASK)
+      if (caught) expect(call).toThrow()
+      else expect(call).not.toThrow()
+    })
+  }
+
+  it('is not vacuous: the table really does contain both answers, and exactly one hole', () => {
+    // Guards the table against becoming all-`true` (which would make the loop a
+    // restatement of the arm above) or all-`false`.
+    expect(SURCHARGES.filter(([, , c]) => c).length).toBe(9)
+    expect(SURCHARGES.filter(([, , c]) => !c)).toEqual([[ORTHO_COST, 4, false]])
+    expect(ORTHO_COST + 4, 'the hole exists because 10 + 4 IS a legal cost').toBe(DIAG_COST)
+  })
+
+  it('names the COST MODEL and not queue sizing for an in-window illegal cost', () => {
+    // The misattribution a review found: under the old bound a uniform +2 on a
+    // diagonal fired the aliasing message — "an edge cost above NB - 1 needs NB
+    // resized" — sending the reader to the queue for a cost-model change. A +2 on
+    // an ORTHOGONAL is inside the window, so membership answers, and the message
+    // must say cost model.
+    expect(() =>
+      assertPushWithinBucketWindow(100 + ORTHO_COST + 2, 100, NB, LEGAL_EDGE_COST_MASK),
+    ).toThrow(/is not a legal edge cost/)
+    expect(() =>
+      assertPushWithinBucketWindow(100 + ORTHO_COST + 2, 100, NB, LEGAL_EDGE_COST_MASK),
+    ).not.toThrow(/needs\s+NB resized/)
   })
 
   it('throws with the ALIASING message when the gap also exceeds the modulus', () => {
-    // `maxEdge` is deliberately NB + 8 rather than DIAG_COST, so the legality
-    // arm cannot fire and this case pins the aliasing arm alone. delta = 16
-    // against 15 buckets, so the entry lands in the bucket drained at
-    // 100 + (16 % 15) = 101 — the arithmetic is the content, and it is what
-    // makes this a statement about Dial's queue rather than about the cost model.
+    // The mask deliberately CONTAINS 16, so the membership arm cannot fire and
+    // this case pins the aliasing arm alone. delta = 16 against 15 buckets, so
+    // the entry lands in the bucket drained at 100 + (16 % 15) = 101 — the
+    // arithmetic is the content, and it is what makes this a statement about
+    // Dial's queue rather than about the cost model.
     //
     // **The two clauses are asserted in the order the MESSAGE has, not the
     // order the plan's snippet had.** The plan paired this message with
@@ -205,19 +318,21 @@ describe('assertPushWithinBucketWindow — trap 2, converted from wrong paths in
     // the aliased bucket second. Measured — that regex fails against the exact
     // message the plan also specifies. The message is the artefact somebody
     // reads at 3am, so the regex moved rather than the message.
-    expect(() => assertPushWithinBucketWindow(100 + NB + 1, 100, NB, NB + 8)).toThrow(
+    expect(() => assertPushWithinBucketWindow(100 + NB + 1, 100, NB, 1 << (NB + 1))).toThrow(
       /NB=15.*aliases into the bucket drained at 101/s,
     )
   })
 
   it('accepts a push exactly NB above the draining distance, which lands in the freshly-detached bucket', () => {
-    // Kept as a separate case from the edge-cost arm: it is a statement about
-    // Dial's queue, not about the cost model, and the two bounds are independent.
-    expect(() => assertPushWithinBucketWindow(100 + NB, 100, NB, NB)).not.toThrow()
+    // Kept as a separate case from the cost-model arm: it is a statement about
+    // Dial's queue, and the two bounds are independent. The mask therefore says
+    // 15 is a legal cost, so ONLY the aliasing arm can answer here — which is
+    // what makes this pin `delta > buckets` rather than `>=`.
+    expect(() => assertPushWithinBucketWindow(100 + NB, 100, NB, 1 << NB)).not.toThrow()
   })
 
   it('throws for a push BELOW the draining distance, which is a monotonicity violation', () => {
-    expect(() => assertPushWithinBucketWindow(99, 100, NB, DIAG_COST)).toThrow(
+    expect(() => assertPushWithinBucketWindow(99, 100, NB, LEGAL_EDGE_COST_MASK)).toThrow(
       /below the distance being drained/,
     )
   })

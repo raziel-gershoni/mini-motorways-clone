@@ -276,8 +276,8 @@ export const FIELD_INPUT_REGIONS = Object.freeze(['mapIdentity', 'destCell', 'ro
  * First, M1f answered the condition in the negative, in writing, in the spec:
  * junction, traffic-light and roundabout cost is NOT edge weight (amendment,
  * 2026-08-21). Second, **M1f did not ship a demand-actuated light at all** — it
- * measured one and deferred it (amendment to spec 5.6, 2026-08-21), shipping a
- * JUNCTION UPGRADE instead: a flag that changes a car's RIGHT TO ENTER a cell,
+ * measured one and deferred it (the M1f plan's Amendment 2, commit `33d57cd`),
+ * shipping a JUNCTION UPGRADE instead: a flag that changes a car's RIGHT TO ENTER a cell,
  * with the cell's SPEED unchanged and the distance of a step never touched. So
  * the five reasons outlived both the object they named and the condition they
  * set.

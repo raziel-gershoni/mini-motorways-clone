@@ -141,6 +141,65 @@ export const INF = 0x40000000
 export const NB = DIAG_COST + 1
 
 /**
+ * A bitmask with bit `c` set for every value `edgeCostOf` can return over
+ * `[0, dirCount)`. `{10, 14}` today, so `(1 << 10) | (1 << 14)` = 17408.
+ *
+ * **Derived from `edgeCost`, never written out, for the reason `graph.ts` gives
+ * about `ORTHO_COST`/`DIAG_COST`: a second copy here would be a second source of
+ * truth a balance change could silently miss.** Parameterised on the same
+ * precedent as `assertBucketCountExceedsEveryEdgeCost`, so the guard below is
+ * testable with a doctored cost set rather than only against today's constants.
+ *
+ * Throws for a cost outside `[0, 30]`, because `1 << 31` is negative and
+ * `1 << 32` wraps to 1 — a silent wrong answer in a membership test, which is
+ * exactly the class of bug the test exists to prevent. Nothing near that is
+ * reachable today (the largest cost is 14, and a motorway divide-by-three tier
+ * makes costs SMALLER), but an unreachable branch that fails loudly is the house
+ * pattern here.
+ */
+export function edgeCostMask(dirCount: number, edgeCostOf: (dir: number) => number): number {
+  // **`dirCount` is validated because a zero mask is a SILENT "nothing is a
+  // legal cost", and this module can really be handed one.** `roads.ts` imports
+  // `dispatch.ts`, which imports this file, which imports `roads.ts` — a genuine
+  // cycle. A first draft of this mask was a module-scope `const`, and under that
+  // cycle `DIR_COUNT` evaluated to `undefined`, the loop ran zero times, and the
+  // mask came out 0. It failed loudly here only by luck of polarity (a 0 mask
+  // rejects every push, so 157 tests went red at once); the same shape in a
+  // guard that FAILS OPEN would have shipped. The mask is therefore built inside
+  // `computeFlowField` rather than at module scope, and this guard makes the
+  // module-scope spelling impossible to reintroduce quietly.
+  if (!Number.isInteger(dirCount) || dirCount <= 0) {
+    throw new Error(
+      `edgeCostMask: dirCount must be a positive integer, got ${dirCount} — a zero or absent ` +
+        'direction count yields an empty mask, which silently means "no cost is legal". If this is ' +
+        '`undefined`, this function is being called at module scope inside the roads/dispatch/scratch ' +
+        'import cycle; call it from inside a function instead.',
+    )
+  }
+  let mask = 0
+  for (let k = 0; k < dirCount; k++) {
+    const cost = edgeCostOf(k)
+    if (!Number.isInteger(cost) || cost < 0 || cost > 30) {
+      throw new Error(
+        `edgeCostMask: edgeCost(${k}) = ${cost} is outside [0, 30]; a cost that large cannot be ` +
+          'represented as a bit in a 32-bit membership mask, and the shift would wrap silently',
+      )
+    }
+    mask |= 1 << cost
+  }
+  return mask
+}
+
+/** The costs a mask names, ascending. Throw-path only; it allocates. */
+function costsInMask(mask: number): readonly number[] {
+  const out: number[] = []
+  for (let c = 0; c <= 30; c++) {
+    if (((mask >>> c) & 1) !== 0) out.push(c)
+  }
+  return out
+}
+
+/**
  * Throws if a relaxation would push a distance the cost model or Dial's cyclic
  * queue cannot represent from the bucket currently draining.
  *
@@ -154,26 +213,48 @@ export const NB = DIAG_COST + 1
  * aliased entry.
  *
  * **TWO bounds, because one is not enough and the difference is the whole
- * point.** The aliasing bound is `delta <= buckets`; the legality bound is
- * `delta <= maxEdge`. On the shipped constants `NB` is 15 and `DIAG_COST` is 14,
- * so a surcharge of `+1` on a diagonal — the SMALLEST edit that could introduce
- * one — produces `delta = 15`, which the aliasing bound accepts. A guard silent
- * on the minimal instance of the thing it guards is decoration. The aliasing arm
- * stays because it is a true and separate statement about the queue: at
- * `delta = buckets` the entry lands in a bucket `computeFlowField` has already
- * detached (`bucketHead[b] = -1`) and drains on its next visit, which is exactly
- * why `NB = DIAG_COST + 1` rather than `DIAG_COST` — measured, at 14 the drain
- * loop does not terminate if that detach moves after the walk, and at 15 it is a
- * no-op.
+ * point.** The aliasing bound is `delta <= buckets`; the legality test is
+ * MEMBERSHIP in the cost model's value set. On the shipped constants `NB` is 15
+ * and `DIAG_COST` is 14, so a surcharge of `+1` on a diagonal — the SMALLEST edit
+ * that could introduce one — produces `delta = 15`, which the aliasing bound
+ * accepts. A guard silent on the minimal instance of the thing it guards is
+ * decoration. The aliasing arm stays because it is a true and separate statement
+ * about the queue: at `delta = buckets` the entry lands in a bucket
+ * `computeFlowField` has already detached (`bucketHead[b] = -1`) and drains on
+ * its next visit, which is exactly why `NB = DIAG_COST + 1` rather than
+ * `DIAG_COST` — measured, at 14 the drain loop does not terminate if that detach
+ * moves after the walk, and at 15 it is a no-op.
  *
- * Parameterised rather than closing over `NB` and `DIAG_COST`, on the precedent
- * of `assertBucketCountExceedsEveryEdgeCost`, `assertSingleCrossing` (cars.ts)
- * and `assertDispatchProgress` (dispatch.ts): the failure path is then testable
- * directly, without editing a constant and rebuilding.
+ * **The legality arm is MEMBERSHIP and used to be `delta <= maxEdge`, which was
+ * a hole a review measured rather than argued.** Because `NB = DIAG_COST + 1`
+ * always and the aliasing arm is tested first, a `delta > maxEdge` bound had a
+ * reachable window of *exactly* `delta === 15` — so a junction surcharge of `+2`
+ * or `+3` on an ORTHOGONAL step (`delta` 12 or 13) passed all three arms in
+ * silence, and a uniform `+2` on a diagonal fired the ALIASING message, blaming
+ * queue sizing for a cost-model change. Membership against the real value set
+ * closes both.
+ *
+ * **What membership still cannot see, stated because a guard's blind spot must
+ * be derived and not discovered.** The only surcharge that survives is one whose
+ * result lands exactly ON another legal value: with `{10, 14}` that is `+4`
+ * applied to ORTHOGONAL steps ONLY, which turns 10 into 14 and is
+ * indistinguishable here from a legitimate diagonal. Any surcharge that also
+ * touches diagonals is caught for every `p >= 1`, because `14 + p` is never in
+ * the set; and a uniform surcharge — the shape an actual junction penalty takes,
+ * since a junction is a property of the CELL and not of the direction of
+ * approach — is therefore always caught. Closing the last case needs the
+ * DIRECTION at this call site, which would make the assert a restatement of the
+ * caller's own arithmetic rather than a statement about the cost model.
+ * `scratch.test.ts` pins the whole table, both the caught cases and this one.
+ *
+ * Parameterised rather than closing over `NB` and `LEGAL_EDGE_COST_MASK`, on the
+ * precedent of `assertBucketCountExceedsEveryEdgeCost`, `assertSingleCrossing`
+ * (cars.ts) and `assertDispatchProgress` (dispatch.ts): the failure path is then
+ * testable directly, without editing a constant and rebuilding.
  *
  * Unreachable today, by construction: the only pushes are `d + edgeCost(dir)`
- * and `max(edgeCost) = DIAG_COST`. It is reachable the moment anybody adds a
- * term, which is the point.
+ * and every `edgeCost(dir)` is in the mask by derivation. It is reachable the
+ * moment anybody adds a term, which is the point.
  *
  * @internal `computeFlowField` is the production call site.
  */
@@ -181,7 +262,7 @@ export function assertPushWithinBucketWindow(
   pushed: number,
   draining: number,
   buckets: number,
-  maxEdge: number,
+  legalCostMask: number,
 ): void {
   const delta = pushed - draining
   if (delta < 0) {
@@ -198,33 +279,17 @@ export function assertPushWithinBucketWindow(
         'NB resized (see NB, and the 2026-08-21 amendment to spec 5.4)',
     )
   }
-  if (delta > maxEdge) {
+  if (((legalCostMask >>> delta) & 1) === 0) {
     throw new Error(
       `scratch: a relaxation advanced the distance by ${delta}, which is not a legal edge cost ` +
-        `(max ${maxEdge}). Path cost is a function of the DIRECTION of a step and of nothing else — ` +
-        'a junction, traffic-light or congestion term inside computeFlowField is exactly what this ' +
-        'catches. See the 2026-08-21 amendment to spec 5.4.',
+        `(the cost model produces only {${costsInMask(legalCostMask).join(', ')}}). Path cost is a ` +
+        'function of the DIRECTION of a step and of nothing else — a junction, traffic-light or ' +
+        'congestion term inside computeFlowField is exactly what this catches. See the 2026-08-21 ' +
+        'amendment to spec 5.4.',
     )
   }
 }
 
-/**
- * Distinct values `edgeCost` can return. Sets the entry-pool bound; **M1g's
- * motorway tier makes it 3 — this said M1d's, then M1e's, then M1f's, and none
- * of the three shipped one.** M1d's Out table deferred motorways to M1e because
- * they are upgrade CARDS with no card mechanism; M1e shipped §5.10's tile grant
- * and left the two-card choice to M1f; **M1f then spent its card slot on the
- * junction upgrade and never had a motorway in scope at all**, which is a
- * different reason from the previous two and is why the date moved rather than
- * the sentence being repointed a third time. M1d Task 7's lane-speed
- * multipliers, M1e Task 7's overcrowd meter and M1f's junction rule all went
- * somewhere other than `edgeCost` — the last of them by a spec amendment
- * (2026-08-21) that says so — so this constant is still 2 and the value set is
- * still `{10, 14}`. `graph.test.ts` and `scratch.test.ts` both pin this against
- * `edgeCost`'s real output (see the linkage test in `scratch.test.ts`, added
- * M1c), so adding a cost tier without updating this constant fails a test
- * rather than silently under-sizing the pool.
- */
 export const DISTINCT_EDGE_COSTS = 2
 
 /**
