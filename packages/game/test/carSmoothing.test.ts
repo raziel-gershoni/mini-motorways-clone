@@ -877,7 +877,15 @@ describe('it cannot lie about blocking', () => {
     // passes silently, which is precisely the drift the floor was moved to
     // accommodate. The exact value is the measurement and the floor is the
     // vacuity bound; they answer different questions and both are kept.
-    expect(measured.smoothed.nearQueuePairs, 'M1f INTERIM — 141 pre-M1f').toBe(46)
+    // **Re-pinned at Task 3, and the move is the whole point of pinning exactly.**
+    // Task 2 measured 46 under the WIDE rule; Task 3 narrowed the rule to
+    // crossing-only and the value is 145. Three columns so the next arm change is
+    // legible rather than a surprise: **141 pre-M1f, 46 wide, 145 crossing (ships)**.
+    // Arm B is far gentler than the wide reading, so 145 sits back beside the
+    // pre-M1f 141 — the shape to expect, not a regression. The exact pin caught
+    // the arm change the moment the two branches merged; the floor alone would
+    // have let 46 -> 145 through in silence, which is what M2 was about.
+    expect(measured.smoothed.nearQueuePairs, 'M1f Task 3 crossing-only — 141 pre-M1f, 46 wide').toBe(145)
     expect(measured.smoothed.nearQueuePairs, 'and still non-vacuous').toBeGreaterThan(20)
   })
 
@@ -928,7 +936,9 @@ describe('the artifact is measurably gone', () => {
     // the new measurement; the treatment's exact 0 is untouched, and that is the
     // assertion this case is actually about.
     // Anchored as well as floored — see the note on `nearQueuePairs` above.
-    expect(measured.exact.standingStarts, 'M1f INTERIM — 163 pre-M1f').toBe(58)
+    // Re-pinned at Task 3 with the wide reading kept beside it:
+    // **163 pre-M1f, 58 wide, 153 crossing (ships)** — see the note above.
+    expect(measured.exact.standingStarts, 'M1f Task 3 crossing-only — 163 pre-M1f, 58 wide').toBe(153)
     expect(measured.exact.standingStarts, 'and still non-vacuous').toBeGreaterThan(25)
     expect(measured.smoothed.standingStarts).toBe(0)
   })
