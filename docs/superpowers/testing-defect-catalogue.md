@@ -915,3 +915,30 @@ The lesson is not about edge costs. **When you propose a stronger-sounding asser
 the exact case you used to justify it.** "Bound" and "membership" differ only on the values between
 the legal ones, and if your example is not in that window you have argued for a change that does not
 address it.
+
+## A report can claim a correction was applied when it was not, and the next task inherits the defect
+
+M1f Task 1 swept for artefacts carrying a refuted claim and reported four corrected in place. Three
+were: `scratch.ts` and `flowfield.ts` both now **quote the refuted sentence and refute it**, which is
+the right shape — verified at Task 1's own commit.
+
+The fourth was not corrected at all. `junctionCensus.ts` still said *"Both policies share one `prev`,
+so a driver may run both in one pass over one buffer"* — and that is false in a way that silently
+destroys a measurement: the loop writes `prev[i]`/`prev[i+1]` **unconditionally** at the end of every
+cell iteration, so a second pass reads the first pass's writes and measures nothing. Both existing
+drivers already allocate two buffers, so nothing was broken — but the comment invites the bug.
+
+It was found by the *next* task, sweeping the whole file rather than patching the three lines it had
+been handed.
+
+**The generalisation is about reports, not comments.** A task report is the artefact a controller
+reads to decide what still needs doing, and "corrected in place" is exactly the kind of claim nobody
+re-checks — it closes the item. Two rules follow. **Spot-check a sweep's claims against the tree, not
+against the report**, and do it per claim rather than per sweep: three of four right is the ratio that
+makes the fourth invisible. And when a task reports N sites fixed, **the cheap verification is a grep
+for the refuted string, at that task's own commit** — which is how this one surfaced.
+
+Related, and this milestone produced both within a day: [a durable artefact that states the opposite
+of the measurement]. There the correction was written **beside** the defect — one file quoted a wrong
+figure and corrected it while the header two directories away kept asserting it. Here the correction
+was **reported** but never written. Same failure, different half.
