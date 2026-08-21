@@ -203,6 +203,15 @@ describe('M1f Task 3: the junction triage, applied to the arm that ships', () =>
     expect(city.valveFirings).toBe(5)
     expect(city.worstWait).toBe(1350)
     expect(city.routesRefused, 'and routing still refuses nothing').toBe(0)
+    // **The size of the narrowing itself, and it is asserted because three
+    // source files quote it** — `blocking.ts` twice, `integration.test.ts` and
+    // `blocking.test.ts` once each — and a figure nothing runs is a figure that
+    // comes back. These are the entries into a junction whose other lane was
+    // occupied on a NON-crossing axis: every crossing Task 2's wide rule refused
+    // and this one admits, turning occupants included.
+    expect(city.ticksDriven, 'ticks driven after the warm start').toBe(21525)
+    expect(city.grantsWithOtherLaneTaken, 'the whole of the narrowing, in crossings').toBe(43)
+    expect(city.warmStartRefusals, 'the city warm start lays no road, so nothing is refused').toBe(0)
     expect(city.conflicts, 'co-presence census').toBe(42)
     expect(city.ruleEvents, 'rule-visible census').toBe(133)
     expect(city.firstRuleEventTick).toBe(10207)
@@ -212,6 +221,15 @@ describe('M1f Task 3: the junction triage, applied to the arm that ships', () =>
     expect(demo.deathTick).toBe(6660)
     expect(demo.trips).toBe(410)
     expect(demo.blockedCarTicks).toBe(12364)
+    // The demo board's warm start is 1,200 busy ticks, so the boot-inclusive
+    // figure `constants.ts` carries is this much larger. Both windows asserted,
+    // because the two tables disagree about which one they mean and that
+    // ambiguity was a real defect in that table once.
+    expect(demo.warmStartRefusals, 'and the demo warm start is already busy').toBe(1463)
+    expect(
+      demo.blockedCarTicks + demo.warmStartRefusals,
+      'from boot, which is MAX_BLOCKED_TICKS’s evidence table’s convention',
+    ).toBe(13827)
     // The city's no-input death tick is unmoved by either M1f rule and is
     // asserted where it is derived; named here so the two constants cannot be
     // confused for one another in this file's table.
