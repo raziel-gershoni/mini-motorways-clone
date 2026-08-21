@@ -1,7 +1,7 @@
 import { MAX_BLOCKED_TICKS } from '@laneways/shared'
 import type { GameState } from './state'
 import type { WorldData } from './world'
-import { DIR_COUNT, LANE_COUNT, LANE_OF_DIR, otherLane } from './roads'
+import { DIR_COUNT, LANE_COUNT, LANE_OF_DIR, OPPOSITE, otherLane } from './roads'
 import { junctionAdmitsOne } from './graph'
 import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
 /**
@@ -12,6 +12,24 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
  * the `carRoute` codec and the definition of a committed route.
  */
 import { isCommittedTo } from './dispatch'
+/**
+ * **A REAL cycle, unlike the one above, so the function-body rule is
+ * load-bearing rather than stylistic.** `cars.ts` imports this module
+ * (`canEnter`, `claimCell`, `releaseCell`, both counter writes), so
+ * `blocking.ts -> cars.ts -> blocking.ts` closes. Whichever module V8 evaluates
+ * first sees the other's bindings uninitialised, and the catalogue's M1f Task 1
+ * entry is exactly this shape: a module-scope constant read through a cycle came
+ * back `undefined` and *"failed loudly only by luck of polarity; the same shape
+ * in a fail-open guard ships green."*
+ *
+ * Two rules follow and both are kept below. **Read these bindings only inside a
+ * function body** — `crossesAt` is the only reader of `previousLegDir`, and
+ * `NO_PREVIOUS_DIR` is read there too and nowhere else. And **make the wrong
+ * value unrepresentable rather than merely detected**: `crossesDirections`
+ * fail-closes on anything outside `[0, DIR_COUNT)` rather than on the sentinel's
+ * identity, so an `undefined` sentinel would still refuse rather than admit.
+ */
+import { previousLegDir, NO_PREVIOUS_DIR } from './cars'
 
 /**
  * Occupancy: who is standing on which (cell, lane), and the claim/release
@@ -37,30 +55,38 @@ import { isCommittedTo } from './dispatch'
  * **M1f Task 2 falsified the heading this section used to carry.** It read *"on
  * the arm that draws column 8, this is a one-second hesitation and not a jam"*,
  * and every measurement under it was correct for the tree that carried it.
- * Junction mutual exclusion changed all of them, and the M1e figures are kept
+ * Junction exclusion changed all of them, and the M1e figures are kept
  * rather than deleted because they are the control this task is measured
  * against — the same probes, run against this commit's parent, return every one
  * of them to the digit.
  *
+ * **The third column is M1f Task 3's, and it is the SHIPPED rule.** Task 2's
+ * wide form is kept in the middle column because it is the other measured arm
+ * and the triage that chose between them is only legible with both — see
+ * `canEnter`'s own section for the narrowing and its cost. Every figure in both
+ * M1f columns was produced by one rig (`game/test/junctionArms.ts`) whose
+ * refusal attribution is validated against `canEnter` on every car on every
+ * tick.
+ *
  * ```
- *   greedy arm, starting city         M1e Task 10   M1f Task 2 (wide rule)
- *   worst carBlockedTicks                      32   1,350 (saturated)
- *   valve firings                               0   15
- *   longest queue, peak week                    4   7
- *   blocked car-ticks over the run          2,120   45,986
- *   ticks with a blocked car                 6.2 %  26.2 %
- *   most cars blocked at once                   2   10
- *   H_ROUTES_REFUSED                            0   0
- *   trips / death tick                 747/31,456   344/21,704
+ *   greedy arm, starting city      M1e Task 10   T2 (wide)   T3 (crossing, ships)
+ *   worst carBlockedTicks                   32   1,350 (sat)   1,350 (saturated)
+ *   valve firings                            0          15                     5
+ *   longest queue, peak                      4           7                     8
+ *   blocked car-ticks over the run       2,120      45,986                29,267
+ *   ticks with a blocked car             6.2 %      26.2 %                22.3 %
+ *   H_ROUTES_REFUSED                         0           0                     0
+ *   trips / death tick              747/31,456  344/21,704            368/21,783
  * ```
  *
  * **So the answer to "does M1d's headline feature fire on the board that
- * ships?" flipped from no to yes at this commit**, and it flipped because the
- * feature acquired the case it was written for: a 2-cycle. Two cars swapping
- * across an edge with a junction at each end each need the other's cell empty
- * and each is standing in it, and only the 45-second valve clears it. See
- * `canEnter` below and `MAX_BLOCKED_TICKS`'s own note, whose evidence table was
- * re-measured in the same commit.
+ * ships?" flipped from no to yes at Task 2 and stays yes here**, and it flipped
+ * because the feature acquired the case it was written for: a 2-cycle. Two cars
+ * swapping across an edge with a junction at each end can each need the other's
+ * cell empty while standing in it, and only the 45-second valve clears it. Task
+ * 3 gives that back for the STRAIGHT swap and not for the turning one, which is
+ * why the valve count falls to 5 rather than to 0. See `canEnter` below and
+ * `MAX_BLOCKED_TICKS`'s own note.
  *
  * **`H_ROUTES_REFUSED` is still 0, and that is not evidence of anything** — see
  * the section immediately below, which was written to stop exactly that
@@ -669,6 +695,73 @@ export function assertEnterCarValid(i: number, carCount: number): void {
 }
 
 /**
+ * The direction the car standing on a cell ENTERED it by, or `NO_PREVIOUS_DIR`
+ * if it has not crossed on this leg.
+ *
+ * **Not a reconstruction.** `previousLegDir` (cars.ts) is the same derivation
+ * `advanceCar` runs to price the turn, over the same arrays, on the same tick —
+ * so this function and the lane the car is standing in cannot disagree. The
+ * alternative, deriving an axis from the car's direction of TRAVEL, is the
+ * queue probe's measured defect one level down: *a car occupies the lane it
+ * ENTERED by, not the one it now faces*, and those differ at every turn and at
+ * every outbound->return flip.
+ *
+ * `NO_PREVIOUS_DIR` is fail-CLOSED downstream: a car that has not crossed on
+ * its leg has no axis, and `crossesDirections` answers *"crossing"* for it, so a
+ * junction whose occupant's axis is unknown refuses.
+ *
+ * **The reachable cases for the sentinel, narrowed by reading rather than
+ * guessed.** Decision 3 says a car that has not crossed on its current leg holds
+ * no slot at all, so a just-dispatched car on its house cell is NOT reachable
+ * through `canEnter` — it is not the occupant of anything. The one case that is:
+ * a car that has just flipped to `PHASE_RETURNING` on the carpark, which keeps
+ * the claim its outbound leg's last crossing made while `previousLegDir` reports
+ * no in-leg predecessor (`cursor === routeLen`). The phase guard adds a second,
+ * unreachable through `canEnter` for the same Decision 3 reason and present
+ * because this is a public query: `previousLegDir` takes `outbound` as a boolean
+ * and would read an IDLE car's stale route through the returning branch.
+ *
+ * @param i the car standing on the cell, i.e. an occupancy slot's contents —
+ *          never the car asking to enter.
+ */
+export function crossesAt(state: GameState, i: number): number {
+  const phase = state.carPhase[i] as number
+  if (phase !== PHASE_OUTBOUND && phase !== PHASE_RETURNING) return NO_PREVIOUS_DIR
+  return previousLegDir(state, i, phase === PHASE_OUTBOUND, state.carRouteCursor[i] as number)
+}
+
+/**
+ * Do two ENTRY directions put their cars on crossing axes?
+ *
+ * Total over `[0, DIR_COUNT)` and fail-closed on everything else — the sentinel
+ * `NO_PREVIOUS_DIR` included, and by RANGE rather than by identity so that an
+ * import-cycle `undefined` cannot make the guard fail open (see the import
+ * comment at the top of this file). Two cars are on the same axis iff their
+ * directions are equal or exact opposites; every other pair crosses.
+ *
+ * **`a === b` is UNREACHABLE through `canEnter`, and it is kept anyway.**
+ * `canEnter` asks about the occupant of `otherLane(LANE_OF_DIR[a])`, and a car
+ * occupies the lane of the direction it entered by, so `LANE_OF_DIR[b] !==
+ * LANE_OF_DIR[a]` and therefore `b !== a`. The clause reduces to `a ===
+ * OPPOSITE[b]` at that call site. It is written out because **this function is
+ * a public predicate about a pair of directions, not a private helper for one
+ * caller**, and because deleting it is a labelled 0-detector equivalent rather
+ * than an unexplained survivor — `blocking.test.ts` records the derivation
+ * beside the measurement.
+ *
+ * **So what arm B actually admits is OPPOSING traffic**, not parallel traffic:
+ * at a junction, exactly the pair every ordinary two-lane cell has always
+ * admitted (`LANE_OF_DIR[d] !== LANE_OF_DIR[OPPOSITE[d]]`, Decision 1). The
+ * earlier justification for this rule talked about *"two cars going straight
+ * through a crossroads on the same axis"*, which describes the dead branch.
+ */
+export function crossesDirections(a: number, b: number): boolean {
+  if (!Number.isInteger(a) || a < 0 || a >= DIR_COUNT) return true
+  if (!Number.isInteger(b) || b < 0 || b >= DIR_COUNT) return true
+  return !(a === b || a === (OPPOSITE[b] as number))
+}
+
+/**
  * **The single blocking question**, spec §5.5: does an inbound vehicle collide
  * with a traversing vehicle on this chunk? Answered as per-(cell, lane)
  * occupancy — car `i` may enter `cell` travelling in direction `dir` iff the
@@ -690,15 +783,68 @@ export function assertEnterCarValid(i: number, carCount: number): void {
  *
  * ---------------------------------------------------------------------------
  * WHAT IS IMPLEMENTED AT A JUNCTION, IN WHOSE FAVOUR IT RESOLVES, AND WHAT IT
- * COSTS — M1f TASK 2
+ * COSTS — M1f TASK 2, NARROWED BY TASK 3
  * ---------------------------------------------------------------------------
  *
  * **This paragraph replaces *"give-way is not implemented because it does not
  * need to be"*, which was true and is not.** What is implemented is not
- * give-way and not priority: it is **mutual exclusion**. A cell of
- * `roadDegree >= INTERSECTION_DEGREE` admits ONE car at a time, whichever axis
- * it is on, and the second car waits. There is no rule about who has right of
- * way, because there is no rule that depends on where the two cars came from.
+ * give-way and not priority: it is **exclusion between CROSSING axes**. A cell
+ * of `roadDegree >= INTERSECTION_DEGREE` admits an entrant only if the other
+ * lane's occupant entered on the same axis — equal or exactly opposite
+ * directions — and the second car waits otherwise. There is no rule about who
+ * has right of way, because there is no rule that depends on which of the two
+ * crossing axes a car is on.
+ *
+ * **Task 2 shipped the WIDE form of this — one car at a time, whichever axis —
+ * and Task 3 narrowed it to crossings after measuring both.** §5.5 asks whether
+ * an inbound vehicle *collides* with a traversing one, not whether it
+ * *co-occupies* the chunk, and two cars on the same axis do not collide: that
+ * is the head-on pair `LANE_OF_DIR` was built to admit (Decision 1) and the wide
+ * rule was refusing it at junctions only. `crossesDirections` below owns the
+ * axis test and `crossesAt` owns the occupant's axis.
+ *
+ * ```
+ *   greedy arm, starting city        pre-M1f   Task 2 wide   Task 3 crossing
+ *   death tick                        31,456        21,704            21,783
+ *   completed trips                      747           344               368
+ *   blocked car-ticks                  2,120        45,986            29,267
+ *   ticks with a blocked car            6.2 %        26.2 %            22.3 %
+ *   worst carBlockedTicks                  32         1,350             1,350
+ *   valve firings                           0            15                 5
+ *   longest queue (peak)                    4             7                 8
+ *   H_ROUTES_REFUSED                        0             0                 0
+ * ```
+ *
+ * **The whole of the narrowing is 43 crossings.** Over that 21,525-tick run the
+ * rule admits exactly 43 entries into a junction whose other lane was occupied,
+ * where the wide rule admitted none — and those 43 are worth 16,719 blocked
+ * car-ticks, 10 valve firings and 24 trips, because each one is a queue that
+ * did not form. A small count with a large consequence is what a spinlock looks
+ * like from outside; it is not a sign the measurement is wrong.
+ *
+ * **A TURNING OCCUPANT IS A KNOWINGLY ADMITTED CROSSING, and this is the
+ * decision rather than an oversight.** `crossesAt` reports the direction the
+ * occupant ENTERED by. An occupant that entered heading E and is about to leave
+ * heading N presents `E`; an entrant heading W is `OPPOSITE[E]` and is admitted,
+ * across the path that occupant is about to take. Two alternatives were
+ * considered and both were refused for stated reasons:
+ *
+ *   - **Compare the occupant's `(in, out)` pair.** Its exit direction is one
+ *     `routeStep` away and costs nothing to read, but the entrant's own exit is
+ *     one cursor FURTHER on than the step `canEnter` is handed, so the rule
+ *     would consider one car's turn and not the other's. That is a
+ *     half-symmetric bound, which this project's catalogue records as its own
+ *     defect family — *a lesson applied where it was learned and not carried to
+ *     its sibling case*.
+ *   - **Compare both cars' full paths.** Symmetric, and it collapses to Task 2's
+ *     wide rule at every junction where either car turns, which is most of them.
+ *     That rule already exists and is what this task narrowed.
+ *
+ * So the rule is stated in terms of entry axes only, and the admission is
+ * pinned by a NAMED fixture case in `blocking.test.ts` rather than left to be
+ * discovered — *"a turning occupant is admitted, deliberately"*. The exposure is
+ * bounded by the 43 above: that count is every admission of any kind the
+ * narrowing makes on the board that ships, turning occupants included.
  *
  * **It resolves in favour of the LOWEST CAR INDEX, and that is a decision taken
  * here rather than a consequence of a loop bound.** `runMovement` iterates
@@ -710,18 +856,31 @@ export function assertEnterCarValid(i: number, carCount: number): void {
  * not as a loop bound"* pins it on a fixture where the descending order gives
  * the opposite answer, so reversing `runMovement`'s loop fails by name.
  *
- * **THE COST IS THE HEAD-ON PROPERTY, AT JUNCTIONS ONLY.** Two cars swapping
- * across an edge whose endpoints are both junctions each require the other's
- * cell to be empty and each is standing in it. That is a 2-cycle, the case
- * `MAX_BLOCKED_TICKS`'s comment used to say could not exist, and only the valve
- * clears it — 45 seconds. Measured on the shipped board's greedy arm, the valve
- * goes from 0 firings to 15 and the worst wait from 32 ticks to the saturated
- * 1,350. **The only thing that lifts it is a junction upgrade** (M1f Task 9,
+ * **THE COST IS THE HEAD-ON PROPERTY AT JUNCTIONS — NARROWED BY TASK 3 AND NOT
+ * RECOVERED.** Two cars swapping across an edge whose endpoints are both
+ * junctions each require the other's cell to be empty and each is standing in
+ * it: a 2-cycle, the case `MAX_BLOCKED_TICKS`'s comment used to say could not
+ * exist, which only the valve clears — 45 seconds.
+ *
+ * Task 3's narrowing gives the property back for the **straight** swap and only
+ * that one. A car that entered `Y` heading W presents axis W to a car entering
+ * `Y` heading E, `E === OPPOSITE[W]`, and the pair resolves in one tick exactly
+ * as it does on an ordinary corridor. A car that entered `Y` on a *different*
+ * axis and is about to leave heading W presents that other axis, and the swap
+ * is still a 2-cycle. So the valve goes 0 -> 15 -> 5 firings across pre-M1f, the
+ * wide rule and this one, and the worst wait is still the saturated 1,350 on
+ * both M1f arms: **fewer deadlocks, not none.**
+ *
+ * **The only thing that lifts the rest is a junction upgrade** (M1f Task 9,
  * §5.6): `junctionAdmitsOne` returns false at an upgraded cell, this clause
  * reduces to the pre-M1f own-lane rule there, and the head-on property comes
- * back whole, at that cell, with no phase and no timer. A traffic light would do
- * the same job by refusing cars instead of admitting them; M1f measured one and
- * rejected it, and it is deferred to M1g.
+ * back whole, at that cell, with no phase and no timer. Measured at Task 3 on
+ * this arm, exempting the three junction-eligible cells that carry the jam
+ * takes the run from 368 trips to **759** and from 29,267 blocked car-ticks to
+ * **2,298**; exempting all five cells the rule ever fires on reproduces the
+ * pre-M1f board to the digit — 747 trips, 2,120 blocked, tick 31,456. A traffic
+ * light would do the same job by refusing cars instead of admitting them; M1f
+ * measured one and rejected it, and it is deferred to M1g.
  *
  * **Queueing is not implemented — it emerges.** There is no queue structure, no
  * follower list and no "who is behind me" anywhere in this milestone. A car
@@ -818,7 +977,7 @@ export function canEnter(
   const lane = LANE_OF_DIR[dir] as number
   const own = state.occupancy[occupancySlot(cell, lane)] as number
   // ------------------------------------------------------------------------
-  // THE JUNCTION'S MUTUAL EXCLUSION — M1f Task 2, spec §5.5
+  // THE JUNCTION'S CROSSING EXCLUSION — M1f Task 2, narrowed by Task 3, §5.5
   // ------------------------------------------------------------------------
   //
   // §5.5's blocking primitive is *"does an inbound vehicle collide with a
@@ -829,10 +988,20 @@ export function canEnter(
   // stopped them. `MAX_BLOCKED_TICKS` is the datamined ceiling on the wait at an
   // intersection; this is the wait.
   //
-  // **A junction cell admits one car at a time.** On a cell of degree >=
-  // `INTERSECTION_DEGREE` the OTHER lane must be free too. One extra
-  // `Int16Array` read on the crossings that reach a junction, no new state, no
-  // allocation.
+  // **A junction cell refuses an entrant whose axis CROSSES the other lane's
+  // occupant.** On a cell of degree >= `INTERSECTION_DEGREE` the other lane is
+  // read, and if it holds a car the two entry axes are compared: same axis
+  // (equal or exactly opposite) admits, anything else waits. Two `Int16Array`
+  // reads and, on the rare occupied one, one `previousLegDir` walk of the
+  // occupant's own route nibble. No new state, no allocation.
+  //
+  // **Task 2 shipped `own === FREE && other === FREE` — one car at a time,
+  // whichever axis — and Task 3 replaced it after measuring both.** *Collide*
+  // and *co-occupy* are different questions, and the wide form was refusing at
+  // junctions the very head-on pair `LANE_OF_DIR` exists to admit everywhere
+  // else. The narrowing is worth 43 admissions, 16,719 blocked car-ticks and 24
+  // trips on the shipped arm; the module comment carries the table and the
+  // turning-occupant decision.
   //
   // **The crossing pair is (E, N) and NOT (E, S).** `LANE_OF_DIR` is
   // `[1, 0, 0, 0, 0, 1, 1, 1]`, so E and S are the SAME lane and the own-lane
@@ -840,13 +1009,13 @@ export function canEnter(
   // because the plan's fixture had it the other way round, which would have made
   // the headline test green before the rule shipped.
   //
-  // **THIS BREAKS THE HEAD-ON PROPERTY AT JUNCTIONS, AND THAT IS THE COST.** Two
-  // cars swapping across an edge whose endpoints are both junctions each require
-  // the other's cell to be empty and each is standing in it — a 2-cycle, which
-  // `MAX_BLOCKED_TICKS`'s own comment used to say could not exist. M1f Task 9's
-  // JUNCTION UPGRADE is what gives the property back — whole, at one cell, with
-  // no phase — which is dossier §1.7's `greenLightsIgnoreCollisions` applied to
-  // every axis at once.
+  // **THE HEAD-ON PROPERTY IS BACK FOR THE STRAIGHT SWAP AND STILL BROKEN FOR
+  // THE TURNING ONE, AND THAT IS THE REMAINING COST.** Two cars swapping across
+  // an edge whose endpoints are both junctions resolve in one tick when each
+  // entered on the shared axis, and still form a 2-cycle when either entered on
+  // another one. M1f Task 9's JUNCTION UPGRADE is what gives the rest back —
+  // whole, at one cell, with no phase — which is dossier §1.7's
+  // `greenLightsIgnoreCollisions` applied to every axis at once.
   //
   // **`junctionAdmitsOne` and NOT `isJunctionCell`**, because the two diverge at
   // Task 9: an upgraded junction keeps the intersection SLOWDOWN and loses this
@@ -855,11 +1024,13 @@ export function canEnter(
   // **It inherits `assertOccupancySound`'s valve exception and introduces no new
   // soundness question**: the other lane's slot is read exactly as the own lane's
   // is, so a stale claim left by a valve displacement is stale in both and is
-  // already in that assert's exception set.
+  // already in that assert's exception set. `crossesAt` then reads that car's
+  // own route, which soundness guarantees is a car standing on this cell.
   const other = junctionAdmitsOne(state, cell)
     ? (state.occupancy[occupancySlot(cell, otherLane(lane))] as number)
     : FREE
-  if (own === FREE && other === FREE) return EnterOutcome.ENTER_FREE
+  const blocked = own !== FREE || (other !== FREE && crossesDirections(dir, crossesAt(state, other)))
+  if (!blocked) return EnterOutcome.ENTER_FREE
   if ((state.carBlockedTicks[i] as number) >= MAX_BLOCKED_TICKS) return EnterOutcome.ENTER_VALVE
   return EnterOutcome.REFUSED_OCCUPIED
 }

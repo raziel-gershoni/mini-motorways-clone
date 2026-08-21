@@ -244,6 +244,69 @@ export function junctionRace(id = 'junction-race'): RaceRig {
   return { ...rig, progress }
 }
 
+/** How many route steps a hand-built OCCUPANT carries. */
+const OCCUPANT_ROUTE_LEN = 4
+
+/**
+ * A car STANDING on `cell`, having entered it heading `enteredBy` and about to
+ * leave heading `exitBy` — byte-indistinguishable from a car that drove there.
+ *
+ * **M1f Task 3 needs this and Task 2 did not, and the difference is the whole
+ * reason it exists.** Task 2's rule read only the occupancy slot, so its
+ * fixtures could hand-`claimCell` an occupant with no phase and no route and
+ * still exercise the rule exactly. Task 3's rule asks the occupant which AXIS it
+ * is on, through `crossesAt` -> `previousLegDir`, and a car with no route
+ * answers `NO_PREVIOUS_DIR` — which `crossesDirections` fail-closes on. So under
+ * the narrowed rule a bare `claimCell` occupant refuses **every** entrant, and
+ * every one of Task 2's junction cases would have stayed green by way of the
+ * fail-closed branch rather than by the rule they name. That is the catalogue's
+ * *"a negative assertion is only meaningful if the fixture disables every OTHER
+ * mechanism that produces the same observation"*, arriving one task later
+ * through a rule change rather than through a fixture mistake.
+ *
+ * `cursor` is 1, so `previousLegDir(outbound, 1)` reads step 0 — `enteredBy` —
+ * and `travelDir` reads step 1, `exitBy`. Those differ for a turning occupant,
+ * which is what makes "read the entry direction, not the direction of travel"
+ * an observable choice rather than an equivalent one.
+ */
+export function handOccupant(
+  s: GameState,
+  i: number,
+  cell: number,
+  enteredBy: number,
+  exitBy: number = enteredBy,
+): void {
+  s.carPhase[i] = PHASE_OUTBOUND
+  s.carCell[i] = cell
+  s.carRouteLen[i] = OCCUPANT_ROUTE_LEN
+  s.carRouteCursor[i] = 1
+  packRouteStep(s, i, 0, enteredBy)
+  for (let k = 1; k < OCCUPANT_ROUTE_LEN; k++) packRouteStep(s, i, k, exitBy)
+  claimCell(s, i, cell, enteredBy)
+}
+
+/**
+ * An occupant that holds a slot and has NOT crossed on its current leg, so
+ * `crossesAt` answers `NO_PREVIOUS_DIR`.
+ *
+ * **Off the reachable manifold on purpose, and the caller asserts that.**
+ * Decision 3 says a car that has not crossed on its leg holds nothing, so the
+ * combination of "names a slot" and "cursor 0" cannot arise through
+ * `runMovement`. The one shape that DOES reach `crossesAt`'s sentinel in
+ * production is a car that has just flipped to `PHASE_RETURNING` on a carpark —
+ * `hasCrossedThisLeg` is false there while the outbound leg's last claim still
+ * stands — and that is a state this rig cannot build without a real trip, so the
+ * fail-closed branch is exercised here through the cheaper posture and labelled.
+ */
+export function handAxislessOccupant(s: GameState, i: number, cell: number, lane: number): void {
+  s.carPhase[i] = PHASE_OUTBOUND
+  s.carCell[i] = cell
+  s.carRouteLen[i] = OCCUPANT_ROUTE_LEN
+  s.carRouteCursor[i] = 0
+  for (let k = 0; k < OCCUPANT_ROUTE_LEN; k++) packRouteStep(s, i, k, DIR_E)
+  s.occupancy[cell * 2 + lane] = i
+}
+
 /**
  * One hand-written car slot, byte-indistinguishable from a car that drove here.
  *

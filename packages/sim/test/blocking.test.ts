@@ -55,13 +55,22 @@ import {
   assertOccupancyComplete,
   assertOccupancyConsistent,
   type EnterOutcomeCode,
+  crossesAt,
+  crossesDirections,
 } from '../src/blocking'
-import { runMovement, speedUnits } from '../src/cars'
+import { NO_PREVIOUS_DIR, runMovement, speedUnits } from '../src/cars'
 import { isCommittedTo, packRouteStep, routeStep } from '../src/dispatch'
 import { runArrivals } from '../src/trips'
 import { step, type TickAction, type TickInputs } from '../src/step'
 import { fieldFor } from '../src/flowfield'
-import { bentCorridor, plusJunction, straightCorridor, twoAdjacentJunctions } from './junctionRigs'
+import {
+  bentCorridor,
+  handAxislessOccupant,
+  handOccupant,
+  plusJunction,
+  straightCorridor,
+  twoAdjacentJunctions,
+} from './junctionRigs'
 import { roadDegree } from '../src/graph'
 
 /**
@@ -3590,7 +3599,25 @@ describe('assertEnterCarValid: the third parameter of canEnter s signature, guar
   })
 })
 
-describe('a junction cell admits ONE car at a time (spec 5.5, M1f Task 2)', () => {
+describe('a junction cell admits one AXIS at a time (spec 5.5, M1f Tasks 2 and 3)', () => {
+  /**
+   * ---------------------------------------------------------------------
+   * **EVERY OCCUPANT IN THIS BLOCK IS BUILT WITH `handOccupant` AS OF M1f
+   * TASK 3, AND A BARE `claimCell` WOULD MAKE THE WHOLE BLOCK GREEN FOR THE
+   * WRONG REASON.**
+   * ---------------------------------------------------------------------
+   *
+   * Task 2's rule read the occupancy slot and nothing else, so an occupant
+   * hand-written with `claimCell` and no phase or route exercised it exactly.
+   * Task 3's rule asks that occupant which AXIS it entered on, and a car with
+   * no route answers `NO_PREVIOUS_DIR`, which `crossesDirections` fail-closes
+   * on. Under the narrowed rule a bare `claimCell` occupant therefore refuses
+   * EVERY entrant — including the ones this block exists to prove are
+   * admitted — and the cases below would have stayed green through the
+   * fail-closed branch instead of through the rule they are named for. Each
+   * refusal case now asserts `crossesAt` on its own occupant, so the branch
+   * that produced the answer is part of the test.
+   */
   /**
    * **The brief's fixture used (E, S) as its crossing pair and those are the
    * same lane** — `LANE_OF_DIR` is `[1, 0, 0, 0, 0, 1, 1, 1]`, so E and S are
@@ -3607,10 +3634,136 @@ describe('a junction cell admits ONE car at a time (spec 5.5, M1f Task 2)', () =
     const rig = plusJunction('xing-refused')
     expect(roadDegree(rig.s, rig.centre), 'the fixture really is a junction').toBe(4)
     expect(LANE_OF_DIR[DIR_E], 'the two cars really are in different lanes').not.toBe(LANE_OF_DIR[DIR_N])
-    claimCell(rig.s, 0, rig.centre, DIR_E)
+    handOccupant(rig.s, 0, rig.centre, DIR_E)
     // The own-lane read cannot be what refuses this: lane 1 is provably free.
     expect(occupantOf(rig.s, rig.centre, LANE_OF_DIR[DIR_N] as number), "the entrant's OWN lane is free").toBe(FREE)
+    // ...and neither can the fail-closed sentinel: the occupant HAS an axis.
+    expect(crossesAt(rig.s, 0), 'the occupant entered heading east and says so').toBe(DIR_E)
+    expect(crossesDirections(DIR_N, DIR_E), 'and north crosses east').toBe(true)
     expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+  })
+
+  it('ADMITS an opposing entrant at a junction — the whole of M1f Task 3s narrowing', () => {
+    // **The one case Task 2's wide rule refused and this one does not.** Task 2
+    // asked "is the other lane free"; Task 3 asks "is the other lane's occupant
+    // on a crossing axis". A car that entered heading west and a car entering
+    // heading east are the head-on pair `LANE_OF_DIR` was built to admit
+    // everywhere else (Decision 1), and the wide rule was refusing it at
+    // junctions only.
+    const rig = plusJunction('xing-opposing')
+    expect(roadDegree(rig.s, rig.centre), 'the fixture really is a junction').toBe(4)
+    handOccupant(rig.s, 0, rig.centre, DIR_W)
+    expect(crossesAt(rig.s, 0)).toBe(DIR_W)
+    expect(LANE_OF_DIR[DIR_E], 'and the two really are in different lanes').not.toBe(LANE_OF_DIR[DIR_W])
+    expect(occupantOf(rig.s, rig.centre, otherLane(LANE_OF_DIR[DIR_E] as number)), 'the other lane IS held').toBe(0)
+    expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_E)).toBe(EnterOutcome.ENTER_FREE)
+  })
+
+  it('a TURNING occupant is admitted, and that is a decision rather than an oversight', () => {
+    // **The named fixture case M1f Task 3's Step 5 owes.** `crossesAt` reports
+    // the direction the occupant ENTERED by. An occupant that entered heading
+    // east and is about to leave heading north presents `E`; an entrant heading
+    // west is `OPPOSITE[E]` and is admitted, straight across the path that
+    // occupant is about to take. That is a real crossing and this rule lets it
+    // through.
+    //
+    // **The two alternatives were considered and refused in writing** — see
+    // `canEnter`'s module comment. Comparing the occupant's `(in, out)` pair is
+    // half-symmetric, because the entrant's own exit is one cursor further on
+    // than the step `canEnter` is handed; comparing both cars' full paths is
+    // Task 2's wide rule at every junction where either car turns. The exposure
+    // is bounded by measurement rather than by argument: the whole narrowing is
+    // 43 admitted crossings over the shipped arm's 21,525 ticks, turning
+    // occupants included.
+    const rig = plusJunction('xing-turning')
+    handOccupant(rig.s, 0, rig.centre, DIR_E, DIR_N)
+    expect(crossesAt(rig.s, 0), 'it ENTERED heading east').toBe(DIR_E)
+    expect(routeStep(rig.s, 0, 1), '...and is about to LEAVE heading north').toBe(DIR_N)
+    expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_W), 'admitted, knowingly').toBe(
+      EnterOutcome.ENTER_FREE,
+    )
+    // And the discrimination that makes "entry, not travel" an observable
+    // choice: reading the occupant's direction of TRAVEL instead would answer
+    // north, which crosses west, and this entrant would be refused.
+    expect(crossesDirections(DIR_W, DIR_N), 'the travel-direction reading refuses it').toBe(true)
+    expect(crossesDirections(DIR_W, DIR_E), 'the entry-direction reading admits it').toBe(false)
+  })
+
+  it('refuses when the occupant has NO axis at all — fail-closed on the sentinel', () => {
+    // The occupant holds a slot and has not crossed on its leg, so
+    // `previousLegDir` has no in-leg predecessor to report. **Off the reachable
+    // manifold, and asserted to be**: Decision 3 says such a car holds nothing,
+    // so `assertOccupancyComplete`'s own predicate is what names the posture.
+    // The production shape that DOES reach the sentinel is a car that has just
+    // flipped to RETURNING on a carpark, which keeps its outbound claim.
+    const rig = plusJunction('xing-axisless')
+    handAxislessOccupant(rig.s, 0, rig.centre, LANE_OF_DIR[DIR_E] as number)
+    expect(hasCrossedThisLeg(rig.s, 0), 'the fixture is off-manifold on purpose').toBe(false)
+    expect(occupantOf(rig.s, rig.centre, LANE_OF_DIR[DIR_E] as number), '...and yet it holds a slot').toBe(0)
+    expect(crossesAt(rig.s, 0), 'so it has no axis').toBe(NO_PREVIOUS_DIR)
+    expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N), 'refused, fail-closed').toBe(
+      EnterOutcome.REFUSED_OCCUPIED,
+    )
+    // ...and it refuses the OPPOSING entrant too, which the axis test would
+    // have admitted. That is what "fail-closed" means here and it is the half a
+    // crossing-only fixture cannot see.
+    expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_W), 'even the opposing one').toBe(
+      EnterOutcome.REFUSED_OCCUPIED,
+    )
+  })
+
+  it('crossesAt refuses a non-driving occupant too, which no slot can legally hold', () => {
+    // The phase guard, which `previousLegDir` itself does not have: handed
+    // `outbound = false` for an IDLE car it would read the returning branch off
+    // a stale route. Unreachable through `canEnter` — occupancy soundness says a
+    // slot names an OUTBOUND or RETURNING car — and guarded because this is a
+    // public query, on `assertEnterCarValid`'s precedent.
+    const rig = plusJunction('xing-idle')
+    rig.s.carPhase[0] = PHASE_IDLE
+    rig.s.carRouteLen[0] = 4
+    rig.s.carRouteCursor[0] = 2
+    packRouteStep(rig.s, 0, 1, DIR_E)
+    expect(crossesAt(rig.s, 0)).toBe(NO_PREVIOUS_DIR)
+  })
+
+  it('crossesDirections is total over all 64 ordered pairs and both sentinel positions', () => {
+    // **The count is asserted against `DIR_COUNT * DIR_COUNT` so a shortened
+    // table fails rather than passing quietly**, which is the catalogue's
+    // "a comment quoting an enumeration far larger than the tripwire beneath
+    // it" wearing its fix.
+    let checked = 0
+    let crossing = 0
+    let same = 0
+    for (let a = 0; a < DIR_COUNT; a++) {
+      for (let b = 0; b < DIR_COUNT; b++) {
+        const expected = !(a === b || a === (OPPOSITE[b] as number))
+        expect(crossesDirections(a, b), `(${a}, ${b})`).toBe(expected)
+        // Symmetric, which the rule has to be: "these two cars conflict" cannot
+        // depend on which of them asked.
+        expect(crossesDirections(b, a), `(${b}, ${a}) is the mirror`).toBe(expected)
+        checked++
+        if (expected) crossing++
+        else same++
+      }
+    }
+    expect(checked, 'every ordered pair, and the count says so').toBe(DIR_COUNT * DIR_COUNT)
+    // Eight directions, each on the same axis as itself and as its opposite, so
+    // 16 same-axis pairs and 48 crossing ones. Written out because a rule that
+    // answered `true` everywhere would still satisfy the loop above if the
+    // expectation were computed the same way the function is.
+    expect(same, 'a === b or a === OPPOSITE[b], for eight directions').toBe(16)
+    expect(crossing, 'and the rest').toBe(48)
+    expect(same + crossing).toBe(DIR_COUNT * DIR_COUNT)
+
+    // Both sentinel positions, and everything else off the table. Fail-CLOSED,
+    // by RANGE rather than by the sentinel's identity — see the import comment
+    // in `blocking.ts`: an import cycle that returned `undefined` for
+    // `NO_PREVIOUS_DIR` must not be able to open this guard.
+    for (const bad of [NO_PREVIOUS_DIR, -1, -2, DIR_COUNT, 99, 1.5, NaN, undefined as unknown as number]) {
+      expect(crossesDirections(bad, DIR_E), `(${String(bad)}, E) must fail closed`).toBe(true)
+      expect(crossesDirections(DIR_E, bad), `(E, ${String(bad)}) must fail closed`).toBe(true)
+    }
+    expect(crossesDirections(NO_PREVIOUS_DIR, NO_PREVIOUS_DIR), 'and both at once').toBe(true)
   })
 
   it('admits the same entrant when the cell is a corridor rather than a junction', () => {
@@ -3637,14 +3790,21 @@ describe('a junction cell admits ONE car at a time (spec 5.5, M1f Task 2)', () =
   })
 
   it('refuses on the OWN lane at a junction exactly as it does on a corridor', () => {
+    // The own-lane clause is UNCONDITIONAL — no axis test in front of it — so
+    // the occupant here is given a real axis, and the same one the entrant is
+    // on. Under Task 3's rule that pair is admitted at the OTHER lane and
+    // refused here, which is the discrimination between the two clauses.
     const rig = plusJunction('xing-own-lane')
-    claimCell(rig.s, 0, rig.centre, DIR_N)
+    handOccupant(rig.s, 0, rig.centre, DIR_N)
+    expect(crossesAt(rig.s, 0), 'the occupant is on the entrant’s own axis').toBe(DIR_N)
+    expect(crossesDirections(DIR_N, DIR_N), 'which the axis test would ADMIT').toBe(false)
     expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.REFUSED_OCCUPIED)
   })
 
   it('releases a junction refusal through the valve, and the valve is still inside the occupied family', () => {
     const rig = plusJunction('xing-valve')
-    claimCell(rig.s, 0, rig.centre, DIR_E)
+    handOccupant(rig.s, 0, rig.centre, DIR_E)
+    expect(crossesAt(rig.s, 0), 'a real crossing axis, not the fail-closed sentinel').toBe(DIR_E)
     rig.s.carBlockedTicks[1] = MAX_BLOCKED_TICKS
     expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.ENTER_VALVE)
   })
@@ -3656,30 +3816,55 @@ describe('a junction cell admits ONE car at a time (spec 5.5, M1f Task 2)', () =
     // once — a saturated counter AND a ghost AND a junction AND the other lane
     // held — on one fixture.
     const rig = plusJunction('xing-ghost')
-    claimCell(rig.s, 0, rig.centre, DIR_E)
+    handOccupant(rig.s, 0, rig.centre, DIR_E)
     rig.s.carBlockedTicks[1] = MAX_BLOCKED_TICKS
     rig.s.ghostMask[rig.centre] = 1 << DIR_E
     expect(isCommittedTo(rig.s, rig.world, 1, rig.centre), 'the fixture is off-manifold on purpose').toBe(false)
     expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.REFUSED_GHOST)
   })
 
-  it('breaks the 2-cycle that the two-lane model used to make impossible', () => {
+  it('the STRAIGHT 2-cycle Task 2 created resolves again, and the TURNING one does not', () => {
     // Two junctions joined by one edge, one car standing on each, each wanting
-    // the other's cell. Neither can move; the valve is the only way out. This is
-    // the case `MAX_BLOCKED_TICKS`'s comment said could not exist, this task
-    // corrects that comment, and Task 9 Step 7 reuses this exact fixture to show
-    // that a junction upgrade on each cell gives the property back, with nothing
-    // hand-written into state.
+    // the other's cell. **Task 2's wide rule deadlocked both of these and only
+    // the valve cleared them — 45 seconds. Task 3 gives the straight one back
+    // and leaves the turning one, which is why the shipped arm's valve count
+    // falls from 15 to 5 rather than to 0.** Both halves are on one fixture
+    // because a pair of tests could each be green for the other's reason.
+    //
+    // Task 9 Step 7 reuses this exact fixture to show that a junction upgrade on
+    // each cell gives the property back for BOTH, with nothing hand-written
+    // into state.
     const rig = twoAdjacentJunctions('xing-2cycle')
     expect(roadDegree(rig.s, rig.left), 'both ends are junctions, at the threshold').toBe(3)
     expect(roadDegree(rig.s, rig.right)).toBe(3)
-    claimCell(rig.s, 0, rig.left, DIR_E)
-    claimCell(rig.s, 1, rig.right, DIR_W)
+
+    // (a) The STRAIGHT swap: each entered on the shared east-west axis.
+    handOccupant(rig.s, 0, rig.left, DIR_E)
+    handOccupant(rig.s, 1, rig.right, DIR_W)
     // Head-on, so the two are in DIFFERENT lanes and the own-lane read grants
-    // both — which is precisely the property this rule costs.
+    // both. Task 2's rule refused them anyway; this one does not.
     expect(LANE_OF_DIR[DIR_E]).not.toBe(LANE_OF_DIR[DIR_W])
-    expect(canEnter(rig.s, rig.world, 0, rig.right, DIR_E)).toBe(EnterOutcome.REFUSED_OCCUPIED)
-    expect(canEnter(rig.s, rig.world, 1, rig.left, DIR_W)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+    expect(canEnter(rig.s, rig.world, 0, rig.right, DIR_E)).toBe(EnterOutcome.ENTER_FREE)
+    expect(canEnter(rig.s, rig.world, 1, rig.left, DIR_W)).toBe(EnterOutcome.ENTER_FREE)
+
+    // (b) The TURNING swap, on the same two cells: the right-hand car entered
+    // heading NORTH off the south arm and is leaving west, so its axis crosses
+    // the left-hand car's. The 2-cycle is back and only the valve clears it.
+    const turn = twoAdjacentJunctions('xing-2cycle-turn')
+    handOccupant(turn.s, 0, turn.left, DIR_E)
+    handOccupant(turn.s, 1, turn.right, DIR_N, DIR_W)
+    expect(crossesAt(turn.s, 1), 'it arrived on the north-south axis').toBe(DIR_N)
+    expect(canEnter(turn.s, turn.world, 0, turn.right, DIR_E)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+    // ...and the other half of the cycle is refused for the mirror reason: the
+    // left-hand car is on the east-west axis, and the entrant is heading west
+    // off a cell it entered heading north, so ITS axis is what the left cell
+    // compares against.
+    expect(canEnter(turn.s, turn.world, 1, turn.left, DIR_W)).toBe(EnterOutcome.ENTER_FREE)
+    // Which is the honest shape of the remaining deadlock: it is one-sided.
+    // Car 0 cannot move and car 1 can, so the cycle breaks the moment car 1
+    // takes its turn — the standing 2-cycle needs BOTH to be crossing, and
+    // `blocking.ts`'s valve count of 5 on the shipped arm is how often that
+    // happens over 21,525 ticks.
   })
 
   it('reads the OTHER lane and not a second copy of the own lane', () => {
@@ -3688,7 +3873,7 @@ describe('a junction cell admits ONE car at a time (spec 5.5, M1f Task 2)', () =
     // equivalent. Here the OWN lane is free and the other is held, so a duplicate
     // read answers ENTER_FREE.
     const rig = plusJunction('xing-other-lane')
-    claimCell(rig.s, 0, rig.centre, DIR_E)
+    handOccupant(rig.s, 0, rig.centre, DIR_E)
     expect(slotsOf(rig.s, rig.centre), 'lane 0 held, lane 1 free').toEqual([0, FREE])
     expect(otherLane(LANE_OF_DIR[DIR_N] as number)).toBe(LANE_OF_DIR[DIR_E])
     expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.REFUSED_OCCUPIED)

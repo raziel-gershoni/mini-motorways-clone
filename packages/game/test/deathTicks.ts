@@ -23,6 +23,11 @@
  * milestone's plan predicted both would move; the derivation for the one that
  * did not is below, and it is a derivation rather than luck.
  *
+ * **Both were re-measured again at M1f Task 3, which narrowed the rule.** The
+ * demo figure moved a second time (5,757 -> 6,660); the city figure did not
+ * move either time, and the derivation below covers both narrowings for the
+ * same reason — the board is dead long before any junction event.
+ *
  * The per-board derivations, the dying destinations and the counterfactuals
  * live beside the boards themselves, in `demoLayout.test.ts` and
  * `startingCity.test.ts`. This file is deliberately only the two integers.
@@ -30,31 +35,41 @@
 
 /**
  * `demoCity` + `seedDemoLayout` + `createState('laneways-demo')` + the
- * 1,200-tick warm start, no input: **5,757** — 3 min 12 s at 30 Hz. D2, the
+ * 1,200-tick warm start, no input: **6,660** — 3 min 42 s at 30 Hz. D2, the
  * colour-2 circle at grid (16, 9).
  *
- * **Moved at M1f Task 2** from 6,703 by junction mutual exclusion — 946 ticks,
- * 31.5 s, 14.1 % earlier. The demo board is a deliberately overloaded city and a
- * junction that costs something is what it was built to exhibit: over the same
- * 3,000-tick window it now takes **39,795** entry refusals against 3,235, fires
- * the anti-deadlock valve **7 times** where it fired 0, and delivers **66** trips
- * against 171. Re-measured on the rig this file's header specifies, not copied
- * from a plan — the M1f plan deliberately states no figure for it.
+ * **Moved TWICE inside M1f, and the second move is most of the first one
+ * undone.** Task 2's wide junction rule took it from 6,703 to **5,757** — 946
+ * ticks, 31.5 s, 14.1 % earlier. Task 3 narrowed the rule to crossing axes only
+ * and it came back to **6,660**, 43 ticks (1.4 s, 0.6 %) short of where it
+ * started. The demo board is a deliberately overloaded city and a junction that
+ * costs something is what it was built to exhibit; the wide rule cost it more
+ * than the board could pay, which is what the Task 3 triage measured. Over the
+ * whole run it now takes **12,364** entry refusals against 6,676 pre-M1f
+ * (97,138 under the wide rule), fires the anti-deadlock valve **0** times
+ * (pre-M1f 0, wide 22), and delivers **410** trips against 420 (wide 105).
  *
- * **Task 3 may move it again** — it is the task that decides whether the shipped
- * rule is this wide one or the narrower crossing-only arm — and if it does, this
- * constant, `demoAllocation.test.ts`'s window margin and `demoLayout.test.ts`'s
- * matched-window block are all re-derived there.
+ * Re-measured on the rig this file's header specifies, not copied from a plan,
+ * and cross-checked against `game/test/junctionArms.ts`'s independent driver,
+ * which answers 6,660 / 410 / 12,364 for the same board.
+ *
+ * **This is the LAST task that may move it before Task 9.** Task 3 owned the
+ * choice of rule; `demoAllocation.test.ts`'s window margin and
+ * `demoLayout.test.ts`'s matched-window block are re-derived against this value
+ * in the same commit.
  */
-export const DEMO_DEATH_TICK = 5757
+export const DEMO_DEATH_TICK = 6660
 
 /**
  * `firstCity` + `seedStartingCity` + `createState('laneways-m2')` + the
  * 258-tick warm start, no input: **5,580** — 3 min 06 s. D2, colour 1's lone
  * circle. **Avoidable in five tiles** — see `startingCity.test.ts`.
  *
- * **Confirmed unmoved at M1f Task 2, and that is derived rather than lucky.**
- * Junction mutual exclusion can only change a run in which two cars both have
+ * **Confirmed unmoved at M1f Task 2 and again at Task 3, and that is derived
+ * rather than lucky. The derivation covers any narrowing for free: Task 3's
+ * rule refuses a subset of what Task 2's did, so it can only change a run Task
+ * 2's rule could already change.**
+ * Junction exclusion can only change a run in which two cars both have
  * business inside one junction cell on one tick. On this board's greedy arm the
  * earliest such tick is **10,207** (`junctionCensus.ts`'s `CENSUS_RULE_VISIBLE`
  * policy; its `CENSUS_CO_PRESENCE` policy says 15,001 and is blind to the

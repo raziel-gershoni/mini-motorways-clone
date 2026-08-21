@@ -692,13 +692,15 @@ describe('the demo layout is visibly congested, measured over 3,000 ticks', () =
     // inequality against an independently measured number: 6,703 came off a
     // 40,000-tick drive of the real boot path, and 3,000 is this file's own
     // choice.
-    // **Re-measured at M1f Task 2: 5,757, down from 6,703.** The window is
-    // unchanged at 3,000 and the margin therefore falls from 55 % to 48 %. Both
-    // numbers are re-derived rather than relaxed — the assertion is still an
-    // exact figure, so the next move has to be made on purpose.
-    expect(DEMO_DEATH_TICK).toBe(5757)
+    // **Re-measured twice inside M1f: 6,703 -> 5,757 (Task 2's wide rule) ->
+    // 6,660 (Task 3's crossing-only rule).** The window is unchanged at 3,000
+    // and the margin therefore went 55 % -> 48 % -> 55 % again. Both numbers are
+    // re-derived rather than relaxed — the assertion is still an exact figure,
+    // so the next move has to be made on purpose, and the margin returning to
+    // its pre-M1f value is a measurement rather than a restoration.
+    expect(DEMO_DEATH_TICK).toBe(6660)
     expect(TICKS).toBeLessThan(DEMO_DEATH_TICK)
-    expect(Math.round((1 - TICKS / DEMO_DEATH_TICK) * 100), 'margin, as a figure').toBe(48)
+    expect(Math.round((1 - TICKS / DEMO_DEATH_TICK) * 100), 'margin, as a figure').toBe(55)
   })
 
   it('queues continuously: thousands of refusals, over half of all ticks blocked', () => {
@@ -709,17 +711,20 @@ describe('the demo layout is visibly congested, measured over 3,000 ticks', () =
     // does.
     //
     // **Measured on this rig, this seed, and THIS 3,000-tick window.** M1f Task
-    // 2 moved every one of them, in the direction junction mutual exclusion
-    // predicts and by more than any previous milestone did:
+    // 2 moved every one of them, in the direction junction exclusion predicts
+    // and by more than any previous milestone did — and **M1f Task 3 moved them
+    // most of the way back**, which is what the triage between the two rules
+    // measured. Both M1f columns are kept because the choice between them is
+    // only legible with both:
     //
     // ```
-    //                    pre-M1f   M1f Task 2 (wide)
-    //   refusals           3,235      39,795     x12.3
-    //   blocked ticks      1,401       2,413     x1.72  (of 3,000)
-    //   longest queue          7          17
-    //   trips                171          66     -61 %
-    //   valve firings          0           7
-    //   cars ever blocked     24          24
+    //                    pre-M1f   T2 (wide)   T3 (crossing, ships)
+    //   refusals           3,235      39,795      5,463   x1.69 on pre-M1f
+    //   blocked ticks      1,401       2,413      1,781   (of 3,000)
+    //   longest queue          7          17          8
+    //   trips                171          66        168   -1.8 %
+    //   valve firings          0           7          0
+    //   cars ever blocked     24          24         24
     // ```
     //
     // **`longest queue` is a POST-REPAIR number.** `carAheadOf` read one lane
@@ -754,11 +759,22 @@ describe('the demo layout is visibly congested, measured over 3,000 ticks', () =
     expect(measured.refusals).toBeGreaterThan(1500)
     expect(measured.blockedTicks).toBeGreaterThan(750)
     expect(measured.longestQueue).toBeGreaterThanOrEqual(4)
-    // Every threshold above is a FLOOR and every measured value went UP, so none
-    // of them was re-fitted at M1f Task 2. Stated because a block whose numbers
-    // all moved and whose assertions all stayed is the shape a reader should
-    // check rather than assume.
-    expect(measured.refusals, 'post-M1f: 39,795').toBeGreaterThan(30000)
+    // Every threshold above is a FLOOR that predates M1f, and every measured
+    // value is still above it under all three rules, so none of them has ever
+    // been re-fitted. Stated because a block whose numbers all moved and whose
+    // assertions all stayed is the shape a reader should check rather than
+    // assume.
+    //
+    // **This last line is a PIN, not a floor, and it is last for that reason.**
+    // Task 2 wrote `> 30000` here to record that refusals had gone up 12.3x;
+    // under Task 3's rule they are 5,463, so a floor at 30,000 would now be
+    // false. Replacing it with a floor just under 5,463 would be re-fitting a
+    // threshold to a measurement, which is the thing the paragraph above says
+    // this block does not do. So the move goes on the record as the exact
+    // figure — it fires for any change in either direction, and the three
+    // loose floors above it are what say the board is still congested.
+    expect(measured.refusals, 'T3 crossing-only: 5,463 (3,235 pre-M1f, 39,795 wide)').toBe(5463)
+    expect(measured.blockedTicks, 'and 1,781 of 3,000 ticks carry a blocked car').toBe(1781)
     // Not one unlucky car going round in circles: the refusals are spread over
     // most of the fleet. Without this, a single permanently-stuck car would
     // satisfy every threshold above.
@@ -787,7 +803,7 @@ describe('the demo layout is visibly congested, measured over 3,000 ticks', () =
     //
     // -------------------------------------------------------------------
     // **M1f TASK 2 TOOK THIS BOARD FROM 171 TRIPS TO 66 AND MADE THE VALVE
-    // FIRE. IT STILL GRINDS RATHER THAN STOPS, AND THAT IS ARITHMETIC.**
+    // FIRE. TASK 3 TOOK IT BACK TO 168 AND STOPPED THE VALVE AGAIN.**
     // -------------------------------------------------------------------
     //
     // The two numbers this criterion was written against belong to a
@@ -801,15 +817,22 @@ describe('the demo layout is visibly congested, measured over 3,000 ticks', () =
     //   the gridlocked draft            47              214
     //   pre-M1f three-corridor       1,140                0
     //   M1f Task 2, wide rule          440               47
+    //   M1f Task 3, crossing only    1,120                0
     // ```
     //
-    // So the board is **9.4x better than the gridlocked draft on throughput**
-    // and 2.6x worse than it was — degraded, not tipped. The valve firing is not
-    // the same signal it was either: pre-M1f a firing meant a cycle of length
-    // >= 3, because the two-lane model made a 2-cycle impossible. Junction
-    // mutual exclusion creates 2-cycles by design (two cars swapping across an
-    // edge with a junction at each end), so a firing now means "a swap that used
-    // to resolve for free needed 45 seconds", which is the cost this task is.
+    // So the board is **23.8x better than the gridlocked draft on throughput**
+    // and 1.8 % worse than it was pre-M1f. Under the wide rule it was 9.4x and
+    // 2.6x respectively — degraded but not tipped, which is why that rule
+    // cleared this criterion and was still refused on the demo rig's margin.
+    //
+    // **The valve is back to 0 and that is not the same statement it was
+    // pre-M1f.** Pre-M1f a firing meant a cycle of length >= 3, because the
+    // two-lane model made a 2-cycle impossible. Task 2's wide rule made
+    // 2-cycles ordinary (two cars swapping across an edge with a junction at
+    // each end); Task 3 admits the straight swap and so removes most of them,
+    // but not the ones whose occupant TURNED. Zero here means this board never
+    // produces the turning kind — not that they cannot happen, and the city arm
+    // still fires 5.
     //
     // **The thresholds are re-derived against the gridlocked draft, not against
     // the new measurement.** 300 per 20,000 ticks is 6.4x the draft's 47 and 1.5x
@@ -823,8 +846,8 @@ describe('the demo layout is visibly congested, measured over 3,000 ticks', () =
     expect(perTwentyK(measured.valves), 'the gridlocked draft fired 214').toBeLessThan(100)
     // And the two figures as measured, so the move is on the record rather than
     // hidden inside a normalisation.
-    expect(measured.trips, 'M1f INTERIM — 171 pre-M1f; Task 9 restores it').toBe(66)
-    expect(measured.valves, 'the valve fires on this board now — 0 pre-M1f').toBe(7)
+    expect(measured.trips, 'T3 crossing-only: 168 (171 pre-M1f, 66 wide)').toBe(168)
+    expect(measured.valves, 'and the valve is quiet again — 0 pre-M1f, 7 wide').toBe(0)
   })
 
   it('is not vacuous: the SHIPPED city, same rig, same ticks, scores zero', () => {
@@ -905,56 +928,60 @@ describe('the demo layout is visibly congested, measured over 3,000 ticks', () =
  *
  * ---------------------------------------------------------------------------
  * **M1f TASK 2 SHORTENED THE WINDOW FROM 1,500 TO 1,000 AND FALSIFIED HALF OF
- * WHAT THIS BLOCK CLAIMED. BOTH ARE WRITTEN OUT.**
+ * WHAT THIS BLOCK CLAIMED. TASK 3 PUT BOTH BACK, AND ALL THREE ARE WRITTEN
+ * OUT.**
  * ---------------------------------------------------------------------------
  *
- * Junction mutual exclusion moves `DEMO_DEATH_TICK` from 6,703 to 5,757, so the
- * old far end — 6,000 — is past the shutdown and the second window would have
- * profiled a corpse. 1,000 puts it at 5,500, **257 ticks (4.5 %) of margin**,
- * which is tighter than the 703 (10 %) this block used to call its tightest
- * deliberate margin and is the price of measuring week 1 on this board at all.
- * The `isGameOver` read below is the mechanical guard and is what actually
- * protects the figures; the arithmetic one is beside it.
+ * Task 2's wide rule moved `DEMO_DEATH_TICK` from 6,703 to 5,757, so the old far
+ * end — 6,000 — was past the shutdown and the second window would have profiled
+ * a corpse; 1,000 put it at 5,500 with 257 ticks (4.5 %) of margin. Task 3's
+ * crossing-only rule puts the death tick at **6,660**, so the 1,500-tick window
+ * is affordable again: 6,000 against 6,660 is **660 ticks (9.9 %)**, against
+ * 703 (10.5 %) pre-M1f. **The window is restored rather than left short**,
+ * because the reason it was shortened is gone and a shortened window that
+ * outlives its reason is an exemption that reads as a constraint. The
+ * `isGameOver` read below is the mechanical guard and is what actually protects
+ * the figures; the arithmetic one is beside it.
  *
  * ```
- *                        pre-M1f, 1,500-tick     M1f Task 2, 1,000-tick
- *                      3,000..4,500  4,500..6,000   3,500..4,500  4,500..5,500
- *   refusals                  1,816         1,622         22,756        22,301
- *   ticks with a block          843           738          1,000         1,000
- *   trips                       101            99              6            10
- *   cars in flight, peak         24            24             24            24
- *   longest queue                 6             7             16            14
- *   valve firings                 0             0             11             4
+ *                     pre-M1f, 1,500   T2 wide, 1,000    T3 ships, 1,500
+ *                   3,000..    4,500..  3,500..  4,500..  3,000..    4,500..
+ *                     4,500     6,000    4,500    5,500    4,500      6,000
+ *   refusals          1,816     1,622   22,756   22,301    3,678      3,239
+ *   ticks with block    843       738    1,000    1,000    1,034      1,008
+ *   trips               101        99        6       10       97         95
+ *   cars in flight       24        24       24       24       24         24
+ *   longest queue         6         7       16       14       10          8
+ *   valve firings         0         0       11        4        0          0
  *
- *   at tick                   4,500         6,000          4,500         5,500
- *   sum of destPins              29            40            220           249
- *   destinations at/over cap   1/18          2/18          18/18         18/18
- *   peak overcrowd meter    469,656     1,937,000      1,383,000     2,383,000
+ *   at tick           4,500     6,000    4,500    5,500    4,500      6,000
+ *   sum of destPins      29        40      220      249       35         50
+ *   dests at/over cap  1/18      2/18    18/18    18/18     1/18       3/18
+ *   peak meter      469,656 1,937,000 1,383,000 2,383,000 504,300 1,980,000
  * ```
  *
  * **The fleet is the binding constraint, not the demand.** All 24 cars are in
  * flight in both windows, so faster pin arrival cannot produce more journeys —
  * it produces a longer queue at the destinations, and that is what ends the run.
- * That half survives Task 2 and is stronger under it: throughput is now at the
- * floor, 6 and 10 trips against 101 and 99.
+ * That half survived Task 2 (throughput at the floor, 6 and 10 trips) and is
+ * back to its pre-M1f form under Task 3, 97 and 95 against 101 and 99.
  *
- * **The half that did NOT survive is the reason this block exists.** It used to
- * read *"the 3,000-tick window cannot see any of it: at tick 3,000 no
- * destination is over its cap and every meter reads 0"*. Under the new rule the
- * first destination goes over cap at tick **2,278** and the first meter starts
- * at **2,279**, so the baseline window sees a third of the run's overcrowd
- * pressure. Every figure the congestion block above measures is now taken on a
- * board where §5.8 is already running. The block is kept because a matched pair
- * across the one week boundary this board lives to see is still the only such
- * pair in the file — but it no longer isolates week 1 from "later in the run",
- * and it never did claim to (see the limit paragraph below); what it has lost is
- * the *baseline* half of the contrast. `is not vacuous` below now asserts the
- * new fact rather than the old one, so nobody reads the old sentence as current.
+ * **The half that did not survive Task 2 has come back, and the round trip is
+ * worth more than either reading alone.** This block used to say *"the
+ * 3,000-tick window cannot see any of it: at tick 3,000 no destination is over
+ * its cap and every meter reads 0"*. Under the wide rule the first destination
+ * went over cap at tick 2,278 with the first meter at 2,279, so the baseline
+ * window saw a third of the run's overcrowd pressure and the sentence was
+ * inverted. Under Task 3's rule **no destination is over cap anywhere in the
+ * first 3,000 ticks and every meter reads 0 again**, measured on the same walk.
+ * So the congestion block above is once more a clean week-0, pre-overcrowd
+ * baseline, and `is not vacuous` below asserts that as the exact figure it is
+ * rather than as a restored adjective.
  *
- * **And `destinations at/over cap` has SATURATED**, which is why the assertion
- * that it grows across the boundary is replaced rather than re-fitted: 18 of 18
- * is the whole board, at both ends, and a `>` on a saturated quantity is a test
- * that can never pass again.
+ * **`destinations at/over cap` is unsaturated again** — 1 of 18 at the boundary
+ * and 3 of 18 at the far end, where the wide rule had 18/18 at both — so the
+ * assertion that it GROWS across the boundary is reinstated rather than replaced
+ * by the "and none of them recovers" form the saturation forced.
  *
  * **Stated because it limits the claim: these two windows are adjacent in TIME,
  * not a treatment and a control.** They cannot separate "week 1" from "later in
@@ -965,22 +992,23 @@ describe('the demo layout is visibly congested, measured over 3,000 ticks', () =
  * needs `pinPeriodForWeek` neutralised, which is `sim`'s to expose and no test
  * here can do.
  */
-describe('the demo layout past week 0, in matched 1,000-tick windows', () => {
-  const WINDOW = 1000
+describe('the demo layout past week 0, in matched 1,500-tick windows', () => {
+  const WINDOW = 1500
   const BOUNDARY = 4500
   const END = BOUNDARY + WINDOW
 
   it('keeps the far end of this window below the tick the board kills itself on', () => {
-    // 5,500 against 5,757: **257 ticks, 4.5 %** — down from 6,000 against 6,703,
-    // which was 703 ticks and 10 %. The tightest deliberate margin in this file,
-    // and it is the price of measuring week 1 at all: under junction mutual
-    // exclusion the board lives only 1,257 ticks past the boundary, against
-    // 2,203 before. The window was shortened rather than the boundary moved,
-    // because the boundary is the week boundary and is not this file's to
-    // choose. The mechanical guard is the `isGameOver` read in the window below,
-    // which is structural; this is the arithmetic one beside it.
+    // 6,000 against 6,660: **660 ticks, 9.9 %** — against 703 ticks and 10.5 %
+    // pre-M1f, and against the 257 ticks and 4.5 % Task 2's wide rule forced.
+    // The window was restored to 1,500 rather than left at 1,000, because the
+    // board lives 2,160 ticks past the boundary again (1,257 under the wide
+    // rule, 2,203 pre-M1f) and a window shortened for a reason that has expired
+    // is coverage nobody gets back. The boundary itself is the week boundary and
+    // is not this file's to choose. The mechanical guard is the `isGameOver`
+    // read in the window below, which is structural; this is the arithmetic one
+    // beside it.
     expect(END).toBeLessThan(DEMO_DEATH_TICK)
-    expect(DEMO_DEATH_TICK - END, 'margin, as a figure rather than an adjective').toBe(257)
+    expect(DEMO_DEATH_TICK - END, 'margin, as a figure rather than an adjective').toBe(660)
     expect(BOUNDARY, 'and the boundary really is inside the window').toBeLessThan(END)
   })
 
@@ -1019,30 +1047,33 @@ describe('the demo layout past week 0, in matched 1,000-tick windows', () => {
       before.refusals,
     )
     // Floors, in this file's idiom, so the two windows are not both measuring
-    // an idle board and agreeing about it. **The refusal floor is unchanged at
-    // 800 and is now 28x below the measurement (22,756 and 22,301) rather than
-    // 2x — it was already loose enough to survive Task 2 and is left alone. The
-    // TRIPS floor is not**: 6 and 10 trips per 1,000 ticks against 101 and 99
-    // per 1,500 is throughput at the floor, so `> 50` is re-derived to `>= 5`.
-    // That is a much weaker guard and it is the honest one: what it can still
-    // catch is a board delivering NOTHING, which is the difference between "it
-    // grinds" and "it stops", and it is exactly the distinction Decision 6 cares
-    // about. Task 9 restores the headroom.
+    // an idle board and agreeing about it. **Both are the pre-M1f floors and
+    // neither has ever been re-fitted.** Task 2's wide rule dropped throughput
+    // to 6 and 10 trips per 1,000 ticks and the trips floor was weakened to
+    // `>= 5` for the duration; Task 3's rule gives 97 and 95 per 1,500, so the
+    // original `> 50` is reinstated. The refusal floor of 800 has stood
+    // unchanged through all three rules.
     expect(before.refusals).toBeGreaterThan(800)
     expect(after.refusals).toBeGreaterThan(800)
-    expect(after.trips, 'M1f INTERIM — 50 pre-M1f; the board still delivers, barely').toBeGreaterThanOrEqual(5)
+    expect(after.trips, 'the board delivers, and not barely — 99 pre-M1f, 10 under the wide rule').toBeGreaterThan(50)
 
     // The backlog is where the pressure goes, and this is the mechanism that
     // ends the run 257 ticks later.
     expect(sumPins(rig), 'the pin backlog grows across the boundary').toBeGreaterThan(pinsAtBoundary)
-    // **Over-cap has SATURATED at 18 of 18, so "it grows" is unassertable.** The
-    // replacement is the stronger statement the saturation licenses: every
-    // destination on the board is already over its cap at the boundary and none
-    // recovers. Pre-M1f this went 1/18 -> 2/18.
-    expect(overAtBoundary, 'every destination is over cap BEFORE the boundary').toBe(18)
-    expect(destinationsOverCap(rig), 'and none of them recovers').toBe(18)
-    // The meter still climbs, by 1.72x rather than the 4.1x it managed pre-M1f —
-    // less headroom, because it starts the window three times higher.
+    // **Over-cap is unsaturated again, so "it grows" is assertable again.** Task
+    // 2's wide rule put 18 of 18 over cap at both ends of the pair, where a `>`
+    // is a test that can never pass; under Task 3's rule it is 1 of 18 at the
+    // boundary and 3 of 18 at the far end, which is the pre-M1f 1 -> 2 shape one
+    // destination wider. Both endpoints are pinned exactly, because the CHANGE
+    // is the claim and an inequality alone would have been satisfied by the
+    // saturated board too.
+    expect(overAtBoundary, 'one of eighteen at the boundary — 18/18 under the wide rule').toBe(1)
+    expect(destinationsOverCap(rig), 'and three of eighteen at the far end').toBe(3)
+    expect(destinationsOverCap(rig), 'which is a growth, not a saturation').toBeGreaterThan(
+      overAtBoundary,
+    )
+    // The meter still climbs, by 3.93x against the 4.1x it managed pre-M1f and
+    // the 1.72x the wide rule left it.
     expect(peakMeter(rig)).toBeGreaterThan(meterAtBoundary * 1.5)
     expect(peakMeter(rig), 'and it is most of the way to the shutdown').toBeGreaterThan(
       OVERCROWD_FAIL_MILLITICKS / 2,
@@ -1052,31 +1083,34 @@ describe('the demo layout past week 0, in matched 1,000-tick windows', () => {
     )
   })
 
-  it('the 3,000-tick window used to see NONE of this and now sees a third of it', () => {
-    // **This case is the INVERSE of what it was, and the inversion is the
-    // finding rather than a repair.** Pre-M1f the baseline window was the reason
-    // a new window was needed at all: over 3,000 ticks the overcrowd mechanism
-    // was completely inert — not "small", zero — so every figure the congestion
-    // block measures was taken before §5.8 did anything.
+  it('the 3,000-tick window sees NONE of this, which it did before M1f and not during it', () => {
+    // **This case has now inverted TWICE, and the round trip is the finding.**
+    // Pre-M1f the baseline window was the reason a new window was needed at all:
+    // over 3,000 ticks the overcrowd mechanism was completely inert — not
+    // "small", zero — so every figure the congestion block measures was taken
+    // before §5.8 did anything.
     //
-    // Junction mutual exclusion ends that. Measured on the same rig: the first
-    // destination goes over its cap at tick **2,278** and the first meter starts
-    // at **2,279**, both inside the baseline window, so at tick 3,000 five of
-    // eighteen destinations are over cap and the meter reads 174,243. The
-    // congestion block's four figures are therefore no longer a clean week-0,
-    // pre-overcrowd baseline, and that limitation is now asserted here rather
-    // than left in a comment that says the opposite.
+    // Task 2's wide junction rule ended that: the first destination went over
+    // its cap at tick 2,278 and the first meter at 2,279, both inside the
+    // baseline window, so at tick 3,000 five of eighteen destinations were over
+    // cap and the meter read 174,243. Task 3's crossing-only rule ends it again
+    // in the other direction: **no destination goes over cap anywhere in the
+    // first 3,000 ticks and every meter reads 0**, so the congestion block's
+    // figures are a clean week-0, pre-overcrowd baseline once more.
     //
     // The assertions are exact rather than inequalities because the point is
-    // the CHANGE: an inequality would have been satisfied by the old board too.
+    // the CHANGE, and an inequality in either direction would have been
+    // satisfied by one of the two other rules.
     const rig = seededRig()
     rig.drive(3000)
-    expect(destinationsOverCap(rig), 'five of eighteen at tick 3,000 — it was 0 pre-M1f').toBe(5)
-    expect(peakMeter(rig), 'and the meter has started — it was 0 pre-M1f').toBe(174243)
+    expect(destinationsOverCap(rig), 'none of eighteen at tick 3,000 — five under the wide rule').toBe(0)
+    expect(peakMeter(rig), 'and the meter has not started — 174,243 under the wide rule').toBe(0)
     expect(isGameOver(rig.state)).toBe(false)
 
-    // The tick it starts on, measured rather than inferred from the reading
-    // above, so the two cannot be satisfied by one accident.
+    // The walk, kept from the inverted version, because the reading above is a
+    // single sample at tick 3,000 and this is the claim about the whole window.
+    // Under the wide rule it answered 2,278; the two cannot be satisfied by one
+    // accident in either direction.
     const walk = seededRig()
     let firstOver = -1
     for (let t = 1; t <= 3000; t++) {
@@ -1086,8 +1120,7 @@ describe('the demo layout past week 0, in matched 1,000-tick windows', () => {
         break
       }
     }
-    expect(firstOver, 'the first over-capacity tick — 3,314 pre-M1f, outside this window').toBe(2278)
-    expect(firstOver, 'and it is INSIDE the baseline window, which is the whole point').toBeLessThan(3000)
+    expect(firstOver, 'nothing goes over cap inside the baseline window — 2,278 under the wide rule').toBe(-1)
   })
 })
 
@@ -1321,17 +1354,18 @@ describe('the demo board under M1e’s spawn phase', () => {
     const live = seededRig()
     const control = seededRig()
     // The window is capped BELOW this board's death tick with the margin
-    // stated: **5,757, MEASURED at M1e Task 7 as 6,703 and re-measured at M1f
-    // Task 2 after junction mutual exclusion** — see `DEMO_DEATH_TICK` — and a
+    // stated: **6,660, MEASURED at M1e Task 7 as 6,703, re-measured at M1f Task
+    // 2 as 5,757 and again at M1f Task 3** — see `DEMO_DEATH_TICK` — and a
     // frozen sim is byte-identical from tick to tick, so a longer window would
-    // assert over a corpse. 5,000 leaves **757 ticks (13 %)** of margin, down
-    // from 1,703 (25 %). **The window was NOT shortened to restore the old
-    // margin**: 5,000 ticks is what makes the spawner's push observable at all,
-    // and the `isGameOver` assertion below is the mechanical guard. Task 3 may
-    // move the death tick again, and 13 % is the headroom it has to work with.
+    // assert over a corpse. 5,000 leaves **1,660 ticks (25 %)** of margin, back
+    // from the 757 (13 %) the wide rule left and level with the 1,703 (25 %) of
+    // M1e. **The window is not lengthened to spend the recovered margin**: 5,000
+    // ticks is what makes the spawner's push observable, and more of them would
+    // only be more of the same. The `isGameOver` assertion below is the
+    // mechanical guard.
     const WINDOW = 5000
     expect(WINDOW, 'and the cap is mechanical, not a comment').toBeLessThan(DEMO_DEATH_TICK)
-    expect(DEMO_DEATH_TICK - WINDOW).toBe(757)
+    expect(DEMO_DEATH_TICK - WINDOW).toBe(1660)
     for (let i = 0; i < WINDOW; i++) {
       live.tick(NO_ACTIONS)
       control.state.header[H_DEST_SPAWN_TIMER] = WINDOW + 2
@@ -1458,51 +1492,52 @@ describe('no road a player can draw saves the demo board', () => {
    * a player draws when they see cars queueing on one corridor while another is
    * idle. Column 9 is a second lane beside the busiest corridor.
    *
-   * **Re-measured in full at M1f Task 2. Every row moved and the conclusion got
-   * STRONGER**, which is why the whole table is reprinted rather than patched:
+   * **Re-measured in full at M1f Task 2 and AGAIN at M1f Task 3**, which
+   * narrowed the rule from "one car at a time" to "one axis at a time". Every
+   * row moved twice, so the whole table is reprinted rather than patched, and
+   * all three columns are kept because the triage between the two M1f rules is
+   * only legible with both:
    *
    * ```
-   *                             tiles   pre-M1f          M1f Task 2 (wide)
-   *   trace                             dies    trips    dies    trips
-   *   no input (the control)        0   6,703     420    5,757     105
-   *   parallel lane, column 9      20   6,703     418    5,494      37
-   *   cross-link row 11             5   7,221     463    7,221     437  <- best
-   *   cross-link row 14             5   6,142     339    5,667     276
-   *   cross-link row 17             5   7,221     426    7,178     379
-   *   cross-link row 20             5   5,639     186    5,639     186
-   *   cross-link row 23             5   6,185     187    5,667     128
-   *   all five cross-links         25   5,667     177    5,639     134  <- worst
+   *                             tiles   pre-M1f      T2 (wide)    T3 (ships)
+   *   trace                             dies  trips  dies  trips  dies  trips
+   *   no input (the control)        0  6,703   420  5,757   105  6,660   410
+   *   parallel lane, column 9      20  6,703   418  5,494    37  6,703   403
+   *   cross-link row 11             5  7,221   463  7,221   437  7,696   459  <- best
+   *   cross-link row 14             5  6,142   339  5,667   276  6,142   305
+   *   cross-link row 17             5  7,221   426  7,178   379  7,221   392
+   *   cross-link row 20             5  5,639   186  5,639   186  5,639   207  <- worst
+   *   cross-link row 23             5  6,185   187  5,667   128  7,178   292
+   *   all five cross-links         25  5,667   177  5,639   134  6,660   206
    * ```
    *
-   * **Pre-M1f four of the seven were worse than doing nothing; under the rule
-   * FIVE are, and the parallel lane went from costing nothing to costing 263
-   * ticks.** That last row is the one worth reading: twenty tiles beside the
-   * busiest corridor used to be exactly neutral, and now it makes the board die
-   * sooner — because a second lane adds junctions where it meets the corridor,
-   * and a junction now costs a wait. **A parallel lane is not merely useless on
-   * this board any more, it is actively harmful.**
+   * **The count of traces that are worse than doing nothing went 4 -> 5 -> 2**,
+   * and the parallel lane went neutral -> harmful (-263) -> mildly helpful
+   * (+43). Under the wide rule a second lane beside the busiest corridor made
+   * the board die sooner, because the lane's two ends are new junctions and a
+   * junction cost a wait whichever axis a car was on; under the crossing-only
+   * rule those two ends cost a wait only for traffic that actually crosses, and
+   * the lane pays for itself by 43 ticks. **Which is a measurement of the rule,
+   * not of the board** — the geometry is identical in all three columns.
    *
-   * **That does NOT generalise to "more road is strictly worse", and the
-   * five-cross-link row is the counter-example.** Twenty-five tiles deliver 134
-   * trips against the control's 105 — up 27.6 % — in a run 118 ticks shorter.
-   * Extra road now genuinely moves more cars and still does not save the board,
-   * because the killer is D2 starving at the top of corridor C and no
-   * cross-link feeds it. Throughput and survival came apart at this task and the
-   * assertions below were split accordingly.
+   * **"More road is worse" is back, on THROUGHPUT, and it is now the only axis
+   * on which it holds.** Twenty-five tiles of cross-link deliver 206 trips
+   * against the control's 410 and die on exactly the same tick, 6,660 — not
+   * earlier, as pre-M1f and under the wide rule, and not later. Survival is
+   * indifferent to every cross-link laid at once and throughput halves.
    *
-   * Two rows did not move at all — cross-link 11 (7,221) and cross-link 20
-   * (5,639/186, to the digit) — which is worth noting rather than smoothing
-   * over: those two traces die before or independently of the ticks where the
-   * junction rule bites.
+   * One row did not move under either rule — cross-link 20 (5,639, three
+   * columns to the digit) — which is worth noting rather than smoothing over:
+   * that trace dies before the ticks where any junction rule bites.
    *
-   * **The best buys 1,464 ticks — 48.8 seconds, 25.4 %** — where pre-M1f it
-   * bought 518 ticks, 17 s, 7.7 %. The ratio therefore rises from 1.077 to
-   * 1.254, and it rises for the bad reason: the control got worse faster than
-   * the best trace did. Nothing survives either way. Compare the starting city
-   * on the same instrument: five tiles remove its death entirely, and a player
-   * who keeps connecting reaches 21,704 against 5,580 — **3.89x, not 1.254x.**
-   * (Both sides of a comparison have to be the same quantity; see
-   * `demoLayout.ts`, and the ratio assertions below rather than prose.)
+   * **The best buys 1,036 ticks — 34.5 seconds, 15.6 %** — where pre-M1f it
+   * bought 518 ticks (17 s, 7.7 %) and under the wide rule 1,464 (48.8 s,
+   * 25.4 %). The ratio goes 1.077 -> 1.254 -> 1.156. Nothing survives in any
+   * column. Compare the starting city on the same instrument: five tiles remove
+   * its death entirely, and a player who keeps connecting reaches 21,783
+   * against 5,580 — **3.90x, not 1.156x.** (Both sides of a comparison have to
+   * be the same quantity; see `demoLayout.ts`, and the ratio assertions below
+   * rather than prose.)
    */
   const CROSSLINK_ROWS: readonly number[] = [11, 14, 17, 20, 23]
   const crosslink = (y: number): number[] => Array.from({ length: 8 }, (_, i) => cellAt(8 + i, y))
@@ -1541,31 +1576,36 @@ describe('no road a player can draw saves the demo board', () => {
     // prose claim needs a test under it.
     const control = driveTrace([])
     expect(control.death, 'the control must reproduce the recorded death tick').toBe(DEMO_DEATH_TICK)
-    // **M1f INTERIM: 105 trips, down from 420.** The floor's job is only to say
-    // the control drove a LIVE board rather than a frozen one, and 105 does
-    // that; 300 was set against the pre-M1f measurement and is now above it.
-    // Re-derived rather than removed, because a control that scores 0 is exactly
-    // the failure this line exists to catch.
+    // The floor's job is only to say the control drove a LIVE board rather than
+    // a frozen one. It was 300 pre-M1f (420 trips), re-derived to 60 when the
+    // wide rule dropped the control to 105, and is left at 60 under Task 3's
+    // 410 — **loosened once and not tightened back**, because a floor that
+    // tracks the measurement is a floor that catches nothing, and what this line
+    // exists to catch is a control that scores 0.
     expect(control.trips, 'and it must be a live board, not a frozen one').toBeGreaterThan(60)
-    expect(control.trips, 'M1f INTERIM — 420 pre-M1f; Task 9 restores it').toBe(105)
+    expect(control.trips, 'T3 crossing-only: 410 (420 pre-M1f, 105 wide)').toBe(410)
 
     // A second lane beside the busiest corridor — the obvious move on a board
     // whose visible symptom is cars queueing in corridor A. **Twenty tiles, and
     // it does not move the death tick by one.** The killer is D2 at the top of
     // corridor C, which this road does not touch, and there is no car to put in
     // the new lane: the fleet is fixed at 24.
-    // **M1f Task 2 turned this row from neutral into harmful, and the assertion
-    // is inverted rather than relaxed.** Pre-M1f a parallel lane bought exactly
-    // zero ticks. Under junction mutual exclusion it COSTS 263 — because the new
-    // lane's two ends are new junctions on the corridor it was meant to relieve,
-    // and a junction now costs a wait. The killer is still D2 at the top of
-    // corridor C, which this road does not touch, and there is still no car to
-    // put in the new lane: the fleet is fixed at 24.
+    // **This row has now been all three things and the assertion has followed
+    // it each time, which is why it is written as an exact signed figure rather
+    // than as a direction.** Pre-M1f a parallel lane bought exactly zero ticks;
+    // under Task 2's wide rule it COST 263, because the new lane's two ends are
+    // new junctions on the corridor it was meant to relieve and a junction cost
+    // a wait on every axis; under Task 3's crossing-only rule it BUYS 43,
+    // because those two ends now only cost a wait to traffic that crosses. The
+    // killer is D2 at the top of corridor C in all three, which this road does
+    // not touch, and there is still no car to put in the new lane: the fleet is
+    // fixed at 24. Twenty tiles for 1.4 seconds.
     const parallel = driveTrace([PARALLEL_A])
-    expect(parallel.death, 'a parallel corridor now COSTS ticks — it bought zero pre-M1f').toBeLessThan(
-      control.death,
-    )
-    expect(control.death - parallel.death, 'and this is how many').toBe(263)
+    expect(
+      parallel.death - control.death,
+      'a parallel corridor buys 43 ticks — 0 pre-M1f, -263 under the wide rule',
+    ).toBe(43)
+    expect(parallel.trips, 'and costs trips even so').toBeLessThan(control.trips)
 
     // The five cross-links, one at a time.
     const deaths = CROSSLINK_ROWS.map((y) => driveTrace([crosslink(y)]))
@@ -1573,55 +1613,59 @@ describe('no road a player can draw saves the demo board', () => {
     const best = Math.max(...deaths.map((r) => r.death))
     const worst = Math.min(...deaths.map((r) => r.death))
     // **The best one helps, and by an amount that makes the point.** Pre-M1f
-    // that was 518 ticks — 17 seconds on a 223-second run. **At M1f Task 2 it is
-    // 1,464 ticks, 48.8 s on a 192-second run, and the bound is re-derived
-    // rather than widened to fit.** What the bound is FOR is "a road does not
-    // save this board", and the way to say that without pinning a tick is as a
-    // FRACTION of the run: the best trace must not buy more than a third of it.
-    // Measured 25.4 % here and 7.7 % pre-M1f, so the same bound holds for both
-    // boards, which a tick count could not.
-    //
-    // Note why the fraction grew: the control got worse (6,703 -> 5,757) while
-    // the best trace barely moved (7,221 -> 7,221, unchanged to the digit). The
-    // best trace looks better only because the baseline collapsed underneath it.
+    // that was 518 ticks — 17 seconds on a 223-second run; under Task 2's wide
+    // rule 1,464 ticks (48.8 s); under Task 3's 1,036 ticks (34.5 s). What the
+    // bound is FOR is "a road does not save this board", and the way to say that
+    // without pinning a tick is as a FRACTION of the run: the best trace must
+    // not buy more than a third of it. Measured 7.7 %, 25.4 % and 15.6 % across
+    // the three rules, so **one bound has held through both rule changes**,
+    // which a tick count could not.
     expect(best, 'the best trace must beat the control, or this is measuring nothing').toBeGreaterThan(
       control.death,
     )
     expect(
       (best - control.death) / control.death,
-      'and buy less than a third of the run — 7.7 % pre-M1f, 25.4 % at M1f Task 2',
+      'and buy less than a third of the run — 7.7 % pre-M1f, 25.4 % wide, 15.6 % shipped',
     ).toBeLessThan(1 / 3)
-    // **And most of them hurt.** Four of the seven traces in the table above
-    // die sooner than doing nothing, which is the thing that separates this
+    // **And some of them hurt.** Two of the five single strokes die sooner than
+    // doing nothing — rows 14 and 20 — which is the thing that separates this
     // board from the starting city: there, road is the lever; here it is noise.
+    // **The count is 2 under the shipped rule where it was 3 pre-M1f and 4 under
+    // the wide one, so the floor moves with it rather than being left where a
+    // stronger measurement put it.** Row 23 is the one that changed sides:
+    // 6,185 -> 5,667 -> 7,178.
     expect(worst, 'some cross-links are worse than no road at all').toBeLessThan(control.death)
     expect(
       deaths.filter((r) => r.death < control.death).length,
-      'at least three of the five single strokes are worse than the control',
-    ).toBeGreaterThanOrEqual(3)
+      'two of the five single strokes are worse than the control — 3 pre-M1f, 4 wide',
+    ).toBe(2)
 
-    // **More road is worse for SURVIVAL, and at M1f Task 2 it stopped being
-    // worse for throughput — which is a sharper statement of the same finding,
-    // not a weaker one.** All five cross-links together is still the worst trace
-    // measured on the axis that ends the run: it dies at 5,639, before any one
-    // of them alone and before doing nothing.
+    // **More road is worse for THROUGHPUT and, under the shipped rule,
+    // INDIFFERENT for survival — and the second half is the one that moved.**
+    // All five cross-links together dies at 6,660: not before doing nothing, as
+    // it did pre-M1f (5,667 against 6,703) and under the wide rule (5,639
+    // against 5,757), but on **exactly the control's tick**, to the digit.
+    // Twenty-five tiles buy nothing at all on the axis that ends the run.
     //
-    // Pre-M1f it also delivered fewer trips (177 against the control's 420) and
-    // this case asserted that. Under junction mutual exclusion the sign flips:
-    // **134 trips against the control's 105, up 27.6 %, in a run that is 118
-    // ticks SHORTER.** Twenty-five tiles of extra road genuinely move more cars
-    // and the board dies sooner anyway, because what kills it is D2 starving at
-    // the top of corridor C and a cross-link cannot feed it. That is a stronger
-    // form of "not survivable" than the old one — the player's best available
-    // lever now visibly works and still does not save them — so the assertion is
-    // replaced by the two that carry the claim rather than deleted.
+    // Throughput is where the cost shows: 206 trips against the control's 410,
+    // which is the pre-M1f shape (177 against 420) after a detour through the
+    // wide rule, where the sign briefly flipped (134 against 105). What kills
+    // the board in every column is D2 starving at the top of corridor C, and a
+    // cross-link cannot feed it.
+    //
+    // The equality is pinned exactly rather than written as `<=`: an inequality
+    // here would be satisfied by both of the other two rules and would say
+    // nothing about the one that ships.
     const all = driveTrace(CROSSLINK_ROWS.map((y) => crosslink(y)))
     expect(all.death, 'five cross-links are worse than one').toBeLessThan(best)
-    expect(all.death, 'and worse than none').toBeLessThan(control.death)
+    expect(
+      all.death,
+      'and buy nothing against none — they died 1,036 and 118 ticks early under the other two rules',
+    ).toBe(control.death)
     expect(
       all.trips,
-      'M1f INTERIM — throughput now RISES with them where it used to fall (177 vs 420 pre-M1f)',
-    ).toBeGreaterThan(control.trips)
+      'while throughput halves — 206 against 410 (177/420 pre-M1f, 134/105 wide)',
+    ).toBeLessThan(control.trips)
 
     // The comparison that decided the flip, in one line: the starting city's
     // greedy arm reaches 31,456 (`startingCity.test.ts` §8) against this
@@ -1634,14 +1678,15 @@ describe('no road a player can draw saves the demo board', () => {
     // drift apart again — M1e's closing sweep.** The comment above quoted 5.64x
     // for the city and 1.077x for this board; the first of those read 4.6x for
     // three commits, which is the same measurement expressed as an excess.
-    expect(best / control.death, "this board's own best trace, as a ratio").toBeCloseTo(1.254, 3)
-    // **Both terms re-measured at M1f Task 2.** The city's greedy arm no longer
-    // reaches 31,456 — junction mutual exclusion ends it at 21,704 — while
-    // `CITY_DEATH_TICK` is unmoved at 5,580 (derived; see `deathTicks.ts`). So
-    // the ratio falls from 5.637 to 3.890, and the comparison it exists to make
-    // survives with room to spare: keeping up still buys the city 3.9x its
-    // no-input life, where the demo board's best trace buys 1.25x.
-    expect(21704 / CITY_DEATH_TICK, "and the starting city's greedy arm").toBeCloseTo(3.890, 3)
+    expect(best / control.death, "this board's own best trace, as a ratio").toBeCloseTo(1.156, 3)
+    // **Both terms re-measured at M1f Task 2 and again at Task 3.** The city's
+    // greedy arm no longer reaches 31,456 — the wide rule ended it at 21,704 and
+    // the crossing-only rule at 21,783 — while `CITY_DEATH_TICK` is unmoved at
+    // 5,580 (derived; see `deathTicks.ts`). So the ratio goes 5.637 -> 3.890 ->
+    // 3.904, and the comparison it exists to make survives with room to spare:
+    // keeping up still buys the city 3.9x its no-input life, where the demo
+    // board's best trace buys 1.16x.
+    expect(21783 / CITY_DEATH_TICK, "and the starting city's greedy arm").toBeCloseTo(3.904, 3)
   })
 
   it('the spawner cannot add anything here, which is why no trace can help', () => {
@@ -1660,3 +1705,4 @@ describe('no road a player can draw saves the demo board', () => {
     expect(rig.state.carPhase.length).toBe(24)
   })
 })
+

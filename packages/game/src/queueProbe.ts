@@ -1,4 +1,6 @@
 import {
+  crossesAt,
+  crossesDirections,
   FREE,
   LANE_OF_DIR,
   PHASE_OUTBOUND,
@@ -120,14 +122,22 @@ export function travelDir(state: GameState, i: number): number {
  * cell, which `i` is not.
  *
  * **M1f Task 2: at a JUNCTION the entrant can be held by either lane, and this
- * function answers with the OWN lane first.** Mutual exclusion means a car
- * entering a cell of degree >= `INTERSECTION_DEGREE` needs both lanes free, so
- * "the car ahead" is no longer a single well-defined slot. The relation must stay
+ * function answers with the OWN lane first. M1f Task 3 narrowed WHEN the other
+ * lane holds anybody up at all** — only when the two entry axes cross, which is
+ * `crossesDirections(dir, crossesAt(state, other))`, the same pair of functions
+ * `canEnter` calls. Without that clause this probe over-reports the moment the
+ * rule narrows, and the iff property below fails by name on the demo board at
+ * tick 421 — which is how the omission was found rather than reasoned about.
+ *
+ * Junction exclusion means a car entering a cell of degree >=
+ * `INTERSECTION_DEGREE` can be held by a slot that is not its own, so "the car
+ * ahead" is no longer a single well-defined slot. The relation must stay
  * FUNCTIONAL — `longestQueue` walks it and would otherwise need a graph — so the
  * tie-break is: the own lane's occupant if there is one, otherwise the other
- * lane's. That is the car whose departure the entrant is actually waiting on in
- * the common case, and the fallback is what makes the chain reflect a crossing
- * refusal instead of reporting an empty road in front of a stopped car.
+ * lane's occupant when its axis crosses. That is the car whose departure the
+ * entrant is actually waiting on in the common case, and the fallback is what
+ * makes the chain reflect a crossing refusal instead of reporting an empty road
+ * in front of a stopped car.
  *
  * **`junctionAdmitsOne` and not `isJunctionCell`**, and reading the sim's own
  * predicate rather than re-deriving the degree here is the whole point: this
@@ -153,7 +163,13 @@ export function carAheadOf(state: GameState, world: WorldData, i: number): numbe
   const own = occupantOf(state, next, lane)
   if (own !== FREE) return own
   if (!junctionAdmitsOne(state, next)) return FREE
-  return occupantOf(state, next, otherLane(lane))
+  const other = occupantOf(state, next, otherLane(lane))
+  if (other === FREE) return FREE
+  // M1f Task 3: the other lane only holds this car up if the two entry axes
+  // CROSS. Both terms are the sim's own — `crossesDirections` and `crossesAt`
+  // are the functions `canEnter` calls, not a copy of the rule — for exactly the
+  // reason `junctionAdmitsOne` is read rather than re-derived above.
+  return crossesDirections(dir, crossesAt(state, other)) ? other : FREE
 }
 
 /**

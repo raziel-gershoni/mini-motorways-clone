@@ -552,8 +552,14 @@ export function replayCapturing(
 }
 
 /**
- * `[cell, count]` for every cell carrying at least `percent` % of `tally`'s
- * total, ordered by count descending and cell ascending within a tie.
+ * Every cell carrying at least `percent` % of `tally`'s total, ordered by count
+ * descending and cell ascending within a tie.
+ *
+ * **A cell with a zero tally is never included, whatever `percent` is**, so
+ * `percent = 0` means "every cell that carried anything at all" rather than
+ * "every cell on the board". Both readings are wanted — the criterion uses 5,
+ * the distribution cross-check uses 0 — and the zero guard is what keeps the
+ * second one from returning 960 cells of nothing.
  *
  * The tie-break is explicit for `censusCellTable`'s reason: `Array.sort` is only
  * stable within equal keys, so leaving ties to input order would make the table
@@ -566,7 +572,7 @@ export function cellsCarryingAtLeast(tally: Int32Array, percent: number): number
   const rows: [number, number][] = []
   for (let cell = 0; cell < tally.length; cell++) {
     const n = tally[cell] as number
-    if (n * 100 >= total * percent) rows.push([cell, n])
+    if (n > 0 && n * 100 >= total * percent) rows.push([cell, n])
   }
   rows.sort((a, b) => b[1] - a[1] || a[0] - b[0])
   return rows.map(([cell]) => cell)

@@ -99,7 +99,48 @@ interface ProfileNode {
 
 const SAMPLING_INTERVAL_BYTES = 512
 const PROFILED_FRAMES = 3000
-const WARMUP_FRAMES = 1500
+/**
+ * **The knob M1f Task 3 spent to buy this rig its margin back, and the only one
+ * of the three it was allowed to touch.**
+ *
+ * `PROFILED_FRAMES` and `WINDOW_COUNT` carry explicit floors below — they are
+ * what the budgets were measured over and what makes the minimum-over-windows
+ * statistic mean anything. **`WARMUP_FRAMES` carries neither, because it is
+ * outside the profiled window**: it buys JIT warm-up and nothing else, so
+ * moving it changes where the three windows sit in the run without changing how
+ * much of the run they cover. That is why criterion 1 of Task 3's triage names
+ * it as the escape and names shortening the profiled window as the trade it may
+ * NOT make.
+ *
+ * Arithmetic, so the change is a derivation rather than a search. At 1,500 this
+ * rig ended at tick 6,459: 3.6 % under the pre-M1f death tick of 6,703, 12 %
+ * OVER Task 2's 5,757 (which is the red this file carried between Task 2 and
+ * Task 3), and 3.0 % under Task 3's 6,660 — live, and tighter than the margin
+ * the triage had already called too tight. At 500 the rig drives 9,500 frames
+ * and ends at tick **5,958**, which is **702 ticks / 10.5 % under 6,660**, with
+ * `PROFILED_FRAMES` and `WINDOW_COUNT` untouched. Coverage is identical: three
+ * windows of 3,000 frames either way.
+ *
+ * **The risk this trade carries, checked rather than assumed.** 500 frames of
+ * warm-up instead of 1,500 could charge JIT warm-up to the first profiled
+ * window, and the minimum over three windows would then be taken over a
+ * poisoned draw. Measured, three draws each, total B/frame across every
+ * profiled scope:
+ *
+ * ```
+ *   WARMUP_FRAMES   window 1        window 2        window 3
+ *   1,500           15.5/23.9/18.4  58.5/54.3/53.6  20.1/18.2/16.5
+ *   500             22.1/23.9/22.8  67.0/65.6/72.7  28.0/26.0/24.4
+ * ```
+ *
+ * Window 1 rises by about 3 B/frame and remains the LOWEST of the three in both
+ * configurations, so the minimum is not poisoned. The one file with a real
+ * residual moves the other way and the guard gets stronger, not weaker:
+ * `loop.ts`'s min-over-three goes from **0.00** at 1,500 frames (window 1 saw
+ * none of it) to **0.87-1.39** at 500, against a 32 B budget. Window 2 is the
+ * expensive one in both, and it is where the overcrowd ring first appears.
+ */
+const WARMUP_FRAMES = 500
 /** See the budget test: the minimum over three windows defeats the sampler's strays. */
 const WINDOW_COUNT = 3
 
@@ -374,27 +415,23 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     // under this rig.
     //
     // ---------------------------------------------------------------------
-    // **RED FROM M1f TASK 2 TO M1f TASK 3, DELIBERATELY. TASK 3 OWNS IT.**
+    // **RED FROM M1f TASK 2 TO M1f TASK 3, DELIBERATELY. TASK 3 REPAIRED IT.**
     // ---------------------------------------------------------------------
     //
-    // Junction mutual exclusion moves `DEMO_DEATH_TICK` from 6,703 to 5,757, so
-    // this rig's 10,500 frames now carry the sim past the shutdown and the three
-    // profiled windows land on a frozen board. **This assertion firing is the
-    // guard doing its job**: the instrument is telling us it cannot measure,
+    // Task 2's wide junction rule moved `DEMO_DEATH_TICK` from 6,703 to 5,757,
+    // so this rig's 10,500 frames carried the sim past the shutdown and the
+    // three profiled windows landed on a frozen board. **That assertion firing
+    // was the guard doing its job**: the instrument said it could not measure,
     // which is the one failure mode the catalogue rates worse than no
     // instrument — a harness that reports clean while measuring nothing.
     //
-    // It is NOT repaired here because Task 3 decides whether the shipped rule is
-    // Task 2's wide one or the narrower crossing-only arm, and the two give
-    // different death ticks (5,757 against a predicted 6,660). Re-deriving
-    // `WARMUP_FRAMES` / `WINDOW_COUNT` / `PROFILED_FRAMES` now would be doing it
-    // twice, and the second derivation would have to undo the first. **Task 3
-    // re-derives all three knobs together with `DEMO_DEATH_TICK` and
-    // `demoLayout.test.ts`'s matched-window margin.**
-    //
-    // Expected red between those two commits, along with the identity-pin case
-    // below and `allocation.test.ts`'s M1e window. **Those three and nothing
-    // else** — anything further is unpredicted and is a finding.
+    // It was left red for one commit because Task 3 was the task that decided
+    // whether the shipped rule was Task 2's wide one or the narrower
+    // crossing-only arm, and the two give different death ticks. Task 3 chose
+    // crossing-only (6,660) and re-derived `WARMUP_FRAMES` here in the same
+    // commit as `DEMO_DEATH_TICK` and `demoLayout.test.ts`'s matched-window
+    // margin. **The other two knobs did not move**, so the profiled coverage is
+    // what it always was — see `WARMUP_FRAMES`.
     expect(
       isGameOver(game.state),
       'this window must profile a LIVE sim — every budget below was measured on a frozen board',
@@ -403,7 +440,7 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
       game.state.header[H_TICK],
       'this rig drove past the demo board’s death tick — the budgets below were measured on a corpse',
     ).toBeLessThan(DEMO_DEATH_TICK)
-    expect(game.state.header[H_TICK], 'and the measured end tick is 6,459').toBe(6459)
+    expect(game.state.header[H_TICK], 'and the measured end tick is 5,958').toBe(5958)
 
     const files = new Set<string>()
     for (const window of windows) {
@@ -542,13 +579,20 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     // exact knobs that would drive this rig past the tick the board dies on.**
     // -----------------------------------------------------------------------
     //
-    // M1e Task 7 measured the demo board's overcrowd failure at tick **6,703**
-    // (`demoLayout.test.ts`'s `DEMO_DEATH_TICK`). Task 8 makes reaching it
-    // freeze the sim, after which every further tick is a byte-identical no-op.
-    // This rig ends at tick **6,459** — 244 ticks, 3.6 %, under it, the
-    // tightest margin in the repo — and **a fourth window would put it at
-    // ~7,962, i.e. 1,259 ticks past the freeze.** The file's own comments
-    // recommend more windows, so that is a likely edit and not a hypothetical.
+    // M1e Task 7 measured the demo board's overcrowd failure at tick 6,703;
+    // M1f Task 2 moved it to 5,757 and M1f Task 3 to **6,660**
+    // (`deathTicks.ts`'s `DEMO_DEATH_TICK`). Task 8 makes reaching it freeze the
+    // sim, after which every further tick is a byte-identical no-op. This rig
+    // ends at tick **5,958** — 702 ticks, 10.5 %, under it — and **a fourth
+    // window would put it at ~7,461, i.e. 801 ticks past the freeze.** The
+    // file's own comments recommend more windows, so that is a likely edit and
+    // not a hypothetical.
+    //
+    // **The 10 % is a criterion rather than a comfort, and it is asserted
+    // below.** M1f Task 3's triage set it, before measuring any arm, as the
+    // margin this rig has to have — the 3.6 % it carried through M1e was
+    // already too tight to absorb a balance change, and the balance change then
+    // arrived and put the whole run past the freeze.
     //
     // **Neither vacuity guard would notice**, which is what makes a mechanical
     // bound necessary rather than tidy: the "really drove 24 cars" check runs on
@@ -568,10 +612,13 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     // What is worth having HERE is a cheap ceiling on the two knobs, so the
     // edit the file's own comments invite — "use more windows" — fails at the
     // knob rather than 3,000 frames later. The rate is measured, not modelled:
-    // 10,500 frames carried the sim from its 1,200-tick warm start to tick
-    // 6,459, i.e. 0.5009 ticks per frame.
+    // **9,500 frames carried the sim from its 1,200-tick warm start to tick
+    // 5,958, i.e. 0.50084 ticks per frame** (10,500 frames reached 6,459 at
+    // `WARMUP_FRAMES` 1,500, which is 0.50086 — the rate is a property of the
+    // frame/tick accumulator and not of the knobs, and the two measurements
+    // agreeing to four digits is what says so).
     const framesDriven = WARMUP_FRAMES + WINDOW_COUNT * PROFILED_FRAMES
-    const TICKS_PER_FRAME = (6459 - 1200) / 10500
+    const TICKS_PER_FRAME = (5958 - 1200) / 9500
     const framesToDeath = (DEMO_DEATH_TICK - 1200) / TICKS_PER_FRAME
     // **THE TWO BOUNDS FIRST, THE IDENTITY PIN LAST — and the pin has now
     // dominated something twice, so read this before reordering it again.**
@@ -588,7 +635,9 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     // after every bound that fires for one KIND of edit.** Three specific
     // guards, then the catch-all.
     //
-    // Measured to discriminate, three edits and three different reds:
+    // Measured to discriminate — **re-run at M1f Task 3 against the new knobs
+    // rather than scaled from the old rows** — three edits and three different
+    // reds:
     //   WINDOW_COUNT 3 -> 4      -> 'past its death tick'      (the ceiling)
     //   PROFILED_FRAMES -> 2000  -> 'shrunk below the length'  (the floor)
     //   PROFILED_FRAMES -> 3100  -> 'the measured frame count' (the pin)
@@ -596,6 +645,17 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
       framesDriven,
       'these knobs now drive the demo rig past its death tick — see DEMO_DEATH_TICK',
     ).toBeLessThan(framesToDeath)
+    // **CRITERION 1 of M1f Task 3's triage, as a number rather than as the
+    // strict inequality above.** The ceiling only says the rig stops before the
+    // board dies; this says it stops with room. 10 % was chosen before any arm
+    // was measured, precisely so the arm could not be chosen to fit it, and
+    // arm B clears it at 10.5 %. Both are here because they fail differently: a
+    // knob change that eats the margin without crossing the freeze fires this
+    // one alone.
+    expect(
+      1 - framesDriven / framesToDeath,
+      'the profiled run must end at least 10 % of the way short of the freeze',
+    ).toBeGreaterThan(0.1)
     // The FLOORS, second: the sampler needs enough frames and enough windows for
     // the minimum-over-three statistic to mean anything. They guard the
     // opposite direction from the ceiling and must be reachable independently
@@ -615,8 +675,19 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     // broader than either bound above — it goes false when the window shrinks
     // too — which is exactly why it sits below them.
     expect(WARMUP_FRAMES + 4 * PROFILED_FRAMES).toBeGreaterThan(framesToDeath)
+    // **A floor on `WARMUP_FRAMES` for the first time, and it is a floor on the
+    // JIT premise rather than on coverage.** The three windows measure the same
+    // 9,000 frames whatever this is; what it buys is a warm engine before the
+    // first of them, and the per-window table in the constant's own comment is
+    // the measurement that says 500 is enough. Lowering it further is the one
+    // edit none of the bounds above catches — it makes the rig END EARLIER, so
+    // the ceiling relaxes rather than firing.
+    expect(
+      WARMUP_FRAMES,
+      'below 500 the first profiled window starts on a cold engine — see the constant',
+    ).toBeGreaterThanOrEqual(500)
     // The catch-all, LAST.
-    expect(framesDriven, 'the measured frame count behind the 6,459').toBe(10500)
+    expect(framesDriven, 'the measured frame count behind the 5,958').toBe(9500)
     expect([...PROFILED_SCOPES].sort()).toEqual([
       'packages/game/src/',
       'packages/render/src/',

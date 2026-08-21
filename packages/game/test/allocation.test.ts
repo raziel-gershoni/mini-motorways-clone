@@ -2606,14 +2606,45 @@ const M1E_UNGUARDED_FILE = 'buildings.ts'
 const M1E_SAMPLING_INTERVAL_BYTES = 64
 const M1E_WINDOWS = 3
 const M1E_WINDOW_TICKS = 4600
-/** Measured: the first window starts here so that the third contains tick 27,320. */
-const M1E_FIRST_WINDOW_START = 14059
+/**
+ * Measured: the first window starts here so that the THIRD contains the first
+ * over-capacity tick, and so that the last profiled tick clears the death tick.
+ *
+ * **RE-SITED at M1f Task 3, not edited.** Junction exclusion moved this arm's
+ * death tick from 31,456 to 21,783 and its first over-capacity tick from 27,320
+ * to 18,394, so the old window (14,059..27,858) profiled 6,154 ticks of frozen
+ * buffer. Both endpoints are load-bearing and neither is a free parameter:
+ *
+ * ```
+ *   the third window must CONTAIN the first over-capacity tick
+ *     start + 2 * 4,600 < 18,394 < start + 3 * 4,600 - 1   ->  4,595 < start < 9,194
+ *   the last profiled tick must clear the death tick
+ *     start + 13,799 < 21,783                              ->          start < 7,984
+ *   exactly three week boundaries inside the span
+ *     9,000, 13,500 and 18,000 land in (start, start + 13,799]
+ * ```
+ *
+ * **6,000 is chosen to sit away from both walls rather than at one of them**:
+ * the first over-capacity tick lands 3,194 ticks into the third window with
+ * 1,405 to spare, and the last profiled tick is 1,984 ticks short of the
+ * freeze. Scaling the old start by the death-tick ratio would have put it at
+ * 9,738, outside the first constraint.
+ */
+const M1E_FIRST_WINDOW_START = 6000
 /** The last profiled tick. */
 const M1E_END_TICK = M1E_FIRST_WINDOW_START + M1E_WINDOWS * M1E_WINDOW_TICKS - 1
-/** Where this board's greedy arm actually dies (`integration.test.ts` asserts it). */
-const M1E_DEATH_TICK = 31456
-/** The first tick on which any destination stands at or over its pin capacity. */
-const M1E_FIRST_OVER_CAPACITY_TICK = 27320
+/**
+ * Where this board's greedy arm actually dies (`integration.test.ts` asserts
+ * it). 31,456 pre-M1f, 21,704 under Task 2's wide junction rule, **21,783**
+ * under Task 3's crossing-only one — measured on THIS rig as well as on the two
+ * that assert it, which is the third independent driver to answer 21,783.
+ */
+const M1E_DEATH_TICK = 21783
+/**
+ * The first tick on which any destination stands at or over its pin capacity.
+ * 27,320 pre-M1f; **18,394** under the shipped rule, measured on this rig.
+ */
+const M1E_FIRST_OVER_CAPACITY_TICK = 18394
 
 /**
  * One counter per branch the driver claims to enter, in `DragCounters`' style
@@ -2783,14 +2814,15 @@ describe('the tick allocates nothing on the SPAWN, WEEK and OVERCROWD phases (Ta
       const all = profileAllocations(() => {
         rig.drive(M1E_WINDOW_TICKS, log, counters)
       }, M1E_SAMPLING_INTERVAL_BYTES)
-      // **RED FROM M1f TASK 2 TO M1f TASK 3, DELIBERATELY. TASK 3 OWNS IT.**
-      // `M1E_FIRST_WINDOW_START` is 14,059 and three 4,600-tick windows reach
-      // 27,858, which was inside the pre-M1f greedy arm's 31,456 and is past the
-      // 21,704 junction mutual exclusion leaves. So these windows profile a
-      // corpse and this guard says so, which is the guard working. Repairing it
-      // means re-deriving both the window start and
-      // `M1E_FIRST_OVER_CAPACITY_TICK` against a death tick Task 3 is about to
-      // move again, so Task 3 does it once instead of Task 2 doing it twice.
+      // **RED FROM M1f TASK 2 TO M1f TASK 3, DELIBERATELY. TASK 3 REPAIRED
+      // IT.** `M1E_FIRST_WINDOW_START` was 14,059 and three 4,600-tick windows
+      // reached 27,858, which was inside the pre-M1f greedy arm's 31,456 and
+      // past the 21,704 Task 2's wide rule left. So those windows profiled a
+      // corpse and this guard said so, which is the guard working. It was left
+      // red for one commit because repairing it means re-deriving the window
+      // start and `M1E_FIRST_OVER_CAPACITY_TICK` against a death tick Task 3
+      // was about to move again; Task 3 did it once instead of Task 2 doing it
+      // twice.
       assertProfiledLive(rig.state, `spawn window ${w}`)
       profiles.push(all)
       attemptsPerWindow.push(counters.destAttempts - before)
@@ -2911,7 +2943,7 @@ describe('the tick allocates nothing on the SPAWN, WEEK and OVERCROWD phases (Ta
     expect(
       M1E_DEATH_TICK - M1E_END_TICK,
       'ticks of margin between the last profiled tick and this board’s death',
-    ).toBe(3598)
+    ).toBe(1984)
   })
 
   it('DOES report a sim/src allocation on the same rig, same scope, same predicate', () => {
