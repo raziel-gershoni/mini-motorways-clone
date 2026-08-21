@@ -167,7 +167,12 @@ export interface JunctionArmRun {
   readonly deathTick: number
   /** `H_SCORE` at the end of the run. */
   readonly trips: number
-  /** Total entry refusals over the run — the "blocked car-ticks" of the tables. */
+  /**
+   * Total entry refusals **from the first frame**, warm start excluded — the
+   * "blocked car-ticks" of `blocking.ts`'s and `integration.test.ts`'s tables,
+   * which are all measured over that window. Add `warmStartRefusals` for
+   * `constants.ts`'s boot-inclusive convention.
+   */
   readonly blockedCarTicks: number
   /** The peak of the repaired `longestQueue` probe, sampled (see the constants). */
   readonly longestQueue: number
@@ -187,9 +192,13 @@ export interface JunctionArmRun {
   readonly ticksWithBlockedCar: number
   /** Ticks driven after the warm start. */
   readonly ticksDriven: number
-  /** Crossings taken by a car saturated on the previous tick. */
+  /**
+   * Crossings taken by a car saturated on the previous tick — **from BOOT,
+   * warm start included**, which is `constants.ts`'s convention for this
+   * quantity and the one the pre-M1f record was taken in.
+   */
   readonly valveFirings: number
-  /** The largest `carBlockedTicks` any car ever reached. */
+  /** The largest `carBlockedTicks` any car ever reached — from BOOT. */
   readonly worstWait: number
   /** `H_ROUTES_REFUSED` at the end of the run. */
   readonly routesRefused: number
@@ -224,6 +233,17 @@ export interface JunctionArmRun {
   readonly grantsWithOtherLaneTaken: number
   /** Ticks a saturated car failed to cross — the `REFUSED_GHOST` hole. Must be 0. */
   readonly saturatedStalls: number
+  /**
+   * Entry refusals inside the layout's own warm start, which every other figure
+   * here excludes.
+   *
+   * **`constants.ts`'s evidence table counts the demo board from BOOT and this
+   * rig counts from the first frame**, and on that board the two differ by this
+   * number. On the city they coincide, because the warm start lays no road.
+   * Reported rather than folded in: two quantities under one column heading is
+   * how that table was wrong once already.
+   */
+  readonly warmStartRefusals: number
   /** The board's width, so a caller can name a cell without re-deriving it. */
   readonly w: number
   /** The board's cell count. */
@@ -234,7 +254,10 @@ interface Boot {
   readonly state: GameState
   readonly world: WorldData
   readonly drive: (actions: readonly TickAction[] | undefined) => void
-  readonly startTick: number
+  /** `H_TICK` at boot, before the warm start. Always 0 today; read, not assumed. */
+  readonly bootTick: number
+  /** The layout's own warm start, driven by the caller so it can be accounted for. */
+  readonly warmStartTicks: number
 }
 
 const NO_ACTIONS: readonly TickAction[] = Object.freeze([])
@@ -252,18 +275,19 @@ function boot(layoutId: string): Boot {
   )
   const fields = createFlowFields(map.groupCount, world.cells)
   layout.seed(state, world)
-  // Reassigned, never mutated in place. The warm start is part of the boot on
-  // both boards and omitting it is how the closing sweep's rig came back with
-  // 23,935 ticks against a recorded 31,456.
+  // Reassigned, never mutated in place. **The warm start is driven by the
+  // CALLER rather than here**, so the ticks inside it can be accounted for
+  // separately: `constants.ts`'s evidence table counts the demo board's
+  // refusals from BOOT and this rig's headline figures count them from the
+  // first frame, and the two differ by exactly the warm start. Omitting the
+  // warm start altogether is how the closing sweep's rig came back with 23,935
+  // ticks against a recorded 31,456.
   const oneTick: { actions: readonly TickAction[] } = { actions: NO_ACTIONS }
-  for (let t = 0; t < layout.warmStartTicks; t++) {
-    oneTick.actions = NO_ACTIONS
-    step(state, world, fields, scratch, oneTick)
-  }
   return {
     state,
     world,
-    startTick: state.header[H_TICK] as number,
+    bootTick: state.header[H_TICK] as number,
+    warmStartTicks: layout.warmStartTicks,
     drive(actions) {
       oneTick.actions = actions ?? NO_ACTIONS
       step(state, world, fields, scratch, oneTick)
@@ -289,7 +313,10 @@ function occupancyShim(occupancy: Int16Array, roads: GameState['roads']): GameSt
 
 function driveArm(arm: JunctionArm): JunctionArmRun {
   const city = arm === 'city-greedy'
-  const { state, world, drive, startTick } = boot(city ? DEFAULT_LAYOUT_ID : DEMO_LAYOUT_ID)
+  const { state, world, drive, bootTick, warmStartTicks } = boot(
+    city ? DEFAULT_LAYOUT_ID : DEMO_LAYOUT_ID,
+  )
+  const startTick = bootTick + warmStartTicks
   const endHorizon = city
     ? startTick + CITY_HORIZON_WEEKS * TICKS_PER_WEEK
     : startTick + DEMO_HORIZON_TICKS
@@ -332,8 +359,10 @@ function driveArm(arm: JunctionArm): JunctionArmRun {
   let grantsWithOtherLaneTaken = 0
   let saturatedStalls = 0
   let ticksDriven = 0
+  let warmStartRefusals = 0
 
-  for (let tick = startTick + 1; tick <= endHorizon; tick++) {
+  for (let tick = bootTick + 1; tick <= endHorizon; tick++) {
+    const warming = tick <= startTick
     for (let c = 0; c < carCount; c++) {
       preCell[c] = state.carCell[c] as number
       preBlocked[c] = state.carBlockedTicks[c] as number
@@ -351,12 +380,12 @@ function driveArm(arm: JunctionArm): JunctionArmRun {
     occPre.set(state.occupancy)
 
     let actions: readonly TickAction[] | undefined
-    if (city) {
+    if (city && !warming) {
       if (tick === startTick + 1) actions = openingActions
       else if (tick % GREEDY_PERIOD_TICKS === 0) actions = armGreedyActions(state, world, tally)
     }
     drive(actions)
-    ticksDriven++
+    if (!warming) ticksDriven++
 
     // ---------------------------------------------------------------------
     // The occupancy replay. See the module comment: this is `runMovement`'s
@@ -373,7 +402,21 @@ function driveArm(arm: JunctionArm): JunctionArmRun {
       if (preInFlight[c] === 0) continue
       const moved = post !== (preCell[c] as number)
       const refused = !moved && blocked === (preBlocked[c] as number) + 1
-      if (refused) {
+      if (refused && warming) {
+        // **The warm start is accounted for SEPARATELY rather than folded in,
+        // and the reason is a defect this repo already had.** `constants.ts`'s
+        // evidence table counts the demo board's entry refusals from BOOT —
+        // 7,544 pre-M1f over 6,703 ticks — while every figure this rig reports
+        // as a headline counts from the first frame, because that is the window
+        // `demoLayout.test.ts`, `startingCity.test.ts` and `integration.test.ts`
+        // all measure. On the city the two coincide (the warm start lays no road,
+        // so nothing moves and nothing is refused); on the demo board they differ
+        // by the whole 1,200-tick warm start, which is already busy. Two
+        // quantities under one column heading is the catalogue's own entry, so
+        // both are reported and each says which window it is over.
+        warmStartRefusals++
+        blockedThisTick = true
+      } else if (refused) {
         // A refused car did not move and movement is the only phase that can
         // change its cursor, so its post-tick travel direction is the one it
         // was refused in. `travelDir` is `queueProbe.ts`'s, the function whose
@@ -436,8 +479,19 @@ function driveArm(arm: JunctionArm): JunctionArmRun {
         if (dir !== NO_CROSSING) saturatedStalls++
       }
     }
-    if (blockedThisTick) ticksWithBlockedCar++
+    if (blockedThisTick && !warming) ticksWithBlockedCar++
 
+    if (warming) {
+      // The census and the queue probe are deliberately NOT run over the warm
+      // start: both are compared against figures the other two drivers measure
+      // from the first frame, and a rig that quietly widened their window would
+      // disagree with them for a reason nothing in the output would name.
+      if (isGameOver(state)) {
+        deathTick = state.header[H_TICK] as number
+        break
+      }
+      continue
+    }
     const co = countJunctionConflicts(state, world, coPrev, CENSUS_CO_PRESENCE, conflictsByCell)
     if (co > 0 && firstConflictTick < 0) firstConflictTick = tick
     conflicts += co
@@ -486,6 +540,7 @@ function driveArm(arm: JunctionArm): JunctionArmRun {
     grantMisses,
     grantsWithOtherLaneTaken,
     saturatedStalls,
+    warmStartRefusals,
     w: world.w,
     cells,
   }
@@ -529,7 +584,10 @@ export function replayCapturing(
   ticks: readonly number[],
 ): Map<number, Snapshot> {
   const city = arm === 'city-greedy'
-  const { state, world, drive, startTick } = boot(city ? DEFAULT_LAYOUT_ID : DEMO_LAYOUT_ID)
+  const { state, world, drive, bootTick, warmStartTicks } = boot(
+    city ? DEFAULT_LAYOUT_ID : DEMO_LAYOUT_ID,
+  )
+  const startTick = bootTick + warmStartTicks
   const wanted = new Set<number>(ticks)
   let last = startTick
   for (const t of ticks) if (t > last) last = t
@@ -538,9 +596,9 @@ export function replayCapturing(
   const tally = { unaffordable: 0 }
 
   const out = new Map<number, Snapshot>()
-  for (let tick = startTick + 1; tick <= last; tick++) {
+  for (let tick = bootTick + 1; tick <= last; tick++) {
     let actions: readonly TickAction[] | undefined
-    if (city) {
+    if (city && tick > startTick) {
       if (tick === startTick + 1) actions = openingActions
       else if (tick % GREEDY_PERIOD_TICKS === 0) actions = armGreedyActions(state, world, tally)
     }
