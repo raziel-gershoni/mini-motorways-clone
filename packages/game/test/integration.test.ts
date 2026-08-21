@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeAll } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
@@ -4032,6 +4032,31 @@ function armRun(arm: CityArm): ArmRun {
 }
 
 describe('the run can be lost end to end, on the board a plain load opens', () => {
+  /**
+   * **Warms all three memoised arms, so no CASE pays for a drive.**
+   *
+   * `armRun` memoises at module scope, so before this hook existed the FIRST
+   * case in this block silently paid for whichever arms it touched — and after
+   * M1f Task 1 added two per-tick census passes over all 960 cells, that bill
+   * grew ~6x. The case that paid it here was the one with nothing to do with the
+   * census, and it was measured at 71-95% of vitest's 5 s default with one run
+   * in nine timing out at 6,337 ms. A red there reads as "the default board
+   * stopped passing its gate", which is a diagnosis pointing at the wrong file.
+   *
+   * **A hook rather than a per-case budget, because ordering is not an
+   * interlock.** Budgeting whichever case happens to be first is correct only
+   * until someone reorders the block or runs `it.only` on a different one; the
+   * hook runs for every case in every order, including under `it.only`. It also
+   * puts the whole cost in ONE budgeted place, which lets every case stay on the
+   * 5 s default — so a future slowdown INSIDE a case still fails loudly instead
+   * of hiding under a generous per-case allowance.
+   */
+  beforeAll(() => {
+    armRun('no-input')
+    armRun('opening')
+    armRun('greedy')
+  }, 120000)
+
   it('an unplayed city dies at a HAND-DERIVED 5,580 with a score of 0, and D2 is what kills it', () => {
     const r = armRun('no-input')
 
@@ -4404,7 +4429,7 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     expect(r.firstRuleEventTick, 'the rule diverges EARLIER than co-presence, not later')
       .toBeLessThan(r.firstConflictTick)
     expect((r.firstConflictTick - r.firstRuleEventTick) / TICKS_PER_SECOND).toBeCloseTo(248.4, 1)
-  }, 30000)
+  })
 
   it('is not vacuous: the three arms are three different runs, not one run reported thrice', () => {
     const none = armRun('no-input')
@@ -4420,5 +4445,5 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     // buys three and a half minutes, keeping up buys fourteen more.
     expect(none.deathTick).toBeLessThan(opening.deathTick)
     expect(opening.deathTick).toBeLessThan(greedy.deathTick)
-  }, 30000)
+  })
 })
