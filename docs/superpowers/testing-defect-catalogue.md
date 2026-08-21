@@ -874,3 +874,44 @@ The generalisation worth keeping: **a rig that disagrees with the record is more
 than the record is**, because the record was produced by a rig that had already reproduced something.
 Disagreement is a reason to check the instrument first, and the check is cheap — pick one number you
 are *not* trying to correct and see whether it comes back right.
+
+## A module-scope constant read through an import cycle is `undefined`, and polarity decides whether you find out
+
+M1f Task 1 hoisted a lookup mask to module scope for speed. **It evaluated to 0**, because
+`roads.ts → dispatch.ts → scratch.ts → roads.ts` is a real cycle and the `DIR_COUNT` it read came back
+`undefined` at module-evaluation time. Nothing in the type system, the linter or the test names says
+so; the value is simply wrong before any test runs.
+
+The implementer's own sentence is the entry: **"It failed loudly only by luck of polarity; the same
+shape in a fail-open guard ships green."** A zero mask happened to make its guard reject everything,
+so the suite went red immediately. Had the guard been written the other way — mask zero meaning
+"nothing to check" — it would have passed every test forever while checking nothing.
+
+Two rules. **Do not compute module-scope constants from imported values in a package with cycles**;
+build them at first use, or on the object that owns them. And when a hoist is worth it anyway, make
+the wrong value *unrepresentable* rather than merely detected — the fix here was a builder that
+refuses a non-positive dimension, so the failure cannot recur even if the cycle returns.
+
+The general shape is worth more than the instance: **an initialisation-order bug and a fail-open
+guard compose into a permanently green test that checks nothing**, and neither half is visible in a
+diff.
+
+## A membership test is not the same as a bound, and the case that motivates the fix may pass both
+
+Reviewing an assertion that caught illegal edge costs with `delta > maxEdge`, I proposed replacing it
+with a membership test: `delta !== ORTHO_COST && delta !== DIAG_COST`.
+
+The implementer measured it and **my fix does not catch my own motivating case.** The example I gave
+was a +4 surcharge on an orthogonal step: `10 + 4 = 14`, which is exactly `DIAG_COST` — a legal value.
+The bound passes it, and so does the membership test. What membership actually buys is the narrow
+`{11, 12, 13}` window between the two legal costs.
+
+It implemented membership anyway, pinned the surviving blind spot as an explicit table with a vacuity
+guard, and replaced the overclaim with the property that does hold: **any surcharge touching a
+diagonal is caught for every value ≥ 1** — which is the shape a real penalty takes, since a uniform
+surcharge hits both tiers.
+
+The lesson is not about edge costs. **When you propose a stronger-sounding assertion, run it against
+the exact case you used to justify it.** "Bound" and "membership" differ only on the values between
+the legal ones, and if your example is not in that window you have argued for a change that does not
+address it.
