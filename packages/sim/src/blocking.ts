@@ -710,6 +710,16 @@ export function assertEnterCarValid(i: number, carCount: number): void {
  * its leg has no axis, and `crossesDirections` answers *"crossing"* for it, so a
  * junction whose occupant's axis is unknown refuses.
  *
+ * **Two mutations say this is not a wrapper, measured on the canonical
+ * whole-suite invocation.** Reconstructing the direction from
+ * `carRouteCursor - 1` instead of delegating scores **15 detectors** and is
+ * killed by `routeStep`'s own bounds guard on a leg-first car —
+ * *"carRoute: step index must be an integer in [0, 96), got -1"*, which is the
+ * case `previousLegDir` exists to answer and a reconstruction has to
+ * re-discover. Returning the direction of TRAVEL rather than of ENTRY scores
+ * **24**, headed by the turning-occupant case, and it is the mutant that makes
+ * the choice between the two an observable one rather than a preference.
+ *
  * **The reachable cases for the sentinel, narrowed by reading rather than
  * guessed.** Decision 3 says a car that has not crossed on its current leg holds
  * no slot at all, so a just-dispatched car on its house cell is NOT reachable
@@ -749,11 +759,44 @@ export function crossesAt(state: GameState, i: number): number {
  * than an unexplained survivor — `blocking.test.ts` records the derivation
  * beside the measurement.
  *
- * **So what arm B actually admits is OPPOSING traffic**, not parallel traffic:
- * at a junction, exactly the pair every ordinary two-lane cell has always
- * admitted (`LANE_OF_DIR[d] !== LANE_OF_DIR[OPPOSITE[d]]`, Decision 1). The
- * earlier justification for this rule talked about *"two cars going straight
- * through a crossroads on the same axis"*, which describes the dead branch.
+ * **So what this rule actually admits is OPPOSING traffic**, not parallel
+ * traffic: at a junction, exactly the pair every ordinary two-lane cell has
+ * always admitted (`LANE_OF_DIR[d] !== LANE_OF_DIR[OPPOSITE[d]]`, Decision 1).
+ * The earlier justification for this rule talked about *"two cars going
+ * straight through a crossroads on the same axis"*, which describes the dead
+ * branch.
+ *
+ * **Measured, on the canonical whole-suite invocation, with the collection
+ * counts unchanged at 902 / 651 and no crash-class line in the output:**
+ *
+ * ```
+ *   mutation                                      detectors
+ *   return true always (i.e. Task 2's wide rule)         25
+ *   return false always                                  27
+ *   the range guard deleted                               1
+ *   `a === b` deleted                                     2, both DIRECT
+ * ```
+ *
+ * **The `a === b` row is the labelled equivalent, and its two detectors are
+ * both assertions on this function rather than on a board.** Through `canEnter`
+ * it is a provable no-op by the derivation above, and the whole-suite run
+ * confirms it: 651 of 651 game tests pass. What kills it is the totality table
+ * and one explanatory line in the own-lane case, both of which call
+ * `crossesDirections` directly. So the correct reading is **0 behavioural
+ * detectors, by proof, plus 2 that pin the predicate's contract** — not a
+ * coverage hole. (A third failure appeared on the first run, in
+ * `drawAllocation.test.ts`, which cannot reach this module; it is the sampling
+ * allocation harness's known ~20 % flake and did not reproduce.)
+ *
+ * **The range guard's 1 detector is also worth reading rather than counting.**
+ * Deleting it leaves the sentinel fail-CLOSED for every reachable case by
+ * accident: `OPPOSITE[-1]` is `undefined`, `a === undefined` is false, and the
+ * function still answers "crossing". The one case that flips is BOTH arguments
+ * being the sentinel, which `canEnter` cannot produce (`assertEnterDirValid`
+ * bounds the entrant's direction). So the guard is defence in depth whose only
+ * observable is that pair — and it is kept because *"it fail-closes by
+ * accident"* is exactly the polarity luck the M1f Task 1 import-cycle entry in
+ * the catalogue is about.
  */
 export function crossesDirections(a: number, b: number): boolean {
   if (!Number.isInteger(a) || a < 0 || a >= DIR_COUNT) return true

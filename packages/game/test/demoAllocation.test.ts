@@ -635,12 +635,18 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     // after every bound that fires for one KIND of edit.** Three specific
     // guards, then the catch-all.
     //
-    // Measured to discriminate — **re-run at M1f Task 3 against the new knobs
-    // rather than scaled from the old rows** — three edits and three different
-    // reds:
+    // Measured to discriminate — **every row re-run at M1f Task 3 against the
+    // new knobs rather than scaled from the old ones** — five edits and five
+    // different first reds, in the order the guards sit in:
     //   WINDOW_COUNT 3 -> 4      -> 'past its death tick'      (the ceiling)
+    //   WARMUP_FRAMES  -> 900    -> 'at least 10 % short'      (criterion 1)
     //   PROFILED_FRAMES -> 2000  -> 'shrunk below the length'  (the floor)
+    //   WARMUP_FRAMES  -> 400    -> 'starts on a cold engine'  (the warm-up floor)
     //   PROFILED_FRAMES -> 3100  -> 'the measured frame count' (the pin)
+    // The three that leave the rig ALIVE also turn the dynamic end-tick pin in
+    // the profiling test above red, which is a different test and is the point
+    // of having both: the static bounds say WHICH knob is wrong, the dynamic
+    // one says the rig no longer ends where its budgets were measured.
     expect(
       framesDriven,
       'these knobs now drive the demo rig past its death tick — see DEMO_DEATH_TICK',
