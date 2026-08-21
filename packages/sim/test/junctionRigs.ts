@@ -32,11 +32,20 @@ import { packRouteStep } from '../src/dispatch'
  * *lane 0 iff the travel vector points east, or due south when it does not point
  * east*, and both of those directions satisfy it.
  *
- * The consequence is not cosmetic. An E/S pair is refused by the pre-M1f
- * own-lane read, so the brief's headline test would have gone **green before the
- * rule existed** — the catalogue's *"a negative assertion is only meaningful if
- * the fixture disables every OTHER mechanism that produces the same
- * observation"*, in the one test the whole task is about.
+ * **The consequence is not cosmetic, and it is TWO failures rather than one.**
+ * Written exactly as the brief gives it, the test goes **RED** — the
+ * `not.toBe(LANE_OF_DIR[DIR_S])` line is itself false, so the fixture's own
+ * guard fires. That guard is doing its job. The danger is what an implementer
+ * does next: the natural repair is to drop or invert the assertion that "failed",
+ * at which point the remaining test **passes on the pre-M1f tree**, because an
+ * E/S pair is already refused by the own-lane read. So the brief pairs a vacuous
+ * fixture with a guard that fires for a reason nobody would connect to vacuity,
+ * and the cheapest way through it is the wrong one.
+ *
+ * That is the catalogue's *"a negative assertion is only meaningful if the
+ * fixture disables every OTHER mechanism that produces the same observation"*,
+ * in the one test the whole task is about — with the twist that the mechanism
+ * meant to catch it is the thing that gets deleted.
  *
  * `roads.ts`'s own module comment names the correct pair, and it is the pair
  * used here: *"at a junction it also permits an **eastbound** car and a

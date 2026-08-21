@@ -15,12 +15,70 @@ import {
  *
  * **WHY TWO.** The two policies answer two different questions and the previous
  * draft conflated them, dated the milestone off the wrong one, and then wrote a
- * correction that was 74 seconds out IN THE WRONG DIRECTION.
+ * correction that was itself out, in the wrong direction and by the wrong
+ * amount.
+ *
+ * ---------------------------------------------------------------------------
+ * **EVERY RULE-VISIBLE FIGURE THAT USED TO STAND IN THIS HEADER WAS WRONG, AND
+ * THE CO-PRESENCE ROW BESIDE IT IS RIGHT — WHICH IS WHAT HID THEM.**
+ * ---------------------------------------------------------------------------
+ *
+ * This block quoted the plan's **271 events / first at tick 12,780 / five
+ * cells**, and concluded the board diverges **74.0 s earlier** than co-presence
+ * says. M1f Task 1 measured all four with the definition below, unaltered, on
+ * two independent drivers, and none of them survived:
+ *
+ * ```
+ *                        plan / this header      measured on 2d76653
+ *   rule-visible events              271                        538
+ *   first at tick                 12,780                     10,207  (5:31.6)
+ *   distinct cells                     5                          6
+ *   gap against co-presence       74.0 s                    159.8 s
+ * ```
+ *
+ * **Five cells is not merely wrong, it is unreachable by this definition.** The
+ * rule-visible branch below contains the co-presence predicate verbatim as one
+ * of its disjuncts, so every co-presence event is a rule-visible event at the
+ * same cell on the same tick and the rule-visible cell set is a strict SUPERSET
+ * of co-presence's six. No re-measurement can move that, and both drivers assert
+ * it rather than arguing it.
+ *
+ * **What 12,780 actually is, since the number is real and only its label was
+ * wrong.** M1f Task 2 measured it directly, by hashing the whole state buffer
+ * every tick against the previous commit: **12,780 is the first tick on which
+ * the board DIVERGES** once mutual exclusion lands — the first byte that differs
+ * anywhere. It is not when this census fires. The two differ by 2,573 ticks
+ * because the event at 10,207 is a swap whose LEAVER has the lower car index,
+ * and `runMovement` ascends, so the leaver releases the cell before the entrant
+ * asks for it and the rule PERMITS it. Confirmed at the cell: 468 = (12,19),
+ * lane 1, occupant 9 -> 24. **So this census over-approximates divergence, and
+ * 10,207 is the safe bound while 12,780 is the truth about the board.** An
+ * artefact quoting 12,780 as "the tick the census fires" is wrong; one quoting
+ * 10,207 as "the tick the board diverges" is also wrong.
+ *
+ * **Why this header was the last place carrying the old figures.** The
+ * co-presence row — 232 / 15,001 / six — is correct and reproduces to the digit,
+ * so a reader who spot-checks one row finds it right and stops. That is the
+ * milestone's dominant defect family (*a durable artefact stating the opposite
+ * of the measurement*) in its most durable form: nothing asserts 271, so nothing
+ * ever goes red to question it, while `startingCity.test.ts` corrects the same
+ * figure fifteen lines of prose away.
+ *
+ * **These are all PRE-M1f-Task-2 figures, and that qualifier is load-bearing
+ * now that the rule ships.** A census is measured ON A RUN, and Task 2 changed
+ * the run: on the same greedy arm after mutual exclusion the same two policies
+ * read **11 / first at 17,658 / three cells** and **44 / first at 10,207 / five
+ * cells**. Co-presence very nearly vanishes because it counts exactly the state
+ * the rule forbids, and what survives it is the anti-deadlock valve, which
+ * crosses regardless of the occupant. Both drivers assert the post-rule figures;
+ * the pre-rule ones above are what the milestone is DATED from and are not
+ * re-measurable on any tree after `f63c40e`.
  *
  * - `CENSUS_CO_PRESENCE` asks *"were two different cars ever standing on one
  *   junction cell at the end of a tick?"* Answer on the greedy arm: **232
  *   events, first at tick 15,001, six cells.** It is a true statement about the
- *   board and it is **STRUCTURALLY BLIND TO A SAME-TICK SWAP**: when two cars
+ *   board, it reproduces to the digit, and it is **STRUCTURALLY BLIND TO A
+ *   SAME-TICK SWAP**: when two cars
  *   exchange cells across an edge, the junction holds one car at the start of the
  *   tick and a different car at the end, never two at once. A swap across an edge
  *   with a junction at its end is exactly the case Decision 2 names as producing
@@ -30,23 +88,34 @@ import {
  *   Task 2's mutual exclusion is about?"* — which additionally counts an
  *   OCCUPANT CHANGE WITHIN A TICK: a junction cell holding car `a` at the end of
  *   tick `t - 1` and a different car `b` at the end of tick `t`, with the cell
- *   never observed empty between them. Answer on the greedy arm: **271 events,
- *   first at tick 12,780, five cells.** At tick 12,780 cars 8 and 9 swap across
- *   `(14,17)`; this policy sees it and the other does not.
+ *   never observed empty between them. Answer on the greedy arm, MEASURED:
+ *   **538 events, first at tick 10,207, six cells.** `(14,17)` does take an
+ *   event at exactly tick 12,780, which is the swap the plan named — it is
+ *   simply not the first one, and (12,19) takes one 2,573 ticks earlier.
  *
- * `15,001 - 12,780 = 2,221` ticks = **74.0 s**, and the board therefore diverges
- * 74 s EARLIER than the co-presence reading says, not later.
+ * `15,001 - 10,207 = 4,794` ticks = **159.8 s**, and the board therefore
+ * diverges 159.8 s EARLIER than the co-presence reading says, not later. **The
+ * DIRECTION the previous draft had backwards survives; only the size of the gap
+ * changed.**
  *
- * **Both counts are values to REPRODUCE, and reproducing one is not
- * reproduction.** They were measured by a review's rig rather than by this
- * project's. `CENSUS_RULE_VISIBLE`'s count is specified here by its EVENT rather
- * than derived from first principles, because whether a given swap would actually
- * have been refused depends on car index order inside `runMovement`, which a
- * between-ticks sampler cannot observe. **If the extended policy reproduces 232
- * and not 271, that IS the finding**: record the measured number with this
- * definition beside it, mark 271 superseded in the task report, and DO NOT adjust
- * the definition until it reaches 271. Tuning an instrument toward a number is
- * the defect this whole section exists to prevent.
+ * **Both counts were values to REPRODUCE, and the protocol that got them here is
+ * worth keeping now that it has fired.** The plan's instruction was: if the
+ * extended policy reproduces 232 and not 271, that IS the finding — record the
+ * measured number, mark 271 superseded, and DO NOT adjust the definition until
+ * it reaches 271. **Task 1 followed it exactly.** Co-presence reproduced all
+ * eight of its inherited quantities, which is what licensed treating the
+ * rule-visible disagreement as a finding about the inherited number rather than
+ * as a broken rig, and nothing in the definition was touched. Tuning an
+ * instrument toward a number is the defect that section existed to prevent, and
+ * the instruction is left here in the past tense rather than deleted, because
+ * the next person to disagree with a figure in this file should follow the same
+ * order: reproduce something you are NOT trying to correct, first.
+ *
+ * `CENSUS_RULE_VISIBLE`'s count is specified by its EVENT rather than derived
+ * from first principles, because whether a given swap would actually have been
+ * refused depends on car index order inside `runMovement`, which a between-ticks
+ * sampler cannot observe. **M1f Task 2 confirmed that caveat is real and not
+ * theoretical** — the 10,207 event is precisely a swap the rule permits.
  *
  * **Read off `state.occupancy` and `state.roads`, never reconstructed.** The
  * queue probe's 5.7-15.2 % disagreement rate came from rebuilding a key the
@@ -54,9 +123,19 @@ import {
  *
  * `prev` is caller-owned, `CENSUS_SLOTS_PER_CELL` entries per cell, and carries
  * the previous tick's occupancy across calls so the edges are detected with no
- * allocation. **Both policies share one `prev`**, so a driver may run both in one
- * pass over one buffer and the two counts are guaranteed to be about the same
- * run.
+ * allocation.
+ *
+ * **EACH POLICY NEEDS ITS OWN `prev`. A sentence here used to say the opposite**
+ * — *"both policies share one `prev`, so a driver may run both in one pass over
+ * one buffer"* — and it is false: the loop writes `prev[i]` and `prev[i + 1]`
+ * **unconditionally** at the end of every cell iteration, so a second policy's
+ * pass over the same buffer reads the first pass's writes and measures nothing
+ * at all. M1f Task 1 found this and both drivers correctly allocate two buffers
+ * (`coPrev` and `rulePrev`); the correction was reported as applied to this
+ * comment and was not, which is why it is being applied now. The guarantee the
+ * old sentence was reaching for is real and comes from somewhere else: the two
+ * counts are about the same run because they are taken on the same tick of the
+ * same drive, not because they share a buffer.
  *
  * **`LANE_COUNT` comes from `@laneways/sim`, not `@laneways/shared`.** The plan's
  * snippet imported it from `shared`; `shared` has never exported it — it is

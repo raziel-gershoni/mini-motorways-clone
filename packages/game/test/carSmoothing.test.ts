@@ -869,7 +869,16 @@ describe('it cannot lie about blocking', () => {
     // queue" from "there were barely any queues to reverse", and that limitation
     // is real** — Task 9's upgrade should push this back up, and if it does not,
     // this floor is the place to notice.
-    expect(measured.smoothed.nearQueuePairs, 'M1f INTERIM — 141 pre-M1f').toBeGreaterThan(20)
+    //
+    // **Anchored exactly as well as floored, because a floor alone is not a
+    // pin.** `demoLayout.test.ts` in this same commit pins its moved values
+    // (`trips === 66`, `valves === 7`) and this file first did not — two
+    // standards in one task. With only the floor, a regression from 46 to 25
+    // passes silently, which is precisely the drift the floor was moved to
+    // accommodate. The exact value is the measurement and the floor is the
+    // vacuity bound; they answer different questions and both are kept.
+    expect(measured.smoothed.nearQueuePairs, 'M1f INTERIM — 141 pre-M1f').toBe(46)
+    expect(measured.smoothed.nearQueuePairs, 'and still non-vacuous').toBeGreaterThan(20)
   })
 
   it('only ever reorders cars the sim itself is already drawing on top of each other', () => {
@@ -918,7 +927,9 @@ describe('the artifact is measurably gone', () => {
     // contains far more stopping. The floor is re-derived to 25, roughly half
     // the new measurement; the treatment's exact 0 is untouched, and that is the
     // assertion this case is actually about.
-    expect(measured.exact.standingStarts, 'M1f INTERIM — 163 pre-M1f').toBeGreaterThan(25)
+    // Anchored as well as floored — see the note on `nearQueuePairs` above.
+    expect(measured.exact.standingStarts, 'M1f INTERIM — 163 pre-M1f').toBe(58)
+    expect(measured.exact.standingStarts, 'and still non-vacuous').toBeGreaterThan(25)
     expect(measured.smoothed.standingStarts).toBe(0)
   })
 

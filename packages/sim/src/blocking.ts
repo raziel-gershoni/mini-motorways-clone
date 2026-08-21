@@ -1049,8 +1049,9 @@ export function canEnter(
   // **The crossing pair is (E, N) and NOT (E, S).** `LANE_OF_DIR` is
   // `[1, 0, 0, 0, 0, 1, 1, 1]`, so E and S are the SAME lane and the own-lane
   // read already refused that pair before this task existed. Written down here
-  // because the plan's fixture had it the other way round, which would have made
-  // the headline test green before the rule shipped.
+  // because the plan's fixture had it the other way round: as given it goes red
+  // on its own lane assertion, and deleting that assertion — the obvious repair
+  // — leaves a test that passes on the tree before this rule shipped.
   //
   // **THE HEAD-ON PROPERTY IS BACK FOR THE STRAIGHT SWAP AND STILL BROKEN FOR
   // THE TURNING ONE, AND THAT IS THE REMAINING COST.** Two cars swapping across

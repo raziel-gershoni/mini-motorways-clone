@@ -460,6 +460,14 @@ describe('carAheadOf at a JUNCTION, where both lanes can hold the entrant up', (
     // different car, so "own lane first" and "other lane first" give different
     // answers and only one of them is this module's contract. Without this the
     // tie-break is a comment.
+    //
+    // **THIS CASE IS THE ONLY DETECTOR FOR THAT ORDER — measured, exactly one
+    // across all 1,906 tests.** Swapping `carAheadOf` to answer with the other
+    // lane first scored **0 detectors** before this case existed and scores
+    // **1** now, and that 1 is this line. Deleting it unpins the decision again
+    // with nothing else going red, so it is not redundant with the case above
+    // (which has the own lane FREE, where both orders agree) and it must not be
+    // folded into it.
     const r = junctionRig()
     placeCar(r.state, 0, JY + 1, PHASE_OUTBOUND, N, 6, 1)
     r.state.carCell[1] = JCELL

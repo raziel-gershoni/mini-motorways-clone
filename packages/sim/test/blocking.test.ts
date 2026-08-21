@@ -3621,11 +3621,13 @@ describe('a junction cell admits one AXIS at a time (spec 5.5, M1f Tasks 2 and 3
   /**
    * **The brief's fixture used (E, S) as its crossing pair and those are the
    * same lane** — `LANE_OF_DIR` is `[1, 0, 0, 0, 0, 1, 1, 1]`, so E and S are
-   * both lane 0 and the pre-M1f own-lane read already refuses that pair. The
-   * headline test would have been green before the rule existed. The pair used
-   * here is the one `roads.ts`'s own module comment names as the case the
-   * two-lane model cannot see: **eastbound and northbound**, lanes 0 and 1.
-   * `junctionRigs.ts` carries the full note.
+   * both lane 0 and the pre-M1f own-lane read already refuses that pair.
+   * Written as given, the brief's own `not.toBe` line fails, so the test goes
+   * RED rather than green; drop that line as a "failing assertion" and what is
+   * left passes on the pre-M1f tree. Two failures, and the cheap repair is the
+   * wrong one. The pair used here is the one `roads.ts`'s own module comment
+   * names as the case the two-lane model cannot see: **eastbound and
+   * northbound**, lanes 0 and 1. `junctionRigs.ts` carries the full note.
    *
    * A PLUS and not a corridor deliberately: on a degree-2 cell the rule must not
    * fire, and the two sibling fixtures below are that arm.

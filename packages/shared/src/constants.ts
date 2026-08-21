@@ -219,6 +219,12 @@ export const INTERSECTION_DEGREE = 3
  * the wide clause it returns the second table with the one correction noted
  * above.
  *
+ * **The refusal counts INCLUDE the death tick.** The probe samples the tick the
+ * run ends on; `integration.test.ts`'s per-week `blockedTicks` row does not,
+ * because its driver breaks on `isGameOver` first. On the greedy arm that is
+ * 45,986 against 45,976 — the ten cars blocked as the run ends — and on the
+ * pre-M1f control it is 2,120 either way, because nothing was blocked there.
+ *
  * **Both refusal conventions agree on this board and that is worth recording**:
  * counting a RISE in `carBlockedTicks` and counting car-ticks with the counter
  * above zero give the same number, because a refused car holds its progress and
