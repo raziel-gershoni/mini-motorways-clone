@@ -1,3 +1,4 @@
+import { DIAG_COST } from '@laneways/shared'
 import { hashInt32 } from './hash'
 import { nonZeroWord, type GameState } from './state'
 import type { WorldData } from './world'
@@ -12,6 +13,7 @@ import {
   NB,
   ST_EXPANSIONS,
   ST_PUSHES,
+  assertPushWithinBucketWindow,
   type FlowField,
   type Scratch,
 } from './scratch'
@@ -60,15 +62,21 @@ import {
  * its own index and no two genuinely different pending distances can ever
  * collide.
  *
- * **`NB = DIAG_COST + 1` is therefore the exact minimum, with zero slack —
- * not a comfortable margin.** (An earlier version of this comment claimed
- * pending entries "differ by at most `DIAG_COST - ORTHO_COST` (4), never by
- * `NB` (15)". The 4 is the spread *before* the current bucket's own pushes
- * are made; instrumenting the queue over 200 seeded random graphs measures a
- * true maximum spread of 14, i.e. the full interval. Reading 4 as headroom
- * would be a 3.5x overestimate of room that does not exist.) See
- * `scratch.ts`'s penalty-routing note for what a future edge-cost change
- * must re-derive alongside `NB`.
+ * **`NB = DIAG_COST + 1` is NOT the exact minimum, and this comment said it
+ * was.** The minimum is `DIAG_COST = 14` and the `+ 1` is one bucket of slack:
+ * `x - d = M` lands in the bucket the drain loop has ALREADY detached, so the
+ * bound is `x - d <= M` rather than `x - d < M`. `scratch.ts`'s `NB` note
+ * derives it and measures what the spare bucket buys — independence from where
+ * `bucketHead[b] = -1` sits, which at modulus 14 is the difference between a
+ * 0-detector no-op and a drain loop that does not terminate. **Two claims have
+ * been made here and retired: first that pending entries "differ by at most
+ * `DIAG_COST - ORTHO_COST` (4)"** — the 4 is the spread *before* the current
+ * bucket's own pushes, and the true maximum measured over 200 seeded random
+ * graphs is 14, the full interval — **and then that 14 is a zero-slack
+ * minimum**, which is off by one in the direction that reads as alarming. See
+ * `scratch.ts`'s penalty-routing note for what a future edge-cost change must
+ * re-derive alongside `NB`, and `assertPushWithinBucketWindow` for the throw
+ * that now fires instead of the wrong path.
  *
  * The check stays because it saves work (skipping a stale cell's whole
  * neighbour scan), and because `scratch.stats[ST_EXPANSIONS]` — which counts
@@ -268,6 +276,12 @@ export function computeFlowField(
           // OPPOSITE[k]) actually exists, since every road segment is
           // written mirrored on both endpoints.
           dir[ni] = OPPOSITE[k] as number
+          // The interlock for the 2026-08-21 amendment to spec 5.4, on the one
+          // statement that can introduce a per-cell term. `d` is the distance
+          // of the bucket being drained and `nd` the candidate; anything but a
+          // direction's own cost between them throws by name instead of
+          // silently aliasing into a bucket the staleness check discards.
+          assertPushWithinBucketWindow(nd, d, NB, DIAG_COST)
           push(scratch, ni, nd)
         }
       }

@@ -40,7 +40,7 @@ import {
   H_ROUTES_REFUSED,
   type TickAction,
 } from '@laneways/sim'
-import { MAX_BLOCKED_TICKS, TICKS_PER_WEEK } from '@laneways/shared'
+import { MAX_BLOCKED_TICKS, TICKS_PER_SECOND, TICKS_PER_WEEK } from '@laneways/shared'
 import { PALETTE, type AtlasContext, type AtlasSurface } from '@laneways/render'
 import {
   buildJamRig,
@@ -74,6 +74,13 @@ import {
   type CityArm,
 } from './cityArms'
 import { longestQueue } from '../src/queueProbe'
+import {
+  censusCellTable,
+  censusPrev,
+  countJunctionConflicts,
+  CENSUS_CO_PRESENCE,
+  CENSUS_RULE_VISIBLE,
+} from './junctionCensus'
 import {
   BOOT_FAILURE_ELEMENT_ID,
   BOOT_FAILURE_STYLE,
@@ -3757,6 +3764,18 @@ interface ArmRun {
   readonly unaffordable: number
   /** Tiles actually spent by the opening, read off `H_TILES` across the one tick it lands on. */
   readonly openingSpend: number
+  /** `CENSUS_CO_PRESENCE` events over the whole arm — see `junctionCensus.ts`. */
+  readonly conflicts: number
+  /** The tick of the first one, or -1. */
+  readonly firstConflictTick: number
+  /** `[cell, count]`, count descending. */
+  readonly conflictCells: readonly (readonly [number, number])[]
+  /** `CENSUS_RULE_VISIBLE` events over the whole arm — the pair the milestone is dated from. */
+  readonly ruleEvents: number
+  /** The tick of the first one, or -1. */
+  readonly firstRuleEventTick: number
+  /** `[cell, count]`, count descending. */
+  readonly ruleEventCells: readonly (readonly [number, number])[]
 }
 
 /** Twelve weeks, which is 54,000 ticks — long enough for every arm to end. */
@@ -3786,6 +3805,21 @@ function driveArm(arm: CityArm): ArmRun {
   let maxBlockedTicks = 0
   let valveFirings = 0
   let openingSpend = 0
+
+  // **Both censuses, two `prev` buffers and two tallies, one pass each per
+  // tick.** They share nothing but the run, which is the point: the two counts
+  // are guaranteed to be about the same drive, and neither can be quietly
+  // measured on a different one. `censusPrev` fills with `FREE` rather than
+  // leaving the buffer zeroed — 0 is a valid car index, and a zeroed buffer
+  // fabricates a swap on the first tick any junction holds a non-zero car.
+  const coPrev = censusPrev(world)
+  const rulePrev = censusPrev(world)
+  const coTally = new Int32Array(world.cells)
+  const ruleTally = new Int32Array(world.cells)
+  let conflicts = 0
+  let ruleEvents = 0
+  let firstConflictTick = -1
+  let firstRuleEventTick = -1
 
   let week = weekOfTick(startTick)
   let weekTrips = state.header[H_SCORE] as number
@@ -3901,6 +3935,13 @@ function driveArm(arm: CityArm): ArmRun {
     if (inFlight > wkInFlight) wkInFlight = inFlight
     if (inFlight > maxInFlight) maxInFlight = inFlight
     if (blocked) wkBlocked++
+
+    const co = countJunctionConflicts(state, world, coPrev, CENSUS_CO_PRESENCE, coTally)
+    if (co > 0 && firstConflictTick < 0) firstConflictTick = tick
+    conflicts += co
+    const rule = countJunctionConflicts(state, world, rulePrev, CENSUS_RULE_VISIBLE, ruleTally)
+    if (rule > 0 && firstRuleEventTick < 0) firstRuleEventTick = tick
+    ruleEvents += rule
     // Sampled, not run every tick: `longestQueue` allocates a `Map` and a `Set`
     // per call. Every tenth tick is the same cadence Task 10's driver used, so
     // the two figures are comparable.
@@ -3943,6 +3984,12 @@ function driveArm(arm: CityArm): ArmRun {
     valveFirings,
     unaffordable: tally.unaffordable,
     openingSpend,
+    conflicts,
+    firstConflictTick,
+    conflictCells: censusCellTable(coTally),
+    ruleEvents,
+    firstRuleEventTick,
+    ruleEventCells: censusCellTable(ruleTally),
   }
 }
 
@@ -4092,6 +4139,15 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     expect(r.maxInFlight).toBeGreaterThan(0)
   })
 
+  /**
+   * **30 s, and the extra budget is the census rather than the drive.** The
+   * greedy arm is 31,456 ticks and used to finish inside vitest's 5 s default;
+   * M1f Task 1 added two per-tick passes over all 960 cells, which is ~5.5 s of
+   * typed-array walking on top. Both hoists that were available have been taken
+   * (`state`'s views out of the loop, a bare-ground short-circuit before
+   * `roadDegree`'s popcount) — see `junctionCensus.ts`. `armRun` memoises, so
+   * only the first case to ask for this arm pays it.
+   */
   it('the greedy arm survives to week 6 and dies on a destination it HAD connected', () => {
     const r = armRun('greedy')
 
@@ -4161,7 +4217,94 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     expect(r.maxBlockedTicks, 'the worst wait, in ticks').toBe(32)
     expect(r.valveFirings, 'the valve cannot fire on this board').toBe(0)
     expect(MAX_BLOCKED_TICKS / 32, '42x from firing').toBeGreaterThan(42)
-  })
+
+    // ---------------------------------------------------------------------
+    // THE JUNCTION CENSUS, BOTH POLICIES, AND ONE FIGURE THAT DID NOT
+    // REPRODUCE
+    // ---------------------------------------------------------------------
+    //
+    // BOTH censuses, measured on the SAME run as every other figure in this
+    // block. Their vacuity guard is their neighbours: `r.deathTick`, `r.trips`
+    // and the seven week rows are pinned above, so this adds no second copy of
+    // them.
+    //
+    // **Co-presence reproduces the inherited figures exactly, on every one of
+    // the eight quantities the review recorded** — 232 events, first at 15,001,
+    // six cells, and all six per-cell counts in order. That is the
+    // reproduce-before-you-contradict step, and it is why the disagreement
+    // below reads as a finding about the inherited number rather than as a
+    // broken instrument.
+    expect(r.conflicts, 'co-presence conflicts — blind to same-tick swaps').toBe(232)
+    expect(r.firstConflictTick, '8:11.4 on a stopwatch, (15001 - 258) / 30').toBe(15001)
+    expect(r.conflictCells.length).toBe(6)
+    expect(r.conflictCells, 'and the per-cell table Task 3 cross-checks against').toEqual([
+      [468, 73], // (12,19)
+      [537, 52], // (9,22)
+      [422, 49], // (14,17)
+      [560, 49], // (8,23)
+      [272, 6], //  (8,11)
+      [512, 3], //  (8,21)
+    ])
+
+    // **RULE-VISIBLE DID NOT REPRODUCE, and the plan said in advance that this
+    // is the finding rather than a licence to retune.** The plan carried
+    // 271 events / first at 12,780 / FIVE cells. Measured here with the
+    // definition the plan itself specifies, character for character:
+    // **538 / 10,207 / SIX**. Nothing was adjusted to reach either number.
+    //
+    // Three things say the instrument is the sound half of the disagreement:
+    //
+    //   1. Co-presence, which shares this module's loop, this `prev` shape,
+    //      this boot and this arm, reproduces all eight of its inherited
+    //      quantities.
+    //   2. **The plan's NAMED event is real and this rig sees it.** The plan
+    //      says "at tick 12,780 cars 8 and 9 swap across (14,17)"; cell
+    //      14 + 17*24 = 422 does take a rule-visible event at exactly tick
+    //      12,780. It is simply not the FIRST one — (12,19) takes one 2,573
+    //      ticks (85.8 s) earlier, at 10,207.
+    //   3. **FIVE cells is not merely wrong, it is unreachable by this
+    //      definition**, and that is asserted below rather than argued. The
+    //      rule-visible branch contains the co-presence predicate verbatim as
+    //      one of its disjuncts, so every co-presence event is a rule-visible
+    //      event at the same cell on the same tick. The rule-visible cell set
+    //      is therefore a SUPERSET of the co-presence one, and cannot be
+    //      smaller than its six.
+    expect(r.ruleEvents, 'junction events the Task 2 rule is about — plan said 271').toBe(538)
+    expect(
+      r.firstRuleEventTick,
+      'the first one — 5:31.6 on a stopwatch, (10207 - 258) / 30; plan said 12,780',
+    ).toBe(10207)
+    expect(r.ruleEventCells.length, 'distinct cells that ever carried one — plan said 5').toBe(6)
+    expect(r.ruleEventCells).toEqual([
+      [468, 161], // (12,19)
+      [537, 133], // (9,22)
+      [422, 120], // (14,17)
+      [560, 99], //  (8,23)
+      [512, 13], //  (8,21)
+      [272, 12], //  (8,11)
+    ])
+
+    // The superset, asserted rather than left to the comment above, because it
+    // is the half of the disagreement that no re-measurement can move: it is a
+    // property of the two definitions and not of this board.
+    const coCells = new Set(r.conflictCells.map(([cell]) => cell))
+    for (const [cell] of r.conflictCells) {
+      expect(
+        r.ruleEventCells.some(([c]) => c === cell),
+        `co-presence cell ${cell} is missing from the rule-visible table, which is impossible`,
+      ).toBe(true)
+    }
+    expect(coCells.size).toBe(6)
+    expect(r.ruleEvents, 'rule-visible strictly contains co-presence').toBeGreaterThan(r.conflicts)
+
+    // The relationship between the two, asserted rather than left to a comment,
+    // because it is the thing the previous draft got backwards. The DIRECTION
+    // survives the disagreement above; only the size of the gap changed, from
+    // the plan's 74.0 s to a measured 159.8 s.
+    expect(r.firstRuleEventTick, 'the rule diverges EARLIER than co-presence, not later')
+      .toBeLessThan(r.firstConflictTick)
+    expect((r.firstConflictTick - r.firstRuleEventTick) / TICKS_PER_SECOND).toBeCloseTo(159.8, 1)
+  }, 30000)
 
   it('is not vacuous: the three arms are three different runs, not one run reported thrice', () => {
     const none = armRun('no-input')
@@ -4177,5 +4320,5 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     // buys three and a half minutes, keeping up buys fourteen more.
     expect(none.deathTick).toBeLessThan(opening.deathTick)
     expect(opening.deathTick).toBeLessThan(greedy.deathTick)
-  })
+  }, 30000)
 })

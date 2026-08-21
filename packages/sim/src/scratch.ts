@@ -22,11 +22,17 @@ import { edgeCost } from './graph'
 export const INF = 0x40000000
 
 /**
- * Dial's cyclic bucket count. Correct only while NB > every edge cost; §5.4
- * promises intersection and traffic-light penalties "as extra integer edge
- * weight" — M1c adds none, so 14 is not exceeded here, and an over-large weight
- * would land in a bucket drained at the wrong d and be discarded — wrong
- * answers, no crash. `createScratch` asserts NB > edgeCost(k) for every k.
+ * Dial's cyclic bucket count. Correct only while NB > every edge cost. An
+ * over-large weight would land in a bucket drained at the wrong d and be
+ * discarded — wrong answers, no crash. `createScratch` asserts NB > edgeCost(k)
+ * for every k, and `assertPushWithinBucketWindow` below asserts the same window
+ * on the relaxation itself.
+ *
+ * **This used to open by quoting §5.4's promise of intersection and
+ * traffic-light penalties "as extra integer edge weight". That clause is
+ * REFUSED** — see the 2026-08-21 amendment to §5.4. Path cost is a function of
+ * the DIRECTION of a step and of nothing else, so no junction or light can ever
+ * be the thing that exceeds NB; only a tier on the step itself can.
  *
  * **This comment predicted M1d would exceed it, and M1d did not — corrected
  * rather than repointed, because the prediction was wrong about the MECHANISM
@@ -42,9 +48,21 @@ export const INF = 0x40000000
  * named need a card mechanism, and M1e shipped only §5.10's tile grant (see
  * `WEEKLY_TILE_GRANT` in `shared/constants.ts` for why the modal is M1f's). So
  * `DISTINCT_EDGE_COSTS` is still 2 and the value set is still `{10, 14}`.
- * **M1f's motorway tier is the live threat** — it is the one item in the §5.10
- * table that changes the value set rather than a speed multiplier, and it
- * arrives with the card mechanism that makes any of them placeable.
+ * **M1g's motorway tier is the live threat** — it is the one item in the §5.10
+ * table that changes the value set rather than a speed multiplier. It was dated
+ * M1f here and M1f shipped no motorway: the milestone spent its card slot on the
+ * junction upgrade, and the motorway was never in its scope.
+ *
+ * **Third wrong prediction, and this one is worth counting.** This comment has
+ * now named M1d, M1e and M1f as the milestone that would exceed NB, and none of
+ * them did. The reason is structural rather than lucky and it is now written
+ * down in the spec: junction and traffic-light cost is not edge weight
+ * (amendment, 2026-08-21), so the only thing that can change the VALUE SET is a
+ * tier on the step itself — the motorway's divide-by-three. Until a motorway
+ * ships, `DISTINCT_EDGE_COSTS` is 2 and the set is {10, 14}. M1f Task 1 also
+ * added `assertPushWithinBucketWindow`, whose SECOND arm catches an added term of
+ * +1 that the modulus bound alone would accept, so a fourth wrong prediction is
+ * a throw rather than a wrong path.
  *
  * ---------------------------------------------------------------------------
  * PENALTY-ROUTING NOTE, FOR WHOEVER ADDS THE FIRST PENALTY
@@ -100,13 +118,16 @@ export const INF = 0x40000000
  * `maxEdgeCost` would be wrong, but because it would be correct for a reason
  * nobody re-derives when they touch the drain loop.
  *
- * **2. The assert cannot see a penalty applied inside the pathfinder.**
- * `assertBucketCountExceedsEveryEdgeCost` only inspects `edgeCost(k)`. If a
- * penalty is applied INSIDE `computeFlowField` rather than through the cost
- * function, the assert keeps passing while the Dial queue silently aliases two
- * distances into one bucket — the `d % 13` row above is what that looks like:
- * wrong paths, no crash, and 31 tests that all fail for reasons that read like
- * a routing regression rather than a queue bug.
+ * **2. The assert cannot see a penalty applied inside the pathfinder — and as
+ * of M1f Task 1 a second one can.** `assertBucketCountExceedsEveryEdgeCost` only
+ * inspects `edgeCost(k)`. If a penalty is applied INSIDE `computeFlowField`
+ * rather than through the cost function, the assert keeps passing while the Dial
+ * queue silently aliases two distances into one bucket — the `d % 13` row above
+ * is what that looks like: wrong paths, no crash, and 31 tests that all fail for
+ * reasons that read like a routing regression rather than a queue bug.
+ * `assertPushWithinBucketWindow` below is the mechanism that closes it: it runs
+ * on the relaxation itself, where the added term would be, and it has a second
+ * arm because the modulus bound alone accepts a surcharge of +1 on a diagonal.
  *
  * **3. A per-CELL penalty changes the signature, not the value.** It makes cost
  * depend on more than direction, so `edgeCost(dir)` and everything derived from
@@ -120,15 +141,86 @@ export const INF = 0x40000000
 export const NB = DIAG_COST + 1
 
 /**
- * Distinct values `edgeCost` can return. Sets the entry-pool bound; **M1f's
- * motorway tier makes it 3 — this said M1d's, then M1e's, and neither shipped
- * one.** M1d's Out table deferred motorways to M1e because they are upgrade
- * CARDS with no card mechanism; M1e shipped §5.10's tile grant and left the
- * two-card choice — and therefore every item card — to M1f, so the deferral
- * moved with it rather than being discharged. M1d Task 7's lane-speed
- * multipliers and M1e Task 7's overcrowd meter both went somewhere other than
- * `edgeCost`, so this constant is still 2 and the value set is still
- * `{10, 14}`. `graph.test.ts` and `scratch.test.ts` both pin this against
+ * Throws if a relaxation would push a distance the cost model or Dial's cyclic
+ * queue cannot represent from the bucket currently draining.
+ *
+ * **This is the mechanism for the trap `NB`'s note above describes and could
+ * not close.** `assertBucketCountExceedsEveryEdgeCost` inspects only
+ * `edgeCost(k)`, so a penalty applied INSIDE `computeFlowField` — a per-cell
+ * term read off `roads`, a junction surcharge, a traffic-light delay — leaves it
+ * green while the queue silently aliases two distances into one bucket. Measured
+ * at modulus 13: 31 detectors, all of which read like a routing regression
+ * rather than a queue bug, because the drain loop's staleness check DISCARDS the
+ * aliased entry.
+ *
+ * **TWO bounds, because one is not enough and the difference is the whole
+ * point.** The aliasing bound is `delta <= buckets`; the legality bound is
+ * `delta <= maxEdge`. On the shipped constants `NB` is 15 and `DIAG_COST` is 14,
+ * so a surcharge of `+1` on a diagonal — the SMALLEST edit that could introduce
+ * one — produces `delta = 15`, which the aliasing bound accepts. A guard silent
+ * on the minimal instance of the thing it guards is decoration. The aliasing arm
+ * stays because it is a true and separate statement about the queue: at
+ * `delta = buckets` the entry lands in a bucket `computeFlowField` has already
+ * detached (`bucketHead[b] = -1`) and drains on its next visit, which is exactly
+ * why `NB = DIAG_COST + 1` rather than `DIAG_COST` — measured, at 14 the drain
+ * loop does not terminate if that detach moves after the walk, and at 15 it is a
+ * no-op.
+ *
+ * Parameterised rather than closing over `NB` and `DIAG_COST`, on the precedent
+ * of `assertBucketCountExceedsEveryEdgeCost`, `assertSingleCrossing` (cars.ts)
+ * and `assertDispatchProgress` (dispatch.ts): the failure path is then testable
+ * directly, without editing a constant and rebuilding.
+ *
+ * Unreachable today, by construction: the only pushes are `d + edgeCost(dir)`
+ * and `max(edgeCost) = DIAG_COST`. It is reachable the moment anybody adds a
+ * term, which is the point.
+ *
+ * @internal `computeFlowField` is the production call site.
+ */
+export function assertPushWithinBucketWindow(
+  pushed: number,
+  draining: number,
+  buckets: number,
+  maxEdge: number,
+): void {
+  const delta = pushed - draining
+  if (delta < 0) {
+    throw new Error(
+      `scratch: a relaxation pushed distance ${pushed}, below the distance being drained (${draining}) — ` +
+        'Dijkstra over non-negative weights cannot do that, so this is a negative or corrupted edge cost',
+    )
+  }
+  if (delta > buckets) {
+    throw new Error(
+      `scratch: a relaxation pushed distance ${pushed} while draining ${draining}, a gap of ${delta} ` +
+        `against NB=${buckets} — it aliases into the bucket drained at ${draining + (delta % buckets)}, ` +
+        'where the staleness check discards it: wrong paths, no crash. An edge cost above NB - 1 needs ' +
+        'NB resized (see NB, and the 2026-08-21 amendment to spec 5.4)',
+    )
+  }
+  if (delta > maxEdge) {
+    throw new Error(
+      `scratch: a relaxation advanced the distance by ${delta}, which is not a legal edge cost ` +
+        `(max ${maxEdge}). Path cost is a function of the DIRECTION of a step and of nothing else — ` +
+        'a junction, traffic-light or congestion term inside computeFlowField is exactly what this ' +
+        'catches. See the 2026-08-21 amendment to spec 5.4.',
+    )
+  }
+}
+
+/**
+ * Distinct values `edgeCost` can return. Sets the entry-pool bound; **M1g's
+ * motorway tier makes it 3 — this said M1d's, then M1e's, then M1f's, and none
+ * of the three shipped one.** M1d's Out table deferred motorways to M1e because
+ * they are upgrade CARDS with no card mechanism; M1e shipped §5.10's tile grant
+ * and left the two-card choice to M1f; **M1f then spent its card slot on the
+ * junction upgrade and never had a motorway in scope at all**, which is a
+ * different reason from the previous two and is why the date moved rather than
+ * the sentence being repointed a third time. M1d Task 7's lane-speed
+ * multipliers, M1e Task 7's overcrowd meter and M1f's junction rule all went
+ * somewhere other than `edgeCost` — the last of them by a spec amendment
+ * (2026-08-21) that says so — so this constant is still 2 and the value set is
+ * still `{10, 14}`. `graph.test.ts` and `scratch.test.ts` both pin this against
  * `edgeCost`'s real output (see the linkage test in `scratch.test.ts`, added
  * M1c), so adding a cost tier without updating this constant fails a test
  * rather than silently under-sizing the pool.
@@ -228,13 +320,21 @@ const CURSOR_LENGTH = 2
  * per distinct edge-cost value a cell can be improved by, plus one source
  * insertion. Conservative by construction — a source cell can never also be
  * improvement-pushed, since its distance (0) can never improve — and it is
- * the formulation that survives M1f's motorway ÷3 tier and flags M1f's
- * traffic-light penalties as requiring a revisit (both change
- * `DISTINCT_EDGE_COSTS`, which this derives from rather than a literal). M1c
- * added neither, **M1d added neither** — its intersection penalty is a movement
- * multiplier rather than an edge weight — and **M1e added neither**, because
- * both items are cards and the card modal is M1f's. See `NB` above, where the
- * same prediction has now been made and refuted twice.
+ * the formulation that survives the motorway ÷3 tier, which changes
+ * `DISTINCT_EDGE_COSTS` and which this derives from rather than a literal. M1c
+ * added no tier, **M1d added none** — its intersection penalty is a movement
+ * multiplier rather than an edge weight — **M1e added none**, because both items
+ * are cards and the card modal was deferred, and **M1f added none**: it shipped
+ * the card modal and spent it on the junction upgrade.
+ *
+ * **This sentence used to name M1f's traffic-light penalties as a second thing
+ * requiring a revisit here, and that half is now refuted rather than merely
+ * re-dated.** A traffic light does not change `DISTINCT_EDGE_COSTS`, because it
+ * is not an edge cost: the 2026-08-21 amendment to spec §5.4 makes path cost a
+ * function of the DIRECTION of a step and of nothing else, and M1f's junction
+ * rule lives in `canEnter`. The motorway is the only remaining candidate, and it
+ * is M1g's. See `NB` above, where the same prediction has now been made and
+ * refuted three times.
  *
  * The reviewed draft's `cells * 9` bound ("8 relaxations per cell plus one
  * source insertion") was wrong in both directions: expansions occur in

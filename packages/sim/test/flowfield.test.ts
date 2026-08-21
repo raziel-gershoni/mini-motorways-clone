@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
 import { parseMap, ORTHO_COST, DIAG_COST, MAX_BLOCKED_TICKS, type MapData } from '@laneways/shared'
 import { createState, hashState, isGameOver, nonZeroWord, H_SCORE, type GameState } from '../src/state'
@@ -1785,5 +1786,74 @@ describe('routing stays congestion-blind (M1e Task 11)', () => {
       firstFieldDifference(baseline, fieldBytes(rig.fields)),
       'some FIELD_IRRELEVANT region reaches the field',
     ).toBe('identical')
+  })
+})
+
+
+describe('the M1f amendment: path cost is a function of direction and nothing else', () => {
+  const graphSrc = readFileSync(new URL('../src/graph.ts', import.meta.url), 'utf8')
+  const flowfieldSrc = readFileSync(new URL('../src/flowfield.ts', import.meta.url), 'utf8')
+
+  it('reads both sources back non-empty', () => {
+    expect(graphSrc.length, 'graph.ts read back empty').toBeGreaterThan(4000)
+    expect(flowfieldSrc.length, 'flowfield.ts read back empty').toBeGreaterThan(4000)
+  })
+
+  it("pins edgeCost's signature line, because a per-cell penalty changes the signature and not the value", () => {
+    expect(
+      graphSrc,
+      'edgeCost no longer takes exactly one direction — see the 2026-08-21 amendment to spec 5.4',
+    ).toMatch(/^export function edgeCost\(dir: number\): number \{$/m)
+    expect(edgeCost.length, 'edgeCost arity').toBe(1)
+  })
+
+  // The behavioural arms below scramble every FIELD_IRRELEVANT region and cannot
+  // see a penalty derived from `roads`, which is FIELD_INPUT. This is the half
+  // that can: the names a junction or traffic-light penalty inside the pathfinder
+  // would have to use.
+  //
+  // **The positive control is `graph.ts`, not `cars.ts`, and that is not
+  // arbitrary.** M1f Task 2 replaces `intersectionSpeedMul`'s body with a call to
+  // `isJunctionCell`, which deletes both `roadDegree` and `INTERSECTION_DEGREE`
+  // from `cars.ts` — so a control anchored there would silently stop matching two
+  // of the names and report green while guarding nothing. `graph.ts` DECLARES
+  // `roadDegree`, `isJunctionCell` and `junctionAdmitsOne` and IMPORTS
+  // `INTERSECTION_DEGREE`, permanently.
+  //
+  // **What the control is anchored to TODAY, stated because the two names are
+  // anchored differently and a reader should not have to check.** `roadDegree`
+  // is DECLARED in `graph.ts` — code. `INTERSECTION_DEGREE` is named in
+  // `roadDegree`'s DOC COMMENT there, because Task 1 moves the constant into
+  // `@laneways/shared` without giving `graph.ts` a runtime reader for it:
+  // `isJunctionCell` is Task 2's, and an import with no use is dead code plus a
+  // suppressed lint rule in production source. Task 2 turns that anchor into a
+  // real import when it lands `isJunctionCell`, and this test does not change.
+  //
+  // The control's job is unaffected either way: it proves the PATTERN can match
+  // at all, so a misspelled or never-matching name cannot leave the guard below
+  // silently vacuous. The guard's own teeth are separate and were measured by
+  // injection — see the M1f Task 1 report.
+  const PENALTY_NAMES = ['roadDegree', 'INTERSECTION_DEGREE']
+
+  const nameRe = (n: string): RegExp => new RegExp(`\\b${n}\\b`)
+
+  for (const name of PENALTY_NAMES) {
+    it(`flowfield.ts does not mention ${name}`, () => {
+      expect(
+        flowfieldSrc,
+        `flowfield.ts now uses ${name} — a junction penalty inside computeFlowField keeps ` +
+          'assertBucketCountExceedsEveryEdgeCost green while Dial aliases two distances into one ' +
+          'bucket. See the 2026-08-21 amendment to spec 5.4 and scratch.ts NB.',
+      ).not.toMatch(nameRe(name))
+    })
+  }
+
+  it('every pattern matches something in graph.ts, so the guards above can fail', () => {
+    for (const name of PENALTY_NAMES) {
+      expect(
+        graphSrc,
+        `the ${name} pattern matches nothing in graph.ts — the guard cannot fail`,
+      ).toMatch(nameRe(name))
+    }
   })
 })

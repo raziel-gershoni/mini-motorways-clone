@@ -105,10 +105,23 @@ export function edgeCost(dir: number): number {
  * like everything else here.
  *
  * Spec §5.5 prices *"approaching an intersection"* with a speed multiplier, and
- * M1d decision 7 defines an intersection as **a cell of degree >= 3** — a cell
- * where a third road meets, as opposed to a corridor cell (2), a dead end (1)
- * or bare ground (0). `cars.ts`'s `intersectionSpeedMul` is the sole caller and
- * asks about the cell a car is ENTERING.
+ * M1d decision 7 defines an intersection as **a cell of degree >=
+ * `INTERSECTION_DEGREE`** — a cell where a third road meets, as opposed to a
+ * corridor cell (2), a dead end (1) or bare ground (0). `cars.ts`'s
+ * `intersectionSpeedMul` is the sole caller and asks about the cell a car is
+ * ENTERING.
+ *
+ * **`INTERSECTION_DEGREE` is `@laneways/shared`'s as of M1f Task 1, not
+ * `cars.ts`'s private constant, and the threshold is named here rather than
+ * spelled `3` for a reason that outlives the tidy-up.** The degree is about to
+ * acquire two more readers — `canEnter`'s mutual exclusion and §5.6's junction
+ * upgrade — and `graph.ts` is the module all three go through. **It is a
+ * threshold on a cell's SHAPE and never an edge weight**: `edgeCost(dir)` above
+ * takes a direction and nothing else, and the 2026-08-21 amendment to spec §5.4
+ * refuses the clause that said to price junctions as extra integer edge weight.
+ * `flowfield.test.ts` scans `flowfield.ts` for both `roadDegree` and
+ * `INTERSECTION_DEGREE` and uses THIS FILE as the positive control for that
+ * scan, which is why the name appears here.
  *
  * **Counted off the MASK, and that differs from `neighbours` in exactly one
  * case, stated here rather than left to be found.** `neighbours` additionally

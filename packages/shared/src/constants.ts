@@ -37,11 +37,19 @@ export const DIAG_COST = 14
  * `RIGHT_ANGLE_SPEED_MUL`, `SHARP_TURN_SPEED_MUL` and `INTERSECTION_SPEED_MUL`
  * are selected per crossing by `laneSpeedMul` (`packages/sim/src/cars.ts`) and
  * scale a car's per-tick progress; `LANE_SPEED_DEFAULT` is the identity, applied
- * when none of the three does. `MOTORWAY_SPEED_MAX` and `ROUNDABOUT_SPEED_MUL`
- * are still uncalled — both are **M1f** upgrade cards, and there is still no
- * card mechanism. Repointed from M1e, which shipped the load-bearing half of
- * §5.10 (`WEEKLY_TILE_GRANT`) and left the two-card CHOICE, and therefore every
- * item in the table, to M1f.
+ * when none of the three does.
+ *
+ * **`ROUNDABOUT_SPEED_MUL` and `MOTORWAY_SPEED_MAX` are still uncalled, and the
+ * date moves from M1f to M1g for two different reasons.** The motorway was never
+ * in M1f's scope. The roundabout WAS, and it was removed after measurement: on the
+ * shipped board, five of the six cells that actually jam admit ZERO legal 3x3
+ * centres at every tick of the run, and the sixth admits one — the cell measured
+ * as worth exactly zero. The greedy connector merges approaches at carparks and
+ * houses, so degree-3 cells form against buildings by construction, and spec 5.6
+ * requires a roundabout's centre plus all eight neighbours to be clear of them.
+ * M1f ships a single-cell JUNCTION UPGRADE instead, which places on one junction cell and
+ * therefore cannot fail to reach the jam. M1g owns the roundabout's geometry
+ * question; see the M1f plan's Out table for the four options.
  *
  * **They are applied in MOVEMENT and never in `edgeCost`.** A turn multiplier is
  * a property of the pair of edges either side of a cell and cannot be expressed
@@ -65,6 +73,24 @@ export const ROUNDABOUT_SPEED_MUL = 2000
 export const RIGHT_ANGLE_SPEED_MUL = 667
 export const INTERSECTION_SPEED_MUL = 500
 export const SHARP_TURN_SPEED_MUL = 333
+
+/**
+ * The road degree at which a cell counts as an INTERSECTION — a third road
+ * meets there. Degree 2 is a corridor cell, 1 a dead end, 0 bare ground.
+ *
+ * **Moved out of `sim/src/cars.ts` module scope at M1f Task 1, because it
+ * acquired a second reader.** M1d used it in exactly one place, to select spec
+ * §5.5's *"approaching an intersection"* speed multiplier. M1f gives the same
+ * threshold two more jobs — `canEnter`'s mutual exclusion and the junction
+ * upgrade's placement rule (§5.6: *"place only on an existing road junction,
+ * never plain road"*) — and a private constant with three conceptual readers is a copy
+ * waiting to happen. All three now go through `graph.ts`'s `isJunctionCell`.
+ *
+ * **It is NOT an edge weight and must never become one** — see the 2026-08-21
+ * amendment to spec §5.4. `flowfield.test.ts` scans `flowfield.ts` for this
+ * name for exactly that reason, with `graph.ts` as its positive control.
+ */
+export const INTERSECTION_DEGREE = 3
 
 // --- Blocking and the anti-deadlock valve (spec §5.5, M1d decision 6) ---
 /**

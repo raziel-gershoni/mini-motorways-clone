@@ -2,6 +2,7 @@ import {
   CAR_SPEED_UNITS_PER_TICK,
   COST_UNIT_SCALE,
   DENOM,
+  INTERSECTION_DEGREE,
   INTERSECTION_SPEED_MUL,
   LANE_SPEED_DEFAULT,
   ORTHO_COST,
@@ -228,14 +229,6 @@ export function scaleSpeed(base: number, mul: number): number {
 export function speedUnits(mul: number): number {
   return scaleSpeed(CAR_SPEED_UNITS_PER_TICK, mul)
 }
-
-/**
- * The road degree at which the cell being ENTERED counts as an intersection
- * (M1d decision 7): a third road meets there. Degree 2 is a corridor cell, 1 a
- * dead end, 0 bare ground; a car crossing into any of those is not "approaching
- * an intersection" in spec §5.5's sense.
- */
-const INTERSECTION_DEGREE = 3
 
 /**
  * "No multiplier of this kind applies", as distinct from "a multiplier of 1.0

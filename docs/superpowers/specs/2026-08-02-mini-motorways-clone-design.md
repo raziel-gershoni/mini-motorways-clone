@@ -176,7 +176,50 @@ One A\* query costs the same as an entire flow field for the whole map. At 200 c
 
 **Do not build D\* Lite or LPA\*.** Full recompute is 30 µs; incremental algorithms buy nothing and cost determinism clarity.
 
-Implementation constraints: preallocate every buffer at boot; never allocate inside a tick; Dial's bucket queue backed by a preallocated `Int32Array` (integer weights bounded at 14, so ~32 buckets suffice); coalesce dirty rebuilds to at most one per tick; model intersection and traffic-light penalties as extra integer edge weight, which Dijkstra absorbs for free.
+Implementation constraints: preallocate every buffer at boot; never allocate inside a tick; Dial's bucket queue backed by a preallocated `Int32Array` (integer weights bounded at 14, so ~32 buckets suffice); coalesce dirty rebuilds to at most one per tick.
+
+> **AMENDMENT, 2026-08-21 (M1f Task 1). Intersection, traffic-light and roundabout
+> penalties are NOT edge weight.** The sentence that stood here said to model them
+> as extra integer edge weight. It contradicts the research this spec is built on
+> and it contradicts the shipped code, and the research is right.
+>
+> **Scope of this amendment, stated because the rest of the paragraph is sound.**
+> The surrounding implementation constraints are verbatim from dossier 3.3 and are
+> not touched. What is refused is the final clause alone.
+>
+> **The two lines that refute it.** Dossier 1.5, line 74: *"It is shortest by
+> DISTANCE, NOT TIME — junctions, lights and roundabouts carry no path cost, which
+> is exactly why players observe 'the game picks the shortest path but not the
+> fastest'"*. And dossier 1.6, line 101, the verifier's own correction of the
+> opposite inference: the lane-speed constants *"sit among pure driving-physics
+> params, the source contains zero references to pathfinding … Time-weighted
+> routing is a plausible hypothesis, NOT established."* Dossier 1.5 also closes
+> with *"Do not add a congestion term to path cost. The omission is load-bearing:
+> it makes the player the only rerouting mechanism, which is the entire game"* —
+> quoted for the design intent, and noting that a STATIC junction surcharge is not
+> a congestion term, so that sentence alone would not have settled this.
+>
+> **The rule, which supersedes the clause above:** path cost is a function of the
+> DIRECTION of a step and of nothing else. `edgeCost(dir: number): number` is the
+> whole cost model. Junction cost lives in MOVEMENT — `laneSpeedMul`, which scales
+> a car's per-tick progress — and in ENTRY — `canEnter`, which refuses a crossing
+> and, from M1f, obeys a traffic light. Neither is visible to Dijkstra,
+> deliberately.
+>
+> **What it would cost to reverse this**, measured on the shipped board's greedy
+> arm at M1f Task 2 under the WIDE rule (both lanes free at any degree-3 cell):
+> junction exclusion produces 45,986 blocked car-ticks. The narrower CROSSING-ONLY
+> rule that M1f Task 3 is predicted to ship measures 29,267 on the same arm. The
+> arm is chosen two tasks after this amendment is written, which is why both
+> numbers are here and why neither is quoted bare. Priced
+> as edge weight instead, cars route around the junctions and the player never sees
+> one, and every traffic light M1f ships is relieving a jam that no longer forms.
+> The milestone would be correct, tested, deployed and invisible.
+>
+> This amendment is enforced rather than recorded: see `packages/sim/src/graph.ts`
+> (`edgeCost`'s signature is pinned by a line-anchored scan), `packages/sim/src/scratch.ts`
+> (`assertPushWithinBucketWindow`), and `packages/sim/test/flowfield.test.ts`
+> (the congestion-blindness arms and the structural scan).
 
 **Dispatch falls out of the field, and the direction matters.** A field seeded from all unfilled pins of colour C gives, for every cell, the distance to the *nearest* pin of that colour — not to one specific pin. So dispatch is not "pick a pin, then search for a house". It is: every house of colour C with a free car reads `dist[houseCell]`, which is its distance to the nearest unfilled pin; the house with the smallest value dispatches. The car then follows `dir[]` downhill and claims whichever pin it reaches.
 

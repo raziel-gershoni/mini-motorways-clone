@@ -268,6 +268,31 @@ export const FIELD_INPUT_REGIONS = Object.freeze(['mapIdentity', 'destCell', 'ro
  * the table, to M1f. Nothing about the classification's ARGUMENT changed; only
  * the milestone that could end it. A comment naming a milestone that has passed
  * reads as satisfied, which is how a handoff dies.
+ *
+ * **M1f is the milestone these five reasons were dated against, and not one of
+ * them became a field input — for a reason STRONGER than the one they
+ * anticipated.** They were dated "M1f's demand-actuated lights" and were
+ * conditional: "IF they price waiting as an edge weight". Two things happened.
+ * First, M1f answered the condition in the negative, in writing, in the spec:
+ * junction, traffic-light and roundabout cost is NOT edge weight (amendment,
+ * 2026-08-21). Second, **M1f did not ship a demand-actuated light at all** — it
+ * measured one and deferred it (amendment to spec 5.6, 2026-08-21), shipping a
+ * JUNCTION UPGRADE instead: a flag that changes a car's RIGHT TO ENTER a cell,
+ * with the cell's SPEED unchanged and the distance of a step never touched. So
+ * the five reasons outlived both the object they named and the condition they
+ * set.
+ *
+ * **Three of the five are no longer resting on this comment.** `carCell`,
+ * `occupancy` and `carBlockedTicks` are pinned by `flowfield.test.ts`'s derived
+ * arm, which scrambles EVERY region this list names and requires byte-identical
+ * `dist`/`dir` and an unmoved `CT_REBUILDS` — so the classification is a failing
+ * assertion rather than a sentence.
+ *
+ * The date moves to M1g because the two things that could still argue with it
+ * are the motorway's divide-by-three tier, which changes `edgeCost`'s VALUE SET
+ * rather than adding a per-cell term, and the demand-actuated light M1f deferred,
+ * if it returns and prices waiting — and either would have to beat the amendment
+ * first.
  */
 export const FIELD_IRRELEVANT_REGIONS = Object.freeze([
   'rng',

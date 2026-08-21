@@ -12,6 +12,7 @@ import {
   PIN_CAP_SQUARE_TIMER,
   OVERCROWD_FAIL_MILLITICKS,
   CARS_PER_HOUSE,
+  TICKS_PER_SECOND,
   TICKS_PER_WEEK,
   type MapData,
 } from '@laneways/shared'
@@ -83,6 +84,13 @@ import {
   GREEDY_PERIOD_TICKS,
   type CityArm,
 } from './cityArms'
+import {
+  censusCellTable,
+  censusPrev,
+  countJunctionConflicts,
+  CENSUS_CO_PRESENCE,
+  CENSUS_RULE_VISIBLE,
+} from './junctionCensus'
 import {
   seedStartingCity,
   STARTING_DESTINATIONS,
@@ -1297,6 +1305,13 @@ interface GateRun {
   readonly maxSpawnedInFlight: number
   readonly unaffordable: number
   readonly outsideRect: number
+  /** Both junction censuses — see `junctionCensus.ts`. The SECOND driver for them. */
+  readonly conflicts: number
+  readonly firstConflictTick: number
+  readonly conflictCells: readonly (readonly [number, number])[]
+  readonly ruleEvents: number
+  readonly firstRuleEventTick: number
+  readonly ruleEventCells: readonly (readonly [number, number])[]
 }
 
 /*
@@ -1352,6 +1367,19 @@ function driveGate(arm: CityArm): GateRun {
   let outsideRect = 0
   let maxInFlight = 0
   let maxSpawnedInFlight = 0
+
+  // The SECOND driver for both junction censuses. `integration.test.ts` runs
+  // them through `createGame` and its frame loop; this file drives `step` by
+  // hand. Same policy module, same two `prev` buffers, same tallies — the only
+  // thing that differs is the driver, which is the whole point of the pair.
+  const coPrev = censusPrev(world)
+  const rulePrev = censusPrev(world)
+  const coTally = new Int32Array(world.cells)
+  const ruleTally = new Int32Array(world.cells)
+  let conflicts = 0
+  let ruleEvents = 0
+  let firstConflictTick = -1
+  let firstRuleEventTick = -1
 
   let week = weekOfTick(startTick)
   let weekTrips = state.header[H_SCORE] as number
@@ -1436,6 +1464,13 @@ function driveGate(arm: CityArm): GateRun {
     if (inFlight > maxInFlight) maxInFlight = inFlight
     if (spawnedInFlight > maxSpawnedInFlight) maxSpawnedInFlight = spawnedInFlight
     if (blocked) wkBlocked++
+
+    const co = countJunctionConflicts(state, world, coPrev, CENSUS_CO_PRESENCE, coTally)
+    if (co > 0 && firstConflictTick < 0) firstConflictTick = tick
+    conflicts += co
+    const rule = countJunctionConflicts(state, world, rulePrev, CENSUS_RULE_VISIBLE, ruleTally)
+    if (rule > 0 && firstRuleEventTick < 0) firstRuleEventTick = tick
+    ruleEvents += rule
     // `longestQueue` allocates a `Map` and a `Set` per call, so it is sampled
     // rather than run every tick — this is a measurement rig, not a frame path,
     // and a queue that stands for one tick in thirty is not a queue.
@@ -1486,6 +1521,12 @@ function driveGate(arm: CityArm): GateRun {
     maxSpawnedInFlight,
     unaffordable: tally.unaffordable,
     outsideRect,
+    conflicts,
+    firstConflictTick,
+    conflictCells: censusCellTable(coTally),
+    ruleEvents,
+    firstRuleEventTick,
+    ruleEventCells: censusCellTable(ruleTally),
   }
 }
 
@@ -1642,6 +1683,83 @@ describe('the survivability gate the default board is flipped behind', () => {
     expect(severed.size).toBeLessThan(east.size)
   })
 
+  /**
+   * **The junction census, SECOND DRIVER.** `integration.test.ts` runs the same
+   * two policies through `createGame`, its `InputQueue` and its frame loop; this
+   * file drives `step` by hand off `layoutFor`. Two drivers agreeing on twelve
+   * quantities is evidence; one driver run twice is not — and the policy itself
+   * lives in `junctionCensus.ts` so the only thing that can differ is the driver.
+   *
+   * Every figure below is asserted identically in `integration.test.ts`. That is
+   * deliberate duplication of the LITERAL, exactly as the two death ticks already
+   * are: a shared constant would let both drivers move together.
+   *
+   * **What reproduced and what did not.** Co-presence reproduces the review's
+   * rig on all eight of its recorded quantities — 232 / 15,001 / six cells and
+   * every per-cell count. Rule-visible does not: the plan carried 271 / 12,780 /
+   * five and both drivers measure **538 / 10,207 / six**, with the definition
+   * the plan specifies and nothing adjusted. The plan's NAMED event is real —
+   * (14,17) does take a rule-visible event at exactly tick 12,780 — it is simply
+   * not the first. See `integration.test.ts` for the full derivation, including
+   * why five cells is unreachable by this definition rather than merely wrong.
+   */
+  it('the junction census, both policies, on the HAND driver', () => {
+    const g = gateRun('greedy')
+
+    // Vacuity: this is the arm that dies at 31,456 having scored 747, and those
+    // are pinned in the cases around this one. A census on a run that stopped
+    // early would report smaller numbers with no other symptom.
+    expect(g.deathTick, 'the arm the census is measured on').toBe(31456)
+
+    expect(g.conflicts, 'co-presence conflicts').toBe(232)
+    expect(g.firstConflictTick, '8:11.4 on a stopwatch').toBe(15001)
+    expect(g.conflictCells).toEqual([
+      [468, 73], // (12,19)
+      [537, 52], // (9,22)
+      [422, 49], // (14,17)
+      [560, 49], // (8,23)
+      [272, 6], //  (8,11)
+      [512, 3], //  (8,21)
+    ])
+
+    expect(g.ruleEvents, 'rule-visible events — the plan carried 271').toBe(538)
+    expect(g.firstRuleEventTick, '5:31.6 on a stopwatch — the plan carried 12,780').toBe(10207)
+    expect(g.ruleEventCells, 'the plan carried five cells; six is structural').toEqual([
+      [468, 161], // (12,19)
+      [537, 133], // (9,22)
+      [422, 120], // (14,17)
+      [560, 99], //  (8,23)
+      [512, 13], //  (8,21)
+      [272, 12], //  (8,11)
+    ])
+
+    // The rule-visible branch contains the co-presence predicate verbatim as one
+    // of its disjuncts, so its cell set is a SUPERSET of co-presence's and its
+    // count is at least as large. Asserted here as well as in the other driver
+    // because it is the half of the disagreement that no re-measurement moves.
+    for (const [cell] of g.conflictCells) {
+      expect(
+        g.ruleEventCells.some(([c]) => c === cell),
+        `co-presence cell ${cell} missing from the rule-visible table`,
+      ).toBe(true)
+    }
+    expect(g.ruleEvents).toBeGreaterThan(g.conflicts)
+
+    // The direction the previous draft had backwards, and it survives the
+    // disagreement above: the rule diverges EARLIER, by 4,794 ticks / 159.8 s.
+    expect(g.firstRuleEventTick).toBeLessThan(g.firstConflictTick)
+    expect((g.firstConflictTick - g.firstRuleEventTick) / TICKS_PER_SECOND).toBeCloseTo(159.8, 1)
+
+    // Not vacuous in the other direction either: the idle arm lays no road, so
+    // it has no junction and no event of either kind. A census that counted
+    // something on a roadless board would be counting bare ground.
+    const idle = gateRun('no-input')
+    expect(idle.ruleEvents, 'no road, no junction, no event').toBe(0)
+    expect(idle.conflicts).toBe(0)
+    expect(idle.firstRuleEventTick).toBe(-1)
+    expect(idle.firstConflictTick).toBe(-1)
+  }, 30000)
+
   it('GATE A — trips and CARS IN MOTION, including cars the spawner put there', () => {
     // **The clause M1d failed and the clause Task 5 failed, in one case.**
     // M1d's shipped board measured `maxInFlight` 1 over 200,000 ticks; Task 5's
@@ -1693,7 +1811,7 @@ describe('the survivability gate the default board is flipped behind', () => {
     // do not read its passing as evidence about the spawner.
     expect(greedy.outsideRect, 'a building spawned outside the revealed rect').toBe(0)
     expect(idle.outsideRect).toBe(0)
-  })
+  }, 30000)
 
   it('GATE B — the delivery fraction falls when the player stops keeping up', () => {
     // **`trips / fires`, and the two arms say different things on purpose.**
@@ -1751,7 +1869,7 @@ describe('the survivability gate the default board is flipped behind', () => {
       expect(wk.tilesLeft, `week ${wk.week} ran out of tiles`).toBeGreaterThan(0)
     }
     expect(greedy.unaffordable, 'no connect decision was unaffordable on this seed').toBe(0)
-  })
+  }, 30000)
 
   it('GATE C — peak destPins on a CONNECTED destination climbs to its timer cap', () => {
     // **The shape, not the level.** A board where a connected destination sits
@@ -1829,7 +1947,7 @@ describe('the survivability gate the default board is flipped behind', () => {
     expect(Math.max(...idle.weeks.map((w) => w.peakPinsRoadless))).toBeGreaterThan(
       PIN_CAP_CIRCLE_TIMER,
     )
-  })
+  }, 30000)
 
   it('rejects a one-week jump from 1 to the cap, which the two-clause form did not', () => {
     // **The artefact for the paragraph above, and it exists because the
@@ -1960,5 +2078,5 @@ describe('the survivability gate the default board is flipped behind', () => {
     expect(blocked, 'M1d blocking never fired on this board at all').toBeGreaterThan(1000)
     expect(longest, 'and cars really do stand behind each other').toBeGreaterThanOrEqual(3)
     expect(greedy.weeks[0]?.blockedTicks, 'but not in the first week — it is a late property').toBe(0)
-  })
+  }, 30000)
 })

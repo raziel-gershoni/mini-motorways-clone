@@ -17,6 +17,7 @@ import {
   createScratch,
   entryPoolCapacity,
   assertBucketCountExceedsEveryEdgeCost,
+  assertPushWithinBucketWindow,
 } from '../src/scratch'
 
 describe('createFlowField / createFlowFields', () => {
@@ -167,5 +168,57 @@ describe('INF', () => {
     expect(v).toBe(INF + DIAG_COST)
     expect(v).toBeGreaterThan(0)
     expect(v).toBeLessThanOrEqual(0x7fffffff)
+  })
+})
+
+describe('assertPushWithinBucketWindow — trap 2, converted from wrong paths into a named throw', () => {
+  it('accepts every real edge cost', () => {
+    for (let k = 0; k < DIR_COUNT; k++) {
+      expect(() => assertPushWithinBucketWindow(1000 + edgeCost(k), 1000, NB, DIAG_COST)).not.toThrow()
+    }
+  })
+
+  it('accepts a push exactly at the maximum legal edge cost', () => {
+    expect(() => assertPushWithinBucketWindow(100 + DIAG_COST, 100, NB, DIAG_COST)).not.toThrow()
+  })
+
+  it('THE ARM THE PREVIOUS DRAFT DID NOT HAVE: throws on the SMALLEST possible added term', () => {
+    // A junction surcharge of +1 on a diagonal is `d + 15`. Under a single
+    // aliasing bound of `delta <= NB` that is ACCEPTED, because NB is 15 — so the
+    // guard would have been silent on precisely the mutation it exists to catch.
+    expect(() => assertPushWithinBucketWindow(100 + DIAG_COST + 1, 100, NB, DIAG_COST)).toThrow(
+      /is not a legal edge cost.*max 14/s,
+    )
+  })
+
+  it('throws with the ALIASING message when the gap also exceeds the modulus', () => {
+    // `maxEdge` is deliberately NB + 8 rather than DIAG_COST, so the legality
+    // arm cannot fire and this case pins the aliasing arm alone. delta = 16
+    // against 15 buckets, so the entry lands in the bucket drained at
+    // 100 + (16 % 15) = 101 — the arithmetic is the content, and it is what
+    // makes this a statement about Dial's queue rather than about the cost model.
+    //
+    // **The two clauses are asserted in the order the MESSAGE has, not the
+    // order the plan's snippet had.** The plan paired this message with
+    // `/aliases into the bucket drained at 101.*NB=15/s`, which cannot match:
+    // the message reports the modulus first ("a gap of 16 against NB=15") and
+    // the aliased bucket second. Measured — that regex fails against the exact
+    // message the plan also specifies. The message is the artefact somebody
+    // reads at 3am, so the regex moved rather than the message.
+    expect(() => assertPushWithinBucketWindow(100 + NB + 1, 100, NB, NB + 8)).toThrow(
+      /NB=15.*aliases into the bucket drained at 101/s,
+    )
+  })
+
+  it('accepts a push exactly NB above the draining distance, which lands in the freshly-detached bucket', () => {
+    // Kept as a separate case from the edge-cost arm: it is a statement about
+    // Dial's queue, not about the cost model, and the two bounds are independent.
+    expect(() => assertPushWithinBucketWindow(100 + NB, 100, NB, NB)).not.toThrow()
+  })
+
+  it('throws for a push BELOW the draining distance, which is a monotonicity violation', () => {
+    expect(() => assertPushWithinBucketWindow(99, 100, NB, DIAG_COST)).toThrow(
+      /below the distance being drained/,
+    )
   })
 })

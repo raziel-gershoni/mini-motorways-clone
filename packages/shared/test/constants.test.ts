@@ -5,6 +5,7 @@ import {
   TICKS_PER_WEEK, TICKS_PER_DAY,
   ORTHO_COST, DIAG_COST,
   LANE_SPEED_DEFAULT, MOTORWAY_SPEED_MAX, ROUNDABOUT_SPEED_MUL,
+  INTERSECTION_DEGREE,
   RIGHT_ANGLE_SPEED_MUL, INTERSECTION_SPEED_MUL, SHARP_TURN_SPEED_MUL,
   MAX_BLOCKED_TICKS,
   MAX_OVERCROWD_TIME_MS, OVERCROWD_RAMP, OVERCROWD_RETURN_MUL,
@@ -63,6 +64,13 @@ describe('rule constants', () => {
     expect(RIGHT_ANGLE_SPEED_MUL).toBe(667)
     expect(INTERSECTION_SPEED_MUL).toBe(500)
     expect(SHARP_TURN_SPEED_MUL).toBe(333)
+  })
+
+  it('makes a cell a junction at the degree a THIRD road meets', () => {
+    // Moved out of `sim/src/cars.ts` module scope at M1f Task 1. The value did
+    // not change; only its home did, because M1f gives the same threshold two
+    // more readers than M1d's single speed-multiplier call site.
+    expect(INTERSECTION_DEGREE, 'a third road meeting is what makes a cell a junction').toBe(3)
   })
 
   it('derives the clock consistently', () => {
