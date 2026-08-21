@@ -226,16 +226,31 @@ Implementation constraints: preallocate every buffer at boot; never allocate ins
 > arm is chosen two tasks after this amendment is written, which is why both
 > numbers are here and why neither is quoted bare.
 >
-> **Neither figure was measured by the task that wrote them here, and both are
-> now permanent in a spec with nothing running them.** They are M1f Task 2's and
-> Task 3's, quoted from the plan. This is the shape this repo's catalogue calls *a
-> figure that nothing runs is a figure that comes back* — and the milestone that
-> wrote them had already proved another figure from the same plan wrong by 2x.
+> **CLOSED AT M1f TASK 3, WHICH SHIPPED THE CROSSING-ONLY RULE. Both figures
+> reproduce and one of them now has a test under it.** The triage rig
+> (`packages/game/test/junctionArms.ts`) measures 29,267 on the shipped arm and
+> 45,986 on the same arm with the clause widened back to Task 2's form, and it
+> reproduced the pre-M1f control — 31,456 ticks, 747 trips, 2,120 blocked
+> car-ticks — before either was believed. **29,267 is asserted by
+> `junctionArms.test.ts`; 45,986 is not, and cannot be.**
+>
+> **The durable repair this paragraph prescribed — "assert both arms in one
+> test" — is not constructible here, and saying so is the correction.** The M1e
+> precedent it borrows from asserted a live arm and a parked arm in one test
+> because the difference between them was a PARAMETER. The difference between
+> these two is compiled code: the rule lives in `canEnter`, `advanceCar` calls it
+> directly, and `step` is monolithic, so only one of the two arms exists in any
+> tree. Decision 3 declined a runtime switch and the reason still holds. What is
+> constructible is what was done: the shipped figure is asserted, the other is
+> marked as history with the rule that produced it, and the rig that measured
+> both is in the repo so the second can be re-measured by a two-line revert
+> rather than re-derived from first principles.
+>
 > **Named recipients, because "whoever owns this" is a synonym for "no one":**
-> M1f **Task 2** owns 45,986 and M1f **Task 3** owns 29,267; each must re-derive
-> its own number on the arm it actually ships and correct this paragraph if it
-> moves. The durable repair the catalogue prescribes — assert both arms in one
-> test — belongs to Task 3, which is the first task that holds both.
+> M1f **Task 2** owned 45,986 — now history — and M1f **Task 3** owns 29,267,
+> which is live and asserted. **M1f Task 9** owns the next move: its junction
+> upgrade takes the shipped arm to 759 trips against 368 by exempting three
+> cells, measured at Task 3, and 29,267 will move with it.
 >
 > Priced
 > as edge weight instead, cars route around the junctions and the player never sees

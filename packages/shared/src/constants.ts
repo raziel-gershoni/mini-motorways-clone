@@ -122,16 +122,23 @@ export const INTERSECTION_DEGREE = 3
  * > structurally impossible (`LANE_OF_DIR[d] !== LANE_OF_DIR[OPPOSITE[d]]`), so
  * > no 2-cycle can deadlock and the valve is not the answer to opposing traffic.
  *
- * That was true while `canEnter` asked about one lane. Under M1f Task 2's
- * junction mutual exclusion two cars swapping across an edge whose endpoints are
- * BOTH junctions each require the other's cell to be empty and each is standing
- * in it: a 2-cycle, cleared only by this constant. The lane property itself is
- * unchanged and still true — what changed is that a junction now consults BOTH
- * lanes, so the property no longer implies what it used to.
- * `blocking.test.ts`'s *"breaks the 2-cycle that the two-lane model used to make
- * impossible"* is the fixture, and M1f Task 9's junction upgrade is the relief:
- * an upgraded cell falls back to the own-lane rule and the property returns
- * there, whole, with no phase.
+ * That was true while `canEnter` asked about one lane. Under M1f Task 2's wide
+ * junction rule two cars swapping across an edge whose endpoints are BOTH
+ * junctions each required the other's cell to be empty while each was standing
+ * in it: a 2-cycle, cleared only by this constant.
+ *
+ * **M1f Task 3 narrowed the rule to CROSSING axes and gave half of that back.**
+ * A junction now consults the other lane only when its occupant entered on a
+ * crossing axis, so the STRAIGHT swap resolves in one tick again — the two cars
+ * are opposed, which is the same axis — and only a swap whose occupant TURNED
+ * into the cell still deadlocks. Measured on the shipped board's greedy arm the
+ * valve therefore fires **5** times where the wide rule fired 15 and the
+ * one-lane rule could not fire at all. The lane property itself is unchanged and
+ * still true; what changed is what it implies at a junction.
+ * `blocking.test.ts`'s *"the STRAIGHT 2-cycle Task 2 created resolves again, and
+ * the TURNING one does not"* holds both halves on one fixture, and M1f Task 9's
+ * junction upgrade is the relief for the rest: an upgraded cell falls back to
+ * the own-lane rule and the property returns there, whole, with no phase.
  *
  * The rest of the paragraph survives: 1,350 ticks is 30 % of a 4,500-tick week —
  * an acceptable price for a genuine circular wait, and an absurd one for the
@@ -156,16 +163,21 @@ export const INTERSECTION_DEGREE = 3
  * tuning evidence exists.
  *
  * ---------------------------------------------------------------------------
- * THE EVIDENCE TABLE, RE-MEASURED AT M1f TASK 2
+ * THE EVIDENCE TABLE, RE-MEASURED AT M1f TASK 2 AND AGAIN AT M1f TASK 3
  * ---------------------------------------------------------------------------
  *
  * **Two of the three rows moved and the conclusion is false.** Every figure is
  * a measurement on the arm named in its row; the entry-refusal column is
  * `canEnter` refusals and is NOT `H_ROUTES_REFUSED`, which is 0 everywhere and
- * measures the route WALK rather than the road (see `blocking.ts`).
+ * measures the route WALK rather than the road (see `blocking.ts`). **Every row
+ * counts from BOOT, warm start included** — which is this table's convention and
+ * not the one `blocking.ts`'s and `integration.test.ts`'s tables use, and on the
+ * demo board the two differ by 868-1,887 refusals depending on the rule. Two
+ * quantities under one column heading is this table's own recorded defect, so
+ * the window is named rather than left to be inferred.
  *
  * Struck through, as of M1e Task 12 — correct for the tree before M1f Task 2 and
- * kept because they are the control this task is measured against:
+ * kept because they are the control both later tasks are measured against:
  *
  * ```
  *   ~~city         5,580 ticks       0 refusals   max     0   0 valve firings~~
@@ -173,20 +185,39 @@ export const INTERSECTION_DEGREE = 3
  *   ~~city, greedy 31,456 ticks  2,120 refusals   max    32   0 valve firings~~
  * ```
  *
- * Current, measured at M1f Task 2 under the WIDE junction rule this task lands.
- * **Task 3 may narrow the rule to crossing-only and must re-measure all three:**
+ * Also struck through, as of M1f Task 3 — the WIDE junction rule Task 2 landed
+ * and Task 3's triage replaced, kept because it is the other arm the triage
+ * chose between and the choice is illegible with one column:
+ *
+ * ```
+ *   ~~city         5,580 ticks       0 refusals   max     0    0 valve firings~~
+ *   ~~demo         5,757 ticks  99,025 refusals   max 1,350   22 valve firings~~
+ *   ~~city, greedy 21,704 ticks 45,986 refusals   max 1,350   15 valve firings~~
+ * ```
+ *
+ * **That demo row read `99,017` from Task 2 until Task 3 re-measured it, and
+ * the correct figure is 99,025.** Two instruments on the same tree agree — the
+ * triage rig (`game/test/junctionArms.ts`) and `demoLayout.test.ts`'s own
+ * `Measured` counter, which is the instrument Task 2 used elsewhere — and the
+ * other three columns of that row reproduce exactly. Eight refusals in 99,025 is
+ * 0.008 % and changes nothing; it is corrected because a figure nothing runs is
+ * a figure that comes back, and this one had already been quoted onward.
+ *
+ * Current, measured at M1f Task 3 under the CROSSING-ONLY rule that ships:
  *
  * ```
  *   city          5,580 ticks       0 refusals   max     0    0 valve firings
- *   demo          5,757 ticks  99,017 refusals   max 1,350   22 valve firings
- *   city, greedy 21,704 ticks  45,986 refusals   max 1,350   15 valve firings
+ *   demo          6,660 ticks  13,827 refusals   max    60    0 valve firings
+ *   city, greedy 21,783 ticks  29,267 refusals   max 1,350    5 valve firings
  * ```
  *
- * **The instrument reproduced the row it was about to replace before it was
- * trusted**, which is the rule this project keeps relearning: run against the
- * parent commit's `sim/src`, the same probe returns `demo 6,703 / 7,544 / 55 / 0`
- * and `city, greedy 31,456 / 2,120 / 32 / 0` — every figure in the struck-through
- * table, to the digit.
+ * **The instrument reproduced the rows it was about to replace before it was
+ * trusted**, which is the rule this project keeps relearning: run against a tree
+ * with the junction clause reverted, the same probe returns
+ * `demo 6,703 / 7,544 / 55 / 0` and `city, greedy 31,456 / 2,120 / 32 / 0` —
+ * every figure in the first struck-through table, to the digit — and run against
+ * the wide clause it returns the second table with the one correction noted
+ * above.
  *
  * **Both refusal conventions agree on this board and that is worth recording**:
  * counting a RISE in `carBlockedTicks` and counting car-ticks with the counter
@@ -196,17 +227,23 @@ export const INTERSECTION_DEGREE = 3
  * resets it. The two only come apart if a car can be blocked without attempting,
  * which `advanceCar` does not permit.
  *
- * **`city` with no input is unmoved and that is derived, not lucky** — a board
- * nobody draws on has no route, so no car ever moves and no junction is ever
- * contended. `deathTicks.ts` carries the derivation.
+ * **`city` with no input is unmoved by BOTH M1f rules and that is derived, not
+ * lucky** — a board nobody draws on has no route, so no car ever moves and no
+ * junction is ever contended. A narrowing cannot change it either, because it
+ * refuses a subset of what the wide rule refused. `deathTicks.ts` carries the
+ * derivation.
  *
- * **The other two both SATURATE the counter, which no board had ever done.**
- * `city, greedy` is the load-bearing row: 21,704 ticks of competent play, 344
- * trips completed, and the worst wait is now the threshold itself where it used
- * to be 32 ticks — a factor of 42 below. `integration.test.ts` asserts the death
- * tick, the trip count, the saturated maximum and the 15 firings; `demoLayout.test.ts`
- * asserts the demo board's 3,000-tick window (39,795 refusals and 7 firings
- * inside it, against 3,235 and 0 before).
+ * **Only ONE of the other two still saturates the counter, and which one moved
+ * is the shape of Task 3's narrowing.** `city, greedy` is the load-bearing row:
+ * 21,783 ticks of competent play, 368 trips completed, and the worst wait is
+ * still the threshold itself where it used to be 32 ticks — a factor of 42
+ * below. The demo board came back down from a saturated 1,350 to **60**, and
+ * from 22 valve firings to **0**: on that board every 2-cycle the wide rule
+ * created was a straight swap, and the narrowed rule resolves all of them.
+ * `integration.test.ts` asserts the city row's death tick, trip count,
+ * saturated maximum and 5 firings; `demoLayout.test.ts` asserts the demo
+ * board's 3,000-tick window (5,463 refusals and 0 firings inside it, against
+ * 3,235 and 0 before M1f and 39,795 and 7 under the wide rule).
  *
  * **So the valve is no longer demo-only, and this is the first firing on the
  * board that ships outside a purpose-built fixture** (`game/test/jamFixture.ts`'s
