@@ -2783,6 +2783,14 @@ describe('the tick allocates nothing on the SPAWN, WEEK and OVERCROWD phases (Ta
       const all = profileAllocations(() => {
         rig.drive(M1E_WINDOW_TICKS, log, counters)
       }, M1E_SAMPLING_INTERVAL_BYTES)
+      // **RED FROM M1f TASK 2 TO M1f TASK 3, DELIBERATELY. TASK 3 OWNS IT.**
+      // `M1E_FIRST_WINDOW_START` is 14,059 and three 4,600-tick windows reach
+      // 27,858, which was inside the pre-M1f greedy arm's 31,456 and is past the
+      // 21,704 junction mutual exclusion leaves. So these windows profile a
+      // corpse and this guard says so, which is the guard working. Repairing it
+      // means re-deriving both the window start and
+      // `M1E_FIRST_OVER_CAPACITY_TICK` against a death tick Task 3 is about to
+      // move again, so Task 3 does it once instead of Task 2 doing it twice.
       assertProfiledLive(rig.state, `spawn window ${w}`)
       profiles.push(all)
       attemptsPerWindow.push(counters.destAttempts - before)

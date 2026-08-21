@@ -1700,37 +1700,56 @@ describe('the survivability gate the default board is flipped behind', () => {
    * five and both drivers measure **538 / 10,207 / six**, with the definition
    * the plan specifies and nothing adjusted. The plan's NAMED event is real —
    * (14,17) does take a rule-visible event at exactly tick 12,780 — it is simply
-   * not the first. See `integration.test.ts` for the full derivation, including
+   * not the first. **M1f Task 2 measured what 12,780 actually is**: it is the
+   * first tick on which the board DIVERGES from the pre-M1f run, measured by a
+   * per-tick fingerprint against the parent commit. So the plan's number was
+   * right about a real and important thing and wrong about which instrument
+   * produces it, and the two figures reconcile rather than compete — the census
+   * fires 2,573 ticks before the first byte moves, because the swap at 10,207 is
+   * one the rule permits. See `integration.test.ts` for the full derivation, including
    * why five cells is unreachable by this definition rather than merely wrong.
    */
   it('the junction census, both policies, on the HAND driver', () => {
     const g = gateRun('greedy')
 
-    // Vacuity: this is the arm that dies at 31,456 having scored 747, and those
+    // **A CENSUS IS MEASURED ON A RUN, AND M1f TASK 2 CHANGED THE RUN.** The
+    // figures below are the same two instruments, unaltered, reporting on the
+    // board Task 2 ships. Task 1's 232 / 15,001 / six and 538 / 10,207 / six
+    // describe the PRE-M1f board, are correct for it, and are what the milestone
+    // is dated from; they are quoted in the block header above and are not
+    // re-measurable here, because the board they describe no longer exists past
+    // tick 12,780. `integration.test.ts` carries the same table off the
+    // production-boot driver, and the two agree on every quantity.
+    //
+    // Vacuity: this is the arm that dies at 21,704 having scored 344, and those
     // are pinned in the cases around this one. A census on a run that stopped
     // early would report smaller numbers with no other symptom.
-    expect(g.deathTick, 'the arm the census is measured on').toBe(31456)
+    expect(g.deathTick, 'the arm the census is measured on').toBe(21704)
 
-    expect(g.conflicts, 'co-presence conflicts').toBe(232)
-    expect(g.firstConflictTick, '8:11.4 on a stopwatch').toBe(15001)
+    // Co-presence is the state the new rule forbids, so it very nearly vanishes;
+    // what survives is the valve, which crosses regardless of the occupant.
+    expect(g.conflicts, 'co-presence conflicts — 232 pre-M1f').toBe(11)
+    expect(g.firstConflictTick, 'the first one — 9:46.7 on a stopwatch, (17658 - 258) / 30').toBe(17658)
     expect(g.conflictCells).toEqual([
-      [468, 73], // (12,19)
-      [537, 52], // (9,22)
-      [422, 49], // (14,17)
-      [560, 49], // (8,23)
-      [272, 6], //  (8,11)
-      [512, 3], //  (8,21)
+      [537, 5], // (9,22)
+      [512, 3], // (8,21)
+      [560, 3], // (8,23)
     ])
 
-    expect(g.ruleEvents, 'rule-visible events — the plan carried 271').toBe(538)
-    expect(g.firstRuleEventTick, '5:31.6 on a stopwatch — the plan carried 12,780').toBe(10207)
-    expect(g.ruleEventCells, 'the plan carried five cells; six is structural').toEqual([
-      [468, 161], // (12,19)
-      [537, 133], // (9,22)
-      [422, 120], // (14,17)
-      [560, 99], //  (8,23)
-      [512, 13], //  (8,21)
-      [272, 12], //  (8,11)
+    // Rule-visible survives, because a swap whose LEAVER has the lower car index
+    // is one this rule permits — and the first event, at 10,207, is exactly such
+    // a swap, which is why this tick alone did not move.
+    expect(g.ruleEvents, 'rule-visible events — 538 pre-M1f').toBe(44)
+    expect(
+      g.firstRuleEventTick,
+      'UNMOVED at 10,207 (5:31.6) — the rule permits that swap. The board first DIVERGES at 12,780.',
+    ).toBe(10207)
+    expect(g.ruleEventCells).toEqual([
+      [468, 15], // (12,19)
+      [537, 13], // (9,22)
+      [512, 7], //  (8,21)
+      [560, 6], //  (8,23)
+      [422, 3], //  (14,17)
     ])
 
     // The rule-visible branch contains the co-presence predicate verbatim as one
@@ -1745,10 +1764,13 @@ describe('the survivability gate the default board is flipped behind', () => {
     }
     expect(g.ruleEvents).toBeGreaterThan(g.conflicts)
 
-    // The direction the previous draft had backwards, and it survives the
-    // disagreement above: the rule diverges EARLIER, by 4,794 ticks / 159.8 s.
+    // The direction the previous draft had backwards, and it survives both the
+    // disagreement above and this task: the rule diverges EARLIER. Pre-M1f the
+    // gap was 4,794 ticks / 159.8 s; under the rule it is 7,451 / 248.4 s,
+    // because co-presence is now reduced to counting valve displacements and the
+    // first of those comes late.
     expect(g.firstRuleEventTick).toBeLessThan(g.firstConflictTick)
-    expect((g.firstConflictTick - g.firstRuleEventTick) / TICKS_PER_SECOND).toBeCloseTo(159.8, 1)
+    expect((g.firstConflictTick - g.firstRuleEventTick) / TICKS_PER_SECOND).toBeCloseTo(248.4, 1)
 
     // Not vacuous in the other direction either: the idle arm lays no road, so
     // it has no junction and no event of either kind. A census that counted
@@ -1768,8 +1790,12 @@ describe('the survivability gate the default board is flipped behind', () => {
     // numbers rather than just under the measurement, so passing them means
     // something specific rather than "better than today".
     const greedy = gateRun('greedy')
-    // Measured: 747 trips, 11 cars in flight at once, 9 of them from spawned
-    // houses, 25 houses and 12 destinations by week 6.
+    // Measured at M1e Task 12: 747 trips, 11 cars in flight at once, 9 of them
+    // from spawned houses, 25 houses and 12 destinations by week 6.
+    // **Measured at M1f Task 2: 344 trips, 12 cars in flight, 11 of them
+    // spawned, 21 houses and 10 destinations by week 4.** The cars-in-motion
+    // clauses got BETTER — cars queue rather than vanish — and the trips clause
+    // is the one that broke; see the block below it.
     //
     // **Ordered narrowest-first, deliberately.** `trips` moves for almost any
     // regression in the sim, so a broad bound above a specific one would make
@@ -1782,7 +1808,34 @@ describe('the survivability gate the default board is flipped behind', () => {
       'peak cars in motion from SPAWNER-placed houses — Task 5 measured 1',
     ).toBeGreaterThanOrEqual(4)
     expect(greedy.maxInFlight, 'peak cars in motion — M1d measured 1').toBeGreaterThanOrEqual(6)
-    expect(greedy.trips, 'completed trips').toBeGreaterThanOrEqual(400)
+    // -----------------------------------------------------------------------
+    // **M1f TASK 2 BREAKS THIS CLAUSE AND THE ALLOWANCE IS WRITTEN SO THAT
+    // FIXING IT GOES RED.**
+    // -----------------------------------------------------------------------
+    //
+    // Junction mutual exclusion takes this arm from 747 trips to **344** — the
+    // gate demanded 400 and the board no longer clears it. That is the plan's
+    // stated cost, not a regression to revert: `canEnter` read one lane, so an
+    // eastbound car and a northbound car crossed inside one cell and nothing
+    // stopped them, and 403 of those 747 trips were bought by cars driving
+    // through each other. **Task 9's junction upgrade is what pays it back** —
+    // the plan's spike measured a six-cell exemption reproducing 747 / 31,456
+    // exactly.
+    //
+    // **Lowering the threshold to 300 and moving on is the catalogue's
+    // "survivability gate passed by deleting the difficulty", so it is not what
+    // this does.** `M1E_TRIPS_GATE` keeps the figure the board was flipped
+    // behind, and the second assertion is an ALLOWANCE FOR A KNOWN VIOLATION
+    // that fails the moment the violation is fixed — so whoever restores the
+    // board has to come here and delete it rather than inheriting a gate that
+    // silently stopped asking. The floor underneath it is what still catches a
+    // FURTHER collapse in the meantime.
+    const M1E_TRIPS_GATE = 400
+    expect(greedy.trips, 'completed trips — a further collapse below the M1f measurement').toBeGreaterThanOrEqual(300)
+    expect(
+      greedy.trips,
+      'M1f INTERIM: trips are back at or above the M1e gate of 400 — DELETE THIS LINE and restore the >= 400 assertion above it',
+    ).toBeLessThan(M1E_TRIPS_GATE)
 
     // **The discrimination, on the same board and the same boot.** Every
     // threshold above is satisfiable by a busier fixture; none of them is
@@ -1852,7 +1905,19 @@ describe('the survivability gate the default board is flipped behind', () => {
     // be demanding the wrong failure mode.
     const greedy = gateRun('greedy')
     const cumulative = greedy.trips / greedy.fires
-    expect(cumulative, 'the network keeps up almost perfectly').toBeGreaterThanOrEqual(0.9)
+    // **M1f Task 2 moved this from 0.975 to 0.837 and the sentence above is now
+    // half false**: part of the failure IS a throughput collapse, because a
+    // junction costs something for the first time. `H_ROUTES_REFUSED` is still 0
+    // in every week, so the distributional reading of WHY the run ends survives
+    // — nothing is ever refused a route — but "keeps up almost perfectly" does
+    // not. Same allowance shape as GATE A: the M1e figure is kept, and the line
+    // that permits today's value fails when Task 9 restores it.
+    const M1E_DELIVERY_GATE = 0.9
+    expect(cumulative, 'a further collapse below the M1f measurement').toBeGreaterThanOrEqual(0.8)
+    expect(
+      cumulative,
+      'M1f INTERIM: delivery is back at or above the M1e gate of 0.9 — DELETE THIS LINE and restore the >= 0.9 assertion',
+    ).toBeLessThan(M1E_DELIVERY_GATE)
     expect(cumulative, 'and not completely — some demand is always in flight').toBeLessThan(1)
     // ...and it keeps up without ever dropping a pin, which is the other half
     // of "the player was not beaten by something they could not control". Both
@@ -1864,8 +1929,21 @@ describe('the survivability gate the default board is flipped behind', () => {
     // five seeds measured at Task 10 the other four drop 0, 6, 13 and 16 pins,
     // every one of them in the week the run dies; `tilesLeft` bottoms out at 37
     // here and at 38-40 elsewhere, and never at 0.
+    //
+    // **M1f Task 2 broke the first clause in the LAST week and only the last
+    // week: `dropped` is 0, 0, 0, 0, 9.** Nine pins the player could not have
+    // served, all inside week 4, which is the week the run ends — the same shape
+    // Task 10 recorded on the other four seeds, arriving on this one for the
+    // first time because the rule made this seed behave like them. The per-week
+    // form is what makes that legible; a total would have said "9 dropped" with
+    // no indication that four clean weeks came first.
     for (const wk of greedy.weeks) {
-      expect(wk.dropped, `week ${wk.week} dropped pins`).toBe(0)
+      const isDeathWeek = wk.week === (greedy.weeks[greedy.weeks.length - 1] as GateWeek).week
+      if (isDeathWeek) {
+        expect(wk.dropped, `week ${wk.week} — the death week, M1f INTERIM`).toBe(9)
+      } else {
+        expect(wk.dropped, `week ${wk.week} dropped pins`).toBe(0)
+      }
       expect(wk.tilesLeft, `week ${wk.week} ran out of tiles`).toBeGreaterThan(0)
     }
     expect(greedy.unaffordable, 'no connect decision was unaffordable on this seed').toBe(0)

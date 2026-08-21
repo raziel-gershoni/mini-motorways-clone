@@ -109,14 +109,34 @@ export const INTERSECTION_DEGREE = 3
  * permanently frozen car holds an occupancy claim and a destination
  * reservation, and would starve that destination for the rest of the run.
  *
- * **Under M1d's two lanes the valve's job is narrower than it looks.** Head-on
- * is structurally impossible (`LANE_OF_DIR[d] !== LANE_OF_DIR[OPPOSITE[d]]`,
- * `packages/sim/src/roads.ts`), so no 2-cycle can deadlock and the valve is not
- * the answer to opposing traffic. It is the answer to a **cycle of length >= 3**
- * in which every car is same-lane-blocked by the next. 1,350 ticks is 30 % of a
- * 4,500-tick week — an acceptable price for a genuine circular wait, and an
- * absurd one for the commonest event in the game, which is why the lane rule
- * has to come first.
+ * ---------------------------------------------------------------------------
+ * **M1f TASK 2 FALSIFIED TWO SENTENCES THAT STOOD HERE, AND BOTH ARE CORRECTED
+ * RATHER THAN DELETED, BECAUSE THE REASONING THAT PRODUCED THEM IS STILL WORTH
+ * READING.**
+ * ---------------------------------------------------------------------------
+ *
+ * **The first said head-on is structurally impossible, so no 2-cycle can
+ * deadlock and the valve is the answer only to a cycle of length >= 3.** It read:
+ *
+ * > Under M1d's two lanes the valve's job is narrower than it looks. Head-on is
+ * > structurally impossible (`LANE_OF_DIR[d] !== LANE_OF_DIR[OPPOSITE[d]]`), so
+ * > no 2-cycle can deadlock and the valve is not the answer to opposing traffic.
+ *
+ * That was true while `canEnter` asked about one lane. Under M1f Task 2's
+ * junction mutual exclusion two cars swapping across an edge whose endpoints are
+ * BOTH junctions each require the other's cell to be empty and each is standing
+ * in it: a 2-cycle, cleared only by this constant. The lane property itself is
+ * unchanged and still true — what changed is that a junction now consults BOTH
+ * lanes, so the property no longer implies what it used to.
+ * `blocking.test.ts`'s *"breaks the 2-cycle that the two-lane model used to make
+ * impossible"* is the fixture, and M1f Task 9's junction upgrade is the relief:
+ * an upgraded cell falls back to the own-lane rule and the property returns
+ * there, whole, with no phase.
+ *
+ * The rest of the paragraph survives: 1,350 ticks is 30 % of a 4,500-tick week —
+ * an acceptable price for a genuine circular wait, and an absurd one for the
+ * commonest event in the game, which is why the lane rule still comes first at
+ * every cell that is not a junction.
  *
  * **Two width facts this number carries, both load-bearing:**
  *
@@ -130,47 +150,86 @@ export const INTERSECTION_DEGREE = 3
  *      below the threshold makes the valve unreachable, and a ceiling above it
  *      is bytes nothing reads.
  *
- * **Whether 45 s is the right wait now has evidence, and the evidence is that
- * NOTHING THAT SHIPS CAN REACH IT.** Measured at the close of M1e by driving
- * each shipped layout from boot to its §5.8 death with no player input:
+ * **The second said lowering this constant is a change no shipped board can
+ * observe and raising it is free.** Also true then, false now. Both directions
+ * are observable on the board that ships as of M1f Task 2, and the first real
+ * tuning evidence exists.
+ *
+ * ---------------------------------------------------------------------------
+ * THE EVIDENCE TABLE, RE-MEASURED AT M1f TASK 2
+ * ---------------------------------------------------------------------------
+ *
+ * **Two of the three rows moved and the conclusion is false.** Every figure is
+ * a measurement on the arm named in its row; the entry-refusal column is
+ * `canEnter` refusals and is NOT `H_ROUTES_REFUSED`, which is 0 everywhere and
+ * measures the route WALK rather than the road (see `blocking.ts`).
+ *
+ * Struck through, as of M1e Task 12 — correct for the tree before M1f Task 2 and
+ * kept because they are the control this task is measured against:
  *
  * ```
- *   city  5,580 ticks   0 refusals      max carBlockedTicks    0   0 valve firings
- *   demo  6,703 ticks   7,544 refusals  max carBlockedTicks   55   0 valve firings
+ *   ~~city         5,580 ticks       0 refusals   max     0   0 valve firings~~
+ *   ~~demo         6,703 ticks   7,544 refusals   max    55   0 valve firings~~
+ *   ~~city, greedy 31,456 ticks  2,120 refusals   max    32   0 valve firings~~
  * ```
  *
- * **And M1e Task 12 adds the row the plan actually asked for — the PLAYED
- * default, which is where cars run at all.** Driven through `createGame`'s own
- * boot and input queue under the greedy connector, 31,456 ticks to the §5.8
- * death:
+ * Current, measured at M1f Task 2 under the WIDE junction rule this task lands.
+ * **Task 3 may narrow the rule to crossing-only and must re-measure all three:**
  *
  * ```
- *   city, greedy   31,456 ticks   0 refusals   max carBlockedTicks   32   0 valve firings
+ *   city          5,580 ticks       0 refusals   max     0    0 valve firings
+ *   demo          5,757 ticks  99,017 refusals   max 1,350   22 valve firings
+ *   city, greedy 21,704 ticks  45,986 refusals   max 1,350   15 valve firings
  * ```
  *
- * Cars genuinely queue behind one another here — longest queue 4, 597 blocked
- * ticks a week from week 5 — and the worst wait any car takes is **32 ticks,
- * 1.07 s, a factor of 42 below this threshold.** `integration.test.ts` asserts
- * all three figures.
+ * **The instrument reproduced the row it was about to replace before it was
+ * trusted**, which is the rule this project keeps relearning: run against the
+ * parent commit's `sim/src`, the same probe returns `demo 6,703 / 7,544 / 55 / 0`
+ * and `city, greedy 31,456 / 2,120 / 32 / 0` — every figure in the struck-through
+ * table, to the digit.
  *
- * **Which row supersedes which: none of them.** The two no-input rows below are
- * a claim about boards nobody plays and the greedy row is a claim about a board
- * played optimally; they are three arms, not three attempts at one number. What
- * changes with the greedy row is only that the valve's unreachability is no
- * longer explained away by "no car ever moves" — on the played default 747
- * trips complete and it still never fires.
+ * **Both refusal conventions agree on this board and that is worth recording**:
+ * counting a RISE in `carBlockedTicks` and counting car-ticks with the counter
+ * above zero give the same number, because a refused car holds its progress and
+ * re-attempts on the very next tick, so the counter rises on every blocked tick
+ * until it saturates — and the tick after saturation is a valve crossing, which
+ * resets it. The two only come apart if a car can be blocked without attempting,
+ * which `advanceCar` does not permit.
  *
- * `city` refuses nothing on the no-input arm because a board nobody draws on has
- * no route, so no car ever moves; `demo` refuses constantly and its worst wait
- * is **55 ticks, 1.8 s — a factor of 24.5 below this threshold.** So this constant is not
- * "unvalidated"; it is unreachable outside purpose-built fixtures
- * (`game/test/jamFixture.ts`'s STARVED variant: 17 firings over 3,000 ticks at
- * twelve houses, 2 at eight; `sim/test/blocking.test.ts`'s hand-built gridlock
- * ring). **Read that as a statement about the boards, not about the number** —
- * the valve is an anti-deadlock backstop and a board that never deadlocks
- * should never fire it. What it does mean is that lowering this constant is a
- * change no shipped board can observe, and raising it is free; the first real
- * tuning evidence needs a board that jams, which is M1f's.
+ * **`city` with no input is unmoved and that is derived, not lucky** — a board
+ * nobody draws on has no route, so no car ever moves and no junction is ever
+ * contended. `deathTicks.ts` carries the derivation.
+ *
+ * **The other two both SATURATE the counter, which no board had ever done.**
+ * `city, greedy` is the load-bearing row: 21,704 ticks of competent play, 344
+ * trips completed, and the worst wait is now the threshold itself where it used
+ * to be 32 ticks — a factor of 42 below. `integration.test.ts` asserts the death
+ * tick, the trip count, the saturated maximum and the 15 firings; `demoLayout.test.ts`
+ * asserts the demo board's 3,000-tick window (39,795 refusals and 7 firings
+ * inside it, against 3,235 and 0 before).
+ *
+ * **So the valve is no longer demo-only, and this is the first firing on the
+ * board that ships outside a purpose-built fixture** (`game/test/jamFixture.ts`'s
+ * STARVED variant: 17 firings over 3,000 ticks at twelve houses, 2 at eight;
+ * `sim/test/blocking.test.ts`'s hand-built gridlock ring, and its new
+ * *"breaks the 2-cycle"* case). Lowering this constant now changes the shipped
+ * board and raising it now changes how long a jam holds; neither is free.
+ *
+ * **A THIRD READER WAS PREDICTED AT M1f TASK 9 AND DOES NOT EXIST, and the
+ * reason is worth keeping.** The prediction was that a demand-actuated traffic
+ * light needing 2 cars on an approach before swapping (dossier §1.7's
+ * `minimumNearbyCarsBeforeSwapping`) would starve a lone car on a quiet approach,
+ * and that this constant would be its only release. M1f measured that light and
+ * rejected it: on a board carrying about a dozen cars in flight the threshold is
+ * essentially never met, so the light did not meter — it latched, and this
+ * constant became its only release for the whole run rather than an occasional
+ * one. **M1f ships a JUNCTION UPGRADE instead** — a per-cell flag that lifts the
+ * mutual exclusion at its cell and changes nothing else, including the
+ * intersection slowdown — which admits cars rather than refusing them and
+ * therefore *reduces* the pressure on this valve. The reader count stays at two.
+ * See the M1f plan's Amendment 2 and Decision 14, and
+ * `docs/superpowers/m1g-carry-forward.md`. **A traffic light is deferred to
+ * M1g**; any artefact saying M1f's `canEnter` obeys one is wrong.
  */
 export const MAX_BLOCKED_TICKS = 45 * TICKS_PER_SECOND
 

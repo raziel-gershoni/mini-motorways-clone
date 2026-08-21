@@ -1880,7 +1880,18 @@ describe('movement cannot re-path, by signature', () => {
     // may say `state.roads` in prose and may not write it in code.
     const code = stripComments(source)
     expect(code).not.toMatch(/state\s*\.\s*roads\b/)
-    expect(code).toMatch(/import \{ edgeCost, roadDegree \} from '\.\/graph'/)
+    // **Re-derived at M1f Task 2, not widened.** The specifier is the same and
+    // the name list is one narrower in what it can express: `roadDegree` returns
+    // a COUNT, `isJunctionCell` returns a BOOLEAN, and neither can express a
+    // step. Task 2 moved the threshold behind the predicate so `>= INTERSECTION_DEGREE`
+    // lives in exactly one place (`graph.ts`), which is also why
+    // `INTERSECTION_DEGREE` no longer appears in this file at all — asserted
+    // below, so the move cannot half-happen.
+    //   before: import { edgeCost, roadDegree } from './graph'
+    //   after:  import { edgeCost, isJunctionCell } from './graph'
+    expect(code).toMatch(/import \{ edgeCost, isJunctionCell \} from '\.\/graph'/)
+    expect(code, 'the threshold left this file with the degree').not.toMatch(/\bINTERSECTION_DEGREE\b/)
+    expect(code, 'and so did the degree itself').not.toMatch(/\broadDegree\b/)
     // Vacuity, both halves, because a stripper that returned '' would satisfy
     // the negative assertion above and a stripper that returned its input would
     // reinstate the prose sensitivity: the code survives and the prose does not.

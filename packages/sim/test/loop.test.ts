@@ -48,7 +48,7 @@ import { createWorld, type WorldData } from '../src/world'
 import { createFieldInputRanges } from '../src/regions'
 import { createScratch, createFlowFields, type FlowField, type Scratch } from '../src/scratch'
 import { fieldFor, hashFieldInputRegions } from '../src/flowfield'
-import { roadMask, tilesLeft, dirBetween, LANE_OF_DIR, OPPOSITE, DX, DY } from '../src/roads'
+import { roadMask, tilesLeft, dirBetween, eraseRoad, LANE_OF_DIR, OPPOSITE, DX, DY } from '../src/roads'
 import {
   canEnter,
   occupantOf,
@@ -73,6 +73,8 @@ import { step, type TickAction, type TickInputs } from '../src/step'
 import { pinPeriodForWeek } from '../src/demand'
 import { hashBytes } from '../src/hash'
 import { m1eInsertedRanges, spliceM1eInsertions } from './m1eSplice'
+import { junctionRace, ORTHO_THRESHOLD } from './junctionRigs'
+import { roadDegree } from '../src/graph'
 
 /**
  * M1c's deliverable: the whole trip loop, driven through `step`, over a
@@ -3018,5 +3020,94 @@ describe('the demand ramp, given an observable of its own: one board, one fleet,
     // ...and it is genuinely a property of this arm and not of all of them.
     const w0Arrivals = new Set(w0.obs.pinsConsumed.map(tickOf))
     expect(w0.obs.fireTicks.filter((t) => w0Arrivals.has(t))).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The junction's tie-break — M1f Task 2
+// ---------------------------------------------------------------------------
+
+/**
+ * **Who gets the junction when two cars want it on the same tick, stated as a
+ * rule rather than inherited from a loop bound.**
+ *
+ * Before M1f Task 2 the question did not arise: an eastbound car and a
+ * northbound car are in different lanes (`LANE_OF_DIR` is
+ * `[1, 0, 0, 0, 0, 1, 1, 1]`, so E is lane 0 and N is lane 1), so both entered
+ * the same cell on the same tick and crossed inside it. Mutual exclusion means
+ * exactly one may have it, and **the answer is the lower car index** — the order
+ * `runMovement` happens to walk in (`cars.ts`, Decision 2).
+ *
+ * It is a rule and not an accident in the sense that matters: it is written down
+ * in `canEnter`'s doc, and this case fails under the other order rather than
+ * merely reporting a different number. Nothing about the geometry enters into it
+ * — not the approach, not the turn, not who has waited longer.
+ */
+describe('two cars want one junction on one tick (M1f Task 2)', () => {
+  it('gives the junction to the LOWER car index, as a rule and not as a loop bound', () => {
+    const rig = junctionRace('junction-race-fair')
+    expect(roadDegree(rig.s, rig.centre), 'the fixture really is a junction').toBe(4)
+    expect(
+      LANE_OF_DIR[2],
+      'and the two racers are in DIFFERENT lanes, so only the junction rule can separate them',
+    ).not.toBe(LANE_OF_DIR[0])
+
+    // Both are one step short of the centre and both would cross this tick: the
+    // progress is derived in `junctionRigs.ts` from `INTERSECTION_SPEED_MUL`
+    // alone (both go straight on into a degree-4 cell), so each gains 165 units
+    // against a 2,500-unit threshold from 2,400.
+    expect(rig.s.carCell[0], 'car 0 starts on the west arm').toBe(rig.west)
+    expect(rig.s.carCell[1], 'car 1 starts on the south arm').toBe(rig.south)
+    expect(rig.s.carProgress[0]).toBe(rig.progress)
+    expect(rig.s.carProgress[1]).toBe(rig.progress)
+    expect(rig.progress + 165, 'both would cross on this tick').toBeGreaterThanOrEqual(
+      ORTHO_THRESHOLD,
+    )
+    expect(rig.progress, 'and neither would have crossed on the tick before').toBeLessThan(
+      ORTHO_THRESHOLD,
+    )
+    // Vacuity in the other direction: neither is blocked going into the tick, so
+    // a counter of 1 afterwards is this tick's refusal and not a carried one.
+    expect(rig.s.carBlockedTicks[0]).toBe(0)
+    expect(rig.s.carBlockedTicks[1]).toBe(0)
+
+    step(rig.s, rig.world, rig.fields, rig.scratch, NO_ACTIONS)
+
+    expect(rig.s.carCell[0], 'car 0 crossed').toBe(rig.centre)
+    expect(rig.s.carCell[1], 'car 1 held its progress').not.toBe(rig.centre)
+    expect(rig.s.carCell[1], 'and it is still where it was, not somewhere else').toBe(rig.south)
+    expect(rig.s.carBlockedTicks[1], 'and was counted as blocked, not merely slow').toBe(1)
+    expect(rig.s.carBlockedTicks[0], 'while the winner was not').toBe(0)
+    // The progress is HELD, not clamped and not accumulated — `advanceCar`'s
+    // rule, asserted here because a refusal at a junction is the newest way to
+    // reach it.
+    expect(rig.s.carProgress[1], 'the loser holds the progress it had').toBe(rig.progress)
+    // And the winner owns the cell, in the lane of ITS direction, with the other
+    // lane still free. That is the state the loser was refused on.
+    expect(occupantOf(rig.s, rig.centre, LANE_OF_DIR[2] as number), 'car 0 holds lane 0').toBe(0)
+    expect(occupantOf(rig.s, rig.centre, LANE_OF_DIR[0] as number), "and lane 1 is free — it is the OTHER lane that refused car 1").toBe(FREE)
+  })
+
+  it('is not vacuous: with the junction removed, BOTH cars cross on that tick', () => {
+    // **The control that makes the case above a test of the junction rule
+    // rather than of anything else.** Same two cars, same directions, same
+    // progress — but the centre cell is degree 2 instead of degree 4, so
+    // `junctionAdmitsOne` is false and the pre-M1f own-lane rule applies. Both
+    // cross, nobody is blocked, and the cell holds two cars at once, which is
+    // exactly the behaviour this milestone exists to end.
+    const rig = junctionRace('junction-race-control')
+    // Erase the two arms the racers are NOT using, taking the centre to degree 2.
+    eraseRoad(rig.s, rig.world, rig.centre, rig.north)
+    eraseRoad(rig.s, rig.world, rig.centre, rig.east)
+    expect(roadDegree(rig.s, rig.centre), 'the control is a corridor, not a junction').toBe(2)
+
+    step(rig.s, rig.world, rig.fields, rig.scratch, NO_ACTIONS)
+
+    expect(rig.s.carCell[0], 'car 0 crossed').toBe(rig.centre)
+    expect(rig.s.carCell[1], 'and so did car 1, into the same cell').toBe(rig.centre)
+    expect(rig.s.carBlockedTicks[0], 'nobody was blocked').toBe(0)
+    expect(rig.s.carBlockedTicks[1]).toBe(0)
+    expect(occupantOf(rig.s, rig.centre, LANE_OF_DIR[2] as number)).toBe(0)
+    expect(occupantOf(rig.s, rig.centre, LANE_OF_DIR[0] as number)).toBe(1)
   })
 })

@@ -1,7 +1,8 @@
 import { MAX_BLOCKED_TICKS } from '@laneways/shared'
 import type { GameState } from './state'
 import type { WorldData } from './world'
-import { DIR_COUNT, LANE_COUNT, LANE_OF_DIR } from './roads'
+import { DIR_COUNT, LANE_COUNT, LANE_OF_DIR, otherLane } from './roads'
+import { junctionAdmitsOne } from './graph'
 import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
 /**
  * Deferred import, and the same rule every cycle in this package follows: read
@@ -29,7 +30,45 @@ import { isCommittedTo } from './dispatch'
  * written; nothing else should compute it inline.
  *
  * ---------------------------------------------------------------------------
- * ON THE ARM THAT DRAWS COLUMN 8, THIS IS A ONE-SECOND HESITATION AND NOT A JAM
+ * THIS WAS A ONE-SECOND HESITATION UNTIL M1f TASK 2. IT IS NOW A JAM, ON THE
+ * BOARD THAT SHIPS, AND THE WHOLE SECTION BELOW IS KEPT AS THE CONTROL
+ * ---------------------------------------------------------------------------
+ *
+ * **M1f Task 2 falsified the heading this section used to carry.** It read *"on
+ * the arm that draws column 8, this is a one-second hesitation and not a jam"*,
+ * and every measurement under it was correct for the tree that carried it.
+ * Junction mutual exclusion changed all of them, and the M1e figures are kept
+ * rather than deleted because they are the control this task is measured
+ * against — the same probes, run against this commit's parent, return every one
+ * of them to the digit.
+ *
+ * ```
+ *   greedy arm, starting city         M1e Task 10   M1f Task 2 (wide rule)
+ *   worst carBlockedTicks                      32   1,350 (saturated)
+ *   valve firings                               0   15
+ *   longest queue, peak week                    4   7
+ *   blocked car-ticks over the run          2,120   45,986
+ *   ticks with a blocked car                 6.2 %  26.2 %
+ *   most cars blocked at once                   2   10
+ *   H_ROUTES_REFUSED                            0   0
+ *   trips / death tick                 747/31,456   344/21,704
+ * ```
+ *
+ * **So the answer to "does M1d's headline feature fire on the board that
+ * ships?" flipped from no to yes at this commit**, and it flipped because the
+ * feature acquired the case it was written for: a 2-cycle. Two cars swapping
+ * across an edge with a junction at each end each need the other's cell empty
+ * and each is standing in it, and only the 45-second valve clears it. See
+ * `canEnter` below and `MAX_BLOCKED_TICKS`'s own note, whose evidence table was
+ * re-measured in the same commit.
+ *
+ * **`H_ROUTES_REFUSED` is still 0, and that is not evidence of anything** — see
+ * the section immediately below, which was written to stop exactly that
+ * inference and is more load-bearing now than when it was written.
+ *
+ * ---------------------------------------------------------------------------
+ * THE M1e CONTROL, KEPT VERBATIM: ON THE ARM THAT DRAWS COLUMN 8, THIS WAS A
+ * ONE-SECOND HESITATION AND NOT A JAM
  * ---------------------------------------------------------------------------
  *
  * **Read the heading. It used to say "on the board that ships", and that is a
@@ -42,7 +81,8 @@ import { isCommittedTo } from './dispatch'
  * `carBlockedTicks` is **32 against a 1,350-tick valve — 42x from firing**.
  * Cars do stand behind each other (longest queue 4, 597 blocked ticks a week
  * from week 5), but nothing is ever refused a route and the valve cannot fire.
- * All of that reproduces exactly.
+ * All of that reproduces exactly **on the parent of the M1f Task 2 commit, and
+ * on nothing after it.**
  *
  * **What it rests on is the 20-tile opening stroke, and specifically the
  * COLUMN-8 half of it.** The greedy arm draws that opening on its first tick
@@ -69,12 +109,14 @@ import { isCommittedTo } from './dispatch'
  * the two quiet ones. So "the board cannot jam under shipped constants" is
  * false, and the honest statement is **"this seed, drawn this way, does not"**.
  *
- * **So M1d's headline feature is now DEMO-ONLY on the shipped seed's played
- * arm**, because M1e Task 10 flipped the default from `demoCity` to the
- * starting city. For this module specifically the flip is a trade and it was
- * made with that stated. For the user's actual complaint the flip is not a
- * trade — 3 houses become 25, 3 destinations become 12, 747 trips, and the
- * outcome depends on what they drew.
+ * **So M1d's headline feature WAS demo-only on the shipped seed's played arm**,
+ * because M1e Task 10 flipped the default from `demoCity` to the starting city.
+ * For this module specifically the flip was a trade and it was made with that
+ * stated. For the user's actual complaint the flip is not a trade — 3 houses
+ * become 25, 3 destinations become 12, 747 trips, and the outcome depends on
+ * what they drew. **M1f Task 2 ended the demo-only part**: the valve fires 15
+ * times on the shipped seed's played arm, and the two seed-and-trunk paragraphs
+ * above are now a description of how narrowly it used to avoid doing so.
  *
  * Recorded here rather than only in a report because this is the module the
  * claim is about, and because the previous milestone's post-mortem is the
@@ -99,9 +141,15 @@ import { isCommittedTo } from './dispatch'
  *
  * Measured rather than argued: on the shipped seed's greedy arm the **longest
  * route ever walked is 21 steps** against a ceiling of 96, so the length arm
- * has 75 steps of headroom; and setting `MAX_PATH_LEN` to **24** leaves the run
- * behaviourally unchanged — tick 31,456, 747 trips, refusals still **0**. It is
- * 0 on all sixteen seed x arm runs measured. **It will stay 0 under every
+ * has 75 steps of headroom; and setting `MAX_PATH_LEN` to **24** left the run
+ * behaviourally unchanged — tick 31,456, 747 trips, refusals still **0** (the
+ * M1e figures; that experiment has not been re-run since M1f Task 2 shortened
+ * the arm to 21,704 / 344, and it does not need to be — the point is the
+ * headroom, and the routes did not get longer). It is 0 on all sixteen
+ * seed x arm runs measured, **and it is still 0 under junction mutual
+ * exclusion**, which is the sharpest illustration this counter has ever had of
+ * why it says nothing about traffic: the board's throughput fell 54 % and this
+ * number did not move. **It will stay 0 under every
  * traffic lever, for a reason that has nothing to do with traffic.**
  *
  * The counters that do measure blocking are the ones in this module:
@@ -624,7 +672,8 @@ export function assertEnterCarValid(i: number, carCount: number): void {
  * **The single blocking question**, spec §5.5: does an inbound vehicle collide
  * with a traversing vehicle on this chunk? Answered as per-(cell, lane)
  * occupancy — car `i` may enter `cell` travelling in direction `dir` iff the
- * lane that direction uses is free.
+ * lane that direction uses is free, **and, at a junction, iff the other lane is
+ * free too**.
  *
  * The lane is `LANE_OF_DIR[dir]` and nothing else. Two properties of that table
  * do all the work and neither is re-derived here:
@@ -636,8 +685,43 @@ export function assertEnterCarValid(i: number, carCount: number): void {
  *   - **`LANE_OF_DIR[d] !== LANE_OF_DIR[OPPOSITE[d]]` for every `d`** (Decision
  *     1). Two cars travelling in exactly opposite directions can never contend
  *     for the same slot, so a head-on swap resolves in one tick in either index
- *     order, with no give-way rule and no valve. Give-way is not implemented
- *     because it does not need to be.
+ *     order, with no give-way rule and no valve — **at every cell that is not a
+ *     junction. M1f Task 2 is what added that qualifier.**
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT IS IMPLEMENTED AT A JUNCTION, IN WHOSE FAVOUR IT RESOLVES, AND WHAT IT
+ * COSTS — M1f TASK 2
+ * ---------------------------------------------------------------------------
+ *
+ * **This paragraph replaces *"give-way is not implemented because it does not
+ * need to be"*, which was true and is not.** What is implemented is not
+ * give-way and not priority: it is **mutual exclusion**. A cell of
+ * `roadDegree >= INTERSECTION_DEGREE` admits ONE car at a time, whichever axis
+ * it is on, and the second car waits. There is no rule about who has right of
+ * way, because there is no rule that depends on where the two cars came from.
+ *
+ * **It resolves in favour of the LOWEST CAR INDEX, and that is a decision taken
+ * here rather than a consequence of a loop bound.** `runMovement` iterates
+ * ascending (`cars.ts`, Decision 2), so on a tick where two cars would both
+ * enter one junction cell, the lower index takes it and the higher is answered
+ * `REFUSED_OCCUPIED` and counted as blocked. Nothing about the geometry — not
+ * the approach, not the turn, not who has waited longer — enters into it.
+ * `loop.test.ts`'s *"gives the junction to the LOWER car index, as a rule and
+ * not as a loop bound"* pins it on a fixture where the descending order gives
+ * the opposite answer, so reversing `runMovement`'s loop fails by name.
+ *
+ * **THE COST IS THE HEAD-ON PROPERTY, AT JUNCTIONS ONLY.** Two cars swapping
+ * across an edge whose endpoints are both junctions each require the other's
+ * cell to be empty and each is standing in it. That is a 2-cycle, the case
+ * `MAX_BLOCKED_TICKS`'s comment used to say could not exist, and only the valve
+ * clears it — 45 seconds. Measured on the shipped board's greedy arm, the valve
+ * goes from 0 firings to 15 and the worst wait from 32 ticks to the saturated
+ * 1,350. **The only thing that lifts it is a junction upgrade** (M1f Task 9,
+ * §5.6): `junctionAdmitsOne` returns false at an upgraded cell, this clause
+ * reduces to the pre-M1f own-lane rule there, and the head-on property comes
+ * back whole, at that cell, with no phase and no timer. A traffic light would do
+ * the same job by refusing cars instead of admitting them; M1f measured one and
+ * rejected it, and it is deferred to M1g.
  *
  * **Queueing is not implemented — it emerges.** There is no queue structure, no
  * follower list and no "who is behind me" anywhere in this milestone. A car
@@ -731,8 +815,51 @@ export function canEnter(
   if ((state.ghostMask[cell] as number) !== 0 && !isCommittedTo(state, world, i, cell)) {
     return EnterOutcome.REFUSED_GHOST
   }
-  const occupant = state.occupancy[occupancySlot(cell, LANE_OF_DIR[dir] as number)] as number
-  if (occupant === FREE) return EnterOutcome.ENTER_FREE
+  const lane = LANE_OF_DIR[dir] as number
+  const own = state.occupancy[occupancySlot(cell, lane)] as number
+  // ------------------------------------------------------------------------
+  // THE JUNCTION'S MUTUAL EXCLUSION — M1f Task 2, spec §5.5
+  // ------------------------------------------------------------------------
+  //
+  // §5.5's blocking primitive is *"does an inbound vehicle collide with a
+  // traversing vehicle on this chunk?"*, and until M1f this function only ever
+  // asked about the entrant's OWN lane. That resolves the parallel case and the
+  // head-on case (`LANE_OF_DIR[d] !== LANE_OF_DIR[OPPOSITE[d]]`) and leaves the
+  // CROSSING case unresolved — so two cars crossed inside one cell and nothing
+  // stopped them. `MAX_BLOCKED_TICKS` is the datamined ceiling on the wait at an
+  // intersection; this is the wait.
+  //
+  // **A junction cell admits one car at a time.** On a cell of degree >=
+  // `INTERSECTION_DEGREE` the OTHER lane must be free too. One extra
+  // `Int16Array` read on the crossings that reach a junction, no new state, no
+  // allocation.
+  //
+  // **The crossing pair is (E, N) and NOT (E, S).** `LANE_OF_DIR` is
+  // `[1, 0, 0, 0, 0, 1, 1, 1]`, so E and S are the SAME lane and the own-lane
+  // read already refused that pair before this task existed. Written down here
+  // because the plan's fixture had it the other way round, which would have made
+  // the headline test green before the rule shipped.
+  //
+  // **THIS BREAKS THE HEAD-ON PROPERTY AT JUNCTIONS, AND THAT IS THE COST.** Two
+  // cars swapping across an edge whose endpoints are both junctions each require
+  // the other's cell to be empty and each is standing in it — a 2-cycle, which
+  // `MAX_BLOCKED_TICKS`'s own comment used to say could not exist. M1f Task 9's
+  // JUNCTION UPGRADE is what gives the property back — whole, at one cell, with
+  // no phase — which is dossier §1.7's `greenLightsIgnoreCollisions` applied to
+  // every axis at once.
+  //
+  // **`junctionAdmitsOne` and NOT `isJunctionCell`**, because the two diverge at
+  // Task 9: an upgraded junction keeps the intersection SLOWDOWN and loses this
+  // rule. See `graph.ts`.
+  //
+  // **It inherits `assertOccupancySound`'s valve exception and introduces no new
+  // soundness question**: the other lane's slot is read exactly as the own lane's
+  // is, so a stale claim left by a valve displacement is stale in both and is
+  // already in that assert's exception set.
+  const other = junctionAdmitsOne(state, cell)
+    ? (state.occupancy[occupancySlot(cell, otherLane(lane))] as number)
+    : FREE
+  if (own === FREE && other === FREE) return EnterOutcome.ENTER_FREE
   if ((state.carBlockedTicks[i] as number) >= MAX_BLOCKED_TICKS) return EnterOutcome.ENTER_VALVE
   return EnterOutcome.REFUSED_OCCUPIED
 }

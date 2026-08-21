@@ -182,6 +182,32 @@ export const LANE_OF_DIR = Object.freeze([1, 0, 0, 0, 0, 1, 1, 1] as const)
 /** The number of occupancy lanes per cell. `LANE_OF_DIR` is total onto `[0, LANE_COUNT)`. */
 export const LANE_COUNT = 2
 
+/**
+ * The other of the two lanes. `LANE_COUNT` is 2 and this function is the one
+ * place that assumes it, so raising `LANE_COUNT` fails here loudly rather than
+ * silently returning a lane index that means something else.
+ *
+ * Its one production caller is `canEnter`'s junction clause (M1f Task 2): mutual
+ * exclusion at a junction means the entrant's own lane AND the lane it is
+ * crossing. `game/src/queueProbe.ts`'s `carAheadOf` is the second, and reads it
+ * for exactly the same reason — so the probe and the entry rule cannot disagree
+ * about which slot is holding a car up.
+ *
+ * **The `LANE_COUNT !== 2` throw is unreachable while `LANE_COUNT` is 2 and is
+ * kept anyway**, in the same register as `assertSingleCrossing` (cars.ts) and
+ * `assertMaxCarsFitsOccupancy` (blocking.ts): it is a compile-time-shaped
+ * assumption that only a future edit can break, and the failure without it is a
+ * silent wrong lane rather than a crash. No detector was manufactured for it —
+ * see the M1f Task 2 report's mutation table, row 8.
+ */
+export function otherLane(lane: number): number {
+  if (LANE_COUNT !== 2) {
+    throw new Error(`roads: otherLane assumes exactly two lanes, but LANE_COUNT is ${LANE_COUNT}`)
+  }
+  if (lane !== 0 && lane !== 1) throw new Error(`roads: lane ${lane} is not one of the two`)
+  return lane === 0 ? 1 : 0
+}
+
 function inBounds(cell: number, cells: number): boolean {
   return Number.isInteger(cell) && cell >= 0 && cell < cells
 }

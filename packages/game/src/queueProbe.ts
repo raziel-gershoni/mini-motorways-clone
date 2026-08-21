@@ -3,7 +3,9 @@ import {
   LANE_OF_DIR,
   PHASE_OUTBOUND,
   PHASE_RETURNING,
+  junctionAdmitsOne,
   occupantOf,
+  otherLane,
   routeStep,
   stepCell,
   type GameState,
@@ -116,31 +118,67 @@ export function travelDir(state: GameState, i: number): number {
  * No `!== i` guard, deliberately: `canEnter` has none either, and occupancy
  * SOUNDNESS (`assertOccupancySound`) says a slot names a car standing on that
  * cell, which `i` is not.
+ *
+ * **M1f Task 2: at a JUNCTION the entrant can be held by either lane, and this
+ * function answers with the OWN lane first.** Mutual exclusion means a car
+ * entering a cell of degree >= `INTERSECTION_DEGREE` needs both lanes free, so
+ * "the car ahead" is no longer a single well-defined slot. The relation must stay
+ * FUNCTIONAL — `longestQueue` walks it and would otherwise need a graph — so the
+ * tie-break is: the own lane's occupant if there is one, otherwise the other
+ * lane's. That is the car whose departure the entrant is actually waiting on in
+ * the common case, and the fallback is what makes the chain reflect a crossing
+ * refusal instead of reporting an empty road in front of a stopped car.
+ *
+ * **`junctionAdmitsOne` and not `isJunctionCell`**, and reading the sim's own
+ * predicate rather than re-deriving the degree here is the whole point: this
+ * function and `canEnter` must not be able to disagree about which cells the
+ * rule governs, and at Task 9 an upgraded junction stops being one of them in
+ * exactly one place. This is the second reader that predicate's doc names.
+ *
+ * The probe's property test — *"for every in-flight car on every tick, the probe's
+ * answer equals `canEnter`'s"* — is re-pointed accordingly: the probe reports a
+ * car ahead **iff** `canEnter` refuses for occupancy. That is the assertion that
+ * catches this whole class, and hand-built cases could not: every reader is an
+ * inequality loose enough to survive a wrong answer. It is asserted on the jam
+ * corridor (`queueProbe.test.ts`, no junction) AND on the demo board
+ * (`demoLayout.test.ts`, junctions everywhere) — the corridor alone cannot see
+ * this repair at all, which is why it stayed green through the break.
  */
 export function carAheadOf(state: GameState, world: WorldData, i: number): number {
   const dir = travelDir(state, i)
   if (dir === NO_CROSSING) return FREE
   const next = stepCell(state.carCell[i] as number, dir, world.w, world.h)
   if (next < 0) return FREE
-  return occupantOf(state, next, LANE_OF_DIR[dir] as number)
+  const lane = LANE_OF_DIR[dir] as number
+  const own = occupantOf(state, next, lane)
+  if (own !== FREE) return own
+  if (!junctionAdmitsOne(state, next)) return FREE
+  return occupantOf(state, next, otherLane(lane))
 }
 
 /**
  * The longest chain of cars each waiting on the next.
  *
- * **The relation is FUNCTIONAL.** A car has exactly one next cell — the next
- * step of its own committed route — so it has at most one car ahead, which is
- * why this is a forward walk rather than a tree search.
+ * **The relation is FUNCTIONAL, and as of M1f Task 2 that is a DECISION rather
+ * than a fact about the board.** A car has exactly one next cell — the next step
+ * of its own committed route — but at a junction that one cell has two lanes and
+ * either can hold it up. `carAheadOf` breaks the tie (own lane, then the other),
+ * which is what keeps this a forward walk rather than a tree search. The cost of
+ * the decision is that a car held by BOTH lanes is charged to one of them; the
+ * benefit is that this function stays O(cars) and its answer stays a number.
  *
- * **The visited set is not decoration, and its justification CHANGED with the
- * key.** A cycle of length >= 3 is precisely the deadlock `MAX_BLOCKED_TICKS`
+ * **The visited set is not decoration, and its justification has now CHANGED
+ * TWICE.** A cycle of length >= 3 is precisely the deadlock `MAX_BLOCKED_TICKS`
  * exists for, and without the set this walk would not terminate on one. The
  * cell-keyed version also argued that a 2-cycle was impossible, because opposite
- * directions land in different lanes. **That argument does not survive reading
+ * directions land in different lanes. **That argument did not survive reading
  * the real slots**: two cars that have each just turned around on adjacent cells
  * both stand in the lane opposite to the way they now face, so each really is
- * the occupant of the slot the other is asking about. It is a 2-cycle, it is
- * reachable, and the set is what stops the walk spinning on it.
+ * the occupant of the slot the other is asking about. **And M1f Task 2 made the
+ * 2-cycle ordinary rather than exotic**: under junction mutual exclusion two cars
+ * swapping across an edge with a junction at each end each need the other's cell
+ * empty and each is standing in it, with no turn-around required. The set was
+ * always load-bearing; it is now load-bearing on the board that ships.
  *
  * **The phase filter here is the one that changes the answer.** A parked car is
  * not a queue of one — three idle cars on consecutive corridor cells are houses.

@@ -2801,7 +2801,7 @@ function captureErrors<T>(run: () => T): { result: T; logged: unknown[] } {
  * the band.
  */
 describe('the demo board stops dead, and stays a still image', () => {
-  it('freezes at 3 min 43 s and draws a bit-identical frame forever after', () => {
+  it('freezes at 3 min 12 s and draws a bit-identical frame forever after', () => {
     // **Pinned to `demo` by name at M1e Task 10, and the pin is the point.**
     // This case used to pass `layoutId: undefined` and assert
     // `DEMO_DEATH_TICK`, on the reasoning that the default WAS the demo — two
@@ -2822,7 +2822,9 @@ describe('the demo board stops dead, and stays a still image', () => {
     // It ended, on the measured tick, unprompted and with no input of any kind.
     expect(isGameOver(rig.game.state), 'the default board must end a run on its own').toBe(true)
     expect(rig.game.state.header[H_TICK]).toBe(DEMO_DEATH_TICK)
-    expect(Math.round(DEMO_DEATH_TICK / 30), 'which is 223 s — 3 min 43 s at 30 Hz').toBe(223)
+    // 5,757 / 30 = 191.9 s. **Moved at M1f Task 2 from 223 s** — junction mutual
+    // exclusion costs this board 946 ticks, 31.5 s, 14.1 %. See `DEMO_DEATH_TICK`.
+    expect(Math.round(DEMO_DEATH_TICK / 30), 'which is 192 s — 3 min 12 s at 30 Hz').toBe(192)
     // The loop followed, and it cannot be talked out of it.
     expect(rig.game.loop.over).toBe(true)
     expect(rig.game.loop.paused).toBe(true)
@@ -3149,12 +3151,22 @@ describe('the demo board stops dead, and stays a still image', () => {
     // these is a statistical figure:
     //
     // ```
-    //   first ring        tick 3,492   1 min 56 s   (1/255 = 1.4 deg of arc)
-    //   first LEGIBLE     tick 4,222   2 min 21 s   (>= 10 % = 36 deg)
-    //   death             tick 6,703   3 min 43 s
-    //   usable warning    2,481 ticks  1 min 23 s   (from the legible ring)
-    //   ring on screen    3,212 of 5,504 frames — 58.4 % of the run
+    //                        M1e Task 9        M1f Task 2
+    //   first ring        tick 3,492  1:56    tick 2,456  1:21.9
+    //   first LEGIBLE     tick 4,222  2:21    tick 3,186  1:46.2
+    //   death             tick 6,703  3:43    tick 5,757  3:11.9
+    //   usable warning    2,481 ticks 1:23    2,571 ticks 1:25.7
+    //   ring on screen    3,212/5,504 58.4 %  3,303/4,559 72.4 %
     // ```
+    //
+    // **Every row moved at M1f Task 2 and the criterion got BETTER, which is
+    // worth saying out loud on a task whose every other gate got worse.**
+    // Junction mutual exclusion starves this board sooner, so the meters start
+    // sooner — but the death tick moves less than the warning does, so the
+    // usable warning grows from 1:23 to 1:25.7 and the ring is on screen for
+    // 72 % of the run instead of 58 %. The bounds below are unchanged; they were
+    // already looser than the measurement, which is what let them absorb a
+    // 946-tick move in the death tick without being re-fitted.
     //
     // **The warning is measured from the LEGIBLE ring, not the first pixel of
     // one.** A 1.4-degree arc is about one pixel at a 29 px tile; quoting 1:56
@@ -3186,15 +3198,30 @@ describe('the demo board stops dead, and stays a still image', () => {
     // starting city, and the only demo ring that drains at all peaks at 19/255
     // — 27 degrees of arc — in the last 25 s of a 223 s run.
     //
+    // **M1f Task 2 moved this from an exact zero to one frame in 4,559, and the
+    // assertion is re-derived rather than relaxed to `<= 1`.** Junction mutual
+    // exclusion lets D2 be served exactly once in the whole run, so the literal
+    // zero is false and the CLAIM — that a player cannot read this ring as
+    // "fills when congested, drains when served" — is not. What makes the claim
+    // testable without pinning a tick is the RATE: 1 frame in 4,559 is 0.022 %,
+    // three orders below the 14 frames the best-served destination manages on
+    // the same run, and it is one thirtieth of a second on screen. A bound of
+    // `<= 1` would pass a board where the killer drained on every other frame
+    // of a two-frame run; a rate cannot.
+    //
     // So the honest reading of a ring on a shipped board is "this destination
     // is not being served and it will end the run", which is a stronger signal
     // than the two-state one, and it is the claim the source now makes.
     const failed = failedDestination(rig.game.state)
     expect(failed).toBeGreaterThanOrEqual(0)
     expect(
-      drainFrames[failed] as number,
-      'the killer’s meter fell at some point — the "fills and drains" reading is back',
-    ).toBe(0)
+      (drainFrames[failed] as number) / frames,
+      'the killer’s meter fell often enough to read — the "fills and drains" reading is back',
+    ).toBeLessThan(0.001)
+    // And the discrimination the rate bound needs: SOME destination does drain
+    // readably, so 0.022 % is a fact about the killer rather than about the
+    // instrument. Measured 14 frames, 636x the killer's rate.
+    expect(Math.max(...drainFrames), 'the best-served destination drains readably').toBeGreaterThan(10)
     // Non-vacuous on the instrument: it CAN count a drain, and does, on the one
     // destination that gets any relief at all.
     const totalDrains = [...drainFrames].reduce((a, b) => a + b, 0)
@@ -3231,8 +3258,10 @@ describe('the demo board stops dead, and stays a still image', () => {
     // saved game-over state. Constructed here by the shortest honest route: a
     // warm start long enough to kill the board it runs on.
     //
-    // 6,703 is the demo board's death tick, so a 6,703-tick warm start boots a
-    // game that has already lost.
+    // `DEMO_DEATH_TICK` is the demo board's death tick — 5,757 as of M1f Task 2 —
+    // so a warm start of exactly that many ticks boots a game that has already lost.
+    // Read from the constant and never spelled, so the day it moves again this
+    // rig moves with it instead of booting a live board and asserting on a corpse.
     const dead = buildRig({ layoutId: DEMO_LAYOUT_ID, warmStartTicks: DEMO_DEATH_TICK })
     expect(isGameOver(dead.game.state), 'vacuity: the warm start really did kill it').toBe(true)
     expect(dead.game.state.header[H_TICK]).toBe(DEMO_DEATH_TICK)
@@ -4160,11 +4189,54 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     // Both numbers are defensible and they are different counters, so the
     // sentence says which is which — see the catalogue's "a unit change inside
     // one sentence".
-    expect(r.deathTick, "Task 10's greedy arm — tick 31,456: 17:28.5 raw, 17:19.9 on a stopwatch").toBe(31456)
-    expect(Math.round(((31456 - 258) / 30) * 10) / 10, 'the stopwatch figure').toBe(1039.9)
-    expect(r.deathWeek, 'week 6 of 12; the window is not what ends it').toBe(6)
-    expect(r.weeks.length, 'seven weeks, 0 through 6').toBe(7)
-    expect(r.failedDest).toBe(6)
+    // ---------------------------------------------------------------------
+    // **EVERY FIGURE IN THIS BLOCK MOVED AT M1f TASK 2, ON PURPOSE, AND THE
+    // MOVE IS THE SIZE OF THE BUG THAT WAS FIXED.**
+    // ---------------------------------------------------------------------
+    //
+    // `MAX_BLOCKED_TICKS` is the datamined ceiling on the wait at an
+    // intersection and this project shipped it without the wait: `canEnter`
+    // read the entrant's own lane only, so an eastbound car and a northbound
+    // car crossed inside one cell and nothing stopped them. Task 2 made a cell
+    // of `roadDegree >= INTERSECTION_DEGREE` admit one car at a time. On the
+    // WIDE rule this task lands:
+    //
+    // ```
+    //                            pre-M1f     M1f Task 2 (wide)
+    //   death tick               31,456      21,704      -31.0 %
+    //   on a stopwatch           17:19.9     11:54.9
+    //   completed trips             747         344      -54.0 %
+    //   delivery fraction         0.975       0.837
+    //   blocked car-ticks         2,120      45,986      x21.7
+    //   ticks with a blocked car   6.2 %      26.2 %
+    //   worst carBlockedTicks        32       1,350      saturated
+    //   valve firings                 0          15
+    //   max cars blocked at once      2          10
+    //   H_ROUTES_REFUSED              0           0      unmoved
+    // ```
+    //
+    // **Task 3 may narrow the rule to crossing-only, which the plan's spike
+    // measured at 21,783 / 368 / 29,267 / 5 — so every figure above says WIDE.**
+    // Task 9's junction upgrade is what gives it back: exempting the six census
+    // conflict cells reproduces the pre-M1f board to the digit.
+    //
+    // **The board is bit-identical to the previous commit until tick 12,780 —
+    // 6:57.4 on a stopwatch — and that is MEASURED, not derived from the
+    // census.** A per-tick fingerprint of `carCell`, `carProgress` and `H_SCORE`
+    // over this arm, run against the parent commit's `sim/src`, first differs at
+    // 12,780. **The rule-visible census fires 2,573 ticks (85.8 s) EARLIER, at
+    // 10,207**, and the two are different quantities: the census counts a
+    // same-tick swap across a junction, and a swap whose LEAVER has the lower
+    // car index is one this rule permits — `runMovement` ascends, so the leaver
+    // releases the cell before the entrant asks for it. The census is therefore
+    // an over-approximation of divergence and the earlier figure is the safe
+    // bound. Anything quoting 12,780 as "the tick the census fires" is wrong;
+    // anything quoting 10,207 as "the tick the board diverges" is also wrong.
+    expect(r.deathTick, 'M1f Task 2, wide rule — tick 21,704: 11:58.5 raw, 11:54.9 on a stopwatch').toBe(21704)
+    expect(Math.round(((21704 - 258) / 30) * 10) / 10, 'the stopwatch figure').toBe(714.9)
+    expect(r.deathWeek, 'week 4 of 12, down from week 6; the window is still not what ends it').toBe(4)
+    expect(r.weeks.length, 'five weeks, 0 through 4 — two fewer than pre-M1f').toBe(5)
+    expect(r.failedDest, 'and a different destination kills it — D5, not D6').toBe(5)
 
     // ---------------------------------------------------------------------
     // THE BINDING CONSTRAINT, AND IT IS THE ONE TASK 10 NAMED
@@ -4181,25 +4253,46 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     // the collapse belongs to the FIXED-network arm above, which is where
     // Task 10 gated it.
     expect(r.failedDestConnected, 'the killer was connected, and still starved').toBe(true)
-    expect(r.weeks.map((w) => w.refusals), 'not one route refused, in any week').toEqual([0, 0, 0, 0, 0, 0, 0])
-    expect(r.trips).toBe(747)
-    expect(r.fires).toBe(766)
-    expect(r.trips / r.fires, 'the delivery fraction never collapses').toBeCloseTo(0.975, 3)
-    expect(r.trips / r.fires).toBeGreaterThanOrEqual(0.9)
+    expect(r.weeks.map((w) => w.refusals), 'not one route refused, in any week').toEqual([0, 0, 0, 0, 0])
+    expect(r.trips).toBe(344)
+    expect(r.fires).toBe(411)
+    // **The delivery fraction DOES fall now, and this is the sentence that
+    // changed rather than the number.** Pre-M1f this arm delivered 97.5 % of
+    // everything demand fired and died distributionally; under junction mutual
+    // exclusion it delivers 83.7 %, so part of the failure IS a throughput
+    // collapse. `H_ROUTES_REFUSED` is still 0 in every week — routing never
+    // refuses a car — so what changed is entirely at the crossing.
+    expect(r.trips / r.fires, 'the delivery fraction now falls').toBeCloseTo(0.837, 3)
+    expect(r.trips / r.fires, 'M1f INTERIM — pre-M1f this was >= 0.9 and Task 9 must restore it').toBeLessThan(0.9)
+    expect(r.trips / r.fires, 'but it has not collapsed').toBeGreaterThan(0.8)
     expect(r.trips / r.fires).toBeLessThan(1)
 
     // Task 10's per-week series, reproduced by the other driver, exactly.
-    expect(r.weeks.map((w) => w.blockedTicks)).toEqual([0, 0, 99, 298, 287, 639, 597])
-    expect(r.weeks.map((w) => w.longestQueue)).toEqual([1, 1, 2, 3, 3, 4, 4])
-    expect(r.weeks.map((w) => w.peakDestPins), "Gate C's 1 -> 2 -> 5 -> 10 gradient").toEqual([
-      1, 1, 1, 1, 2, 5, 10,
+    // **Weeks 0 to 2 are BYTE-IDENTICAL to pre-M1f and weeks 3 and 4 are not**,
+    // which is the per-week form of the 12,780 divergence above: 12,780 is
+    // inside week 2 (4,500-tick weeks, so week 2 is 9,000..13,499), and week 2's
+    // 99 blocked ticks all land before it. That is the strongest single check
+    // that this rule changes nothing early — three whole weeks of six series
+    // reproduce with no re-blessing at all.
+    expect(r.weeks.map((w) => w.blockedTicks)).toEqual([0, 0, 99, 1810, 3703])
+    // **A POST-REPAIR figure.** `carAheadOf` read one lane until this commit and
+    // would have reported "nothing ahead" for a car `canEnter` was refusing
+    // across a junction; measured against the un-repaired probe on the same run
+    // this row reads `[1, 1, 2, 6, 6]`, so week 3's chain is one longer than the
+    // broken probe could see. Every `longestQueue` figure in this repo is a
+    // measurement from after that repair — see `queueProbe.ts`.
+    expect(r.weeks.map((w) => w.longestQueue)).toEqual([1, 1, 2, 7, 6])
+    expect(r.weeks.map((w) => w.peakDestPins), "Gate C's 1 -> 5 -> 10 gradient").toEqual([
+      1, 1, 1, 5, 10,
     ])
-    expect(r.maxInFlight, "Gate A's peak cars in motion").toBe(11)
-    expect(r.weeks.map((w) => w.dests)).toEqual([5, 6, 8, 10, 10, 11, 12])
-    expect(r.weeks.map((w) => w.houses)).toEqual([8, 13, 17, 21, 21, 23, 25])
-    // Tiles never bind: the whole twelve-week connect bill is 62 of 210 granted.
+    expect(r.maxInFlight, "Gate A's peak cars in motion — UP, because they are queueing").toBe(12)
+    expect(r.weeks.map((w) => w.dests)).toEqual([5, 6, 8, 10, 10])
+    expect(r.weeks.map((w) => w.houses)).toEqual([8, 13, 17, 21, 21])
+    // Tiles never bind. The run is two weeks shorter so the ceiling falls with
+    // it — 151 was week 6's figure and there is no week 6 — but the FLOOR is
+    // unmoved at 37, which is the half this assertion is about.
     expect(Math.min(...r.weeks.map((w) => w.tilesLeft))).toBe(37)
-    expect(Math.max(...r.weeks.map((w) => w.tilesLeft))).toBe(151)
+    expect(Math.max(...r.weeks.map((w) => w.tilesLeft))).toBe(94)
     expect(r.unaffordable, 'the greedy policy never once could not afford its next connection').toBe(0)
 
     // ---------------------------------------------------------------------
@@ -4208,15 +4301,22 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     //
     // `constants.ts`'s MAX_BLOCKED_TICKS block records the valve on the two
     // shipped boards with NO input, where `city` scores zero refusals for the
-    // dull reason that no road exists. This is the other arm: 31,456 ticks of
-    // competent play, cars genuinely standing behind each other from week 2 —
-    // and the worst wait any car ever takes is **32 ticks, 1.07 s, a factor of
-    // 42 below the 1,350-tick threshold.** M1d's headline feature is a
-    // one-second hesitation on the board that ships, and the demo board is
-    // still the only place the valve can fire.
-    expect(r.maxBlockedTicks, 'the worst wait, in ticks').toBe(32)
-    expect(r.valveFirings, 'the valve cannot fire on this board').toBe(0)
-    expect(MAX_BLOCKED_TICKS / 32, '42x from firing').toBeGreaterThan(42)
+    // dull reason that no road exists. This is the other arm: 21,704 ticks of
+    // competent play, cars genuinely standing behind each other from week 2.
+    //
+    // **Pre-M1f the worst wait any car ever took was 32 ticks, 1.07 s, a factor
+    // of 42 below the threshold, and the valve could not fire at all. Under
+    // junction mutual exclusion the counter SATURATES and the valve fires 15
+    // times.** M1d's headline feature stops being demo-only on this commit —
+    // this is the first firing of the anti-deadlock valve on the board that
+    // ships, outside a purpose-built fixture, and it is the direct consequence
+    // of the head-on property being lost at junctions: two cars swapping across
+    // an edge with a junction at each end now each need the other's cell empty
+    // and each is standing in it. `blocking.test.ts`'s *"breaks the 2-cycle"*
+    // is that fixture; Task 9's upgrade is the relief.
+    expect(r.maxBlockedTicks, 'the worst wait, in ticks — SATURATED').toBe(MAX_BLOCKED_TICKS)
+    expect(r.maxBlockedTicks, 'and that is the constant, not a coincidence').toBe(1350)
+    expect(r.valveFirings, 'the valve now fires on the board that ships').toBe(15)
 
     // ---------------------------------------------------------------------
     // THE JUNCTION CENSUS, BOTH POLICIES, AND ONE FIGURE THAT DID NOT
@@ -4228,82 +4328,82 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     // and the seven week rows are pinned above, so this adds no second copy of
     // them.
     //
-    // **Co-presence reproduces the inherited figures exactly, on every one of
-    // the eight quantities the review recorded** — 232 events, first at 15,001,
-    // six cells, and all six per-cell counts in order. That is the
-    // reproduce-before-you-contradict step, and it is why the disagreement
-    // below reads as a finding about the inherited number rather than as a
-    // broken instrument.
-    expect(r.conflicts, 'co-presence conflicts — blind to same-tick swaps').toBe(232)
-    expect(r.firstConflictTick, '8:11.4 on a stopwatch, (15001 - 258) / 30').toBe(15001)
-    expect(r.conflictCells.length).toBe(6)
-    expect(r.conflictCells, 'and the per-cell table Task 3 cross-checks against').toEqual([
-      [468, 73], // (12,19)
-      [537, 52], // (9,22)
-      [422, 49], // (14,17)
-      [560, 49], // (8,23)
-      [272, 6], //  (8,11)
-      [512, 3], //  (8,21)
+    // **THESE FIGURES ARE NOW POST-RULE AND THEY ARE NOT THE ONES TASK 1
+    // MEASURED, because a census is measured ON A RUN and this task changed the
+    // run.** Task 1's figures — 232 / 15,001 / six cells for co-presence,
+    // 538 / 10,207 / six for rule-visible — describe the pre-M1f board, are
+    // correct for it, and are what the rest of the milestone dates from. What
+    // this block asserts is what the SAME two instruments say about the board
+    // Task 2 ships. Nothing about the census module changed.
+    //
+    // **Co-presence very nearly disappears, and that is the rule working.**
+    // Co-presence is *two different cars in the two lanes of one junction cell
+    // at the end of a tick* — exactly the state mutual exclusion forbids. 232
+    // becomes **11**, and the survivors are not a leak: the valve crosses
+    // regardless of the occupant (`ENTER_VALVE` displaces it), and this arm
+    // valves 15 times. A co-presence count of 0 would mean the valve had stopped
+    // firing, so 11 is the number that is consistent with the rest of the block.
+    expect(r.conflicts, 'co-presence conflicts — 232 pre-M1f; what survives is the valve').toBe(11)
+    expect(r.firstConflictTick, 'the first one, 5,657 ticks later than pre-M1f').toBe(17658)
+    expect(r.conflictCells.length, 'three cells, down from six').toBe(3)
+    expect(r.conflictCells).toEqual([
+      [537, 5], // (9,22)
+      [512, 3], // (8,21)
+      [560, 3], // (8,23)
     ])
 
-    // **RULE-VISIBLE DID NOT REPRODUCE, and the plan said in advance that this
-    // is the finding rather than a licence to retune.** The plan carried
-    // 271 events / first at 12,780 / FIVE cells. Measured here with the
-    // definition the plan itself specifies, character for character:
-    // **538 / 10,207 / SIX**. Nothing was adjusted to reach either number.
+    // **Rule-visible does NOT disappear, and the reason is the fairness rule.**
+    // Its `swapped` disjunct counts a cell holding car `a` at the end of tick
+    // `t-1` and a different car `b` at the end of `t`. That is still reachable
+    // whenever the LEAVER has the lower car index: `runMovement` ascends, `a`
+    // releases the cell, and `b` then finds both lanes free. So the census stays
+    // non-zero where co-presence collapses — 538 becomes **44**, not 0 — and the
+    // fall is mostly the run being 31 % shorter and the board carrying far fewer
+    // completed crossings, not the predicate going blind.
     //
-    // Three things say the instrument is the sound half of the disagreement:
-    //
-    //   1. Co-presence, which shares this module's loop, this `prev` shape,
-    //      this boot and this arm, reproduces all eight of its inherited
-    //      quantities.
-    //   2. **The plan's NAMED event is real and this rig sees it.** The plan
-    //      says "at tick 12,780 cars 8 and 9 swap across (14,17)"; cell
-    //      14 + 17*24 = 422 does take a rule-visible event at exactly tick
-    //      12,780. It is simply not the FIRST one — (12,19) takes one 2,573
-    //      ticks (85.8 s) earlier, at 10,207.
-    //   3. **FIVE cells is not merely wrong, it is unreachable by this
-    //      definition**, and that is asserted below rather than argued. The
-    //      rule-visible branch contains the co-presence predicate verbatim as
-    //      one of its disjuncts, so every co-presence event is a rule-visible
-    //      event at the same cell on the same tick. The rule-visible cell set
-    //      is therefore a SUPERSET of the co-presence one, and cannot be
-    //      smaller than its six.
-    expect(r.ruleEvents, 'junction events the Task 2 rule is about — plan said 271').toBe(538)
+    // **`firstRuleEventTick` is UNMOVED at 10,207, and that is the load-bearing
+    // one.** It is unmoved precisely because the event at 10,207 is one of those
+    // lower-index-leaver swaps: the rule permits it, so the state at the end of
+    // that tick is byte-identical to the previous commit's. The first tick on
+    // which any byte differs is **12,780** — measured by fingerprint, see the
+    // block header. The census is an over-approximation of divergence by
+    // 2,573 ticks (85.8 s), and both numbers are right about different things.
+    expect(r.ruleEvents, 'rule-visible events — 538 pre-M1f').toBe(44)
     expect(
       r.firstRuleEventTick,
-      'the first one — 5:31.6 on a stopwatch, (10207 - 258) / 30; plan said 12,780',
+      'UNMOVED at 10,207 (5:31.6): the rule permits that swap, so the board is still bit-identical there',
     ).toBe(10207)
-    expect(r.ruleEventCells.length, 'distinct cells that ever carried one — plan said 5').toBe(6)
+    expect(r.ruleEventCells.length, 'five cells, down from six').toBe(5)
     expect(r.ruleEventCells).toEqual([
-      [468, 161], // (12,19)
-      [537, 133], // (9,22)
-      [422, 120], // (14,17)
-      [560, 99], //  (8,23)
-      [512, 13], //  (8,21)
-      [272, 12], //  (8,11)
+      [468, 15], // (12,19)
+      [537, 13], // (9,22)
+      [512, 7], //  (8,21)
+      [560, 6], //  (8,23)
+      [422, 3], //  (14,17)
     ])
 
-    // The superset, asserted rather than left to the comment above, because it
-    // is the half of the disagreement that no re-measurement can move: it is a
-    // property of the two definitions and not of this board.
-    const coCells = new Set(r.conflictCells.map(([cell]) => cell))
+    // The superset, asserted rather than left to a comment, because it is the
+    // half that no re-measurement can move: the rule-visible branch contains the
+    // co-presence predicate verbatim as one of its disjuncts, so every
+    // co-presence event is a rule-visible event at the same cell on the same
+    // tick. It held pre-M1f at six cells against six and it holds here at three
+    // against five, which is the stronger test of the two — the sets are now
+    // different sizes, so a mutant that swapped the two tallies would show.
     for (const [cell] of r.conflictCells) {
       expect(
         r.ruleEventCells.some(([c]) => c === cell),
         `co-presence cell ${cell} is missing from the rule-visible table, which is impossible`,
       ).toBe(true)
     }
-    expect(coCells.size).toBe(6)
     expect(r.ruleEvents, 'rule-visible strictly contains co-presence').toBeGreaterThan(r.conflicts)
 
-    // The relationship between the two, asserted rather than left to a comment,
-    // because it is the thing the previous draft got backwards. The DIRECTION
-    // survives the disagreement above; only the size of the gap changed, from
-    // the plan's 74.0 s to a measured 159.8 s.
+    // The relationship between the two. The DIRECTION is what matters and it
+    // survives — the rule diverges earlier than co-presence sees it — while the
+    // gap grows from 159.8 s pre-M1f to 248.4 s here, because the rule delays
+    // the valve firings that co-presence is now reduced to counting.
     expect(r.firstRuleEventTick, 'the rule diverges EARLIER than co-presence, not later')
       .toBeLessThan(r.firstConflictTick)
-    expect((r.firstConflictTick - r.firstRuleEventTick) / TICKS_PER_SECOND).toBeCloseTo(159.8, 1)
+    expect((r.firstConflictTick - r.firstRuleEventTick) / TICKS_PER_SECOND).toBeCloseTo(248.4, 1)
   }, 30000)
 
   it('is not vacuous: the three arms are three different runs, not one run reported thrice', () => {

@@ -1,4 +1,4 @@
-import { ORTHO_COST, DIAG_COST } from '@laneways/shared'
+import { ORTHO_COST, DIAG_COST, INTERSECTION_DEGREE } from '@laneways/shared'
 import type { GameState } from './state'
 import type { WorldData } from './world'
 import { DIR_COUNT, DX, DY, dirBetween } from './roads'
@@ -107,15 +107,20 @@ export function edgeCost(dir: number): number {
  * Spec §5.5 prices *"approaching an intersection"* with a speed multiplier, and
  * M1d decision 7 defines an intersection as **a cell of degree >=
  * `INTERSECTION_DEGREE`** — a cell where a third road meets, as opposed to a
- * corridor cell (2), a dead end (1) or bare ground (0). `cars.ts`'s
- * `intersectionSpeedMul` is the sole caller and asks about the cell a car is
- * ENTERING.
+ * corridor cell (2), a dead end (1) or bare ground (0).
+ *
+ * **Its only caller as of M1f Task 2 is `isJunctionCell` below, and that is the
+ * point of the split.** `cars.ts`'s `intersectionSpeedMul` used to read this
+ * directly; it now goes through the predicate, so the threshold is applied in
+ * ONE place and `canEnter`'s exclusion and §5.6's upgrade can be given their own
+ * reader without a third copy of `>= INTERSECTION_DEGREE` appearing anywhere.
  *
  * **`INTERSECTION_DEGREE` is `@laneways/shared`'s as of M1f Task 1, not
  * `cars.ts`'s private constant, and the threshold is named here rather than
- * spelled `3` for a reason that outlives the tidy-up.** The degree is about to
- * acquire two more readers — `canEnter`'s mutual exclusion and §5.6's junction
- * upgrade — and `graph.ts` is the module all three go through. **It is a
+ * spelled `3` for a reason that outlived the tidy-up.** The degree acquired its
+ * two further readers at Task 2 — `canEnter`'s mutual exclusion, via
+ * `junctionAdmitsOne`, and the slowdown, via `isJunctionCell` — and `graph.ts`
+ * is the module all three go through. **It is a
  * threshold on a cell's SHAPE and never an edge weight**: `edgeCost(dir)` above
  * takes a direction and nothing else, and the 2026-08-21 amendment to spec §5.4
  * refuses the clause that said to price junctions as extra integer edge weight.
@@ -139,9 +144,12 @@ export function edgeCost(dir: number): number {
  * route does not name.
  *
  * An off-board `cell` reads `undefined` from the typed array and answers 0,
- * which is the same answer bare ground gives. No guard, deliberately: the one
- * caller passes a cell `advanceCar` has already proved on-board by throwing on
- * `stepCell`'s -1, and a guard here would be a second owner of that check.
+ * which is the same answer bare ground gives. No guard, deliberately: every
+ * production path passes a cell that has already been proved on-board —
+ * `advanceCar` throws on `stepCell`'s -1, and `canEnter` runs
+ * `assertEnterCellOnBoard` before it asks anything — so a guard here would be a
+ * second owner of that check. `graph.test.ts` asserts the `undefined` answer
+ * directly, for `roadDegree` and for both predicates below.
  */
 export function roadDegree(state: GameState, cell: number): number {
   const mask = state.roads[cell] as number
@@ -150,6 +158,54 @@ export function roadDegree(state: GameState, cell: number): number {
     if ((mask & (1 << k)) !== 0) n++
   }
   return n
+}
+
+/**
+ * Is `cell` an INTERSECTION — a cell where a third road meets?
+ *
+ * **This is the SLOWDOWN's predicate and it is deliberately NOT the
+ * EXCLUSION's.** See `junctionAdmitsOne` below. A cell carrying a junction
+ * upgrade is still an intersection for the purposes of `intersectionSpeedMul` —
+ * M1f's upgrade lifts the mutual exclusion and changes nothing else about the
+ * cell — while no longer being governed by the default rule. Keeping the two
+ * apart puts each rule's edit in exactly one place and turns the divergence into
+ * a table in `graph.test.ts` rather than a branch inside a caller.
+ *
+ * Counted off the MASK by `roadDegree`, which differs from `neighbours` only for
+ * a bit written directly into `state.roads`. An off-board `cell` reads
+ * `undefined`, `roadDegree` answers 0, and this answers `false` — the same answer
+ * bare ground gives. No guard, for the same reason `roadDegree` has none.
+ *
+ * **NOT an edge weight, and never.** See the 2026-08-21 amendment to spec §5.4.
+ */
+export function isJunctionCell(state: GameState, cell: number): boolean {
+  return roadDegree(state, cell) >= INTERSECTION_DEGREE
+}
+
+/**
+ * Does the DEFAULT junction rule — spec §5.5's mutual exclusion, one car at a
+ * time — govern `cell`?
+ *
+ * **`canEnter`'s exclusion clause is this function's only production reader** —
+ * with one deliberate second reader in test-adjacent code, `carAheadOf`
+ * (`game/src/queueProbe.ts`), which reads the same predicate precisely so the
+ * probe and the entry rule cannot disagree. It exists as a separate name from
+ * `isJunctionCell` so that M1f Task 9 can add its upgrade clause HERE and nowhere
+ * else. An upgraded junction is still an intersection (it slows cars) and is no
+ * longer under the default rule (nothing replaces it; the rule is simply lifted).
+ * `graph.test.ts` holds the table over both shapes and over a whole board, so the
+ * two cannot drift into agreement — and the whole-board case is the assertion
+ * Task 9 has to EDIT rather than delete.
+ *
+ * Identical to `isJunctionCell` at this task. That is not redundancy; it is the
+ * seam, named before it is needed, in the one commit where both readers are still
+ * asking the same question. **Forcing one predicate false instead of splitting
+ * them would remove the slowdown as well as the exclusion**, and a pre-M1f
+ * identical control — which is what Task 9 measures its relief against — could
+ * not then be built at all.
+ */
+export function junctionAdmitsOne(state: GameState, cell: number): boolean {
+  return isJunctionCell(state, cell)
 }
 
 /**

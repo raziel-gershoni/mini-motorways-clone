@@ -846,8 +846,30 @@ describe('it cannot lie about blocking', () => {
     // drawn behind its own follower because its launch lag pulled it back.
     // Zero over 30 s of the busiest board in the repo.
     expect(measured.smoothed.queueInversions).toBe(0)
-    // Vacuity: there were plenty of pairs close enough for it to matter.
-    expect(measured.smoothed.nearQueuePairs).toBeGreaterThan(100)
+    // ---------------------------------------------------------------------
+    // **VACUITY FLOOR, RE-DERIVED AT M1f TASK 2: 141 -> 46. IT FELL BECAUSE
+    // THE BOARD GOT MORE CONGESTED, WHICH IS THE OPPOSITE OF WHAT IT LOOKS
+    // LIKE.**
+    // ---------------------------------------------------------------------
+    //
+    // A "queue pair" needs `codir`, and `codir` is the DOT PRODUCT of the two
+    // cars' per-tick sim displacements being strictly positive. **A stopped car
+    // has zero displacement, so a stopped car is in no queue pair at all** —
+    // this counter only ever sees pairs where BOTH cars are moving. Junction
+    // mutual exclusion takes the demo board from 1,401 blocked ticks per 3,000
+    // to 2,413 and makes the anti-deadlock valve fire, so the population this
+    // counter samples from shrinks by roughly the amount it did: 141 -> 46, a
+    // factor of 3.1 against a factor of 1.7 more blocked ticks and a 61 % drop
+    // in trips.
+    //
+    // So the floor is re-derived, not lowered to fit: 20 is roughly half the new
+    // measurement, which is this repo's idiom for a vacuity floor, and 46
+    // pair-frames is still ample for `queueInversions === 0` to mean something.
+    // **What it can no longer do is distinguish "the renderer never reverses a
+    // queue" from "there were barely any queues to reverse", and that limitation
+    // is real** — Task 9's upgrade should push this back up, and if it does not,
+    // this floor is the place to notice.
+    expect(measured.smoothed.nearQueuePairs, 'M1f INTERIM — 141 pre-M1f').toBeGreaterThan(20)
   })
 
   it('only ever reorders cars the sim itself is already drawing on top of each other', () => {
@@ -886,7 +908,17 @@ describe('the artifact is measurably gone', () => {
   it('removes every standing start, where the exact renderer has hundreds', () => {
     // "Zero to full in one frame", counted. A car whose drawn speed goes from
     // exactly 0 to more than a quarter of top speed inside one frame.
-    expect(measured.exact.standingStarts).toBeGreaterThan(100)
+    //
+    // **The control's count fell from 163 to 58 at M1f Task 2, and the same
+    // derivation applies as to `nearQueuePairs` above.** A standing start is a
+    // stop-to-go TRANSITION, not time spent stopped. Junction mutual exclusion
+    // makes each wait far longer — the worst wait on the shipped board goes from
+    // 32 ticks to a saturated 1,350, which is longer than this whole 900-tick
+    // window — so a fixed window contains fewer transitions even though it
+    // contains far more stopping. The floor is re-derived to 25, roughly half
+    // the new measurement; the treatment's exact 0 is untouched, and that is the
+    // assertion this case is actually about.
+    expect(measured.exact.standingStarts, 'M1f INTERIM — 163 pre-M1f').toBeGreaterThan(25)
     expect(measured.smoothed.standingStarts).toBe(0)
   })
 

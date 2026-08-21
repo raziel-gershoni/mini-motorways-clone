@@ -5,6 +5,8 @@ import {
   claimCell,
   occupantOf,
   stepCell,
+  placeRoad,
+  roadDegree,
   EnterOutcome,
   FREE,
   LANE_OF_DIR,
@@ -389,5 +391,107 @@ describe('the probe asks the same question canEnter does', () => {
     expect(asked).toBeGreaterThan(10000)
     expect(blocked).toBeGreaterThan(1000)
     expect(free).toBeGreaterThan(1000)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The junction tie-break — M1f Task 2
+// ---------------------------------------------------------------------------
+
+/**
+ * **At a junction the entrant can be held by EITHER lane, so "the car ahead" is
+ * no longer a single well-defined slot — and which one this function names is a
+ * DECISION.**
+ *
+ * `canEnter` refuses entry to a cell of `roadDegree >= INTERSECTION_DEGREE`
+ * unless BOTH lanes are free. `longestQueue` walks `carAheadOf` as a function
+ * and would need a graph otherwise, so the relation has to stay single-valued:
+ * the tie-break is **own lane first, other lane as the fallback**.
+ *
+ * These three cases exist because the corridor cases above cannot see any of
+ * it — the jam board's road column is degree 2 everywhere, which is exactly why
+ * the 900-tick agreement property stayed green while the probe and `canEnter`
+ * disagreed on every junction in the repo. Two of the three kill a mutation that
+ * the whole rest of the suite survives:
+ *
+ *   - dropping the other-lane fallback altogether, and
+ *   - **returning the other lane FIRST**, which is the tie-break itself and
+ *     which scored **0 detectors** across all 1,903 tests before these landed.
+ *
+ * The fixture puts the junction on the jam board's own road column by adding two
+ * side roads, so `stepCell`, the lanes and the occupancy slots are the
+ * production ones and only the degree is hand-made.
+ */
+describe('carAheadOf at a JUNCTION, where both lanes can hold the entrant up', () => {
+  const JY = 10
+  const JCELL = cellAt(JY)
+
+  /** The jam board with `(8, 10)` raised from degree 2 to degree 4. */
+  function junctionRig() {
+    const r = buildJamRig('probe-junction')
+    expect(placeRoad(r.state, r.world, JCELL, JCELL - 1)).toBe(true)
+    expect(placeRoad(r.state, r.world, JCELL, JCELL + 1)).toBe(true)
+    expect(roadDegree(r.state, JCELL), 'the fixture really is a junction').toBe(4)
+    parkEveryone(r.state)
+    return r
+  }
+
+  it('names the OTHER lane’s car when the own lane is free — and canEnter refuses on the same tick', () => {
+    // Car 0 is one cell south of the junction, heading north (lane 1). Car 1
+    // stands ON the junction having entered heading east (lane 0). Car 0's own
+    // lane is provably free, so a probe that reads one slot answers FREE while
+    // `canEnter` refuses — the disagreement this repair exists to end.
+    const r = junctionRig()
+    placeCar(r.state, 0, JY + 1, PHASE_OUTBOUND, N, 6, 1)
+    r.state.carCell[1] = JCELL
+    r.state.carPhase[1] = PHASE_OUTBOUND
+    claimCell(r.state, 1, JCELL, E)
+
+    expect(occupantOf(r.state, JCELL, LANE_OF_DIR[N] as number), "car 0's OWN lane is free").toBe(FREE)
+    expect(occupantOf(r.state, JCELL, LANE_OF_DIR[E] as number), 'and the other lane holds car 1').toBe(1)
+    expect(carAheadOf(r.state, r.world, 0), 'so the car ahead is the one in the other lane').toBe(1)
+    expect(canEnter(r.state, r.world, 0, JCELL, N), 'and canEnter agrees, on the same tick').toBe(
+      EnterOutcome.REFUSED_OCCUPIED,
+    )
+  })
+
+  it('names the OWN lane’s car when BOTH lanes are held — the tie-break, as a decision', () => {
+    // **The case that pins the ORDER.** Both lanes of the junction hold a
+    // different car, so "own lane first" and "other lane first" give different
+    // answers and only one of them is this module's contract. Without this the
+    // tie-break is a comment.
+    const r = junctionRig()
+    placeCar(r.state, 0, JY + 1, PHASE_OUTBOUND, N, 6, 1)
+    r.state.carCell[1] = JCELL
+    r.state.carPhase[1] = PHASE_OUTBOUND
+    claimCell(r.state, 1, JCELL, E) // lane 0, the OTHER lane
+    r.state.carCell[2] = JCELL
+    r.state.carPhase[2] = PHASE_OUTBOUND
+    claimCell(r.state, 2, JCELL, N) // lane 1, car 0's OWN lane
+
+    expect(occupantOf(r.state, JCELL, LANE_OF_DIR[N] as number), 'own lane holds car 2').toBe(2)
+    expect(occupantOf(r.state, JCELL, LANE_OF_DIR[E] as number), 'other lane holds car 1').toBe(1)
+    expect(carAheadOf(r.state, r.world, 0), 'own lane wins the tie-break').toBe(2)
+    expect(canEnter(r.state, r.world, 0, JCELL, N)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+  })
+
+  it('does NOT consult the other lane on a CORRIDOR, which is the whole difference', () => {
+    // The same cars, the same lanes, the same directions — on a degree-2 cell of
+    // the same road column, two rows north. `junctionAdmitsOne` is false there, so the
+    // fallback must not fire and the probe must answer FREE, exactly as
+    // `canEnter` grants.
+    const r = buildJamRig('probe-corridor-control')
+    parkEveryone(r.state)
+    const CY = JY - 2
+    const CCELL = cellAt(CY)
+    expect(roadDegree(r.state, CCELL), 'the control is degree 2').toBe(2)
+    placeCar(r.state, 0, CY + 1, PHASE_OUTBOUND, N, 6, 1)
+    r.state.carCell[1] = CCELL
+    r.state.carPhase[1] = PHASE_OUTBOUND
+    claimCell(r.state, 1, CCELL, E)
+
+    expect(occupantOf(r.state, CCELL, LANE_OF_DIR[E] as number), 'the other lane IS held').toBe(1)
+    expect(carAheadOf(r.state, r.world, 0), 'and it is still not in the way').toBe(FREE)
+    expect(canEnter(r.state, r.world, 0, CCELL, N), 'canEnter agrees').toBe(EnterOutcome.ENTER_FREE)
   })
 })

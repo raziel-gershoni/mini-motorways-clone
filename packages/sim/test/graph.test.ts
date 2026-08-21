@@ -1,10 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { parseMap, ORTHO_COST, DIAG_COST, type MapData } from '@laneways/shared'
+import { parseMap, ORTHO_COST, DIAG_COST, INTERSECTION_DEGREE, type MapData } from '@laneways/shared'
 import { createState } from '../src/state'
 import { createWorld, type WorldData } from '../src/world'
 import { seedFromString, randomBelow } from '../src/rng'
 import { DIR_COUNT, DX, DY, dirBetween, placeRoad } from '../src/roads'
-import { neighbours, edgeCost, isConnected, roadDegree } from '../src/graph'
+import { neighbours, edgeCost, isConnected, roadDegree, isJunctionCell, junctionAdmitsOne } from '../src/graph'
+import { plusJunction, straightCorridor, twoAdjacentJunctions } from './junctionRigs'
 
 /**
  * All-LAND fixture for pure connectivity geometry. Terrain never gates
@@ -477,5 +478,70 @@ describe('isConnected', () => {
     const state = createState('s', map)
     const a = 1 * W + 2
     expect(isConnected(state, world, a, a)).toBe(false)
+  })
+})
+
+describe('isJunctionCell and junctionAdmitsOne are TWO predicates with two jobs', () => {
+  // They agree at Task 2 and diverge at Task 9, when an UPGRADED junction keeps
+  // the SLOWDOWN (INTERSECTION_SPEED_MUL still applies; spec 5.6's right-on-red
+  // clause protects the same property) and loses the DEFAULT EXCLUSION. This
+  // table is what stops them silently collapsing back into one.
+  //
+  // **Both a degree-4 and a degree-3 fixture, because 3 IS the threshold.** A
+  // degree-4 case alone cannot see `>= INTERSECTION_DEGREE` widened to
+  // `> INTERSECTION_DEGREE`; `twoAdjacentJunctions`'s endpoints are exactly 3 and
+  // that mutant dies on them.
+  it('a degree-4 cell is a junction, and the default exclusion applies', () => {
+    const rig = plusJunction('pred-plus')
+    expect(roadDegree(rig.s, rig.centre)).toBe(4)
+    expect(isJunctionCell(rig.s, rig.centre)).toBe(true)
+    expect(junctionAdmitsOne(rig.s, rig.centre)).toBe(true)
+  })
+
+  it('a degree-3 cell — exactly INTERSECTION_DEGREE — is a junction too', () => {
+    const rig = twoAdjacentJunctions('pred-threshold')
+    expect(roadDegree(rig.s, rig.left)).toBe(INTERSECTION_DEGREE)
+    expect(isJunctionCell(rig.s, rig.left)).toBe(true)
+    expect(junctionAdmitsOne(rig.s, rig.left)).toBe(true)
+  })
+
+  it('a degree-2 cell is neither', () => {
+    const rig = straightCorridor('pred-corridor')
+    expect(roadDegree(rig.s, rig.mid)).toBe(2)
+    expect(isJunctionCell(rig.s, rig.mid)).toBe(false)
+    expect(junctionAdmitsOne(rig.s, rig.mid)).toBe(false)
+  })
+
+  it('bare ground and a dead end are neither', () => {
+    const rig = straightCorridor('pred-bare')
+    expect(roadDegree(rig.s, rig.west), 'the corridor end is a dead end').toBe(1)
+    expect(isJunctionCell(rig.s, rig.west)).toBe(false)
+    expect(junctionAdmitsOne(rig.s, rig.west)).toBe(false)
+    const bare = 0
+    expect(roadDegree(rig.s, bare)).toBe(0)
+    expect(isJunctionCell(rig.s, bare)).toBe(false)
+    expect(junctionAdmitsOne(rig.s, bare)).toBe(false)
+  })
+
+  it('an off-board index answers false from both, with no guard, exactly as roadDegree does', () => {
+    const rig = plusJunction('pred-offboard')
+    expect(roadDegree(rig.s, rig.world.cells + 5)).toBe(0)
+    expect(isJunctionCell(rig.s, rig.world.cells + 5)).toBe(false)
+    expect(junctionAdmitsOne(rig.s, rig.world.cells + 5)).toBe(false)
+  })
+
+  it('the two answer the same thing on every cell of a mixed board — TODAY, and this is the seam', () => {
+    // The table above is per-shape; this is the whole-board statement, and it is
+    // the assertion Task 9 must EDIT rather than delete. When the upgrade lands,
+    // an upgraded cell is the one place these two disagree, and the sentence
+    // that has to change is right here.
+    const rig = twoAdjacentJunctions('pred-whole-board')
+    let junctions = 0
+    for (let cell = 0; cell < rig.world.cells; cell++) {
+      const a = isJunctionCell(rig.s, cell)
+      expect(junctionAdmitsOne(rig.s, cell), `cell ${cell}`).toBe(a)
+      if (a) junctions++
+    }
+    expect(junctions, 'non-vacuous: the board really does carry junctions').toBe(2)
   })
 })

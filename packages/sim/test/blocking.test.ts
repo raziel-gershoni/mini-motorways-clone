@@ -23,7 +23,7 @@ import {
 import { createWorld, type WorldData } from '../src/world'
 import { createFieldInputRanges } from '../src/regions'
 import { createScratch, createFlowFields, CT_REBUILDS, INF, type FlowField, type Scratch } from '../src/scratch'
-import { DIR_COUNT, LANE_COUNT, LANE_OF_DIR, DX, DY, OPPOSITE, eraseRoad, stepCell } from '../src/roads'
+import { DIR_COUNT, LANE_COUNT, LANE_OF_DIR, DX, DY, OPPOSITE, eraseRoad, otherLane, stepCell } from '../src/roads'
 import {
   placeHouse,
   placeDestination,
@@ -61,6 +61,8 @@ import { isCommittedTo, packRouteStep, routeStep } from '../src/dispatch'
 import { runArrivals } from '../src/trips'
 import { step, type TickAction, type TickInputs } from '../src/step'
 import { fieldFor } from '../src/flowfield'
+import { bentCorridor, plusJunction, straightCorridor, twoAdjacentJunctions } from './junctionRigs'
+import { roadDegree } from '../src/graph'
 
 /**
  * M1d Task 2: the occupancy region and its claim/release lifecycle.
@@ -3585,5 +3587,120 @@ describe('assertEnterCarValid: the third parameter of canEnter s signature, guar
     const carCount = r.state.carPhase.length
     expect(() => canEnter(r.state, r.world, carCount, 150, DIR_E)).toThrow(/is not a car index/)
     expect(() => canEnter(r.state, r.world, 0, 150, DIR_E)).not.toThrow()
+  })
+})
+
+describe('a junction cell admits ONE car at a time (spec 5.5, M1f Task 2)', () => {
+  /**
+   * **The brief's fixture used (E, S) as its crossing pair and those are the
+   * same lane** — `LANE_OF_DIR` is `[1, 0, 0, 0, 0, 1, 1, 1]`, so E and S are
+   * both lane 0 and the pre-M1f own-lane read already refuses that pair. The
+   * headline test would have been green before the rule existed. The pair used
+   * here is the one `roads.ts`'s own module comment names as the case the
+   * two-lane model cannot see: **eastbound and northbound**, lanes 0 and 1.
+   * `junctionRigs.ts` carries the full note.
+   *
+   * A PLUS and not a corridor deliberately: on a degree-2 cell the rule must not
+   * fire, and the two sibling fixtures below are that arm.
+   */
+  it('refuses a crossing entrant while the other lane is held', () => {
+    const rig = plusJunction('xing-refused')
+    expect(roadDegree(rig.s, rig.centre), 'the fixture really is a junction').toBe(4)
+    expect(LANE_OF_DIR[DIR_E], 'the two cars really are in different lanes').not.toBe(LANE_OF_DIR[DIR_N])
+    claimCell(rig.s, 0, rig.centre, DIR_E)
+    // The own-lane read cannot be what refuses this: lane 1 is provably free.
+    expect(occupantOf(rig.s, rig.centre, LANE_OF_DIR[DIR_N] as number), "the entrant's OWN lane is free").toBe(FREE)
+    expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+  })
+
+  it('admits the same entrant when the cell is a corridor rather than a junction', () => {
+    const rig = straightCorridor('xing-corridor')
+    expect(roadDegree(rig.s, rig.mid), 'the fixture really is degree 2').toBe(2)
+    claimCell(rig.s, 0, rig.mid, DIR_E)
+    expect(canEnter(rig.s, rig.world, 1, rig.mid, DIR_N)).toBe(EnterOutcome.ENTER_FREE)
+  })
+
+  it('admits it on a degree-2 CORNER too, where both approaches carry a road', () => {
+    // `straightCorridor`'s northbound approach has no road bit, so on its own it
+    // leaves "refuse only when the entrant's approach carries a road" alive. Here
+    // `mid` carries roads west and south, so both cars arrive along real roads and
+    // the ONLY thing separating this from `plusJunction` is the degree.
+    const rig = bentCorridor('xing-corner')
+    expect(roadDegree(rig.s, rig.mid), 'a corner is still degree 2').toBe(2)
+    claimCell(rig.s, 0, rig.mid, DIR_E)
+    expect(canEnter(rig.s, rig.world, 1, rig.mid, DIR_N)).toBe(EnterOutcome.ENTER_FREE)
+  })
+
+  it('still admits an entrant onto an EMPTY junction', () => {
+    const rig = plusJunction('xing-empty')
+    expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.ENTER_FREE)
+  })
+
+  it('refuses on the OWN lane at a junction exactly as it does on a corridor', () => {
+    const rig = plusJunction('xing-own-lane')
+    claimCell(rig.s, 0, rig.centre, DIR_N)
+    expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+  })
+
+  it('releases a junction refusal through the valve, and the valve is still inside the occupied family', () => {
+    const rig = plusJunction('xing-valve')
+    claimCell(rig.s, 0, rig.centre, DIR_E)
+    rig.s.carBlockedTicks[1] = MAX_BLOCKED_TICKS
+    expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.ENTER_VALVE)
+  })
+
+  it('does NOT let the valve release a junction cell that is also a ghost', () => {
+    // The ghost check is an early return in FRONT of the occupancy read, so the
+    // junction clause cannot reach it either. This is the conjunction the
+    // catalogue records as untested for a whole milestone: BOTH clauses true at
+    // once — a saturated counter AND a ghost AND a junction AND the other lane
+    // held — on one fixture.
+    const rig = plusJunction('xing-ghost')
+    claimCell(rig.s, 0, rig.centre, DIR_E)
+    rig.s.carBlockedTicks[1] = MAX_BLOCKED_TICKS
+    rig.s.ghostMask[rig.centre] = 1 << DIR_E
+    expect(isCommittedTo(rig.s, rig.world, 1, rig.centre), 'the fixture is off-manifold on purpose').toBe(false)
+    expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.REFUSED_GHOST)
+  })
+
+  it('breaks the 2-cycle that the two-lane model used to make impossible', () => {
+    // Two junctions joined by one edge, one car standing on each, each wanting
+    // the other's cell. Neither can move; the valve is the only way out. This is
+    // the case `MAX_BLOCKED_TICKS`'s comment said could not exist, this task
+    // corrects that comment, and Task 9 Step 7 reuses this exact fixture to show
+    // that a junction upgrade on each cell gives the property back, with nothing
+    // hand-written into state.
+    const rig = twoAdjacentJunctions('xing-2cycle')
+    expect(roadDegree(rig.s, rig.left), 'both ends are junctions, at the threshold').toBe(3)
+    expect(roadDegree(rig.s, rig.right)).toBe(3)
+    claimCell(rig.s, 0, rig.left, DIR_E)
+    claimCell(rig.s, 1, rig.right, DIR_W)
+    // Head-on, so the two are in DIFFERENT lanes and the own-lane read grants
+    // both — which is precisely the property this rule costs.
+    expect(LANE_OF_DIR[DIR_E]).not.toBe(LANE_OF_DIR[DIR_W])
+    expect(canEnter(rig.s, rig.world, 0, rig.right, DIR_E)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+    expect(canEnter(rig.s, rig.world, 1, rig.left, DIR_W)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+  })
+
+  it('reads the OTHER lane and not a second copy of the own lane', () => {
+    // The mutant this exists for is `otherLane(lane)` -> `lane`, which makes the
+    // junction clause a duplicate of the own-lane read and is otherwise
+    // equivalent. Here the OWN lane is free and the other is held, so a duplicate
+    // read answers ENTER_FREE.
+    const rig = plusJunction('xing-other-lane')
+    claimCell(rig.s, 0, rig.centre, DIR_E)
+    expect(slotsOf(rig.s, rig.centre), 'lane 0 held, lane 1 free').toEqual([0, FREE])
+    expect(otherLane(LANE_OF_DIR[DIR_N] as number)).toBe(LANE_OF_DIR[DIR_E])
+    expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+  })
+
+  it('otherLane is an involution over both lanes and refuses anything else', () => {
+    expect(LANE_COUNT).toBe(2)
+    expect(otherLane(0)).toBe(1)
+    expect(otherLane(1)).toBe(0)
+    expect(otherLane(otherLane(0))).toBe(0)
+    expect(otherLane(otherLane(1))).toBe(1)
+    expect(() => otherLane(2)).toThrow(/is not one of the two/)
+    expect(() => otherLane(-1)).toThrow(/is not one of the two/)
   })
 })

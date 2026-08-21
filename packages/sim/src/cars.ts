@@ -2,7 +2,6 @@ import {
   CAR_SPEED_UNITS_PER_TICK,
   COST_UNIT_SCALE,
   DENOM,
-  INTERSECTION_DEGREE,
   INTERSECTION_SPEED_MUL,
   LANE_SPEED_DEFAULT,
   ORTHO_COST,
@@ -13,7 +12,7 @@ import type { GameState } from './state'
 import type { WorldData } from './world'
 import { DIR_COUNT, OPPOSITE, noteGhostDeparture, stepCell } from './roads'
 import { canEnter, claimCell, releaseCell, isEntryGranted, noteEntryGranted, noteEntryRefused } from './blocking'
-import { edgeCost, roadDegree } from './graph'
+import { edgeCost, isJunctionCell } from './graph'
 import { routeStep } from './dispatch'
 import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
 
@@ -41,9 +40,12 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
  * used to make instead is written out here so the change is not silent.** Until
  * Task 7 this paragraph read *"this module also never reads the `roads` region"*, and
  * two later paragraphs named Task 7 as the change that would end it. It has.
- * The intersection multiplier needs the DEGREE of the cell a car is entering,
- * which it takes from `roadDegree` (graph.ts) — one read-only helper, one call,
- * one purpose.
+ * The intersection multiplier needs to know whether the cell a car is entering
+ * is a junction, which it takes from `isJunctionCell` (graph.ts) — one read-only
+ * helper, one call, one purpose. **M1f Task 2 narrowed that from `roadDegree` to
+ * the predicate**: the degree now has three readers and the threshold is applied
+ * in one place. What this module can learn from `roads` went from a COUNT to a
+ * BOOLEAN in the same edit, which is strictly less.
  *
  * **What survives is the sentence that was doing the work, and it is now
  * narrower and exactly true: a road edit can change an in-flight car's SPEED
@@ -334,7 +336,7 @@ export function turnSpeedMul(dirIn: number, dirOut: number): number {
  * otherwise an equivalent mutant on any route whose junction is not at an end.
  */
 export function intersectionSpeedMul(state: GameState, cell: number): number {
-  return roadDegree(state, cell) >= INTERSECTION_DEGREE ? INTERSECTION_SPEED_MUL : MUL_NONE
+  return isJunctionCell(state, cell) ? INTERSECTION_SPEED_MUL : MUL_NONE
 }
 
 /**

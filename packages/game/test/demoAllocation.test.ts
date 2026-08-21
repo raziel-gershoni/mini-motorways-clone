@@ -221,7 +221,9 @@ function countingContext(counts: DrawCounts): GameContext {
   return {
     fillStyle: '',
     // M1e Task 9's five. The demo board is live for this whole window (it dies
-    // at 6,703 and the rig stops well short), so `arc` fires only for the ring
+    // at `DEMO_DEATH_TICK` — 5,757 as of M1f Task 2, 6,703 before — and THIS rig
+    // stops well short; the profiling rig further down this file no longer does,
+    // which is Task 3's to repair), so `arc` fires only for the ring
     // and `stroke` follows it; both are counted through `fills` nowhere, which
     // is deliberate — `drawAllocation.test.ts` owns the ring and scrim counters.
     strokeStyle: '',
@@ -370,6 +372,29 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     // together the day `DEMO_DEATH_TICK` goes stale, while this one reads the
     // byte `step` actually branches on and survives someone changing the layout
     // under this rig.
+    //
+    // ---------------------------------------------------------------------
+    // **RED FROM M1f TASK 2 TO M1f TASK 3, DELIBERATELY. TASK 3 OWNS IT.**
+    // ---------------------------------------------------------------------
+    //
+    // Junction mutual exclusion moves `DEMO_DEATH_TICK` from 6,703 to 5,757, so
+    // this rig's 10,500 frames now carry the sim past the shutdown and the three
+    // profiled windows land on a frozen board. **This assertion firing is the
+    // guard doing its job**: the instrument is telling us it cannot measure,
+    // which is the one failure mode the catalogue rates worse than no
+    // instrument — a harness that reports clean while measuring nothing.
+    //
+    // It is NOT repaired here because Task 3 decides whether the shipped rule is
+    // Task 2's wide one or the narrower crossing-only arm, and the two give
+    // different death ticks (5,757 against a predicted 6,660). Re-deriving
+    // `WARMUP_FRAMES` / `WINDOW_COUNT` / `PROFILED_FRAMES` now would be doing it
+    // twice, and the second derivation would have to undo the first. **Task 3
+    // re-derives all three knobs together with `DEMO_DEATH_TICK` and
+    // `demoLayout.test.ts`'s matched-window margin.**
+    //
+    // Expected red between those two commits, along with the identity-pin case
+    // below and `allocation.test.ts`'s M1e window. **Those three and nothing
+    // else** — anything further is unpredicted and is a finding.
     expect(
       isGameOver(game.state),
       'this window must profile a LIVE sim — every budget below was measured on a frozen board',
