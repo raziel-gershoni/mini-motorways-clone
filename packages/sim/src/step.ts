@@ -7,7 +7,7 @@ import type { FlowField, Scratch } from './scratch'
 import { syncFields } from './flowfield'
 import { placeRoad, eraseRoad } from './roads'
 import { runDemand } from './demand'
-import { runOffer } from './cards'
+import { applyChooseCard, runOffer } from './cards'
 import { runSpawn } from './spawn'
 import { assembleSources, runDispatch } from './dispatch'
 import { runMovement } from './cars'
@@ -15,13 +15,25 @@ import { runArrivals } from './trips'
 import { runOvercrowd } from './overcrowd'
 
 /**
- * A single road edit applied on one tick. `a`/`b` are the same cell-index
- * pair `placeRoad`/`eraseRoad` already take. An unknown `kind` throws (see
- * `step` below) rather than being silently skipped — a corrupted or
- * forward-incompatible input log should fail loudly, not apply a subset of
- * its actions with no signal.
+ * One player action applied on one tick. An unknown `kind` throws (see `step`
+ * below) rather than being silently skipped — a corrupted or forward-
+ * incompatible input log should fail loudly, not apply a subset of its actions
+ * with no signal.
+ *
+ * **`a` and `b` are two bare numbers whose MEANING is the kind's**, which is
+ * what keeps `game`'s pooled queue allocation-free (`inputs.ts`: one reused
+ * object shape, never a per-kind payload):
+ *
+ *   - `'place'` / `'erase'` — the cell-index pair `placeRoad`/`eraseRoad` take.
+ *   - `'choose-card'` (M1f Task 6) — `a` is the offer slot (`OFFER_SLOT_A` /
+ *     `OFFER_SLOT_B`) and `b` is **the card id the client believes that slot
+ *     holds**. `b` is an ECHO and not an instruction: `applyChooseCard` throws
+ *     when it disagrees with what this simulation offered, and that throw is
+ *     the replay-divergence detector a verified leaderboard is built on.
+ *
+ * Task 9 adds a fourth kind, `'upgrade'`.
  */
-export type TickActionKind = 'place' | 'erase'
+export type TickActionKind = 'place' | 'erase' | 'choose-card'
 export interface TickAction {
   readonly kind: TickActionKind
   readonly a: number
@@ -115,16 +127,25 @@ export interface TickInputs {
  *      read the clock**, and the disclosure below is about what that changes.
  *   3. Apply inputs — the only phase that changes `roads`. Must precede the
  *      field sync, or a road drawn on tick T is invisible to this tick's
- *      field.
+ *      field. **From M1f Task 6 it dispatches into TWO modules, not one**:
+ *      `roads.ts` for the road edits and `cards.ts` for `applyChooseCard`. That
+ *      is what ends the "no `TickAction` reads the clock" condition M1c and M1d
+ *      recorded — `applyChooseCard` reads `H_WEEK` and writes `H_TILES` — and
+ *      `step.test.ts`'s tripwire scans both modules for the disjointness that
+ *      keeps `3 <-> 6` commuting.
  *   4. The card offer (`cards.ts`, M1f Task 5, spec §5.10) — raise this week's
  *      pair into `H_OFFER_A`/`H_OFFER_B`. AFTER phase 3, because a `choose-card`
- *      queued on the boundary tick (Task 6) must resolve THIS week's offer before
- *      the phase that would raise one. BEFORE phase 5, because nothing
- *      downstream may observe a half-raised offer. **Both bounds are arguments
- *      and NEITHER HAS A DETECTOR IN M1f TASK 5** — nothing enqueues a
- *      `choose-card` yet and nothing reads the slots until Task 8, so both
- *      displacements scored 0 in Task 5's own battery and are recorded there as
- *      0 rather than as coverage. It reads `H_WEEK` and `rng[0]`; it writes the
+ *      queued on the boundary tick (Task 6) must resolve the offer the slots
+ *      ACTUALLY hold before the phase that would overwrite them. BEFORE phase
+ *      5, because nothing downstream may observe a half-raised offer. **The
+ *      lower bound acquired its first detector at M1f Task 6 and the upper one
+ *      is still an argument.** `3 <-> 4` scored 0 in Task 5's battery because
+ *      nothing enqueued a `choose-card`; `cards.test.ts`'s *"THROWS on the
+ *      boundary tick itself"* is what makes it non-zero — with `runOffer` in
+ *      front of the input loop, a boundary-tick choice finds the pair already
+ *      raised, the echo matches and nothing throws. `4 <-> 5` is still 0 and
+ *      still recorded as an absence; **M1f Task 8's frame fold** is what makes
+ *      that position observable. It reads `H_WEEK` and `rng[0]`; it writes the
  *      two offer slots and, on a pool of fewer than two cards, `H_OFFER_WEEK`.
  *      It writes **no** `H_TILES`: the card's tile bonus is paid by
  *      `applyChooseCard` in phase 3, so phases 2 and 4 are disjoint BY
@@ -316,9 +337,18 @@ export interface TickInputs {
  * test. The handoff is closed, and it is closed by a test that can fail rather
  * than by a test that could not exist.
  *
- * **What was re-confirmed by reading, at M1e Task 2**: `TickActionKind` is still
- * exactly `'place' | 'erase'`, and phase 3 still calls nothing but
- * `placeRoad`/`eraseRoad`. `roads.ts` imports `H_TILES` and `H_DEST_COUNT` from
+ * **What was re-confirmed by reading, at M1e Task 2, and what M1f TASK 6
+ * ENDED.** Task 2 recorded that `TickActionKind` was still exactly
+ * `'place' | 'erase'` and that phase 3 called nothing but
+ * `placeRoad`/`eraseRoad`. **Both halves are false from Task 6**: the union is
+ * `'place' | 'erase' | 'choose-card'` and phase 3 also calls `applyChooseCard`,
+ * which reads `H_WEEK` and writes `H_TILES`. The paragraph is kept because the
+ * READING it records is still the recipe — and because the conclusion it
+ * reaches survives for a reason the paragraph did not anticipate:
+ * `applyChooseCard` lives in `cards.ts`, so everything below about `roads.ts`
+ * is still true OF `roads.ts`, and `step.test.ts` gained a fourth scan over
+ * `cards.ts` rather than widening this one. `roads.ts` imports `H_TILES` and
+ * `H_DEST_COUNT` from
  * `state.ts` and nothing else from it, and reaches **two** other modules —
  * `buildings.ts` through `isFootprintCell`/`destMetaOrientation`, and
  * `dispatch.ts` through `countCommittedCars` (`roads.ts:6`). An earlier version
@@ -750,13 +780,41 @@ export interface TickInputs {
  * Task 12's closing sweep is where it gets re-measured. Both positions are right
  * for the reasons `cards.ts` gives; neither reason is currently under test.
  *
+ * ---------------------------------------------------------------------------
+ * M1f TASK 6 — THE FIVE ROWS A CLOCK-READING, TILE-WRITING ACTION CHANGES
+ * ---------------------------------------------------------------------------
+ *
+ * **No phase moved and no phase was added; what changed is what phase 3 DOES.**
+ * `applyChooseCard` reads `H_WEEK`, reads the offer slots and writes `H_TILES`,
+ * `H_INV_UPGRADES` and `H_OFFER_WEEK`, so exactly five rows of the table above
+ * can change meaning: `1<->3`, `2<->3`, `2<->4`, `3<->4` and `3<->6`. **Those
+ * five are re-run in this task and the other fifty are Task 5's, re-run at Task
+ * 12.**
+ *
+ * **THE NUMBERS BELOW ARE THE PREDICTION AND NOT YET THE MEASUREMENT.** They
+ * were written into this comment before the battery ran, which is the only
+ * thing that makes the battery evidence; the commit that carries the battery
+ * replaces this block with the measured table and says which predictions were
+ * wrong.
+ *
+ * ```
+ *   pair    Task 5   predicted   why
+ *   1<->3      7          7      unchanged; the grant still reads `tick - 1`
+ *   2<->3      1          1      unchanged; week.test.ts's boundary-tick placement
+ *   2<->4      1          1      unchanged; the card bonus is paid in phase 3,
+ *                                so 2<->4 cannot reach it
+ *   3<->4      0     NON-ZERO    **cards.test.ts, "THROWS on the boundary tick
+ *                                itself"** — the row Task 5 handed forward by name
+ *   3<->6      1          1      unchanged; spawn.test.ts's paving test
+ * ```
+ *
  * **`1 <-> 2` and `1 <-> 3` produce the identical detector SET for the third
  * sweep running** — `step.test.ts` x1, `week.test.ts` x2, `integration.test.ts`
  * x3 — which is the same non-coincidence recorded at eight and ten phases: both
  * orderings put the grant in front of the advance, so the grant reads `tick - 1`
  * either way. **They gained a SEVENTH detector in this task, and it is one of
- * Task 5's own**: `cards.test.ts`'s *"writes H_TILES never, so phases 2 and 4 are
- * disjoint by construction"* drives to the tick before a boundary and asserts the
+ * Task 5's own**: `cards.test.ts`'s *"runOffer writes H_TILES never, so phases 2
+ * and 4 are disjoint by construction"* drives to the tick before a boundary and asserts the
  * grant lands, so it fails when the grant misses the boundary. A test written to
  * pin phase 4's disjointness turns out to pin phase 1's position as well; that is
  * a windfall, not a design, and it is recorded as one.
@@ -835,6 +893,12 @@ export function step(
       placeRoad(s, world, action.a, action.b)
     } else if (action.kind === 'erase') {
       eraseRoad(s, world, action.a, action.b)
+    } else if (action.kind === 'choose-card') {
+      // `a` is the offer slot, `b` is the card id the CLIENT believes that slot
+      // holds. The echo is checked inside `applyChooseCard`, which throws on a
+      // mismatch: that throw IS the replay-divergence detector, and a Worker
+      // that hits it must report `unverifiable` rather than apply either card.
+      applyChooseCard(s, action.a, action.b)
     } else {
       throw new Error(`step: unknown action kind "${String(action.kind)}"`)
     }

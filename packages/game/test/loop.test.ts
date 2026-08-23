@@ -637,6 +637,39 @@ describe('the input queue', () => {
     expect(queue.poolSize).toBe(3)
   })
 
+  it('carries a choose-card with NO structural change to the queue, because a kind and two numbers is all it is', () => {
+    // **M1f Task 6's confirm-and-pin.** `enqueue(kind, a, b)` already takes a
+    // `TickActionKind`, so the third action kind needed no edit here at all —
+    // and that is the property worth a test rather than a sentence, because the
+    // natural wrong move when a new kind arrives is a per-kind payload, which
+    // is exactly what would end this module's allocation-freedom (one reused
+    // object shape, `pool[n]`, forever).
+    //
+    // **`a` is the offer SLOT and `b` is the ECHOED CARD ID** — the card the
+    // client believes that slot holds. Task 8's `pointer.ts` calls
+    // `queue.enqueue('choose-card', slot, cardId)`; `sim`'s `applyChooseCard`
+    // throws when `b` disagrees with what it offered, which is the whole
+    // replay-divergence mechanism, so a queue that dropped or transposed the two
+    // numbers would turn every honest replay into an `unverifiable` verdict.
+    const queue = createInputQueue(2)
+    queue.enqueue('place', 10, 11)
+    queue.enqueue('choose-card', 1, 7)
+    expect(queue.inputs.actions.length).toBe(2)
+    expect(queue.inputs.actions[1]).toEqual({ kind: 'choose-card', a: 1, b: 7 })
+    expect(queue.poolSize, 'and it took no extra pooled object').toBe(2)
+
+    // The pooled object is REUSED ACROSS KINDS — slot 0 held a `'place'` a moment
+    // ago and holds a `'choose-card'` now, same object, rewritten in place. That
+    // is the half a per-kind payload would fail.
+    const pooled = queue.inputs.actions[0] as TickAction
+    expect(pooled.kind, 'slot 0 is the place action').toBe('place')
+    queue.clear()
+    queue.enqueue('choose-card', 0, 1)
+    expect(queue.inputs.actions[0]).toBe(pooled)
+    expect(queue.inputs.actions[0]).toEqual({ kind: 'choose-card', a: 0, b: 1 })
+    expect(queue.poolSize, 'and still no growth').toBe(2)
+  })
+
   it('clears to length 0 and leaves the array reusable', () => {
     const queue = createInputQueue()
     queue.enqueue('place', 1, 2)

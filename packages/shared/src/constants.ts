@@ -574,6 +574,57 @@ export const SPAWN_CANDIDATE_LIMIT = 24
 export const WEEKLY_TILE_GRANT = 30
 
 /**
+ * Spec §5.10's Road Tiles card: the per-map constant "30 or 40" — 30 here, the
+ * same value `WEEKLY_TILE_GRANT` uses, and deliberately a SEPARATE constant
+ * because they are two different rules that happen to agree today. One is a
+ * weekly income (`runWeekBoundary`, phase 2); this is a card's one-off bonus
+ * (`applyChooseCard`, phase 3). Defining either in terms of the other would make
+ * a map that grants 40 silently change the other rule too, and
+ * `constants.test.ts` reads this declaration off disk to keep them apart.
+ */
+export const CARD_GRANT_ROAD_TILES = 30
+/**
+ * Spec §5.10's tile bonus on every ITEM card except the motorway, which grants
+ * 10. **The motorway's number is not declared**, because the motorway is not
+ * offerable in M1f (`CARD_IMPLEMENTED_MASK`) and an untested value reads as a
+ * supported configuration — `cardTileGrant` throws for it instead. M1g declares
+ * it with the card.
+ *
+ * **This is a bonus ON TOP of `WEEKLY_TILE_GRANT`, not a replacement**, and that
+ * is a balance change stated rather than hidden: tile income goes from 30 a week
+ * to 50 or 60, against a measured 3.4x slack — 62 tiles spent of 210 granted on
+ * the arm that ships, with a WEEK-CLOSE minimum of 37. **Quote the week-close
+ * qualifier or do not quote the 37**: `integration.test.ts` takes the minimum
+ * over per-week-close samples, and the true running minimum is **7, at tick
+ * 2,280**, in week 0 before the first grant.
+ *
+ * The alternative — deleting the automatic grant so the card is the only income
+ * — is what §5.10 literally describes, and it is the only version in which the
+ * modal's 30-vs-20 costs the player anything. It was refused for two reasons: it
+ * makes two goldens' `H_TILES` a function of the input log, and `runWeekBoundary`
+ * has no other body, so deleting the grant deletes a phase and forces a second
+ * renumbering in a milestone that has already paid for one. **M1f Task 12
+ * measures the new slack and hands the lever to M1g with the number** — and notes
+ * that M1f has already paid its expensive half, because every headless rig
+ * acquires a card policy at Task 7.
+ */
+export const CARD_GRANT_ITEM = 20
+/**
+ * Spec §5.10's grant row for the item card: **two per card, for 20 tiles.** The
+ * row is headed "Traffic Lights" in §5.10 — Tunnel, Roundabout and Motorway
+ * grant 1, so 2 is that ROW and not the table's rate; M1f ships a JUNCTION
+ * UPGRADE in that slot and honours the grant unchanged (see the 2026-08-21
+ * amendment to §5.6 and the M1f plan's Decision 14 for the measurement that made
+ * the substitution).
+ *
+ * A named constant rather than a literal inside `cardItemGrant` because the
+ * modal draws it (`RenderFrame.offerItemsA`/`offerItemsB`) and a literal in
+ * `canvas.ts` is how a UI ends up lying about a rule — failure mode I6 of the
+ * M1f review. `MAX_UPGRADES` below is derived from it as well.
+ */
+export const UPGRADES_PER_CARD = 2
+
+/**
  * How many junction upgrades one run may place on the board.
  *
  * **Derived, not chosen.** The rate is **2 per card**, and that figure is one

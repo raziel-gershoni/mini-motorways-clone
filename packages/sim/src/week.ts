@@ -15,16 +15,28 @@ import { isWeekBoundary } from './clock'
  *
  * This is the first phase in the game to read the clock. `step.ts`'s comment
  * records why that matters: the two inherited 0-detector transpositions were
- * inert because **no `TickAction` reads `H_TICK`**, and this phase does not
- * change that — `TickActionKind` is still `'place' | 'erase'`. What it does is
- * put a clock reader BETWEEN the advance and the input loop, which ends the
- * inertness of that pair for a different and better reason: the two phases now
- * have something observable between them.
+ * inert because **no `TickAction` reads `H_TICK`**, and M1e Task 2 did not
+ * change that. What it did was put a clock reader BETWEEN the advance and the
+ * input loop, which ends the inertness of that pair for a different and better
+ * reason: the two phases now have something observable between them.
  *
- * **This function is also the source term in the tile ledger.** `tilesLeft +
- * roadCells + ghostCells` was an exact conservation law across 25,000 ticks at
- * the close of M1d; from here it is conserved BETWEEN boundaries and stepped by
- * `WEEKLY_TILE_GRANT` at each one. The long-run assertion must carry the term
+ * **M1f Task 6 ended the no-`TickAction`-reads-the-clock condition itself, and
+ * this sentence used to assert it.** It read *"`TickActionKind` is still
+ * `'place' | 'erase'`"*; the union is `'place' | 'erase' | 'choose-card'` and
+ * `applyChooseCard` reads `H_WEEK`. Nothing about THIS function changes — the
+ * grant still takes no week argument and still reads only `H_TICK` — but the
+ * clause is corrected rather than left standing, because a comment that states
+ * the opposite of the code is this project's dominant recorded defect.
+ *
+ * **This function is one of TWO source terms in the tile ledger, and it was the
+ * only one until M1f Task 6.** `tilesLeft + roadCells + ghostCells` was an exact
+ * conservation law across 25,000 ticks at the close of M1d; from M1e Task 2 it
+ * is conserved BETWEEN boundaries and stepped by `WEEKLY_TILE_GRANT` at each
+ * one; and from M1f Task 6 `applyChooseCard` steps it again, by
+ * `CARD_GRANT_ROAD_TILES` or `CARD_GRANT_ITEM`, on whichever tick carries the
+ * `choose-card` action. **No fixture in the repo enqueues one yet** — Task 8 is
+ * what makes the action reachable — so `integration.test.ts`'s ledger sweep is
+ * unaffected today and will need the second term the day a rig takes a card. The long-run assertion must carry the term
  * explicitly rather than loosening to a range — the point of the invariant is
  * that the refund path conserves, and a range hides a leaking refund.
  *

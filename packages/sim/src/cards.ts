@@ -1,6 +1,15 @@
+import { CARD_GRANT_ITEM, CARD_GRANT_ROAD_TILES, UPGRADES_PER_CARD } from '@laneways/shared'
 import { mixWord } from './rng'
 import type { GameState } from './state'
-import { offerPending, H_OFFER_A, H_OFFER_B, H_OFFER_WEEK, H_WEEK } from './state'
+import {
+  offerPending,
+  H_INV_UPGRADES,
+  H_OFFER_A,
+  H_OFFER_B,
+  H_OFFER_WEEK,
+  H_TILES,
+  H_WEEK,
+} from './state'
 import type { WorldData } from './world'
 import type { Scratch } from './scratch'
 
@@ -34,11 +43,14 @@ import type { Scratch } from './scratch'
  * `CARD_NONE = 0` is load-bearing: `H_OFFER_A`/`H_OFFER_B` are zero-initialised
  * and must read as "no offer" without `createState` writing a sentinel.
  *
- * **This module's runtime imports are `mixWord` and five names from `state.ts`,
- * and the edge is ONE-WAY.** Until M1f Task 5 the only runtime import was
- * `mixWord`; wiring phase 4 made this module a writer of the header, so it now
- * imports `offerPending` and four slot indices. **`state.ts` still imports
- * nothing from here at run time and must not start** — `offerSlot` returns the
+ * **This module's runtime imports are `mixWord`, three grant constants from
+ * `@laneways/shared`, and SEVEN names from `state.ts` — and the `state.ts` edge
+ * is ONE-WAY.** Until M1f Task 5 the only runtime import was `mixWord`; wiring
+ * phase 4 made this module a writer of the header, so it took `offerPending` and
+ * four slot indices, and M1f Task 6's `applyChooseCard` added `H_TILES` and
+ * `H_INV_UPGRADES` plus the three §5.10 grants. `@laneways/shared` is a leaf: it
+ * imports nothing from this package, so that edge cannot close a cycle at all.
+ * **`state.ts` still imports nothing from here at run time and must not start** — `offerSlot` returns the
  * literal `0` rather than `CARD_NONE` precisely to keep the direction clean, and
  * `cards.test.ts` pins `CARD_NONE === 0` so the two cannot drift. `state.ts` is
  * imported by nearly every file in this package, so a back-edge would close a
@@ -46,9 +58,11 @@ import type { Scratch } from './scratch'
  * dispatch.ts -> scratch.ts -> roads.ts`) with a module-scope mask that evaluated
  * to 0. The `WorldData` and `Scratch` imports are TYPE-ONLY and erase.
  *
- * **Nothing at this module's top level reads an IMPORTED value.**
- * `CARD_IMPLEMENTED_MASK` is built from two `const` declarations in this file;
- * every other constant below is a literal. That is the property the Task 1 defect
+ * **Nothing at this module's top level reads an IMPORTED value, and Task 6's
+ * three shared constants did not change that.** `CARD_IMPLEMENTED_MASK` is built
+ * from two `const` declarations in this file; every other constant below is a
+ * literal; and `CARD_GRANT_ROAD_TILES`/`CARD_GRANT_ITEM`/`UPGRADES_PER_CARD` are
+ * read inside function bodies, never at module scope. That is the property the Task 1 defect
  * violated, and it is the one that has to survive this module gaining imports.
  */
 
@@ -404,21 +418,26 @@ export function runOfferFromPool(state: GameState, pool: number, scratch: Scratc
  * Phase 4 of the tick order: raise this week's card offer (spec §5.10).
  *
  * **Position, and why both bounds are forced.** AFTER phase 3, because a
- * `choose-card` queued on the boundary tick must resolve THIS week's offer before
- * the phase that would raise one. BEFORE phase 5, because nothing downstream may
- * observe a half-raised offer.
+ * `choose-card` queued on the boundary tick must resolve the offer the slots
+ * ACTUALLY hold before the phase that would overwrite them. BEFORE phase 5,
+ * because nothing downstream may observe a half-raised offer.
  *
- * **Both bounds are arguments and neither has a detector in M1f Task 5, which is
- * recorded rather than implied.** Nothing enqueues a `choose-card` until Task 6
- * and nothing reads the offer slots until Task 8, so moving this call to either
- * side of its neighbours scored 0 in this task's own mutation battery. The
- * positions are right for the reasons above; the evidence for them arrives with
- * the tasks that make them observable.
+ * **The lower bound HAS a detector from M1f Task 6; the upper one is still an
+ * argument, and the difference is recorded rather than blurred.** Task 5
+ * measured both displacements at 0 and said so, because nothing enqueued a
+ * `choose-card` and nothing read the slots. Task 6 wired the action, and
+ * `cards.test.ts`'s *"THROWS on the boundary tick itself"* is `3 <-> 4`'s first
+ * detector: on the boundary tick the clock has advanced, so `offerPending` is
+ * true while `H_OFFER_A` is still `CARD_NONE`, and the echo cannot agree — move
+ * this call in front of the input loop and it does agree, and nothing throws.
+ * `4 <-> 5` is still 0; **M1f Task 8's frame fold** is what makes it
+ * observable, and Task 12's closing sweep is where it gets re-measured.
  *
  * **It writes the two offer slots and NOTHING else** — except in the degenerate
  * case, where it writes `H_OFFER_WEEK` and no card. Phase 2 writes `H_TILES`; the
- * card's own tile bonus is paid by `applyChooseCard` in phase 3 (Task 6). So
- * phases 2 and 4 touch disjoint state BY CONSTRUCTION.
+ * card's own tile bonus is paid by `applyChooseCard` in phase 3 (Task 6, and it
+ * is landed rather than scheduled). So phases 2 and 4 touch disjoint state BY
+ * CONSTRUCTION.
  *
  * **That disjointness does NOT make the positional transposition `2 <-> 4`
  * inert, and reading a red row there as a refutation of it is the mistake this
@@ -458,4 +477,106 @@ export function runOfferFromPool(state: GameState, pool: number, scratch: Scratc
  */
 export function runOffer(state: GameState, world: WorldData, scratch: Scratch): void {
   runOfferFromPool(state, poolFor(world), scratch)
+}
+
+/**
+ * §5.10's tile bonus for a card. **Total over the OFFERABLE set and a throw
+ * outside it**, rather than a default arm: a card with no placement mechanism
+ * cannot be offered (`CARD_IMPLEMENTED_MASK`), so reaching this with one means
+ * the pool and the grant table disagree, and a plausible fallback would hide
+ * that. `cards.test.ts` sweeps the complement of the mask rather than a
+ * hand-written list of ids, so M1g moving a bit into the mask moves the sweep
+ * with it.
+ */
+export function cardTileGrant(cardId: number): number {
+  if (cardId === CARD_ROAD_TILES) return CARD_GRANT_ROAD_TILES
+  if (cardId === CARD_JUNCTION_UPGRADE) return CARD_GRANT_ITEM
+  throw new Error(
+    `cards: card ${cardId} has no tile grant — only the cards in CARD_IMPLEMENTED_MASK do, and a ` +
+      'card that can be offered but not priced means the pool and this table disagree',
+  )
+}
+
+/**
+ * §5.10's ITEM count for a card: 2 for the Traffic Lights row, 0 for Road Tiles.
+ * Same totality rule as `cardTileGrant`, and a separate function rather than a
+ * second return value because `render` needs the number on its own, folded onto
+ * the frame, so the modal's "x2" is not a string literal in `canvas.ts`.
+ */
+export function cardItemGrant(cardId: number): number {
+  if (cardId === CARD_ROAD_TILES) return 0
+  if (cardId === CARD_JUNCTION_UPGRADE) return UPGRADES_PER_CARD
+  throw new Error(`cards: card ${cardId} has no item grant — see cardTileGrant`)
+}
+
+/**
+ * Applies a `choose-card` action, in phase 3.
+ *
+ * **Three checks, and their ORDER is load-bearing.**
+ *
+ *   1. **Not pending -> silent no-op.** A duplicate `choose-card` in one batch is
+ *      what a double tap produces, and a throw there would poison `H_EPOCH` and
+ *      end the run over a UI event. `H_OFFER_WEEK === H_WEEK` absorbs it, which
+ *      is why `pointer.ts` (Task 8) needs no second guard — a second guard here
+ *      would be the catalogue's independently-sufficient-structures defect.
+ *      **This check must come FIRST, and the reason is narrower than it looks:
+ *      once a week is RESOLVED the slots still hold that week's real cards, so
+ *      an echo evaluated first would MATCH a repeat tap and pay the card a
+ *      second time — silently, with no throw to notice.** It is not, as an
+ *      earlier draft of this comment said, that a later week's offer has
+ *      overwritten the slots: a later week is PENDING again, so check 1 does not
+ *      fire there at all and check 3 does the work. See the two tests named
+ *      *"same resolved week"* and *"arrives WITH a later boundary"*.
+ *   2. **A slot outside {0, 1} -> throw.** A malformed action, exactly like
+ *      `step`'s unknown-kind throw.
+ *   3. **The echo -> throw.** `b` is the card id the CLIENT believes it is
+ *      taking. A mismatch means the browser and this simulation disagree about
+ *      what was offered, which can only happen if the draw is not a pure
+ *      function of state. **That is exactly what a verified leaderboard exists
+ *      to catch**, so a Worker that hits it returns `unverifiable`: never a
+ *      score, and never apply-anyway. Applying the logged card regardless is
+ *      what makes a leaderboard forgeable.
+ *
+ * **The one honest consequence of check 3, stated because it looks like a rough
+ * edge and is not.** On a week-boundary tick the clock has already advanced in
+ * phase 1, so `offerPending` is TRUE while `H_OFFER_A` still holds the previous
+ * week's cards — or `CARD_NONE`, at the first boundary. An action arriving on
+ * that tick therefore throws unless it echoes what the slots ACTUALLY hold. A
+ * client can only echo a card it was shown, and it is shown one by a frame
+ * folded after a tick, so no honest log carries a `choose-card` for a pair that
+ * does not exist yet. `cards.test.ts` pins both arms — the first-boundary throw
+ * and the later-boundary carry-over — and the first arm is the only detector the
+ * `3 <-> 4` tick-order transposition has.
+ *
+ * **The tile bonus is paid HERE and never at the week boundary.** Phase 2 owns
+ * `H_TILES`'s weekly grant and phase 4 owns the offer slots, so the two are
+ * disjoint by construction.
+ *
+ * **`H_OFFER_A`/`H_OFFER_B` are NOT cleared**, deliberately: `offerSlot` already
+ * folds `pending ? slot : CARD_NONE`, and clearing them here would be a second
+ * mechanism for the same fact. Every reader goes through `offerSlot`.
+ *
+ * Allocates nothing, and it is not on a per-tick path at all: it runs once per
+ * `choose-card` action, of which a run produces at most one per week.
+ */
+export function applyChooseCard(state: GameState, slot: number, cardId: number): void {
+  if (!offerPending(state)) return
+  if (slot !== OFFER_SLOT_A && slot !== OFFER_SLOT_B) {
+    throw new Error(`cards: choose-card slot ${slot} is not 0 or 1`)
+  }
+  const offered = (slot === OFFER_SLOT_A ? state.header[H_OFFER_A] : state.header[H_OFFER_B]) as number
+  if (offered !== cardId) {
+    throw new Error(
+      `cards: the client believed slot ${slot} held card ${cardId}, and this simulation offered ` +
+        `${offered} — the offer is a pure function of the seed word and the week, so the two cannot ` +
+        'disagree unless the replay has diverged. A verifier must report unverifiable rather than ' +
+        'apply either card.',
+    )
+  }
+  state.header[H_TILES] = (state.header[H_TILES] as number) + cardTileGrant(cardId)
+  // Unconditional, and that is the point of `cardItemGrant` returning 0 for the
+  // road-tiles card: there is no `if (cardId === ...)` here to get wrong, and the
+  // two grants are read from one table rather than from two branches.
+  state.header[H_INV_UPGRADES] = (state.header[H_INV_UPGRADES] as number) + cardItemGrant(cardId)
+  state.header[H_OFFER_WEEK] = state.header[H_WEEK] as number
 }

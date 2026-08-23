@@ -19,6 +19,7 @@ import {
   COST_UNIT_SCALE, CAR_SPEED_UNITS_PER_TICK,
   MS_PER_SECOND, DESTINATIONS_PER_WEEK, DEST_SPAWN_PERIOD_TICKS, HOUSE_SPAWN_PERIOD_TICKS,
   WEEKLY_TILE_GRANT, MAX_UPGRADES,
+  CARD_GRANT_ROAD_TILES, CARD_GRANT_ITEM, UPGRADES_PER_CARD,
 } from '../src/index'
 import * as C from '../src/index'
 
@@ -371,6 +372,43 @@ describe('rule constants', () => {
     // and adding `toBeGreaterThan(0)` here would be a decorative assertion
     // that reads as a load-bearing one.
     expect(WEEKLY_TILE_GRANT).toBe(30)
+  })
+
+  it('pays the two card grants spec 5.10 states, as constants SEPARATE from the weekly grant', () => {
+    // M1f Task 6, spec 5.10's table. Road Tiles is the per-map "30 or 40" — 30
+    // here — and every ITEM card but the motorway grants 20 tiles on top of its
+    // item. The motorway's 10 is deliberately NOT declared: it is not offerable
+    // in M1f (`CARD_IMPLEMENTED_MASK`), and an untested constant reads as a
+    // supported configuration. `cardTileGrant` throws for it instead.
+    expect(CARD_GRANT_ROAD_TILES).toBe(30)
+    expect(CARD_GRANT_ITEM).toBe(20)
+
+    // **Equal to `WEEKLY_TILE_GRANT` today and NOT defined as it**, which is the
+    // whole reason there are two names. Phase 2's grant is a weekly income and
+    // this is a card's one-off bonus; they agree at 30 by coincidence of the
+    // per-map constant, and `CARD_GRANT_ROAD_TILES = WEEKLY_TILE_GRANT` would
+    // make a future map that grants 40 silently change the weekly income too.
+    // Asserted as equal-and-distinct, on `MS_PER_SECOND`/`DENOM`'s precedent.
+    expect(CARD_GRANT_ROAD_TILES).toBe(WEEKLY_TILE_GRANT) // true today, and not a definition
+    expect(
+      readFileSync(new URL('../src/constants.ts', import.meta.url), 'utf8'),
+      'CARD_GRANT_ROAD_TILES was defined in terms of WEEKLY_TILE_GRANT, which welds two ' +
+        'different rules together',
+    ).toMatch(/^export const CARD_GRANT_ROAD_TILES = 30$/m)
+  })
+
+  it('grants TWO items per card, which is 5.10s Traffic Lights ROW and not the tables rate', () => {
+    // Tunnel, Roundabout and Motorway grant 1; Bridge grants "1 or 2"; Traffic
+    // Lights grants 2. `CARD_JUNCTION_UPGRADE` is M1f's substitution for the
+    // light and inherits that row — so 2 is right HERE and would be wrong quoted
+    // as the table's general rate. `MAX_UPGRADES`'s derivation below reads this
+    // number, which is why it is a constant rather than a literal in
+    // `cardItemGrant`; `packages/render` also draws it, and a literal in
+    // `canvas.ts` is how a UI ends up lying about a rule.
+    expect(UPGRADES_PER_CARD).toBe(2)
+    expect(MAX_UPGRADES, 'the cap is derived from this rate: 2/card x 11 weeks + slack').toBe(
+      UPGRADES_PER_CARD * 11 + 2,
+    )
   })
 
   it('caps junction upgrades on the board at a number the shipped arm cannot reach', () => {

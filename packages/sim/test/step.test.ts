@@ -245,7 +245,7 @@ describe('step', () => {
      * `step.ts` sets it out at length.) So this test pins three things, and only
      * the third is load-bearing for the commutation:
      *
-     *   1. The action set is still exactly the two road edits.
+     *   1. The action set is still exactly the three kinds phase 3 dispatches.
      *   2. `roads.ts` still cannot observe the clock. **Kept, but demoted**: it
      *      is the condition M1c and M1d recorded, it is cheap, and a
      *      clock-reading `roads.ts` is still something whoever writes it should
@@ -256,12 +256,34 @@ describe('step', () => {
      *      makes `eraseRoad` drop a disconnected destination's pending pins,
      *      which gains `roads.ts` no `H_TICK` — so guard 2 stays green — while
      *      making the pair a real one-tick pin error at 0 detectors.
+     *   4. **`cards.ts` writes nothing `runDemand` reads either**, which is new
+     *      at M1f Task 6 and is guard 3's subject widening rather than a second
+     *      guard. Phase 3 is no longer only `roads.ts`: `applyChooseCard` is
+     *      dispatched from the same loop, and it lives in `cards.ts`. Guard 3
+     *      scanned one of phase 3's two modules the moment the second one
+     *      landed, and a disjointness scan that covers half a phase is the
+     *      catalogue's *"a check whose coverage is a strict subset"* with the
+     *      subset on the wrong axis. Same five names, same hoisted patterns,
+     *      same positive control.
      *
-     * **What guard 3 cannot see, said here rather than left to be found:** an
-     * INDIRECT write, where phase 3 calls a helper exported from `demand.ts` (or
-     * anywhere else) that mutates those regions on its behalf. The scan is a
-     * mechanism for the direct case and a prompt for the rest. It is not a proof
-     * that the phases commute.
+     * **What guards 3 and 4 cannot see, said here rather than left to be
+     * found:** an INDIRECT write, where phase 3 calls a helper exported from
+     * `demand.ts` (or anywhere else) that mutates those regions on its behalf.
+     * The scan is a mechanism for the direct case and a prompt for the rest. It
+     * is not a proof that the phases commute.
+     *
+     * **AND PHASE 3 IS NO LONGER CLOCK-BLIND, which is the condition M1c and
+     * M1d recorded as keeping two transpositions inert.** `applyChooseCard`
+     * reads `H_WEEK` (through `offerPending`, and again to stamp
+     * `H_OFFER_WEEK`) and writes `H_TILES`. Guard 2 is *still meaningful and
+     * still passes*, and the reason is deliberate design rather than luck: the
+     * new kind was given its own module, so the guard keeps its subject —
+     * `roads.ts`, the road-edit half of phase 3 — and says exactly what it
+     * always said about it. What it can no longer be read as is a statement
+     * about the whole of phase 3. The clock-freedom of phase 3 as a whole is
+     * **over**, recorded here rather than left for a reader to infer from a
+     * green guard, and `3 <-> 4` acquires its first detector in the same task
+     * (`cards.test.ts`, *"THROWS on the boundary tick itself"*).
      *
      * A source read rather than a behavioural assertion, deliberately, on the
      * precedent of `loop.test.ts`'s cross-file golden scan and
@@ -274,23 +296,34 @@ describe('step', () => {
     it('pins the condition that keeps the inputs/demand tick-order pair commuting (3 <-> 6 today)', () => {
       const stepSrc = readFileSync(new URL('../src/step.ts', import.meta.url), 'utf8')
       const roadsSrc = readFileSync(new URL('../src/roads.ts', import.meta.url), 'utf8')
-      // Vacuity: an empty or misresolved read satisfies both scans below.
+      const cardsSrc = readFileSync(new URL('../src/cards.ts', import.meta.url), 'utf8')
+      // Vacuity: an empty or misresolved read satisfies every scan below.
       expect(stepSrc.length, 'step.ts read back empty').toBeGreaterThan(4000)
       expect(roadsSrc.length, 'roads.ts read back empty').toBeGreaterThan(4000)
+      expect(cardsSrc.length, 'cards.ts read back empty').toBeGreaterThan(4000)
 
       /**
-       * Half 1: the action set is still exactly the two road edits.
+       * Half 1: the action set is still exactly the three kinds phase 3
+       * dispatches.
        *
        * **Anchored to the whole line, and the first version of this assertion
        * was not — it used `toContain` and scored 0 detectors** against the
        * mutation it was written for. `'place' | 'erase' | 'build'` *contains*
        * `'place' | 'erase'`, so a widened union passed. Substring containment
        * cannot express "exactly these"; a line-anchored match can.
+       *
+       * **It went red at M1f Task 6, which is the tripwire WORKING, and it goes
+       * red AGAIN at Task 9**, which adds `'upgrade'`. Say so, so the second
+       * re-derivation reads as scheduled rather than as alarming: the point of
+       * the pin is that widening the union costs somebody a reading of the
+       * paragraph above, and Task 6's reading is what added half 4 and ended
+       * phase 3's clock-blindness. Retype the whole line each time — do not
+       * loosen the anchor, and do not switch it back to `toContain`.
        */
       expect(
         stepSrc,
         'the TickAction set changed — re-derive tick phases 1..6 before widening it; see step.ts',
-      ).toMatch(/^export type TickActionKind = 'place' \| 'erase'$/m)
+      ).toMatch(/^export type TickActionKind = 'place' \| 'erase' \| 'choose-card'$/m)
 
       /**
        * Half 2: phase 3 still cannot observe the clock. `roads.ts` is the
@@ -346,6 +379,25 @@ describe('step', () => {
           roadsSrc,
           `roads.ts now touches ${name}, which runDemand reads — phases 3 and 6 no longer commute, ` +
             'and transposing them is a one-tick pin error nothing else catches; see step.ts',
+        ).not.toMatch(demandRe(name))
+      }
+
+      /**
+       * Half 4: the OTHER module phase 3 dispatches into, on the same five
+       * names and the same patterns.
+       *
+       * `applyChooseCard` (M1f Task 6) is the second thing the input loop calls,
+       * so from Task 6 on "phase 3 writes nothing phase 6 reads" is a claim
+       * about two files. It reads `H_WEEK` and writes `H_TILES`,
+       * `H_INV_UPGRADES` and `H_OFFER_WEEK` — none of which `runDemand` touches
+       * — and this scan is what keeps it that way. All five score 0 occurrences
+       * in `cards.ts` today, in code and in prose alike.
+       */
+      for (const name of DEMAND_STATE) {
+        expect(
+          cardsSrc,
+          `cards.ts now touches ${name}, which runDemand reads — phase 3 dispatches into this ` +
+            'module too (applyChooseCard), so phases 3 and 6 no longer commute; see step.ts',
         ).not.toMatch(demandRe(name))
       }
 

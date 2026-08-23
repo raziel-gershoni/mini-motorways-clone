@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
+  CARD_GRANT_ITEM,
+  CARD_GRANT_ROAD_TILES,
   PIN_CAP_SQUARE_TIMER,
   TICKS_PER_WEEK,
+  UPGRADES_PER_CARD,
   WEEKLY_TILE_GRANT,
   firstCity,
   parseMap,
@@ -20,7 +23,10 @@ import {
   CARD_TUNNEL,
   OFFER_SLOT_A,
   OFFER_SLOT_B,
+  applyChooseCard,
   canDrawOfferPair,
+  cardItemGrant,
+  cardTileGrant,
   drawOfferPair,
   nthSetBit,
   offerSeedFor,
@@ -36,6 +42,10 @@ import {
   hashState,
   isGameOver,
   offerPending,
+  restore,
+  snapshot,
+  H_EPOCH,
+  H_INV_UPGRADES,
   H_OFFER_A,
   H_OFFER_B,
   H_OFFER_WEEK,
@@ -51,6 +61,14 @@ import { step, type TickInputs } from '../src/step'
 import { placeDestination, DEST_KIND_SQUARE, ORIENTATION_S } from '../src/buildings'
 
 const NO_INPUT: TickInputs = { actions: [] }
+
+/**
+ * One `choose-card` action for a tick. `b` is the card id the CLIENT believes
+ * the slot holds — an ECHO, and the thing `applyChooseCard` compares against.
+ */
+function chooseCard(slot: number, cardId: number): TickInputs {
+  return { actions: [{ kind: 'choose-card', a: slot, b: cardId }] }
+}
 
 /**
  * A 4x4 all-land board, on `step.test.ts`'s recipe and for its reason: the
@@ -819,7 +837,14 @@ describe('runOffer — phase 4', () => {
     )
   })
 
-  it('writes H_TILES never, so phases 2 and 4 are disjoint by construction', () => {
+  it('runOffer writes H_TILES never, so phases 2 and 4 are disjoint by construction', () => {
+    // **`runOffer` never writes it — `cards.ts` now does, and the two are
+    // different claims.** M1f Task 6 pays the card's tile bonus inside
+    // `applyChooseCard`, which is phase 3; that is precisely what keeps phase 2
+    // (the weekly grant) and phase 4 (the offer slots) disjoint, so the title was
+    // narrowed from "writes H_TILES never" rather than left to read as a claim
+    // about the module. The tick below carries no action, so phase 3 is empty and
+    // the only tile movement on it is the boundary's.
     const rig = bootCity('offer-disjoint')
     driveTo(rig, TICKS_PER_WEEK - 1)
     const tiles = rig.s.header[H_TILES] as number
@@ -827,5 +852,356 @@ describe('runOffer — phase 4', () => {
     expect(rig.s.header[H_TILES], 'the boundary granted exactly the weekly tiles').toBe(
       tiles + WEEKLY_TILE_GRANT,
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M1f Task 6 — `choose-card` as an input
+// ---------------------------------------------------------------------------
+
+describe('cardTileGrant and cardItemGrant', () => {
+  it('pays 30 for road tiles and 20 for an item, per spec 5.10', () => {
+    expect(cardTileGrant(CARD_ROAD_TILES)).toBe(30)
+    expect(cardTileGrant(CARD_JUNCTION_UPGRADE)).toBe(20)
+    // Read back off the shared constants too, so a change in one place cannot
+    // leave this file asserting a literal nothing produces any more.
+    expect(cardTileGrant(CARD_ROAD_TILES)).toBe(CARD_GRANT_ROAD_TILES)
+    expect(cardTileGrant(CARD_JUNCTION_UPGRADE)).toBe(CARD_GRANT_ITEM)
+  })
+
+  it('gives two upgrades and zero items for road tiles, per spec 5.10s grant row', () => {
+    expect(cardItemGrant(CARD_JUNCTION_UPGRADE)).toBe(2)
+    expect(cardItemGrant(CARD_JUNCTION_UPGRADE)).toBe(UPGRADES_PER_CARD)
+    expect(cardItemGrant(CARD_ROAD_TILES)).toBe(0)
+  })
+
+  it('THROWS for EVERY card outside CARD_IMPLEMENTED_MASK, rather than inventing a grant', () => {
+    // **The set is DERIVED from the mask, not hand-listed, and the hand-list
+    // this replaces is why.** Task 6's brief enumerated
+    // `[CARD_BRIDGE, CARD_TUNNEL, CARD_ROUNDABOUT, CARD_MOTORWAY, CARD_NONE]` —
+    // five of the six unofferable ids, silently missing `CARD_TRAFFIC_LIGHTS`,
+    // which is the ONE of them this milestone deliberately built, measured and
+    // deferred (`cards.ts`, Amendment 2). A hand-list also cannot follow M1g
+    // deleting a bit from the mask. Deriving it from `CARD_IMPLEMENTED_MASK`
+    // makes the sweep total over the domain by construction.
+    const unofferable: number[] = []
+    for (let id = 0; id < CARD_COUNT; id++) {
+      if ((CARD_IMPLEMENTED_MASK & (1 << id)) === 0) unofferable.push(id)
+    }
+    // Vacuity, and it names the id the hand-list dropped: an empty or
+    // one-element sweep would pass the loop below without saying anything.
+    expect(unofferable, 'the six ids no pool can offer, including the deferred light').toEqual([
+      CARD_NONE,
+      CARD_BRIDGE,
+      CARD_TUNNEL,
+      CARD_ROUNDABOUT,
+      CARD_TRAFFIC_LIGHTS,
+      CARD_MOTORWAY,
+    ])
+    for (const id of unofferable) {
+      expect(() => cardTileGrant(id), `card ${id} tile grant`).toThrow(/has no tile grant/)
+      expect(() => cardItemGrant(id), `card ${id} item grant`).toThrow(/has no item grant/)
+    }
+  })
+})
+
+describe('applyChooseCard — the echo is the replay-divergence detector', () => {
+  it('grants the card tiles, sets H_OFFER_WEEK, and ends the offer', () => {
+    const rig = bootCity('choose-grants')
+    driveTo(rig, TICKS_PER_WEEK)
+    const tiles = rig.s.header[H_TILES] as number
+    const card = rig.s.header[H_OFFER_A] as number
+    step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(OFFER_SLOT_A, card))
+    expect(rig.s.header[H_TILES]).toBe(tiles + cardTileGrant(card))
+    expect(rig.s.header[H_OFFER_WEEK]).toBe(1)
+    expect(offerPending(rig.s)).toBe(false)
+  })
+
+  it('pays the bonus in PHASE 3 and never at the week boundary, so phases 2 and 4 stay disjoint', () => {
+    // The tick that carries the choice is NOT a boundary tick, so the only tile
+    // movement on it is the card's. `week.test.ts` owns the other half — that a
+    // boundary tick with no choice moves `H_TILES` by exactly the weekly grant.
+    const rig = bootCity('choose-phase-3')
+    driveTo(rig, TICKS_PER_WEEK + 7)
+    const tiles = rig.s.header[H_TILES] as number
+    const card = rig.s.header[H_OFFER_A] as number
+    step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(OFFER_SLOT_A, card))
+    expect(rig.s.header[H_TICK], 'no boundary on this tick').not.toBe(TICKS_PER_WEEK * 2)
+    expect(rig.s.header[H_TILES]).toBe(tiles + cardTileGrant(card))
+  })
+
+  it('adds TWO upgrades to the inventory when that is the card, and none otherwise', () => {
+    const rig = bootCity('choose-two-upgrades')
+    driveTo(rig, TICKS_PER_WEEK)
+    const slot = rig.s.header[H_OFFER_A] === CARD_JUNCTION_UPGRADE ? OFFER_SLOT_A : OFFER_SLOT_B
+    const card = (slot === OFFER_SLOT_A ? rig.s.header[H_OFFER_A] : rig.s.header[H_OFFER_B]) as number
+    expect(card, 'the shipped pool always offers it').toBe(CARD_JUNCTION_UPGRADE)
+    step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(slot, card))
+    // 5.10's table: "Traffic Lights | 2 | 20". TWO, not one, and this is the
+    // assertion that would catch it being implemented as one.
+    expect(rig.s.header[H_INV_UPGRADES]).toBe(UPGRADES_PER_CARD)
+    expect(rig.s.header[H_INV_UPGRADES]).toBe(2)
+  })
+
+  it('adds no upgrades when the road-tiles card is taken', () => {
+    const rig = bootCity('choose-no-upgrades')
+    driveTo(rig, TICKS_PER_WEEK)
+    const slot = rig.s.header[H_OFFER_A] === CARD_ROAD_TILES ? OFFER_SLOT_A : OFFER_SLOT_B
+    step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(slot, CARD_ROAD_TILES))
+    expect(rig.s.header[H_INV_UPGRADES]).toBe(0)
+  })
+
+  it('raises no new offer for the rest of the week', () => {
+    const rig = bootCity('choose-rest-of-week')
+    driveTo(rig, TICKS_PER_WEEK)
+    step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(OFFER_SLOT_A, rig.s.header[H_OFFER_A] as number))
+    const after = hashState(rig.s)
+    for (let t = 0; t < 100; t++) step(rig.s, rig.world, rig.fields, rig.scratch, NO_INPUT)
+    expect(rig.s.header[H_OFFER_WEEK], 'still resolved').toBe(1)
+    expect(offerPending(rig.s)).toBe(false)
+    expect(hashState(rig.s), 'and the run went on').not.toBe(after)
+  })
+
+  it('offers again at the NEXT boundary', () => {
+    const rig = bootCity('choose-next-boundary')
+    driveTo(rig, TICKS_PER_WEEK)
+    step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(OFFER_SLOT_A, rig.s.header[H_OFFER_A] as number))
+    driveTo(rig, TICKS_PER_WEEK * 2)
+    expect(offerPending(rig.s)).toBe(true)
+  })
+
+  it('is a SILENT NO-OP for a second choice in the same batch — a double tap must not brick a run', () => {
+    const rig = bootCity('choose-double-tap')
+    driveTo(rig, TICKS_PER_WEEK)
+    const a = rig.s.header[H_OFFER_A] as number
+    const b = rig.s.header[H_OFFER_B] as number
+    const tiles = rig.s.header[H_TILES] as number
+    step(rig.s, rig.world, rig.fields, rig.scratch, {
+      actions: [
+        { kind: 'choose-card', a: OFFER_SLOT_A, b: a },
+        { kind: 'choose-card', a: OFFER_SLOT_B, b: b },
+      ],
+    })
+    expect(rig.s.header[H_TILES], 'only the first was paid').toBe(tiles + cardTileGrant(a))
+    expect(rig.s.header[H_INV_UPGRADES], 'and only the first cards items').toBe(cardItemGrant(a))
+    expect(rig.s.header[H_EPOCH], 'and nothing threw').toBe(0)
+  })
+
+  it('is a SILENT NO-OP for a second tap on the SAME slot, which is what a double tap actually is', () => {
+    // The sibling above taps A then B, so the echo would refer to a DIFFERENT
+    // card on the second action. A real double tap repeats the same slot and the
+    // same card, and there the echo MATCHES — so `offerPending` is the only
+    // thing standing between it and a card paid twice. Two tests because the two
+    // mutations they catch are different: dropping the pending check dies here
+    // on the tile count, and dies above on the tile count too but for the other
+    // slot's grant. Same tap, two shapes.
+    const rig = bootCity('choose-double-tap-same-slot')
+    driveTo(rig, TICKS_PER_WEEK)
+    const a = rig.s.header[H_OFFER_A] as number
+    const tiles = rig.s.header[H_TILES] as number
+    step(rig.s, rig.world, rig.fields, rig.scratch, {
+      actions: [
+        { kind: 'choose-card', a: OFFER_SLOT_A, b: a },
+        { kind: 'choose-card', a: OFFER_SLOT_A, b: a },
+      ],
+    })
+    expect(rig.s.header[H_TILES], 'paid exactly once').toBe(tiles + cardTileGrant(a))
+    expect(rig.s.header[H_INV_UPGRADES], 'and granted its items exactly once').toBe(cardItemGrant(a))
+    expect(rig.s.header[H_EPOCH], 'and nothing threw').toBe(0)
+  })
+
+  it('is a SILENT NO-OP in week 0, where no offer exists', () => {
+    const rig = bootCity('choose-week-0')
+    const before = hashState(rig.s)
+    step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(OFFER_SLOT_A, CARD_ROAD_TILES))
+    expect(rig.s.header[H_EPOCH]).toBe(0)
+    expect(rig.s.header[H_OFFER_WEEK]).toBe(0)
+    expect(rig.s.header[H_TILES], 'and nothing was paid').toBe(CARDS_MAP.startingTiles)
+    expect(hashState(rig.s), 'the tick still ran').not.toBe(before)
+  })
+
+  it('THROWS, naming both cards, when the echo disagrees with the slot', () => {
+    const rig = bootCity('choose-echo-mismatch')
+    driveTo(rig, TICKS_PER_WEEK)
+    const wrong =
+      (rig.s.header[H_OFFER_A] as number) === CARD_ROAD_TILES ? CARD_JUNCTION_UPGRADE : CARD_ROAD_TILES
+    expect(() =>
+      step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(OFFER_SLOT_A, wrong)),
+    ).toThrow(/believed slot 0 held card \d+.*this simulation offered \d+.*replay/s)
+  })
+
+  it('the echo reads the slot it was GIVEN, not the other one', () => {
+    // **The mutant this exists for is `offered` taken from the opposite slot**,
+    // which the sibling above cannot see: on a two-card pool the wrong card is
+    // exactly the other slot's card, so an echo that reads slot B throws on the
+    // mismatch test for the wrong reason and passes it. Here the echo is CORRECT
+    // for slot B, so reading slot A instead turns a legal choice into a throw.
+    const rig = bootCity('choose-echo-slot-b')
+    driveTo(rig, TICKS_PER_WEEK)
+    const b = rig.s.header[H_OFFER_B] as number
+    const tiles = rig.s.header[H_TILES] as number
+    expect(b, 'the two slots hold different cards, or this pins nothing').not.toBe(
+      rig.s.header[H_OFFER_A],
+    )
+    step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(OFFER_SLOT_B, b))
+    expect(rig.s.header[H_TILES], 'slot B was taken and slot Bs grant was paid').toBe(
+      tiles + cardTileGrant(b),
+    )
+    expect(rig.s.header[H_OFFER_WEEK]).toBe(1)
+  })
+
+  it('THROWS for a slot that is neither 0 nor 1', () => {
+    const rig = bootCity('choose-bad-slot')
+    driveTo(rig, TICKS_PER_WEEK)
+    expect(() => step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(2, CARD_ROAD_TILES))).toThrow(
+      /slot 2 is not 0 or 1/,
+    )
+  })
+
+  it('checks PENDING before the echo, so a repeat within the SAME resolved week is a no-op and not a throw', () => {
+    // **And "not a throw" is only half of what has to hold — the other half is
+    // "not paid again", which is the assertion the brief's draft of this test
+    // did not have.** Once the week is resolved the slots still hold its real
+    // cards, so an echo evaluated FIRST would MATCH and pay a second time
+    // silently. `.not.toThrow()` alone scores 0 against exactly the mutant this
+    // test names in its title.
+    const rig = bootCity('choose-stale-same-week')
+    driveTo(rig, TICKS_PER_WEEK)
+    const week1A = rig.s.header[H_OFFER_A] as number
+    step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(OFFER_SLOT_A, week1A))
+    const tiles = rig.s.header[H_TILES] as number
+    const upgrades = rig.s.header[H_INV_UPGRADES] as number
+    driveTo(rig, TICKS_PER_WEEK + 10)
+    expect(() =>
+      step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(OFFER_SLOT_A, week1A)),
+    ).not.toThrow()
+    expect(rig.s.header[H_TILES], 'the stale choice was not paid a second time').toBe(tiles)
+    expect(rig.s.header[H_INV_UPGRADES], 'nor granted its items a second time').toBe(upgrades)
+  })
+
+  it('THROWS on the boundary tick itself, because phase 3 runs BEFORE phase 4 raises the pair', () => {
+    // **This is the `3 <-> 4` detector Task 5 recorded as an absence, and the
+    // assertion is the one the RUN produces rather than the one the brief
+    // predicted.** The brief's draft asserted a silent no-op followed by a
+    // raised offer, reasoning that "phase 3 found nothing pending for week 1".
+    // Derive it instead:
+    //
+    //   phase 1  tick 4,500, `H_WEEK` 0 -> 1
+    //   phase 3  `offerPending` is `week > 0 && H_OFFER_WEEK !== week`
+    //            = `1 > 0 && 0 !== 1` = **TRUE**. The week is pending the moment
+    //            the clock advances; `H_OFFER_A` is what has not been written yet.
+    //            The echo therefore compares the client's card against
+    //            `CARD_NONE` and they cannot agree.
+    //   -> THROW, before phase 4 ever runs.
+    //
+    // **That is correct behaviour and not a rough edge.** A client can only echo
+    // a card it was shown, and it is shown one by the frame folded AFTER a tick;
+    // week 1's pair does not exist until phase 4 of tick 4,500, so no honest log
+    // can carry a `choose-card` on that tick. One that does is a divergent or
+    // forged log and `unverifiable` is the right answer.
+    //
+    // **Under `3 <-> 4` — `runOffer` moved in front of the input loop — it does
+    // NOT throw**: phase 4 raises week 1's pair first, the echo then matches, and
+    // the choice resolves the week. That is the whole detector.
+    const rig = bootCity('choose-on-the-boundary')
+    driveTo(rig, TICKS_PER_WEEK - 1)
+    expect(rig.s.header[H_WEEK], 'still week 0 going in').toBe(0)
+    expect(rig.s.header[H_OFFER_A], 'and the slots are empty').toBe(CARD_NONE)
+    // The offer for week 1 does not exist yet, so the client cannot have seen it
+    // — computed here the way a REPLAY would, from the seed word and the week.
+    const out = new Int32Array(2)
+    drawOfferPair(poolFor(rig.world), offerSeedFor(rig.s, 1), out)
+    expect(out[0], 'week 1 slot A is a real card, or the throw below is for the wrong reason').not.toBe(
+      CARD_NONE,
+    )
+    expect(() =>
+      step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(OFFER_SLOT_A, out[0] as number)),
+    ).toThrow(/believed slot 0 held card \d+.*this simulation offered 0.*replay/s)
+    // And the buffer is poisoned, which is what makes the Worker STOP rather
+    // than score: `step` wrote `H_EPOCH` in phase 1 and threw in phase 3.
+    expect(rig.s.header[H_EPOCH], 'the throw left the tick unfinished').toBe(TICKS_PER_WEEK)
+  })
+
+  it('resolves the OLD pair when a choice arrives WITH a later boundary, and burns the new weeks offer', () => {
+    // The second half of "phase 4 comes after phase 3", and the one that is a
+    // real gameplay path rather than a forgery: week 1's offer is still up at
+    // tick 8,999, the player taps, and the action lands on tick 9,000. Phase 3
+    // sees `H_OFFER_A` still holding WEEK 1's pair, the echo matches, and the
+    // card is paid — then `H_OFFER_WEEK` is 2, so phase 4 raises nothing and
+    // week 2's offer never happens.
+    //
+    // **Recorded as the measured behaviour, not endorsed as a design.** M1f Task
+    // 7 pauses the tick while an offer is pending, so the shell cannot cross a
+    // boundary with one unresolved and this path is unreachable from the UI.
+    // `sim` has no notion of pause and must still be total here.
+    const rig = bootCity('choose-across-a-boundary')
+    driveTo(rig, TICKS_PER_WEEK)
+    const week1 = [rig.s.header[H_OFFER_A] as number, rig.s.header[H_OFFER_B] as number]
+    driveTo(rig, TICKS_PER_WEEK * 2 - 1)
+    const tiles = rig.s.header[H_TILES] as number
+    step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(OFFER_SLOT_A, week1[0] as number))
+    expect(rig.s.header[H_WEEK]).toBe(2)
+    expect(rig.s.header[H_TILES], 'week 2s grant plus week 1s card').toBe(
+      tiles + WEEKLY_TILE_GRANT + cardTileGrant(week1[0] as number),
+    )
+    expect(rig.s.header[H_OFFER_WEEK], 'week 2 is resolved by week 1s choice').toBe(2)
+    expect(offerPending(rig.s)).toBe(false)
+    expect(
+      [rig.s.header[H_OFFER_A], rig.s.header[H_OFFER_B]],
+      'and week 2s pair was never raised over the top of week 1s',
+    ).toEqual(week1)
+  })
+
+  it('replays BYTE-IDENTICALLY through a snapshot and a restore into a COLD world', () => {
+    // **The M3 property, exercised on this task's own bytes.** A `choose-card`
+    // writes `H_TILES`, `H_INV_UPGRADES` and `H_OFFER_WEEK`; all three are inside
+    // the hashed buffer, and this is the test that says a verifier rebuilding
+    // `fields` and `scratch` from nothing reaches the same digest as the browser
+    // that produced the log. The log is scripted by tick, exactly as M3's would
+    // be, rather than applied by hand.
+    const CHOOSE_AT = TICKS_PER_WEEK + 3
+    const SNAP_AT = TICKS_PER_WEEK + 1
+    const END_AT = TICKS_PER_WEEK * 2 + 50
+
+    const hot = bootCity('choose-replay')
+    driveTo(hot, SNAP_AT)
+    const saved = snapshot(hot.s)
+    // The card the ORIGINAL client saw. A replay reads it out of the log; it does
+    // not recompute it, which is exactly why the echo can catch a divergence.
+    const logged = hot.s.header[H_OFFER_A] as number
+    const logFor = (tick: number): TickInputs => (tick === CHOOSE_AT ? chooseCard(OFFER_SLOT_A, logged) : NO_INPUT)
+    for (let t = SNAP_AT; t < END_AT; t++) step(hot.s, hot.world, hot.fields, hot.scratch, logFor(t + 1))
+    const expected = hashState(hot.s)
+    expect(hot.s.header[H_OFFER_WEEK], 'the logged choice resolved week 1').toBe(1)
+    expect(hot.s.header[H_WEEK], 'and the run carried on into week 2').toBe(2)
+
+    // A Worker cold-starts with no fields and no scratch and only the buffer.
+    const cold = bootCity('choose-replay-cold')
+    const coldState = restore(saved, cold.world)
+    for (let t = SNAP_AT; t < END_AT; t++) step(coldState, cold.world, cold.fields, cold.scratch, logFor(t + 1))
+    expect(hashState(coldState), 'the cold replay diverged from the hot run').toBe(expected)
+
+    // And a full re-run from tick 0 with the same log reaches it too, so the
+    // digest is a property of (seed, map, log) and not of the snapshot.
+    const fresh = bootCity('choose-replay')
+    for (let t = 0; t < END_AT; t++) step(fresh.s, fresh.world, fresh.fields, fresh.scratch, logFor(t + 1))
+    expect(hashState(fresh.s), 'a fresh run of the same log diverged').toBe(expected)
+  })
+
+  it('dispatches on the KIND: a choose-card is not fed to placeRoad', () => {
+    // **The mutant is `step`'s third arm calling `placeRoad(s, world, a, b)`.**
+    // On this 4x4 board `a = OFFER_SLOT_A = 0` and `b = CARD_ROAD_TILES = 1` are
+    // two ADJACENT cells, so the mis-dispatch lays a real road and spends real
+    // tiles rather than throwing — which is why it needs an assertion about
+    // `roads` and not only about `H_TILES`. Nothing else in this file looks at
+    // the road bits.
+    const rig = bootCity('choose-not-a-road')
+    driveTo(rig, TICKS_PER_WEEK)
+    const card = rig.s.header[H_OFFER_A] as number
+    step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(OFFER_SLOT_A, card))
+    for (let c = 0; c < CARDS_WORLD.cells; c++) {
+      expect(rig.s.roads[c], `cell ${c} was paved by a choose-card`).toBe(0)
+    }
+    expect(rig.s.header[H_OFFER_WEEK], 'and the card was actually taken').toBe(1)
   })
 })
