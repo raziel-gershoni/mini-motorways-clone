@@ -178,6 +178,29 @@ describe('nthSetBit and popCountCards', () => {
     expect(() => nthSetBit(0b0110, 2)).toThrow(/only 2 set bits/)
     expect(() => nthSetBit(0, 0)).toThrow(/only 0 set bits/)
   })
+
+  it('throws on a NEGATIVE k too, which is the only place seen === k and seen >= k differ', () => {
+    // **Added from a mutation result, and the enumeration is why it is here.**
+    // `seen === k` -> `seen >= k` scored 0 detectors over the whole 1,995-test
+    // suite. It is not equivalent, though: swept over all 256 masks and k in
+    // [-8, 12), the two disagree on **2,040 cases, every one of them at k < 0,
+    // and on ZERO cases at k >= 0**. `drawOfferPair` never produces a negative
+    // k and the exhaustive agreement test above only walks [0, popcount), so
+    // the difference sat entirely outside every fixture.
+    //
+    // It is worth closing rather than recording, because of what the mutant
+    // RETURNS: `nthSetBit(mask, -1)` under `seen >= k` hands back the first set
+    // bit — a perfectly plausible card id — where the contract is a throw. That
+    // is the catalogue's `Int32Array` pointer-id shape: an out-of-contract input
+    // must not be able to return a believable answer, however unreachable it
+    // looks from today's callers.
+    expect(() => nthSetBit(0b0110, -1)).toThrow(/asked for set bit -1/)
+    expect(() => nthSetBit(0xff, -3)).toThrow(/asked for set bit -3/)
+    // And a non-integer, for the same reason: `seen === 1.5` is never true, so
+    // the loop falls through to the throw, which is the right answer — pinned
+    // so a future `>=` rewrite cannot quietly return bit 1.
+    expect(() => nthSetBit(0b0110, 1.5)).toThrow(/asked for set bit 1.5/)
+  })
 })
 
 describe('canDrawOfferPair', () => {

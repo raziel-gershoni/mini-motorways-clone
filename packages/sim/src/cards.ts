@@ -145,6 +145,21 @@ export function nthSetBit(mask: number, k: number): number {
  * slot B from the pool with A's bit cleared, which is what makes the two distinct
  * **by construction** rather than by a retry loop that could spin.
  *
+ * **The `mixWord` between the two picks is a PROVABLY EQUIVALENT line, and it is
+ * labelled so nobody deletes it on the strength of its own survival.** Removing
+ * it scores 0 detectors over the whole suite, and unlike most 0-detector results
+ * that is not a coverage hole: slot A indexes by `word % n` and slot B by
+ * `word % (n - 1)`, `gcd(n, n - 1) = 1` for every `n`, so by the Chinese
+ * remainder theorem the two indices are independent and all `n(n - 1)` ordered
+ * pairs are reachable from a single word. Brute-forced for n = 2, 3, 4, 6, 8:
+ * 2/2, 6/6, 12/12, 30/30, 56/56 pairs. **No test can distinguish the two, and
+ * the axes were enumerated before that sentence was written** rather than after.
+ *
+ * It is kept because the equivalence is a property of "the second pool is
+ * exactly one card smaller", which a third slot or a weighted pool would end —
+ * and at that point the re-mix is load-bearing and its absence would be a real,
+ * silent bias. One line against a whole class of future defect.
+ *
  * **The `n < 2` throw is a programming-error guard and `runOffer` must never
  * reach it.** Call `canDrawOfferPair` — the same predicate — and degrade the
  * week instead. A throw inside `step` after `H_EPOCH` is written poisons the
