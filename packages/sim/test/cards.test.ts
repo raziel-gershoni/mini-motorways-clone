@@ -362,6 +362,23 @@ describe('canDrawOfferPair', () => {
   })
 })
 
+/**
+ * The six pairs `drawOfferPair` returns for seeds 0..5 on the three-card pool
+ * `{CARD_ROAD_TILES, CARD_TUNNEL, CARD_JUNCTION_UPGRADE}`. Captured from the
+ * real function at M1f Task 5 and pinned because the `mixWord` between the two
+ * picks is invisible on every OTHER fixture in this repo — see the test that
+ * reads it.
+ */
+const THREE_CARD_SEEDS: readonly number[] = [0, 1, 16, 17, 18, 19]
+const PAIRS_ON_A_THREE_CARD_POOL: readonly [number, number][] = [
+  [1, 3],
+  [3, 7],
+  [3, 7],
+  [7, 1],
+  [1, 7],
+  [3, 7],
+]
+
 describe('drawOfferPair', () => {
   const out = new Int32Array(2)
 
@@ -399,6 +416,52 @@ describe('drawOfferPair', () => {
       seen.add(out[1] as number)
     }
     expect(seen.size, 'the rejection path reaches every card, not just the low bits').toBe(4)
+  })
+
+  it('pins one (pool, seed) -> PAIR on a THREE-card pool, which is the smallest fixture the re-mix moves', () => {
+    // **The line this exists for is the `mixWord` between the two picks, and the
+    // comment above it claimed until M1f Task 5 that "no test CAN distinguish
+    // the two". That was false and this is the test that ends it.** Measured
+    // over 20,000 seeds, comparing the pair with the re-mix against the pair
+    // without:
+    //
+    //     n = 2 (the shipped pool)        0 / 20,000 seeds differ
+    //     n = 3                       9,954 / 20,000 differ
+    //     n = 4                      13,320 / 20,000 differ
+    //     n = 6                      15,896 / 20,000 differ
+    //
+    // At n = 2 slot B has one candidate and `v % 1` is 0 whatever the word, so
+    // the second pick cannot see its input — which is why every other test in
+    // this file, every golden, and `poolFor` itself are all blind to the line.
+    // THREE cards is the smallest pool that is not.
+    //
+    // Values captured from the real function, and the seeds are chosen so the
+    // pin is not vacuous: each of these differs from the no-re-mix answer, which
+    // the sibling assertion below states as a property rather than a hope.
+    const pool = (1 << CARD_ROAD_TILES) | (1 << CARD_TUNNEL) | (1 << CARD_JUNCTION_UPGRADE)
+    expect(popCountCards(pool), 'three cards, or this pins the wrong thing').toBe(3)
+    const pairs: [number, number][] = []
+    for (const seed of THREE_CARD_SEEDS) {
+      drawOfferPair(pool, seed, out)
+      pairs.push([out[0] as number, out[1] as number])
+    }
+    expect(pairs).toEqual(PAIRS_ON_A_THREE_CARD_POOL)
+    // **Vacuity, and it is the whole point of the fixture: the SEEDS are chosen,
+    // not the first six integers.** Seeds 0..15 on this pool all happen to give
+    // the same answer with and without the re-mix, so a pin over 0..5 would sit
+    // in exactly the blind spot it exists to close — measured, it scored `moved`
+    // = 0 on the first attempt. 16, 17 and 18 are the first three that move.
+    // Computed here from the same primitives rather than hard-coded, so it stays
+    // honest if `mixWord` ever changes.
+    let moved = 0
+    for (let k = 0; k < THREE_CARD_SEEDS.length; k++) {
+      const seed = THREE_CARD_SEEDS[k] as number
+      const n = popCountCards(pool)
+      const a = pickFromPool(pool, n, seed)
+      const withoutRemix = pickFromPool(pool & ~(1 << a), n - 1, seed)
+      if (withoutRemix !== (pairs[k] as [number, number])[1]) moved++
+    }
+    expect(moved, 'none of the chosen seeds can see the re-mix, so this pin is inert').toBe(3)
   })
 
   it('is deterministic: the same seed and pool give the same pair', () => {

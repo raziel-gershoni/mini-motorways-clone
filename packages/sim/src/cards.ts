@@ -249,26 +249,58 @@ export function nthSetBit(mask: number, k: number): number {
  * slot B from the pool with A's bit cleared, which is what makes the two distinct
  * **by construction** rather than by a retry loop that could spin.
  *
- * **The `mixWord` between the two picks is a PROVABLY EQUIVALENT line, and it is
- * labelled so nobody deletes it on the strength of its own survival.** Removing
- * it scores 0 detectors over the whole suite, and unlike most 0-detector results
- * that is not a coverage hole: slot A indexes by `word % n` and slot B by
- * `word % (n - 1)`, `gcd(n, n - 1) = 1` for every `n`, so by the Chinese
- * remainder theorem the two indices are independent and all `n(n - 1)` ordered
- * pairs are reachable from a single word. Brute-forced for n = 2, 3, 4, 6, 8:
- * 2/2, 6/6, 12/12, 30/30, 56/56 pairs. **No test can distinguish the two, and
- * the axes were enumerated before that sentence was written** rather than after.
+ * ---------------------------------------------------------------------------
+ * **THE `mixWord` BETWEEN THE TWO PICKS. THIS PARAGRAPH USED TO CALL IT
+ * "PROVABLY EQUIVALENT" AND THAT WAS FALSE — CORRECTED AT M1f TASK 5, BY
+ * MEASUREMENT.**
+ * ---------------------------------------------------------------------------
  *
- * It is kept because the equivalence is a property of "the second pool is
- * exactly one card smaller", which a third slot or a weighted pool would end —
- * and at that point the re-mix is load-bearing and its absence would be a real,
- * silent bias. One line against a whole class of future defect.
+ * What it said: *"Removing it scores 0 detectors over the whole suite, and
+ * unlike most 0-detector results that is not a coverage hole ... No test CAN
+ * distinguish the two."* Two of those three clauses were right and the load-
+ * bearing one was not.
+ *
+ * **The line is pointwise equivalent on a TWO-card pool and on nothing else.**
+ * Measured over 20,000 seeds, comparing the pair with the re-mix against the
+ * pair without it:
+ *
+ * ```
+ *   n = 2 (the shipped pool)        0 / 20,000 seeds differ
+ *   n = 3                       9,954 / 20,000 differ
+ *   n = 4                      13,320 / 20,000 differ
+ *   n = 6                      15,896 / 20,000 differ
+ * ```
+ *
+ * At `n = 2` slot B has exactly one candidate — `v % 1` is 0 whatever the word —
+ * so the second pick cannot see its input at all. That is the whole of the
+ * equivalence, and it is a property of the POOL SIZE rather than of the
+ * arithmetic. The Chinese-remainder argument the old paragraph gave is still
+ * true and still worth keeping, but it is a statement about REACHABILITY — all
+ * `n(n - 1)` ordered pairs are reachable from a single word, brute-forced at
+ * n = 2, 3, 4, 6, 8: 2/2, 6/6, 12/12, 30/30, 56/56 — and reachability of the
+ * same SET is not identity of the MAPPING. Reading one as the other is how
+ * "provably equivalent" got written.
+ *
+ * **What that changes for a reader of a moved golden.** The whole-buffer goldens
+ * now fold `H_OFFER_A`/`H_OFFER_B` (M1f Task 5), so they DO see this function's
+ * output — but only through `poolFor`, which is two cards, so deleting the
+ * re-mix still moves no golden. `cards.test.ts` pins one `(pool, seed) -> pair`
+ * on a THREE-card pool instead, which is the smallest fixture that can see the
+ * line at all. Do not diagnose a moved golden as this line: on the shipped pool
+ * it cannot be.
+ *
+ * It is kept because the equivalence expires the moment the pool grows past two
+ * — which `CARD_IMPLEMENTED_MASK` is scheduled to do as M1g implements more of
+ * §5.10's table — and at that point its absence is a real, silent bias in what
+ * the player is offered. One line against a whole class of future defect.
  *
  * **The `n < 2` throw is a programming-error guard and `runOffer` must never
- * reach it.** Call `canDrawOfferPair` — the same predicate — and degrade the
- * week instead. A throw inside `step` after `H_EPOCH` is written poisons the
- * buffer permanently, which is what the previous design did on a 4x4 golden
- * fixture at tick 4,500 of a 13,499-tick run.
+ * reach it.** It does not call this function directly at all: `tryDrawOfferPair`
+ * above welds `canDrawOfferPair` to this call so there is no second threshold to
+ * get wrong, and `cards.test.ts` scans this module to keep it that way. A throw
+ * inside `step` after `H_EPOCH` is written poisons the buffer permanently, which
+ * is what the previous design did on a 4x4 golden fixture at tick 4,500 of a
+ * 13,499-tick run.
  */
 export function drawOfferPair(pool: number, seed: number, out: Int32Array): void {
   const n = popCountCards(pool)
