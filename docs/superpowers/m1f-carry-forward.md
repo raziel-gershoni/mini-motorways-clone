@@ -61,6 +61,47 @@ the only reason the disagreements below read as findings. What changed:
 
 ---
 
+## 0. THE MILESTONE'S ACCEPTANCE CRITERION, AND WHO OWNS EACH HALF
+
+**Written at M1f Task 8, because at task seven of twelve nobody owned it.** Seven
+tasks had shipped, six honestly reporting *"a human sees nothing"* and the
+seventh reporting a board that stops dead at a week boundary with nothing drawn
+on it. M1d shipped correct, tested, deployed and **invisible**, and the user
+noticed before we did; the review of M1f Tasks 5 and 6 named the shape while it
+was still recoverable — *"six invisible tasks with the acceptance criterion still
+unowned at task seven of twelve is how M1d happened"*.
+
+The criterion is two sentences, three tasks apart, and each has an owner.
+
+**A — THE CHOICE. Owner: M1f Task 8. Satisfied.**
+
+> On the board a plain link opens, with nobody told where to look: at **2 min
+> 21 s** — tick 4,500, `(4500 − 258) / 30` = 141.4 s — the board stops and dims,
+> and **CHOOSE A CARD** appears over two large cards, **ROAD TILES · 30 TILES**
+> and **JUNCTION UPGRADE · 20 TILES · x2**. The player taps one. The modal goes,
+> the cars move again, and the HUD's tile counter is **20 or 30 higher**. The
+> ERASE ROADS button is off the screen while the modal is up and back afterwards.
+> Under **SEE THE BOARD** the modal disappears and the frozen city is visible at
+> full contrast with **TAP TO RETURN** over it; the clock does not advance.
+
+**B — THE JAM, AND WHETHER THE CHOICE MATTERED. Owner: M1f Task 10.**
+
+> At **8 min 56 s** cars stack at specific corners. The player taps the inventory
+> chip and then a jammed junction; a marker appears and cars cross that corner
+> the way they did before minute seven. A good corner makes the run measurably
+> longer; a corner that was not the constraint changes almost nothing.
+
+**Both are verified on hardware by M1f Task 12's device session**, which owns the
+half no test can hold: that a person who was told none of this does it anyway.
+
+**A does NOT claim the 30-vs-20 choice is a trade-off, and must not be quoted as
+if it did.** Measured: the greedy arm's tile slack goes **2.7× → 4.3× for
+identical roads**, `unaffordable` is 0 across the whole 21,783-tick run, so
+**the card's tiles are free money and either card costs the player nothing** on
+the board that ships. A is a claim that the loop is visible, reachable and
+completable. Whether it is a *dilemma* is `CARD_GRANT_ITEM`'s "delete the weekly
+grant" lever, handed to M1g with the number and not pulled here.
+
 ## 1. Everything waiting on the §5.10 card modal
 
 M1e shipped the **load-bearing half** of §5.10 — `WEEKLY_TILE_GRANT`, 30 tiles a
@@ -136,24 +177,44 @@ dispatch-time read of a shared, non-commutative resource*. Removal is one
 instance; a rule letting one colour's dispatch refuse another's is another and
 needs no removal to arrive.
 
-## 4. The erase control never unsubscribes its click handler
+## 4. The erase control never unsubscribes its click handler — HALF CLOSED at M1f Task 8
 
 `retire()` (M1e Task 9) hides the control on game over and refuses every later
 render, and `main.ts` calls it on both the edge and the already-terminal boot
 path. What it does **not** do is unsubscribe: `offClick` is declared on the
 `MainButton` shape (`telegram.ts:76`) and called nowhere in `packages/`, and the
-DOM fallback's `click` listener is never removed.
+DOM fallback's `click` listener is never removed. **That half is unchanged and
+still open**, and still unreachable on every client this ships to — a hidden
+`MainButton` delivers no clicks and `display: none` takes the pill out of the hit
+test.
 
-Unreachable on every client this ships to — a hidden `MainButton` delivers no
-clicks and `display: none` takes the pill out of the hit test — so the
-consequence is bounded and cosmetic. The specific wrongness worth fixing:
-`press()` calls `host.toggleEraseMode()` **before** `render()`'s terminal guard
-runs, so a press that did somehow arrive would flip the player's erase mode with
-no label to show it.
+**The half worth fixing is fixed.** `press()` called `host.toggleEraseMode()`
+before `render()`'s terminal guard ran, so a press that did arrive flipped the
+player's erase mode with **no label anywhere to show it** — the "an erase mode
+you cannot see you are in" hazard the whole file exists to prevent. `press` now
+carries its own `retired || suspended` guard.
 
-The fix is a choice, not a line: either hold the handler reference and widen
-`mainButton()`'s shape re-check to cover `offClick`, or move the `retired` guard
-into `press`. Recorded at the site in `eraseControl.ts` as well as here.
+**It was ADDED to `press`, not MOVED out of `render`, and the difference is a
+deleted guard.** `render()` is also called from `sync()`, so moving its check
+down would have removed the terminal guard from a live path — which is how a
+retired control gets re-shown. The M1f Task 8 brief's own step said "move" where
+it meant "add".
+
+**The other fix was refused and this records which.** Unsubscribing properly
+means holding the handler reference and widening `mainButton()`'s shape re-check
+to cover `offClick` — a change to the Telegram surface detection, which is the
+one part of that file that has never run on a phone (`grep -rn "MainButton"
+spike/src/` returns nothing). Two lines of guard against a shape change on
+untested platform code, for a consequence that is bounded and cosmetic.
+
+**M1f Task 8 also gave the control `suspend()`/`resume()`**, for §5.10's modal:
+the scrim is canvas paint and this control is not, so without it the largest,
+brightest thing on a screen asking the player to choose a card is a button
+reading ERASE ROADS. Same defect as `retire`'s, different door. It is driven off
+`frame.offerPending` in `main.ts`'s draw closure rather than off `onOfferRaised`,
+because that callback fires only on ticks and could raise the suspension without
+ever lifting it. `retired` outranks `suspended` in `resume`, so a city that dies
+with a modal up does not get its erase button back.
 
 ## 5. `MAX_BLOCKED_TICKS` is unreachable on the arms M1e drove — NOT on the board
 

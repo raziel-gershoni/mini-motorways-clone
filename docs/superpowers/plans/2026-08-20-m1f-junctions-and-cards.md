@@ -348,6 +348,56 @@ a good placement and a bad one.*
 
 ---
 
+### THE ACCEPTANCE CRITERION, SPLIT IN TWO AND EACH HALF GIVEN AN OWNER — written at Task 8
+
+The sentence above is the milestone's, and at task seven of twelve **nobody owned it**. Seven tasks
+had shipped, six of them honestly reporting *"a human sees nothing"* and the seventh reporting a
+board that stops dead at a week boundary with nothing drawn on it. The review of Tasks 5 and 6 put
+the danger exactly right: *"Six invisible tasks is fine; six invisible tasks with the acceptance
+criterion still unowned at task seven of twelve is how M1d happened."* M1d shipped correct, tested,
+deployed and invisible, and the user noticed before we did.
+
+The sentence above cannot be owned by one task, because its two halves are three tasks apart. So it
+is split, each half is a criterion in its own right, and each has an owner. **A milestone that
+satisfies A and not B is diminished; a milestone that satisfies neither is M1d again.**
+
+**A — THE CHOICE. Owner: Task 8. Satisfied at commit `9054b18`.**
+
+> *On the board a plain link opens, with nobody told where to look: at **2 min 21 s** — tick 4,500,
+> `(TICKS_PER_WEEK − WARM_START_TICKS) / TICKS_PER_SECOND` = `(4500 − 258) / 30` = 141.4 s — the
+> board stops and dims, and one line reading **CHOOSE A CARD** appears over two large cards:
+> **ROAD TILES · 30 TILES** and **JUNCTION UPGRADE · 20 TILES · x2**. The player taps one. The modal
+> goes, the cars move again, and the tile counter in the HUD is **20 or 30 higher** than it was. The
+> ERASE ROADS button is off the screen for as long as the modal is up and back afterwards. Under
+> **SEE THE BOARD** the modal disappears and the frozen city is visible at full contrast with
+> **TAP TO RETURN** over it; the clock does not advance while it is held.*
+>
+> Driven end to end on the production boot in `integration.test.ts` ›
+> *"takes a card from a TAP at the drawn rect, and the board runs on with the tiles"* and
+> *"gives the modal the whole screen: the erase control leaves and comes back"*.
+> **Verified on hardware by Task 12's device session, which owns the half no test can hold: that a
+> person who was not told any of this does it anyway.**
+
+**B — THE JAM, AND WHETHER THE CHOICE MATTERED. Owner: Task 10, verified by Task 12.**
+
+> *At **8 min 56 s** cars begin to stack at a handful of specific corners. The player taps the
+> inventory chip and then a jammed junction; a marker appears on that cell and, from that tick, cars
+> cross that corner the way they did before minute seven. A good corner makes the run measurably
+> longer; a corner that was not the constraint changes almost nothing.*
+
+**Task 8's own honest caveat, and it must not be papered over: criterion A does NOT require the
+30-vs-20 choice to be a trade-off, because measured, it is not one.** Task 7 measured the greedy
+arm's tile slack going **2.7× → 4.3× for identical roads** — `armGreedyActions` reads the budget in
+exactly one place and `unaffordable` is **0** across the whole 21,783-tick run — so on the board that
+ships today **the card's tiles are free money and taking either card costs the player nothing.** A
+criterion phrased as *"the player weighs 30 tiles against 2 upgrades"* would be **false**, and Task
+12 would find that on a device. What A asserts is that the loop is **visible, reachable and
+completable**: the game stops, says what it is offering, takes an answer, and visibly pays for it.
+Whether the answer is a *dilemma* is `CARD_GRANT_ITEM`'s "delete the automatic weekly grant" lever,
+which M1f hands to M1g **with the number attached** and does not pull.
+
+---
+
 ## Global Constraints
 
 Every task's requirements implicitly include this section.
@@ -4757,8 +4807,14 @@ describe('phase 12: the offer modal', () => {
     expect(lastText).toBeGreaterThan(lastScrim)
   })
 
-  it('has one label per card id, so a seventh card fails here rather than drawing undefined', () => {
-    expect(CARD_LABEL_COUNT).toBe(7)   // CARD_COUNT, pinned in game/test/frame.test.ts
+  it('has one label per card id, so an eighth card fails here rather than drawing undefined', () => {
+    // **CORRECTED AT EXECUTION: this read `toBe(7)` and `CARD_COUNT` is 8.**
+    // `cards.ts` declares ids 0-7 and `CARD_COUNT` is "one past the highest id",
+    // and the label array in Step 2 above has eight rows — so the literal here
+    // and the array it was written beside disagreed, and the pin in
+    // `frame.test.ts` (`CARD_LABEL_COUNT === CARD_COUNT`) would have failed
+    // against it. See Task 8's report.
+    expect(CARD_LABEL_COUNT).toBe(8)   // CARD_COUNT, pinned in game/test/frame.test.ts
   })
 })
 ```
