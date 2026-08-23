@@ -663,6 +663,16 @@ describe('suspend(): §5.10\'s modal cannot dim what is not on the canvas either
     expect(mb.calls.length, 'a retired control came back').toBe(after)
     expect(control.retired).toBe(true)
     expect(mb.calls.at(-1)).toBe('hide')
+    // **And it still REPORTS itself off the screen**, which is the half that
+    // `render`'s own guard cannot carry. Measured: with only `!suspended` in
+    // `resume`, the surface stays hidden — `render` refuses on `retired` — and
+    // the flag flips to false, so the control's public state says it is back
+    // while the button is not. That mutant scored 0 detectors until this line
+    // existed. The two guards are not one guard twice: `render`'s protects the
+    // SURFACE and this one protects the FLAG, and the day `render`'s
+    // `suspended` check moves or goes, this one is what stops a dead run's
+    // erase button reappearing.
+    expect(control.suspended, 'a retired control reported itself back on screen').toBe(true)
   })
 
   it('survives a surface with no hide at all, exactly as retire does', () => {
