@@ -371,6 +371,14 @@ describe('wired to the real PointerInput', () => {
       // M1e Task 9. This file is about the erase MODE, which is unreachable
       // once the run ends, so the run never ends here.
       gameOver: () => false,
+      // M1f Task 8. Same reasoning as `gameOver`: this file is about the erase
+      // MODE, and the modal is a state in which the control is off screen
+      // entirely (`suspend`), so no offer is ever pending here. The suspension
+      // itself is exercised directly, further down, rather than through a
+      // fabricated modal.
+      offerPending: () => false,
+      offerA: () => 0,
+      offerB: () => 0,
       restart: () => {
         throw new Error('the erase-control rig has no shutdown; this call means the guard inverted')
       },
@@ -557,5 +565,169 @@ describe('retire(): the shutdown screen cannot dim what is not on the canvas', (
       control.retire()
     }).not.toThrow()
     expect(control.retired).toBe(true)
+  })
+})
+
+describe('suspend(): §5.10\'s modal cannot dim what is not on the canvas either', () => {
+  /**
+   * **The same defect `retire()` exists for, arrived at through a different
+   * door — M1f Task 8.** The offer modal scrims the whole canvas and asks the
+   * player to choose a card. This control is not on the canvas: on Telegram it
+   * is the native full-width `MainButton`, outside the webview's content area,
+   * and the fallback is a `position: fixed` pill above it. Left alone, the
+   * largest and brightest thing on that screen is a button reading ERASE ROADS.
+   *
+   * Unlike `retire`, this one comes back — a week boundary is not a shutdown.
+   */
+  it('hides the MainButton while a modal owns the screen, and puts it back after', () => {
+    const mb = installTelegram('8.0')
+    const host = fakeHost()
+    const control = createEraseControl({ host, createFallback: NO_FALLBACK })
+    expect(mb.calls, 'vacuity: it was shown at boot').toContain('show')
+    expect(control.suspended).toBe(false)
+
+    control.suspend()
+    expect(control.suspended).toBe(true)
+    expect(mb.calls.at(-1), 'the last thing the button was told was to go away').toBe('hide')
+
+    // While suspended it stays gone, whatever else happens — `sync()` is what
+    // `main.ts` calls after restoring a mode, and it must not re-show a control
+    // a modal is standing in front of.
+    const after = mb.calls.length
+    control.sync()
+    expect(mb.calls.length, 'something re-rendered a suspended control').toBe(after)
+
+    control.resume()
+    expect(control.suspended).toBe(false)
+    expect(mb.calls.at(-1), 'and it is shown again').toBe('show')
+    expect(control.label, 'in the state it was in before the modal').toBe(MAIN_BUTTON_LABEL_OFF)
+  })
+
+  it('puts the control back in the state it was in, not in the default one', () => {
+    // The failure this catches is `resume()` rendering `false` rather than the
+    // host's mode: a player who was in erase mode when the week ticked over
+    // would come back to a button reading ERASE ROADS while the next drag
+    // deleted — which is precisely "an erase mode you cannot see you are in".
+    const mb = installTelegram('8.0')
+    const host = fakeHost()
+    const control = createEraseControl({ host, createFallback: NO_FALLBACK })
+    control.press()
+    expect(control.label).toBe(MAIN_BUTTON_LABEL_ON)
+    control.suspend()
+    control.resume()
+    expect(control.label).toBe(MAIN_BUTTON_LABEL_ON)
+    expect(control.erase).toBe(true)
+    expect(mb.calls.at(-1)).toBe('show')
+    expect(mb.calls.filter((c) => c === `setText:${MAIN_BUTTON_LABEL_ON}`).length).toBe(2)
+  })
+
+  it('takes the DOM fallback out of layout too, and brings it back', () => {
+    const element = fallbackRecorder()
+    const control = createEraseControl({ host: fakeHost(), createFallback: () => element })
+    expect(control.surface).toBe(EraseControlSurface.DOM_NO_TELEGRAM)
+    const styleOf = (): string | undefined =>
+      element.calls.filter((c) => c.startsWith('style=')).at(-1)?.slice('style='.length)
+    expect(styleOf(), 'vacuity: it was styled at boot').toBeTruthy()
+
+    control.suspend()
+    expect(styleOf()).toBe('display:none')
+    control.resume()
+    expect(styleOf()).not.toBe('display:none')
+    expect(element.textContent).toBe(FALLBACK_LABEL_OFF)
+  })
+
+  it('is idempotent in both directions, and resuming what was never suspended does nothing', () => {
+    const mb = installTelegram('8.0')
+    const control = createEraseControl({ host: fakeHost(), createFallback: NO_FALLBACK })
+    const atBoot = mb.calls.length
+    control.resume()
+    expect(mb.calls.length, 'resume on a live control is a no-op').toBe(atBoot)
+    control.suspend()
+    control.suspend()
+    expect(mb.calls.filter((c) => c === 'hide').length, 'hidden once, not twice').toBe(1)
+    control.resume()
+    control.resume()
+    expect(mb.calls.filter((c) => c === 'show').length, 'shown at boot and once more').toBe(2)
+  })
+
+  it('does NOT come back after a retire, because the run does not come back either', () => {
+    // A city that dies with a modal up: `onGameOver` retires, and the frame
+    // that reports the offer gone must not undo it. Ordering the two checks in
+    // `resume` the other way round would do exactly that.
+    const mb = installTelegram('8.0')
+    const control = createEraseControl({ host: fakeHost(), createFallback: NO_FALLBACK })
+    control.suspend()
+    control.retire()
+    const after = mb.calls.length
+    control.resume()
+    expect(mb.calls.length, 'a retired control came back').toBe(after)
+    expect(control.retired).toBe(true)
+    expect(mb.calls.at(-1)).toBe('hide')
+  })
+
+  it('survives a surface with no hide at all, exactly as retire does', () => {
+    const mb = installTelegram('8.0', false)
+    const control = createEraseControl({ host: fakeHost(), createFallback: NO_FALLBACK })
+    expect(() => {
+      control.suspend()
+      control.resume()
+    }).not.toThrow()
+    void mb
+  })
+})
+
+describe('press() refuses on a control that is not on the screen', () => {
+  /**
+   * **Carry-forward §4, closed — M1f Task 8.** `press()` used to call
+   * `host.toggleEraseMode()` BEFORE `render()`'s terminal guard ran, so a press
+   * arriving on a retired control flipped the player's erase mode with **no
+   * label anywhere to show it** — the "an erase mode you cannot see you are in"
+   * hazard this file exists to prevent, in its purest form.
+   *
+   * It is unreachable on every client this ships to (a hidden `MainButton`
+   * delivers no clicks; `display: none` takes the pill out of the hit test), and
+   * `press` is public, so `main.ts` binding a keyboard shortcut to it would make
+   * it reachable tomorrow with no other change.
+   *
+   * The guard was **added** to `press` rather than moved out of `render`:
+   * `render()` is also called from `sync()`, so moving it would delete the
+   * terminal guard from a live path.
+   */
+  it('leaves the MODE alone on a retired control, not merely the label', () => {
+    // The pre-existing retire test asserts nothing re-rendered. That is
+    // satisfied by the defect: the mode flips and the render is refused, which
+    // is the worst of the three possible outcomes and the only one no assertion
+    // could see.
+    const mb = installTelegram('8.0')
+    const host = fakeHost()
+    const control = createEraseControl({ host, createFallback: NO_FALLBACK })
+    control.retire()
+    expect(control.press(), 'press reports the mode it left alone').toBe(false)
+    expect(host.eraseMode, 'the mode flipped behind a control that cannot show it').toBe(false)
+    // ...and through the surface's own handler, which is the path that would
+    // actually deliver it.
+    mb.press()
+    expect(host.eraseMode).toBe(false)
+  })
+
+  it('leaves the MODE alone on a suspended control too', () => {
+    const host = fakeHost()
+    const control = createEraseControl({ host, createFallback: NO_FALLBACK })
+    control.suspend()
+    expect(control.press()).toBe(false)
+    expect(host.eraseMode).toBe(false)
+    // ...and it works again the moment the modal closes, so the guard is a
+    // suspension and not a second retire.
+    control.resume()
+    expect(control.press()).toBe(true)
+    expect(host.eraseMode).toBe(true)
+  })
+
+  it('still presses normally on a live control — the guard is not always on', () => {
+    const host = fakeHost()
+    const control = createEraseControl({ host, createFallback: NO_FALLBACK })
+    expect(control.press()).toBe(true)
+    expect(host.eraseMode).toBe(true)
+    expect(control.label).toBe(MAIN_BUTTON_LABEL_ON)
   })
 })

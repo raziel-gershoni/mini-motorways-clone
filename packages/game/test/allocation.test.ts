@@ -21,6 +21,8 @@ import {
   createFlowFields,
   createFieldInputRanges,
   isGameOver,
+  offerPending,
+  offerSlot,
   snapshot,
   placeHouse,
   placeDestination,
@@ -38,6 +40,8 @@ import {
   H_DEST_SPAWN_TIMER,
   H_PINS_DROPPED,
   H_TICK,
+  OFFER_SLOT_A,
+  OFFER_SLOT_B,
   type GameState,
   type Scratch,
   type TickAction,
@@ -577,6 +581,14 @@ function buildRig(draw: (frame: RenderFrame) => void): Rig {
             'budgets below would be measured on a stopped board. See TICKS_PER_WEEK against the frame count.',
         )
       },
+      // **A real read of a real flag, not a `false` literal** — M1f Task 8. The
+      // pointer below is the one this rig drives, and `buildFrame` folds this
+      // into `frame.offerPeek` on every frame, so a `() => false` here would
+      // profile a draw path the production one never takes. The rig never taps
+      // the peek control (the offer branch is unreachable at these tick counts,
+      // per `onOfferRaised` above), so it reads `false` on every frame — but it
+      // reads it from the object that would say otherwise.
+      peeking: () => pointer.peeking,
     }),
     queue,
   )
@@ -600,6 +612,17 @@ function buildRig(draw: (frame: RenderFrame) => void): Rig {
     restart: () => {
       throw new Error('the allocation rig reached a shutdown tap — it is no longer measuring a live board')
     },
+    // §5.10's offer, read off the SAME state the driver steps — M1f Task 8, and
+    // wired through `sim`'s own guards exactly as `main.ts` does rather than
+    // stubbed to `false`. The rig never reaches a week boundary (see
+    // `onOfferRaised`'s throw above), so the modal branch in `down` is never
+    // entered and every profiled tap still exercises the board and HUD paths.
+    // Stubbing these would have made that a property of the STUB rather than of
+    // the tick count, which is the difference between a rig that measures the
+    // production path and one that measures a rig.
+    offerPending: () => offerPending(state),
+    offerA: () => offerSlot(state, OFFER_SLOT_A),
+    offerB: () => offerSlot(state, OFFER_SLOT_B),
   })
   // Precomputed OUTSIDE the profiled window: `hudRects` writes into a
   // caller-owned object, but building one per frame would charge this file's own

@@ -491,7 +491,7 @@ describe('the frame path actually draws the smoothed position', () => {
     state.carProgress[0] = FULL_SPEED_UNITS
     snapshotCurr(snap, state, world, 1)
 
-    const frame = buildFrame(builder, state, world, camera, 1, false)
+    const frame = buildFrame(builder, state, world, camera, 1, false, false)
     expect(frame.carCount).toBe(1)
     const drawn = drawnAt(snap, 0, 1)
     const exact = exactAt(snap, 0, 1)
@@ -545,6 +545,10 @@ describe('the frame path actually draws the smoothed position', () => {
         onOfferRaised: (): void => {
           throw new Error('the smoothing rig stepped the sim — it only drives beforeStep and afterDrain')
         },
+        // This rig never renders either, so the fold this feeds is unreachable
+        // from here. Required by the type, and `false` is the honest value: no
+        // pointer exists in this fixture to have pressed peek.
+        peeking: (): boolean => false,
       })
       driver.beforeStep()
       // The sim moves one tick's worth; the DRAIN is declared as `ticks`.

@@ -3665,22 +3665,38 @@ describe('phase 12: the offer modal', () => {
     expect(textsOf(peeking), 'and the HUD is still readable').toContain(scoreLine(plain))
   })
 
-  it('draws the modal ABOVE the shutdown screen when both are somehow true', () => {
-    // Unreachable in production — `step` freezes past the failure, so no
-    // boundary can be crossed on a dead board and no offer can be raised behind
-    // a shutdown screen. Drawn in a defined order anyway, because a scrim over
-    // a modal over a scrim is the one composition nobody can debug from a
-    // screenshot.
+  it('is not drawn at all on a DEAD board, because the tap there restarts the run', () => {
+    // **A reachable state, and the first draft of this file said it was not.**
+    // The argument was that `step` freezes past the failure so no boundary can
+    // be crossed on a dead board. True, and pointing the wrong way: the
+    // boundary is crossed BEFORE the death with the offer unresolved, and then
+    // the death freezes `offerPending` true forever, because `H_OFFER_WEEK` can
+    // never catch up on a state that does not advance.
+    // `game/test/drawAllocation.test.ts`'s already-dead rig is exactly that
+    // board, and it is what caught this — as two scrims a frame.
+    //
+    // The shutdown wins because `game/pointer.ts` puts its game-over branch
+    // ABOVE its modal branch: a tap on that screen restarts the run, so a modal
+    // over it would be asking a question the next tap does not answer. Draw
+    // order and tap order have to agree.
     const log = drawWith(offerFrame({ gameOver: true }))
-    const styles = log.map((c) => (c.op === 'fillRect' ? c.fillStyle : undefined))
-    const texts = log.map((c) => (c.op === 'fillText' ? c.text : undefined))
-    expect(styles.lastIndexOf(PALETTE.scrim)).toBeGreaterThan(-1)
-    expect(texts.lastIndexOf('ROAD TILES')).toBeGreaterThan(styles.lastIndexOf(PALETTE.scrim))
-    // Non-vacuous: BOTH screens really drew. Two scrims, and the shutdown's own
-    // line is in the log below the modal's.
-    expect(fillsIn(log, PALETTE.scrim).length, 'both scrims').toBe(2)
-    expect(texts).toContain(RESTART_TEXT)
-    expect(texts.indexOf(RESTART_TEXT)).toBeLessThan(texts.lastIndexOf('ROAD TILES'))
+    const texts = textsOf(log)
+    expect(fillsIn(log, PALETTE.scrim).length, 'one scrim, the shutdown’s').toBe(1)
+    expect(fillsIn(log, PALETTE.cardFace), 'and no card').toEqual([])
+    expect(texts).not.toContain('ROAD TILES')
+    expect(texts).not.toContain(OFFER_TITLE_TEXT)
+    expect(texts).not.toContain(PEEK_TEXT)
+    // Non-vacuous on both halves: the shutdown really drew, and the same frame
+    // without `gameOver` really does draw the modal.
+    expect(texts, 'the screen the player actually gets').toContain(RESTART_TEXT)
+    expect(textsOf(drawWith(offerFrame({ gameOver: false })))).toContain('ROAD TILES')
+  })
+
+  it('is not drawn while peeking on a dead board either, so peek cannot outlive the run', () => {
+    const log = drawWith(offerFrame({ gameOver: true, offerPeek: true }))
+    expect(textsOf(log)).not.toContain(PEEK_RETURN_TEXT)
+    expect(fillsIn(log, PALETTE.cardAccent)).toEqual([])
+    expect(textsOf(log)).toContain(RESTART_TEXT)
   })
 
   it('has one label per card id, so an eighth card fails here rather than drawing undefined', () => {

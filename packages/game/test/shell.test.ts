@@ -554,6 +554,11 @@ describe('the five matte fills tile the backing store the shell actually created
       offerPending: false,
       offerA: 0,
       offerB: 0,
+      offerGrantA: 0,
+      offerGrantB: 0,
+      offerItemsA: 0,
+      offerItemsB: 0,
+      offerPeek: false,
     }
   }
 

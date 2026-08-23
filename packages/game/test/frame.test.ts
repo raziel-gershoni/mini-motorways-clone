@@ -36,7 +36,13 @@ import {
   destMetaColour,
   destMetaKind,
   destMetaOrientation,
+  CARD_COUNT,
+  CARD_JUNCTION_UPGRADE,
   CARD_NONE,
+  CARD_ROAD_TILES,
+  CARD_TRAFFIC_LIGHTS,
+  cardItemGrant,
+  cardTileGrant,
   DEST_KIND_CIRCLE,
   DEST_KIND_SQUARE,
   ORIENTATION_E,
@@ -64,7 +70,14 @@ import {
   type TickAction,
   type WorldData,
 } from '@laneways/sim'
-import { fitCamera, TerrainClass, type Camera, type RenderFrame } from '@laneways/render'
+import {
+  CARD_LABELS,
+  CARD_LABEL_COUNT,
+  fitCamera,
+  TerrainClass,
+  type Camera,
+  type RenderFrame,
+} from '@laneways/render'
 import { seedStartingCity } from '../src/startingCity'
 import {
   createFrameBuilder,
@@ -147,8 +160,8 @@ function builderFor(r: Rig): FrameBuilder {
   return fb
 }
 
-function build(r: Rig, fb: FrameBuilder, alpha = 0, paused = false): RenderFrame {
-  return buildFrame(fb, r.state, r.world, r.camera, alpha, paused)
+function build(r: Rig, fb: FrameBuilder, alpha = 0, paused = false, peeking = false): RenderFrame {
+  return buildFrame(fb, r.state, r.world, r.camera, alpha, paused, peeking)
 }
 
 function cellOf(x: number, y: number): number {
@@ -726,6 +739,74 @@ describe('the HUD scalars', () => {
     expect(offerPending(r.state), 'and the frame agrees with sim rather than with a copy').toBe(false)
   })
 
+  /**
+   * §5.10's grants, folded as NUMBERS — M1f Task 8, plan Decision 17, review
+   * finding I6.
+   *
+   * **This is the test that makes `CARD_GRANT_ROAD_TILES` reach the screen.**
+   * The modal shows "30 TILES" and "x2"; both numbers are `shared` constants
+   * `render` cannot import. Written as literals in `canvas.ts` they would keep
+   * saying 30 and 2 after a retune, with every test in both packages green.
+   */
+  it('folds both grants and both item counts from sim’s own table', () => {
+    const r = rig(true)
+    const fb = builderFor(r)
+
+    // Nothing pending: no card, so no grant. `cardTileGrant` THROWS on
+    // `CARD_NONE` — it is total over the OFFERABLE set by design — so a fold
+    // that did not guard would take the whole render path down on every frame
+    // of week 0.
+    let frame = build(r, fb)
+    expect(frame.offerPending).toBe(false)
+    expect([frame.offerGrantA, frame.offerGrantB]).toEqual([0, 0])
+    expect([frame.offerItemsA, frame.offerItemsB]).toEqual([0, 0])
+    expect(() => cardTileGrant(CARD_NONE), 'and the guard is load-bearing').toThrow()
+
+    r.state.header[H_WEEK] = 1
+    r.state.header[H_OFFER_A] = CARD_ROAD_TILES
+    r.state.header[H_OFFER_B] = CARD_JUNCTION_UPGRADE
+    frame = build(r, fb)
+    expect(frame.offerGrantA).toBe(cardTileGrant(CARD_ROAD_TILES))
+    expect(frame.offerGrantB).toBe(cardTileGrant(CARD_JUNCTION_UPGRADE))
+    expect(frame.offerItemsA).toBe(cardItemGrant(CARD_ROAD_TILES))
+    expect(frame.offerItemsB).toBe(cardItemGrant(CARD_JUNCTION_UPGRADE))
+
+    // **The two slots must be separable**, or "folds slot B" is satisfied by a
+    // fold that reads slot A twice. The two cards pay different numbers of
+    // tiles AND different numbers of items on the shipped pair, so swapping the
+    // slots moves both rows.
+    expect(frame.offerGrantA).not.toBe(frame.offerGrantB)
+    expect(frame.offerItemsA).not.toBe(frame.offerItemsB)
+
+    // ...and swapping the header slots swaps the frame's, so neither field is a
+    // constant that happens to match.
+    r.state.header[H_OFFER_A] = CARD_JUNCTION_UPGRADE
+    r.state.header[H_OFFER_B] = CARD_ROAD_TILES
+    frame = build(r, fb)
+    expect(frame.offerGrantA).toBe(cardTileGrant(CARD_JUNCTION_UPGRADE))
+    expect(frame.offerItemsA).toBe(cardItemGrant(CARD_JUNCTION_UPGRADE))
+    expect(frame.offerGrantB).toBe(cardTileGrant(CARD_ROAD_TILES))
+    expect(frame.offerItemsB).toBe(cardItemGrant(CARD_ROAD_TILES))
+
+    // Resolved: `offerSlot` folds to `CARD_NONE`, so the grants go with it and
+    // the modal cannot draw last week's numbers over a running board.
+    r.state.header[H_OFFER_WEEK] = 1
+    frame = build(r, fb)
+    expect([frame.offerGrantA, frame.offerGrantB]).toEqual([0, 0])
+    expect([frame.offerItemsA, frame.offerItemsB]).toEqual([0, 0])
+  })
+
+  it('carries the peek flag through as it is handed, on both sides of it', () => {
+    // `offerPeek` is not derived from anything in `sim` — peek is UI (plan
+    // Decision 16) — so the only thing to pin is that the parameter reaches the
+    // field rather than being dropped for a literal.
+    const r = rig(true)
+    const fb = builderFor(r)
+    expect(build(r, fb, 0, true, false).offerPeek).toBe(false)
+    expect(build(r, fb, 0, true, true).offerPeek).toBe(true)
+    expect(build(r, fb, 0, true, false).offerPeek, 'and it follows back down').toBe(false)
+  })
+
   it('carries the camera it was handed, so a viewport change reaches the renderer', () => {
     const r = rig()
     const fb = builderFor(r)
@@ -735,7 +816,7 @@ describe('the HUD scalars', () => {
     )
     expect(narrow.tileSize).not.toBe(r.camera.tileSize)
     expect(build(r, fb).camera).toBe(r.camera)
-    expect(buildFrame(fb, r.state, r.world, narrow, 0, false).camera).toBe(narrow)
+    expect(buildFrame(fb, r.state, r.world, narrow, 0, false, false).camera).toBe(narrow)
   })
 })
 
@@ -1292,6 +1373,7 @@ function driverFor(
   draw?: (f: RenderFrame) => void,
   onGameOver?: () => void,
   onOfferRaised?: () => void,
+  peeking?: () => boolean,
 ): ReturnType<typeof createFrameDriver> {
   return createFrameDriver({
     state: r.state,
@@ -1307,6 +1389,7 @@ function driverFor(
     // `onOfferRaised` (M1f Task 7) and section 8c pins that one.
     onGameOver: onGameOver ?? ((): void => {}),
     onOfferRaised: onOfferRaised ?? ((): void => {}),
+    peeking: peeking ?? ((): boolean => false),
   })
 }
 
@@ -1620,6 +1703,7 @@ describe('createFrameDriver', () => {
         draw: (f): void => {
           drawn.push(f.camera)
         },
+        peeking: (): boolean => false,
       }),
       createInputQueue(),
     )
@@ -1815,14 +1899,16 @@ describe('the frame driver follows the sim into game over', () => {
     // completely different error and still read as this guard.
     //
     // **BOTH required properties, and that is what keeps this arm honest.**
-    // M1f Task 7 made `onOfferRaised` required too, so `{ ...deps, onGameOver }`
-    // alone is now ALSO a type error — the directive above would still be
-    // "used" and this line would silently stop being a vacuity check. Section
-    // 8c pins `onOfferRaised`'s own requiredness separately.
+    // M1f Task 7 made `onOfferRaised` required too, and M1f Task 8 made
+    // `peeking` required, so `{ ...deps, onGameOver }` alone is now ALSO a type
+    // error — the directive above would still be "used" and this line would
+    // silently stop being a vacuity check. Sections 8c and 8d pin the other two
+    // separately.
     const ok = createFrameDriver({
       ...deps,
       onGameOver: (): void => {},
       onOfferRaised: (): void => {},
+      peeking: (): boolean => false,
     })
     expect(typeof driver.advance).toBe('function')
     expect(typeof ok.advance).toBe('function')
@@ -1945,7 +2031,74 @@ describe('the frame driver raises the offer pause on the CONDITION', () => {
     const driver = createFrameDriver(deps)
     // Vacuity, exactly as in 8b: the same object plus the one property must
     // compile, or the directive could be suppressing an unrelated error.
-    const ok = createFrameDriver({ ...deps, onOfferRaised: (): void => {} })
+    const ok = createFrameDriver({
+      ...deps,
+      onOfferRaised: (): void => {},
+      peeking: (): boolean => false,
+    })
+    expect(typeof driver.advance).toBe('function')
+    expect(typeof ok.advance).toBe('function')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 8d. peeking: the driver reads it every frame — M1f Task 8
+// ---------------------------------------------------------------------------
+
+describe('the driver reads the peek flag on every render, not once at construction', () => {
+  it('folds whatever the dependency says NOW into RenderFrame.offerPeek', () => {
+    // A function rather than a value, for `camera`'s reason: `main.ts` supplies
+    // `() => pointer.peeking` and the pointer outlives no rebuild of the
+    // driver, so a boolean captured at construction would freeze peek off for
+    // the whole session and the control would do nothing visible.
+    const r = rig(true)
+    const fb = builderFor(r)
+    let peeking = false
+    const seen: boolean[] = []
+    const driver = driverFor(
+      r,
+      fb,
+      (f) => {
+        seen.push(f.offerPeek)
+      },
+      undefined,
+      undefined,
+      () => peeking,
+    )
+    driver.render(0, true)
+    peeking = true
+    driver.render(0, true)
+    peeking = false
+    driver.render(0, true)
+    expect(seen).toEqual([false, true, false])
+  })
+
+  it('requires peeking in the TYPE, so a caller that forgets it does not compile', () => {
+    // **The same absence of a runtime detector as 8b and 8c.** An OPTIONAL
+    // `peeking` compiles a `main.ts` in which the peek control is drawn, is
+    // hit-tested, and refuses every other tap on its behalf — while showing the
+    // player nothing at all, because the frame it feeds always reads `false`.
+    // That is a control that does nothing, produced by omitting one property,
+    // with no compile error and no test failure. M2's optional `createFallback`
+    // is the precedent this project already paid for.
+    const r = rig()
+    const fb = builderFor(r)
+    const deps = {
+      state: r.state,
+      world: r.world,
+      fields: r.fields,
+      scratch: r.scratch,
+      builder: fb,
+      camera: () => r.camera,
+      draw: (): void => {},
+      onGameOver: (): void => {},
+      onOfferRaised: (): void => {},
+    }
+    // @ts-expect-error peeking is REQUIRED — see the comment above.
+    const driver = createFrameDriver(deps)
+    // Vacuity, exactly as in 8b and 8c: the same object plus the one property
+    // must compile, or the directive could be suppressing an unrelated error.
+    const ok = createFrameDriver({ ...deps, peeking: (): boolean => false })
     expect(typeof driver.advance).toBe('function')
     expect(typeof ok.advance).toBe('function')
   })
@@ -2336,5 +2489,61 @@ describe('the reachability fold', () => {
     r.state.roads[EAST_EDGE] = (r.state.roads[EAST_EDGE] as number) | 1
     r.state.roads[REAL] = 1 << 4
     expect([...build(r, fb).destReachable].slice(0, 1), 'a real neighbour IS an edge').toEqual([1])
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// The card contract: `render` and `sim` agree, and `game` is the only package
+// that can check — M1f Task 8
+// ---------------------------------------------------------------------------
+
+/**
+ * `TerrainClass`'s idiom (section 1 of this file), applied to a second forced
+ * duplication.
+ *
+ * `packages/render/package.json` declares **no dependencies at all**, so
+ * `render/test` cannot import `CARD_ROAD_TILES` or `CARD_COUNT` — the import
+ * would not resolve, and `render/test/boundary.test.ts` bans it anyway. And
+ * `sim` cannot see `CARD_LABELS`, because nothing in `sim` may import `render`.
+ * Neither side can assert this about itself; `game` imports both.
+ */
+describe('render and sim agree about cards, and game is the only package that can check', () => {
+  it('has one label per card id', () => {
+    expect(CARD_LABEL_COUNT).toBe(CARD_COUNT)
+    // Non-vacuous: `CARD_COUNT` is one PAST the highest id, so the array is
+    // id-indexed and index 0 is the never-drawn `CARD_NONE` row rather than the
+    // first real card.
+    expect(CARD_NONE).toBe(0)
+    expect(CARD_LABELS[CARD_NONE], 'id 0 has a row and it is empty').toBe('')
+    expect(CARD_LABELS[CARD_COUNT], 'and there is nothing past the end').toBeUndefined()
+  })
+
+  it('gives every card id a NON-EMPTY label except CARD_NONE', () => {
+    // The failure this catches is an id added to `cards.ts` and not to
+    // `CARD_LABELS`: the length check above would go red, but only if the array
+    // were not padded. A padded array satisfies the length and draws a card
+    // with no name.
+    for (let id = 1; id < CARD_COUNT; id++) {
+      expect(CARD_LABELS[id], `card ${id} has no label`).toBeTruthy()
+    }
+  })
+
+  it('names the two offerable cards with the exact strings canvas.test.ts expects', () => {
+    expect(CARD_LABELS[CARD_ROAD_TILES]).toBe('ROAD TILES')
+    expect(CARD_LABELS[CARD_JUNCTION_UPGRADE]).toBe('JUNCTION UPGRADE')
+    // The deferred light keeps its row, so the array stays id-indexed and the
+    // deferral reads as an interlock rather than as a gap.
+    expect(CARD_LABELS[CARD_TRAFFIC_LIGHTS]).toBe('TRAFFIC LIGHTS')
+  })
+
+  it('pins the bare integers render/test/canvas.test.ts hit-tests with', () => {
+    // `canvas.test.ts` writes `const ROAD_TILES = 1` with a comment naming this
+    // pin, because it cannot import the constant. If the ids are ever
+    // renumbered, this is the line that says so — the render test would
+    // otherwise keep passing against a card that no longer exists.
+    expect(CARD_ROAD_TILES).toBe(1)
+    expect(CARD_JUNCTION_UPGRADE).toBe(7)
+    expect(CARD_COUNT, 'and the count canvas.test.ts asserts as a literal').toBe(8)
   })
 })

@@ -15,6 +15,7 @@ import {
 import {
   H_DEST_COUNT,
   H_HOUSE_COUNT,
+  CARD_JUNCTION_UPGRADE,
   H_INV_UPGRADES,
   H_OFFER_A,
   H_OFFER_B,
@@ -54,7 +55,14 @@ import {
   TICKS_PER_WEEK,
   UPGRADES_PER_CARD,
 } from '@laneways/shared'
-import { PALETTE, type AtlasContext, type AtlasSurface } from '@laneways/render'
+import {
+  PALETTE,
+  createOfferRects,
+  offerRects,
+  type AtlasContext,
+  type AtlasSurface,
+  type Rect,
+} from '@laneways/render'
 import {
   buildJamRig,
   jamGhostCells,
@@ -3872,11 +3880,11 @@ describe('the weekly card offer stops the board', () => {
     expect([frame.week, frame.day], 'the clock stops here').toEqual([1, 0])
     expect(frame.offerPending, 'and Task 8 has three fields to draw a modal from').toBe(true)
 
-    // **And there is no way past it, which is why this commit ships an
-    // interlock.** The HUD clock is the only pause control a player has; the
-    // pause fires on the CONDITION, so a tap buys exactly one tick and the next
-    // drained tick re-arms it. `offerInterlock.test.ts` is the red test that
-    // says this state must not be deployed.
+    // **And the HUD clock is not a way past it.** The pause fires on the
+    // CONDITION, so a tap buys exactly one tick and the next drained tick
+    // re-arms it. Until M1f Task 8 that left the board with no way out at all,
+    // interlocked by a deliberately red `offerInterlock.test.ts`; the way out
+    // now is the modal, and the case below drives it from a screen coordinate.
     const tapClock = (): void => {
       rig.game.loop.setPaused(false)
       // Two frames, and `rawTick` rather than 16.7 ms: the first frame after
@@ -3975,6 +3983,126 @@ describe('the weekly card offer stops the board', () => {
     for (let f = 0; f < 40; f++) rawTick(rig)
     expect(rig.game.loop.paused).toBe(false)
     expect(rig.game.builder.frame.offerPending).toBe(false)
+  })
+
+  it('takes a card from a TAP at the drawn rect, and the board runs on with the tiles', () => {
+    // ---------------------------------------------------------------------
+    // **THE MILESTONE'S ACCEPTANCE CRITERION, DRIVEN END TO END — M1f Task 8.**
+    // ---------------------------------------------------------------------
+    //
+    // *At 2:21 on the board a plain load opens, the board dims and two cards
+    // appear. The player taps one. The modal goes, the board runs again, and
+    // the tile counter in the HUD is 20 or 30 higher than it was.*
+    //
+    // **This is the first test in the repo that exercises a player decision
+    // from a screen coordinate to a header slot**, and it is the one that would
+    // catch a rect/draw mismatch that both packages' own tests miss: `render`
+    // asserts the faces are drawn at `offerRects`, `game` asserts the hit test
+    // reads `offerRects`, and only a rig with a real camera, a real pointer and
+    // a real sim can say the two are the same rectangle on the same screen.
+    //
+    // Deliberately the DEFAULT layout at its own warm start — no `layoutId`, no
+    // `warmStartTicks` — because the criterion is about the board that boots,
+    // not about a fixture built to reach the boundary quickly.
+    const rig = buildRig({ layoutId: undefined })
+    expect(rig.game.layoutId).toBe(DEFAULT_LAYOUT_ID)
+
+    let frames = 0
+    while (!rig.game.loop.paused && frames < 20000) {
+      rig.advanceRaw(16.7)
+      frames++
+    }
+    expect(rig.game.loop.paused, 'the board stopped at the boundary').toBe(true)
+    expect(rig.game.state.header[H_TICK]).toBe(TICKS_PER_WEEK)
+    expect(offerPending(rig.game.state)).toBe(true)
+
+    // **The stopwatch reading a person would take**, in §14's units: the frame
+    // count is the wall clock, because every one of them was 16.7 ms.
+    expect((frames * 16.7) / 1000, 'a shade over 2:21 of real time').toBeCloseTo(141.7, 0)
+
+    const frame = rig.game.builder.frame
+    expect(frame.offerPending, 'and the modal has something to draw').toBe(true)
+    expect(new Set([frame.offerA, frame.offerB]).size, 'two DIFFERENT cards').toBe(2)
+
+    // The card the player is aiming at: whichever slot holds the junction
+    // upgrade, so the assertions below are about a specific card rather than
+    // about a slot the draw happens to have filled. Both slots are exercised
+    // across the file — `takeCardPolicy` always takes slot A.
+    const upgradeInB = frame.offerB === CARD_JUNCTION_UPGRADE
+    expect(upgradeInB || frame.offerA === CARD_JUNCTION_UPGRADE, 'the pool offers it').toBe(true)
+    const rects = offerRects(rig.game.shell.camera, createOfferRects())
+    const target: Rect = upgradeInB ? rects.cardB : rects.cardA
+
+    // The frame the player is looking at reads exactly what the modal draws:
+    // §5.10's grants, hand-carried as literals rather than computed from the
+    // functions under test.
+    expect(upgradeInB ? frame.offerGrantB : frame.offerGrantA, '20 tiles').toBe(CARD_GRANT_ITEM)
+    expect(upgradeInB ? frame.offerItemsB : frame.offerItemsA, 'and two of them').toBe(
+      UPGRADES_PER_CARD,
+    )
+    expect(CARD_GRANT_ITEM).toBe(20)
+    expect(UPGRADES_PER_CARD).toBe(2)
+
+    const tilesBefore = tilesLeft(rig.game.state)
+    expect(rig.game.state.header[H_INV_UPGRADES], 'nothing held yet').toBe(0)
+
+    // **The tap. A client point, at the centre of the rect the renderer filled
+    // with `PALETTE.cardFace` on the frame above.**
+    const clientX = CANVAS_LEFT + target.x + target.w / 2
+    const clientY = CANVAS_TOP + target.y + target.h / 2
+    expect(rig.game.pointer.down(1, clientX, clientY)).toBe(PointerOutcome.CARD_CHOSEN)
+    expect(rig.game.loop.paused, 'the tap resumed the loop').toBe(false)
+
+    // Two frames: the first after any resume runs zero ticks (`resetClock`), the
+    // second drains the tick that applies the choice.
+    expect(rawTick(rig), 'the resume frame drains nothing').toBe(0)
+    expect(rawTick(rig), 'and the next one applies the choice').toBe(1)
+
+    expect(rig.game.state.header[H_INV_UPGRADES], 'two junction upgrades held').toBe(
+      UPGRADES_PER_CARD,
+    )
+    expect(tilesLeft(rig.game.state) - tilesBefore, 'and the tile counter jumped by 20').toBe(
+      CARD_GRANT_ITEM,
+    )
+    expect(rig.game.state.header[H_OFFER_WEEK], 'the week is resolved').toBe(1)
+    expect(rig.game.loop.paused, 'the board is running').toBe(false)
+    expect(rig.game.builder.frame.offerPending, 'and the modal is gone').toBe(false)
+    expect(rig.game.builder.frame.tilesLeft, 'the HUD shows the new number').toBe(
+      tilesLeft(rig.game.state),
+    )
+
+    // ...and it keeps running, rather than re-arming on the next drained tick.
+    for (let f = 0; f < 40; f++) rawTick(rig)
+    expect(rig.game.loop.paused).toBe(false)
+    expect(rig.game.state.header[H_TICK]).toBeGreaterThan(TICKS_PER_WEEK)
+  })
+
+  it('gives the modal the whole screen: the erase control leaves and comes back', () => {
+    // **The scrim is canvas paint and the erase control is not** — on Telegram
+    // it is the native full-width `MainButton`, outside the webview's content
+    // area entirely. Left alone, the largest and brightest thing on a screen
+    // asking the player to choose a card is a button reading ERASE ROADS. M1e
+    // shipped exactly that under the shutdown screen and it took a user to
+    // notice; this is the same defect through a different door.
+    const rig = buildRig({ layoutId: undefined, fallback: true, warmStartTicks: TICKS_PER_WEEK - 1 })
+    expect(rig.game.erase.surface, 'the DOM pill, since Node has no Telegram').toBe(
+      EraseControlSurface.DOM_NO_TELEGRAM,
+    )
+    expect(rig.game.erase.suspended, 'live at boot').toBe(false)
+
+    rig.advanceRaw(16.7)
+    while (!rig.game.loop.paused) rig.advanceRaw(16.7)
+    expect(offerPending(rig.game.state)).toBe(true)
+    expect(rig.game.builder.frame.offerPending, 'the frame the suspension is driven off').toBe(true)
+    expect(rig.game.erase.suspended, 'and the control left the screen with it').toBe(true)
+
+    const rects = offerRects(rig.game.shell.camera, createOfferRects())
+    rig.game.pointer.down(1, CANVAS_LEFT + rects.cardA.x + 4, CANVAS_TOP + rects.cardA.y + 4)
+    rawTick(rig)
+    rawTick(rig)
+    expect(rig.game.builder.frame.offerPending).toBe(false)
+    expect(rig.game.erase.suspended, 'and it came back when the modal did').toBe(false)
+    expect(rig.game.erase.retired, 'without being retired on the way').toBe(false)
   })
 
   it('declines a DEAD board, so a rig that keeps drawing does not fill a queue nothing drains', () => {

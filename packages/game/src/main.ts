@@ -6,7 +6,11 @@ import {
   createState,
   createWorld,
   isGameOver,
+  offerPending,
+  offerSlot,
   step,
+  OFFER_SLOT_A,
+  OFFER_SLOT_B,
   type FlowField,
   type GameState,
   type Scratch,
@@ -349,6 +353,27 @@ export function createGame(deps: GameDeps): Game {
       // the driver being rebuilt.
       camera: () => shell.camera,
       draw: (frame) => {
+        // **The erase control gets out of the modal's way, and comes back when
+        // the modal does** — M1f Task 8.
+        //
+        // Driven off the FRAME rather than off `onOfferRaised`, and that is one
+        // mechanism instead of two. `onOfferRaised` fires only on ticks, so it
+        // could raise the suspension but could never lift it — the offer
+        // resolves inside a tick and announces nothing — and a pair of
+        // half-mechanisms is the catalogue's independently-sufficient-structures
+        // shape, where neither half ends up with a detector. `frame.offerPending`
+        // is the same boolean the modal itself is drawn from, so the button and
+        // the scrim cannot disagree about whether a modal is up. Both calls
+        // early-return when there is nothing to do, so the cost is a comparison.
+        //
+        // **The same defect `onGameOver`'s `erase.retire()` prevents, through a
+        // different door.** The scrim is canvas paint and this control is not:
+        // on Telegram it is the native full-width `MainButton`, outside the
+        // webview entirely. Left alone, the largest, brightest thing on a screen
+        // asking the player to choose a card would be a button reading ERASE
+        // ROADS.
+        if (frame.offerPending) erase.suspend()
+        else erase.resume()
         drawFrame(deps.context, frame, atlases as Atlases, PALETTE)
       },
       // §5.8's shutdown reaching the shell. `sim` is the authority — `step` is
@@ -385,12 +410,24 @@ export function createGame(deps: GameDeps): Game {
       // zero-tick frame (the clock reference resets), then one frame that
       // drains a tick, and that tick re-arms this.
       //
-      // **Between this task and Task 8 that is a board with no way out**, at
-      // 2:21 on the default layout — disclosed in the commit message and
-      // interlocked by `test/offerInterlock.test.ts`, which Task 8 deletes.
+      // **M1f Task 7 shipped this with nothing drawn on top of it** — a board
+      // that stopped dead at 2:21 with no way past — and interlocked that state
+      // with a deliberately red test. Task 8 draws the modal, wires the tap and
+      // deletes the interlock; from here the pause is the thing that makes a
+      // choice possible rather than the thing that strands the player.
       onOfferRaised: () => {
         loop.setPaused(true)
       },
+      // §5.10's peek — M1f Task 8. `pointer.ts` owns the flag because peek is
+      // UI and not simulation (plan Decision 16); this is the wire that gets it
+      // onto the frame. A forward reference to a `const` declared below, safe
+      // for the same reason `erase` above is: this closure only ever runs from
+      // inside `loop.frame`, which cannot happen before `createGame` returns.
+      //
+      // **Reading it is also what ends it.** `pointer.peeking` clears itself
+      // once no offer is pending, and this per-frame read is the poll that does
+      // it — see the getter.
+      peeking: () => pointer.peeking,
     }),
     queue,
   )
@@ -475,6 +512,14 @@ export function createGame(deps: GameDeps): Game {
     restart: deps.restart ?? ((): void => {
       location.reload()
     }),
+    // §5.10's offer, through `sim`'s own guards and never off the header —
+    // M1f Task 8. The same three reads `buildFrame` folds the modal's faces
+    // from, so the rect the player taps and the card the action names come from
+    // one source. `offerSlot` is what makes a resolved week read `CARD_NONE`
+    // even though `applyChooseCard` deliberately leaves the raw ids in place.
+    offerPending: () => offerPending(state),
+    offerA: () => offerSlot(state, OFFER_SLOT_A),
+    offerB: () => offerSlot(state, OFFER_SLOT_B),
   })
 
   const erase = createEraseControl({

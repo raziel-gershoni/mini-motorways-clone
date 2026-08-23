@@ -1,5 +1,7 @@
 import { OVERCROWD_FULL_MILLITICKS, TERRAIN } from '@laneways/shared'
 import {
+  cardItemGrant,
+  cardTileGrant,
   carparkCell,
   dayOfWeek,
   destMetaColour,
@@ -11,6 +13,9 @@ import {
   offerPending,
   offerSlot,
   step,
+  CARD_NONE,
+  OFFER_SLOT_A,
+  OFFER_SLOT_B,
   tilesLeft,
   weekOfTick,
   H_DEST_COUNT,
@@ -202,6 +207,11 @@ export function createFrameBuilder(state: GameState, world: WorldData, camera: C
     offerPending: false,
     offerA: 0,
     offerB: 0,
+    offerGrantA: 0,
+    offerGrantB: 0,
+    offerItemsA: 0,
+    offerItemsB: 0,
+    offerPeek: false,
   }
   return {
     frame,
@@ -420,7 +430,10 @@ export function destinationIsReachable(
  * Rewrites the frame in place and returns it. Allocation-free.
  *
  * `alpha` is the loop's interpolation fraction, always in `[0, 1)`; `paused` is
- * the loop's own flag, passed down rather than read back (see `LoopDriver`).
+ * the loop's own flag, passed down rather than read back (see `LoopDriver`);
+ * `peeking` is `pointer.ts`'s peek flag, passed down for the same reason — it
+ * lives outside both the loop and the sim, and a copy here would be a third
+ * place for it to be wrong.
  */
 export function buildFrame(
   builder: FrameBuilder,
@@ -429,6 +442,7 @@ export function buildFrame(
   camera: Camera,
   alpha: number,
   paused: boolean,
+  peeking: boolean,
 ): RenderFrame {
   const frame = builder.frame
   frame.camera = camera
@@ -517,8 +531,40 @@ export function buildFrame(
   // last week's card on every frame for the rest of the run, and the modal
   // that Task 8 draws off these three fields would be up over a live board.
   frame.offerPending = offerPending(state)
-  frame.offerA = offerSlot(state, 0)
-  frame.offerB = offerSlot(state, 1)
+  const cardA = offerSlot(state, OFFER_SLOT_A)
+  const cardB = offerSlot(state, OFFER_SLOT_B)
+  frame.offerA = cardA
+  frame.offerB = cardB
+  // **The two grants and the two item counts, as NUMBERS folded from `sim`'s
+  // own table** — M1f Task 8, plan Decision 17, review finding I6.
+  //
+  // The modal shows the player "30 TILES" and "x2". Both of those are `shared`
+  // constants (`CARD_GRANT_ROAD_TILES`, `CARD_GRANT_ITEM`, `UPGRADES_PER_CARD`)
+  // and `render` cannot import any of them, so if they were literals in
+  // `canvas.ts` a retune would leave the modal telling the player the old
+  // number with every test in both packages green. This fold is what makes a
+  // constant change reach the screen, and `frame.test.ts` compares each field
+  // against `cardTileGrant`/`cardItemGrant` directly.
+  //
+  // **Guarded on `CARD_NONE` and on nothing else, deliberately.** Both grant
+  // functions are TOTAL over the offerable set and THROW outside it, which is
+  // `sim`'s way of saying "the pool and the grant table disagree" — a state
+  // `CARD_IMPLEMENTED_MASK` makes unreachable. The one id that legitimately
+  // arrives here is `CARD_NONE`, on every frame of every unresolved week and
+  // every frame after a week is taken (`offerSlot` folds `pending ? slot :
+  // CARD_NONE`), and it is not in the table. So: no card, no grant. Any OTHER
+  // unpriced id reaching this line is the disagreement the throw exists to
+  // surface, and swallowing it here would move the failure from a loud one in
+  // `game` to a modal quietly showing `0 TILES` for a card that pays 30.
+  frame.offerGrantA = cardA === CARD_NONE ? 0 : cardTileGrant(cardA)
+  frame.offerGrantB = cardB === CARD_NONE ? 0 : cardTileGrant(cardB)
+  frame.offerItemsA = cardA === CARD_NONE ? 0 : cardItemGrant(cardA)
+  frame.offerItemsB = cardB === CARD_NONE ? 0 : cardItemGrant(cardB)
+  // Peek is UI and not simulation (plan Decision 16): `pointer.ts` owns the
+  // boolean beside `eraseMode`, the driver reads it through `deps.peeking`, and
+  // it reaches the renderer here. Putting it in the state buffer would make a
+  // cosmetic toggle a replay input.
+  frame.offerPeek = peeking
 
   return frame
 }
@@ -611,6 +657,30 @@ export interface FrameDriverDeps {
    * produced by a client that had this pause. State that before removing it.
    */
   readonly onOfferRaised: () => void
+  /**
+   * Is the player holding §5.10's modal out of the way to look at the board
+   * underneath? Folded into `RenderFrame.offerPeek` on every frame — M1f Task 8.
+   *
+   * **A function rather than a value**, for `camera`'s reason: `main.ts` supplies
+   * `() => pointer.peeking` and the pointer machine outlives no rebuild of this
+   * driver, so a snapshot taken at construction would freeze peek off forever.
+   *
+   * **Required, not optional, and the type says so** — the third member of this
+   * interface to make that choice and for the same reason each time (`onGameOver`
+   * in M2, `onOfferRaised` in M1f Task 7, and M2's optional `createFallback`,
+   * which is the precedent this project already paid for). An optional `peeking`
+   * compiles a `main.ts` in which the peek control is drawn, is hit-tested, is
+   * refused every other tap on its behalf — and shows the player nothing, because
+   * the frame it feeds always reads `false`. That is a control that does nothing,
+   * arrived at by omitting one property, with no compile error and no test
+   * failure. `frame.test.ts` § 8d pins it.
+   *
+   * **It reads a boolean and it must not do anything else.** Peek does not
+   * resume the sim (plan Decision 16): the loop stays paused while it holds, so
+   * nothing here may clear `paused`, and `pointer.ts` deliberately never calls
+   * `setPaused` on that path.
+   */
+  readonly peeking: () => boolean
 }
 
 /**
@@ -679,7 +749,7 @@ export function createFrameDriver(deps: FrameDriverDeps): LoopDriver {
       snapshotCurr(builder.snapshots, state, world, ticks)
     },
     render(alpha: number, paused: boolean): void {
-      deps.draw(buildFrame(builder, state, world, deps.camera(), alpha, paused))
+      deps.draw(buildFrame(builder, state, world, deps.camera(), alpha, paused, deps.peeking()))
     },
   }
 }

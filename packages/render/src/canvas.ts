@@ -813,12 +813,27 @@ function destinationIsUnreachable(frame: RenderFrame, d: number): boolean {
  * sides of it — which is why `frameA` and `frameB` set every offer field
  * explicitly rather than leaving them absent.
  *
- * **12 after 11, and the pair is unreachable in production.** `step` is a
- * byte-identical no-op past the failure, so no week boundary can be crossed on a
- * dead board and no offer can be raised behind a shutdown screen. The order is
- * fixed anyway, because a scrim over a modal over a scrim is the one composition
- * nobody can debug from a screenshot — and because the modal is the screen that
- * is asking a question, so it must be the one on top.
+ * **11 EXCLUDES 12, and that pair is reachable — the first draft of this file
+ * said it was not and was wrong.** The argument was: `step` is a byte-identical
+ * no-op past the failure, so no week boundary can be crossed on a dead board.
+ * True, and it is the wrong direction. The boundary is crossed BEFORE the death,
+ * with the offer left unresolved, and then the death freezes `offerPending`
+ * **true forever** — `H_OFFER_WEEK` can never catch up on a state that does not
+ * advance. `game/test/drawAllocation.test.ts`'s already-dead rig is exactly that
+ * state and it is what caught this: with the two phases as independent `if`s it
+ * drew two scrims a frame, a modal over a shutdown screen.
+ *
+ * A player is protected from it in production by the shell's pause rather than
+ * by the sim (the loop stops at the boundary and the run cannot continue until a
+ * card is taken), and that protection ends wherever a warm start crosses a week
+ * — which every long-warm-start rig does today, and which **M3's restore** will
+ * do with a real saved game.
+ *
+ * So the shutdown WINS, and the reason is not aesthetic: `game/pointer.ts` puts
+ * its game-over branch ABOVE its modal branch, so a tap on that screen restarts
+ * the run. Drawing a modal over it would put a question on screen that the next
+ * tap answers differently. **Draw order and tap order have to agree**, and this
+ * `else` is where that agreement lives on the drawing side.
  *
  * **Phases 4 and 5 cannot paint the same cell, and the order between them is
  * fixed anyway.** `sim` only ghosts a cell whose live mask reached 0, and
@@ -964,14 +979,13 @@ export function drawFrame(
 
   // 11. The shutdown screen, and NOTHING when the run is live. Last, after the
   //     HUD, because the HUD's own labels must not be able to paint over it.
+  // 12. §5.10's offer modal — and NOTHING on a dead board, which is an `else`
+  //     rather than a second `if` for a reason `drawOffer` spells out: the
+  //     pointer's game-over branch sits ABOVE its modal branch, so a tap on
+  //     that screen restarts the run. A modal drawn over a shutdown screen
+  //     would be asking for a choice the next tap cannot make.
   if (frame.gameOver) drawShutdown(ctx, frame, palette, right, gridTop, gridBottom)
-
-  // 12. §5.10's offer modal, and NOTHING when no offer is pending. AFTER the
-  //     shutdown for the reason `drawOffer` gives: the two are unreachable
-  //     together in production and a scrim over a modal over a scrim is the one
-  //     composition nobody can debug from a screenshot, so the order is fixed
-  //     rather than left to which flag happens to be set.
-  if (frame.offerPending) drawOffer(ctx, frame, palette, right, bottom)
+  else if (frame.offerPending) drawOffer(ctx, frame, palette, right, bottom)
 }
 
 /**
@@ -1068,6 +1082,16 @@ function drawShutdown(
  * sits SEE THE BOARD. Tapping a card takes it and the board runs on with the
  * tile counter jumped; tapping SEE THE BOARD hides all of this and shows the
  * frozen board, with TAP TO RETURN left standing so the way back is visible.
+ *
+ * ---------------------------------------------------------------------------
+ * NOT DRAWN AT ALL ON A DEAD BOARD, AND THAT IS TAP ORDER RATHER THAN TASTE
+ * ---------------------------------------------------------------------------
+ *
+ * `drawFrame` reaches this phase only when `!frame.gameOver`. A dead board with
+ * an unresolved offer is a real state — see the phase list — and on it
+ * `game/pointer.ts` answers every tap with `RESTART_REQUESTED`, because its
+ * game-over branch is above its modal branch. A modal drawn over that screen
+ * would be asking a question the next tap does not answer.
  *
  * ---------------------------------------------------------------------------
  * THE SCRIM COVERS THE **WHOLE CANVAS**, AND `drawShutdown`'s STOPS AT THE BOARD

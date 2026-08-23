@@ -12,14 +12,26 @@ import {
   HitRegion,
   createGridHit,
   createHudRects,
+  createOfferRects,
   fitCamera,
   gridToScreenX,
   gridToScreenY,
   hudRects,
+  offerRects,
   screenToGrid,
   type Camera,
+  type Rect,
 } from '@laneways/render'
-import { createState, createWorld, dirBetween, placeRoad } from '@laneways/sim'
+import {
+  CARD_JUNCTION_UPGRADE,
+  CARD_ROAD_TILES,
+  OFFER_SLOT_A,
+  OFFER_SLOT_B,
+  createState,
+  createWorld,
+  dirBetween,
+  placeRoad,
+} from '@laneways/sim'
 import { createInputQueue, type InputQueue } from '../src/inputs'
 import { PointerOutcome, createPointerInput, type PointerHost, type PointerInput } from '../src/pointer'
 
@@ -164,6 +176,10 @@ interface Rig {
    * would let a guard pass here and fail on a phone.
    */
   readonly endRun: () => void
+  /** Raises §5.10's offer and pauses, the way `main.ts` does. See the implementation. */
+  readonly raiseOffer: (a?: number, b?: number) => void
+  /** Clears it, the way the tick that applies `choose-card` does. */
+  readonly resolveOffer: () => void
 }
 
 function rig(camera: Camera = phone390()): Rig {
@@ -171,6 +187,9 @@ function rig(camera: Camera = phone390()): Rig {
   let paused = false
   let over = false
   let restarts = 0
+  let pending = false
+  let cardA = 0
+  let cardB = 0
   const setPausedCalls: boolean[] = []
   const host: PointerHost = {
     camera: () => camera,
@@ -187,6 +206,12 @@ function rig(camera: Camera = phone390()): Rig {
     restart: () => {
       restarts++
     },
+    // The three §5.10 reads, as functions for `camera`'s reason: `main.ts`
+    // supplies them off live sim state, so a value snapshotted at construction
+    // would freeze the modal shut for the whole run.
+    offerPending: () => pending,
+    offerA: () => cardA,
+    offerB: () => cardB,
   }
   const input = createPointerInput(host)
   return {
@@ -207,7 +232,35 @@ function rig(camera: Camera = phone390()): Rig {
       over = true
       paused = true
     },
+    /**
+     * Raises §5.10's offer the way `main.ts` does — **and pauses, which is not
+     * convenience.** `frame.ts`'s `onOfferRaised` fires on every tick the offer
+     * holds and `main.ts` answers it with `loop.setPaused(true)`, so
+     * `offerPending && !paused` is a state production is never in for longer
+     * than the frame that raises it, and a fixture that produced it would let a
+     * guard pass here and fail on a phone. Exactly the reasoning `endRun` above
+     * already carries for game over.
+     */
+    raiseOffer: (a = CARD_ROAD_TILES, b = CARD_JUNCTION_UPGRADE) => {
+      pending = true
+      cardA = a
+      cardB = b
+      paused = true
+    },
+    resolveOffer: () => {
+      pending = false
+    },
   }
+}
+
+/** The client CSS point at the exact centre of a canvas-relative rect. */
+function centreOf(rect: Rect): readonly [number, number] {
+  return [CANVAS_LEFT + rect.x + rect.w / 2, CANVAS_TOP + rect.y + rect.h / 2] as const
+}
+
+/** The modal's three rects on the fixture camera. */
+function modal(r: Rig): ReturnType<typeof offerRects> {
+  return offerRects(r.host.camera(), createOfferRects())
 }
 
 /** The client CSS point at the exact centre of board cell (gx, gy). */
@@ -1479,5 +1532,302 @@ describe('once the city has shut down', () => {
     expect(r.input.lastCell).toBe(-1)
     expect(r.input.eraseMode).toBe(false)
     expect(r.restarts).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// §5.10's offer modal owns every tap while it is up — M1f Task 8
+// ---------------------------------------------------------------------------
+
+/**
+ * A board point ABOVE the modal, hand-computed against the fixture: css
+ * (100.5, 130), which is board cell (8, 10).
+ *
+ * ```
+ * cardA.y = 202, the title strip is [162, 190) and its gap [190, 202)
+ * board band starts at originY 95, so [95, 162) is bare board
+ * gx = 5 + floor((100.5 - 6) / 27) = 5 + 3 = 8
+ * gy = 9 + floor((130 - 95) / 27)  = 9 + 1 = 10
+ * ```
+ *
+ * **This point exists because of `OFFER_CARD_MAX_H_CSS`**, and without the cap
+ * there would be no board pixel outside a card on this viewport at all — the
+ * whole `REFUSED_OFFER_MODAL` branch would be unreachable from a real camera.
+ */
+const BOARD_ABOVE_MODAL_X = 140.5
+const BOARD_ABOVE_MODAL_Y = 153
+const CELL_8_10 = 10 * GRID_W + 8
+
+/** The 12 CSS px gap BETWEEN the two cards: css (200, 408). Inside the modal, on neither card. */
+const BETWEEN_CARDS_X = 240
+const BETWEEN_CARDS_Y = 431
+
+describe('the fixture can tell the modal’s regions apart', () => {
+  it('puts the "above the modal" probe on the board and outside every offer rect', () => {
+    // Without this the whole describe below could be asserting about a point
+    // that is in the letterbox, or one that is quietly on card A.
+    const r = rig()
+    const hit = createGridHit()
+    screenToGrid(r.host.camera(), BOARD_ABOVE_MODAL_X, BOARD_ABOVE_MODAL_Y, CANVAS_LEFT, CANVAS_TOP, hit)
+    expect(hit.region, 'the probe is not on the board').toBe(HitRegion.GRID)
+    expect(hit.gy * GRID_W + hit.gx).toBe(CELL_8_10)
+    const rects = modal(r)
+    const cssX = BOARD_ABOVE_MODAL_X - CANVAS_LEFT
+    const cssY = BOARD_ABOVE_MODAL_Y - CANVAS_TOP
+    for (const [name, rect] of [
+      ['cardA', rects.cardA],
+      ['cardB', rects.cardB],
+      ['peek', rects.peek],
+    ] as const) {
+      const inside =
+        cssX >= rect.x && cssX < rect.x + rect.w && cssY >= rect.y && cssY < rect.y + rect.h
+      expect(inside, `the probe is on ${name}`).toBe(false)
+    }
+  })
+
+  it('puts the "between the cards" probe inside the modal and on neither card', () => {
+    const r = rig()
+    const rects = modal(r)
+    const cssY = BETWEEN_CARDS_Y - CANVAS_TOP
+    expect(cssY, 'below card A').toBeGreaterThanOrEqual(rects.cardA.y + rects.cardA.h)
+    expect(cssY, 'above card B').toBeLessThan(rects.cardB.y)
+    const cssX = BETWEEN_CARDS_X - CANVAS_LEFT
+    expect(cssX, 'and horizontally within the modal’s column').toBeGreaterThanOrEqual(rects.cardA.x)
+  })
+
+  it('puts the two card centres on DIFFERENT points, so a swapped rect is visible', () => {
+    const rects = modal(rig())
+    expect(centreOf(rects.cardA)).not.toEqual(centreOf(rects.cardB))
+    expect(centreOf(rects.cardA)[1]).toBeLessThan(centreOf(rects.cardB)[1])
+  })
+})
+
+describe('the offer modal owns every tap while it is up', () => {
+  it('queues a choose-card with the SLOT and the card id it believes it is taking', () => {
+    const r = rig()
+    r.raiseOffer()
+    expect(r.input.down(1, ...centreOf(modal(r).cardB))).toBe(PointerOutcome.CARD_CHOSEN)
+    expect(queued(r.queue)).toEqual([
+      { kind: 'choose-card', a: OFFER_SLOT_B, b: CARD_JUNCTION_UPGRADE },
+    ])
+  })
+
+  it('takes slot A from card A, so the two are not the same branch', () => {
+    // Two cases rather than one, because a single-card fixture cannot tell
+    // "reads the rect it was tapped on" from "always takes slot A".
+    const r = rig()
+    r.raiseOffer()
+    expect(r.input.down(1, ...centreOf(modal(r).cardA))).toBe(PointerOutcome.CARD_CHOSEN)
+    expect(queued(r.queue)).toEqual([{ kind: 'choose-card', a: OFFER_SLOT_A, b: CARD_ROAD_TILES }])
+  })
+
+  it('echoes the id the HOST reports, never a card id of its own', () => {
+    // **This is the mutant `applyChooseCard`'s echo throw exists for.** The
+    // second argument is the card THIS CLIENT believes the slot holds, read
+    // from the same frame the player tapped; `sim` throws if it disagrees, and
+    // that throw is the replay-divergence detector. A pointer that re-derived
+    // the id — or read the wrong slot's — would make an honest client produce a
+    // log that fails verification.
+    const r = rig()
+    r.raiseOffer(CARD_JUNCTION_UPGRADE, CARD_ROAD_TILES) // deliberately the other way round
+    r.input.down(1, ...centreOf(modal(r).cardA))
+    expect(queued(r.queue)).toEqual([
+      { kind: 'choose-card', a: OFFER_SLOT_A, b: CARD_JUNCTION_UPGRADE },
+    ])
+  })
+
+  it('resumes the loop on the choice, because the tick that resolves the offer cannot run while paused', () => {
+    const r = rig()
+    r.raiseOffer()
+    expect(r.setPausedCalls, 'the fixture paused, as `main.ts` does').toEqual([])
+    r.input.down(1, ...centreOf(modal(r).cardA))
+    expect(r.setPausedCalls).toEqual([false])
+    expect(r.paused).toBe(false)
+  })
+
+  it('refuses a tap that misses both cards, and names the guard that refused it', () => {
+    const r = rig()
+    r.raiseOffer()
+    expect(r.input.down(1, BETWEEN_CARDS_X, BETWEEN_CARDS_Y)).toBe(PointerOutcome.REFUSED_OFFER_MODAL)
+    expect(queued(r.queue)).toEqual([])
+    expect(r.setPausedCalls, 'and the board did not restart').toEqual([])
+  })
+
+  it('refuses a HUD-CLOCK tap while the modal is up — a pause toggle would resume a dead board', () => {
+    // **The reason the arbitration is ONE branch above everything rather than a
+    // guard per path.** The clock is a pause TOGGLE: with the modal's own guard
+    // missing it would clear `paused` from outside this decision entirely, and
+    // the board would run behind a modal until the next drained tick re-armed
+    // it. §5.10 gives this modal no skip.
+    const r = rig()
+    r.raiseOffer()
+    expect(r.input.down(1, CLOCK_X, CLOCK_Y)).toBe(PointerOutcome.REFUSED_OFFER_MODAL)
+    expect(r.setPausedCalls, 'and the clock did not toggle').toEqual([])
+    expect(r.paused).toBe(true)
+  })
+
+  it('refuses a GRID tap while the modal is up', () => {
+    const r = rig()
+    r.raiseOffer()
+    expect(r.input.down(1, BOARD_ABOVE_MODAL_X, BOARD_ABOVE_MODAL_Y)).toBe(
+      PointerOutcome.REFUSED_OFFER_MODAL,
+    )
+    expect(r.input.dragging, 'and no drag started').toBe(false)
+    expect(queued(r.queue)).toEqual([])
+  })
+
+  it('names the OFFER as the refuser, not the pause, so the two guards are distinguishable', () => {
+    // A board tap while merely paused is REFUSED_PAUSED and while a modal is up
+    // is REFUSED_OFFER_MODAL. Both are true at once in production — the modal
+    // pauses — so a single code would make "the modal refused it" unassertable
+    // and the ordering below unobservable.
+    const r = rig()
+    r.forcePaused(true)
+    expect(r.input.down(1, BOARD_ABOVE_MODAL_X, BOARD_ABOVE_MODAL_Y)).toBe(PointerOutcome.REFUSED_PAUSED)
+    r.raiseOffer()
+    expect(r.input.down(2, BOARD_ABOVE_MODAL_X, BOARD_ABOVE_MODAL_Y)).toBe(
+      PointerOutcome.REFUSED_OFFER_MODAL,
+    )
+  })
+
+  it('answers the next tap of a stroke that was mid-drag when the boundary arrived', () => {
+    // **The case the ordering exists for, as a fixture rather than as a
+    // comment.** The modal branch is ABOVE the `dragging` block, so a modal
+    // raised mid-stroke does not answer REFUSED_SECOND_POINTER in front of a
+    // screen asking for a choice — which would leave the player unable to take
+    // either card until they lifted a finger the game never told them was
+    // still down.
+    const r = rig()
+    expect(r.input.down(1, T9_14_X, T9_14_Y)).toBe(PointerOutcome.DRAG_START)
+    expect(r.input.dragging).toBe(true)
+    r.raiseOffer()
+    expect(r.input.down(2, ...centreOf(modal(r).cardA))).toBe(PointerOutcome.CARD_CHOSEN)
+    expect(queued(r.queue)).toEqual([{ kind: 'choose-card', a: OFFER_SLOT_A, b: CARD_ROAD_TILES }])
+  })
+
+  it('is BELOW the game-over branch, so a city that dies mid-modal still restarts', () => {
+    // Unreachable in production — `step` freezes past the failure, so no week
+    // boundary can be crossed on a dead board — and ordered anyway, because the
+    // two screens both want the same tap and only one of them has a way out.
+    const r = rig()
+    r.raiseOffer()
+    r.endRun()
+    expect(r.input.down(1, ...centreOf(modal(r).cardA))).toBe(PointerOutcome.RESTART_REQUESTED)
+    expect(r.restarts).toBe(1)
+    expect(queued(r.queue), 'and no card was taken off a dead board').toEqual([])
+  })
+
+  it('leaves every existing path alone when no offer is pending', () => {
+    // The gate, on the fixture that has cards loaded — so this cannot pass
+    // because the rig forgot to set them.
+    const r = rig()
+    r.raiseOffer()
+    r.resolveOffer()
+    r.forcePaused(false)
+    expect(r.input.down(1, T9_14_X, T9_14_Y)).toBe(PointerOutcome.DRAG_START)
+    expect(r.input.down(2, CLOCK_X, CLOCK_Y)).toBe(PointerOutcome.REFUSED_SECOND_POINTER)
+    r.input.up(1)
+    expect(r.input.down(3, CLOCK_X, CLOCK_Y)).toBe(PointerOutcome.PAUSE_TOGGLED)
+  })
+
+  it('stops owning taps the moment the offer resolves, even while still paused', () => {
+    // The window between the tap and the tick that applies it: the loop has
+    // been resumed, one zero-tick frame runs, then the tick lands. A second tap
+    // in that window is still the modal's — `offerPending` is the whole gate —
+    // and `sim` no-ops the duplicate against `H_OFFER_WEEK === H_WEEK`.
+    const r = rig()
+    r.raiseOffer()
+    r.input.down(1, ...centreOf(modal(r).cardA))
+    expect(r.input.down(2, ...centreOf(modal(r).cardB)), 'still the modal’s').toBe(
+      PointerOutcome.CARD_CHOSEN,
+    )
+    expect(queued(r.queue).length, 'two actions, and sim absorbs the second').toBe(2)
+    r.resolveOffer()
+    expect(r.input.down(3, BOARD_ABOVE_MODAL_X, BOARD_ABOVE_MODAL_Y)).toBe(PointerOutcome.DRAG_START)
+  })
+})
+
+describe('peek: it hides the modal, and it does not skip the week', () => {
+  it('toggles peek, and a tap ANYWHERE returns from it', () => {
+    const r = rig()
+    r.raiseOffer()
+    expect(r.input.peeking, 'the modal opens showing itself').toBe(false)
+    expect(r.input.down(1, ...centreOf(modal(r).peek))).toBe(PointerOutcome.PEEK_TOGGLED)
+    expect(r.input.peeking).toBe(true)
+    // Anywhere: a board point, not the peek rect. The way back must not require
+    // finding the control again on a screen that is no longer showing it.
+    expect(r.input.down(2, BOARD_ABOVE_MODAL_X, BOARD_ABOVE_MODAL_Y)).toBe(PointerOutcome.PEEK_TOGGLED)
+    expect(r.input.peeking).toBe(false)
+    expect(queued(r.queue), 'and nothing reached the sim either way').toEqual([])
+  })
+
+  it('does NOT resume the loop while peeking — peek inspects, it does not skip', () => {
+    // Plan Decision 16. A peek that resumed the sim would be a free unpause
+    // with no cost, which is the one thing a modal with no timer and no skip
+    // must not offer: hold peek for the rest of the week and the offer is
+    // gone.
+    const r = rig()
+    r.raiseOffer()
+    r.input.down(1, ...centreOf(modal(r).peek))
+    expect(r.setPausedCalls).toEqual([])
+    expect(r.paused).toBe(true)
+    r.input.down(2, BOARD_ABOVE_MODAL_X, BOARD_ABOVE_MODAL_Y)
+    expect(r.setPausedCalls, 'and returning does not resume it either').toEqual([])
+    expect(r.paused).toBe(true)
+  })
+
+  it('cannot take a card while peeking — the cards are not on screen to be tapped', () => {
+    // The return is the FIRST thing the modal branch does, above the rect
+    // tests, so a tap that happens to land where card B was drawn returns
+    // rather than spending the week on a card the player could not see.
+    const r = rig()
+    r.raiseOffer()
+    r.input.down(1, ...centreOf(modal(r).peek))
+    expect(r.input.down(2, ...centreOf(modal(r).cardB))).toBe(PointerOutcome.PEEK_TOGGLED)
+    expect(queued(r.queue)).toEqual([])
+    expect(r.input.peeking).toBe(false)
+    // ...and now that the modal is back, the same point takes the card.
+    expect(r.input.down(3, ...centreOf(modal(r).cardB))).toBe(PointerOutcome.CARD_CHOSEN)
+  })
+
+  it('clears peek when the offer resolves, so the next modal opens showing itself', () => {
+    // Peek is a property of THIS modal, not of the session. Left latched, the
+    // next week's offer would open invisible over a frozen board — the state
+    // M1f Task 7 shipped on purpose and interlocked against, reached by a
+    // control the player used correctly a week earlier.
+    const r = rig()
+    r.raiseOffer()
+    r.input.down(1, ...centreOf(modal(r).peek))
+    expect(r.input.peeking).toBe(true)
+    r.resolveOffer()
+    r.forcePaused(false)
+    // **Reading it is the poll**, and `main.ts` does this once per frame — the
+    // frame driver folds `pointer.peeking` into `RenderFrame.offerPeek` on
+    // every draw, and there are 4,500 ticks between one week boundary and the
+    // next. This module never sees the offer resolve; the tick does.
+    expect(r.input.peeking, 'the flag came down with the modal').toBe(false)
+
+    // ...and the next week's modal opens SHOWING ITSELF, which is the failure
+    // this clears for: a latched peek would put the player in front of a frozen
+    // board with one TAP TO RETURN on it and no sign a choice was waiting.
+    r.raiseOffer()
+    expect(r.input.peeking).toBe(false)
+    expect(r.input.down(2, ...centreOf(modal(r).cardA)), 'and the first tap takes a card').toBe(
+      PointerOutcome.CARD_CHOSEN,
+    )
+  })
+
+  it('is not reachable at all when no offer is pending', () => {
+    const r = rig()
+    expect(r.input.down(1, ...centreOf(modal(r).peek))).not.toBe(PointerOutcome.PEEK_TOGGLED)
+    expect(r.input.peeking).toBe(false)
+  })
+
+  it('is BELOW game over too: a dead board offers a restart, not a peek', () => {
+    const r = rig()
+    r.raiseOffer()
+    r.endRun()
+    expect(r.input.down(1, ...centreOf(modal(r).peek))).toBe(PointerOutcome.RESTART_REQUESTED)
+    expect(r.input.peeking).toBe(false)
   })
 })

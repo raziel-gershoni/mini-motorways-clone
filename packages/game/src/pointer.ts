@@ -1,5 +1,14 @@
-import { HitRegion, createGridHit, createHudRects, hudRects, screenToGrid } from '@laneways/render'
+import {
+  HitRegion,
+  createGridHit,
+  createHudRects,
+  createOfferRects,
+  hudRects,
+  offerRects,
+  screenToGrid,
+} from '@laneways/render'
 import type { Camera, Rect } from '@laneways/render'
+import { OFFER_SLOT_A, OFFER_SLOT_B } from '@laneways/sim'
 import type { TickActionKind } from '@laneways/sim'
 import type { InputQueue } from './inputs'
 
@@ -218,6 +227,22 @@ export const PointerOutcome = Object.freeze({
   REFUSED_SECOND_POINTER: 8,
   /** A tap while the run is over; a new run was requested (§5.8, M1e Task 9). */
   RESTART_REQUESTED: 9,
+  /** A card was taken off §5.10's offer modal; a `choose-card` is queued (M1f Task 8). */
+  CARD_CHOSEN: 10,
+  /** The peek control was used, in either direction. See `PointerInput.peeking`. */
+  PEEK_TOGGLED: 11,
+  /**
+   * A tap the offer modal consumed and did nothing with — a miss, the HUD
+   * clock, the board.
+   *
+   * **A code of its own rather than `REFUSED_PAUSED`, and the distinction is
+   * load-bearing rather than tidy.** The modal always pauses, so both are true
+   * at once in production; one code would make "the modal refused it"
+   * unassertable and the branch ordering below unobservable, which is the
+   * catalogue's most-repeated failure — a negative assertion satisfied by the
+   * wrong mechanism.
+   */
+  REFUSED_OFFER_MODAL: 12,
 } as const)
 
 /** A `PointerOutcome` value, derived from the const rather than hand-written. */
@@ -273,6 +298,32 @@ export interface PointerHost {
    * `createFallbackButton` and `createBootFailureSurface` are injected.
    */
   readonly restart: () => void
+  /**
+   * Is §5.10's weekly card offer waiting to be taken? — M1f Task 8.
+   *
+   * **Read from `sim` through `main.ts`, not from the loop and not from a copy
+   * here.** `main.ts` supplies `() => offerPending(state)`; `pointer.ts` must
+   * not grow a `GameState` import for a boolean, for the same reason
+   * `gameOver` above reads the loop instead of the sim.
+   *
+   * **It is not the same question as `paused()`.** The modal pauses, so both
+   * hold together in production — but a HUD-clock tap pauses too, and a modal
+   * branch keyed on `paused` would swallow every tap of an ordinary pause.
+   */
+  readonly offerPending: () => boolean
+  /**
+   * The card id in slot A, as the CLIENT currently sees it — `main.ts` supplies
+   * `() => offerSlot(state, OFFER_SLOT_A)`, which is the same guard
+   * `buildFrame` folds the modal's own face from.
+   *
+   * **This is the echo, and it must never be re-derived.** `applyChooseCard`
+   * throws when the id the client sends disagrees with the id the simulation
+   * offered, and that throw is the replay-divergence detector a verified
+   * leaderboard rests on. So the tap sends back what this client was SHOWN.
+   */
+  readonly offerA: () => number
+  /** The card id in slot B. See `offerA`. */
+  readonly offerB: () => number
 }
 
 /** The pointer state machine. One per run; `main.ts` wires the DOM events to it. */
@@ -298,6 +349,19 @@ export interface PointerInput {
    * latch is observable rather than an internal detail nothing can check.
    */
   readonly strokeEraseMode: boolean
+  /**
+   * Is the player holding §5.10's modal out of the way to look at the frozen
+   * board underneath? (spec §5.10's peek, plan Decision 16.)
+   *
+   * **Peek is UI and not simulation**, so it lives here beside `eraseMode`
+   * rather than in the state buffer: a cosmetic toggle in `GameState` would be
+   * a replay input. `main.ts` hands this to the frame driver as
+   * `peeking: () => pointer.peeking` and `buildFrame` folds it into
+   * `RenderFrame.offerPeek`.
+   *
+   * **Reading it is also the poll that ends it** — see the getter.
+   */
+  readonly peeking: boolean
   /** True while a pointer owns the drag. */
   readonly dragging: boolean
   /** The owning `pointerId`, or -1 when no drag is active. */
@@ -357,10 +421,14 @@ export function createPointerInput(host: PointerHost): PointerInput {
   const slots = new Float64Array(DRAG_SLOT_COUNT)
   slots[D_POINTER_ID] = NO_POINTER
 
-  // Allocated once. `screenToGrid` and `hudRects` both take a caller-owned
-  // output and return it, precisely so a per-event caller cannot allocate.
+  // Allocated once. `screenToGrid`, `hudRects` and `offerRects` all take a
+  // caller-owned output and return it, precisely so a per-event caller cannot
+  // allocate. `canvas.ts` holds its OWN `OfferRects` scratch — two callers, two
+  // objects, one function, which is what stops the drawn faces and the tapped
+  // targets drifting apart.
   const hit = createGridHit()
   const rects = createHudRects()
+  const offer = createOfferRects()
 
   // Booleans are singletons and never box, so these stay as closure variables.
   let dragging = false
@@ -368,6 +436,57 @@ export function createPointerInput(host: PointerHost): PointerInput {
   let erase = false
   /** The mode the CURRENT stroke is using, latched at `pointerdown`. See below. */
   let strokeErase = false
+  /**
+   * Is §5.10's modal being held out of the way? See `PointerInput.peeking`, and
+   * `peekActive` below for why it is never read raw.
+   */
+  let peek = false
+
+  /**
+   * Peek, **cleared by the act of reading it once the modal is gone.**
+   *
+   * Peek belongs to ONE modal. This module never sees a week resolve — the tick
+   * does that, from an action this module queued — so there is no event to clear
+   * the latch on, and the read is the only poll available. `main.ts` performs it
+   * once per frame (`peeking: () => pointer.peeking`, folded into
+   * `RenderFrame.offerPeek`), and there are 4,500 ticks between one week
+   * boundary and the next, so the poll is not a hope.
+   *
+   * **What it prevents is the whole reason for the side effect**: a latched peek
+   * would open NEXT week's modal already hidden. The player would be looking at
+   * a frozen board with one TAP TO RETURN on it and nothing saying a choice was
+   * waiting — which is exactly the state M1f Task 7 shipped on purpose and
+   * interlocked against, reached this time by a control they used correctly a
+   * week earlier.
+   *
+   * Both readers go through here — the getter and `down` — so there is one
+   * accessor and not a raw latch with a rule about it.
+   */
+  function peekActive(): boolean {
+    if (peek && !host.offerPending()) peek = false
+    return peek
+  }
+
+  function chooseCard(slot: number, cardId: number): PointerOutcomeCode {
+    // **The echo: the card id THIS CLIENT believes the slot holds**, read from
+    // the same frame the player tapped. `applyChooseCard` throws on a mismatch
+    // and that throw is the replay-divergence detector a verified leaderboard
+    // rests on — so this passes on what it saw and never re-derives it.
+    host.queue.enqueue('choose-card', slot, cardId)
+    // **The resume, and it belongs here rather than in the tick**: the tick
+    // that resolves the offer cannot run while the loop is paused, so a choice
+    // that did not unpause would queue an action nothing would ever drain and
+    // leave the board stopped for good.
+    //
+    // The one-or-two frame window in which the modal is still drawn after the
+    // tap is harmless and is not worth a second flag: the first frame after any
+    // resume runs zero ticks (`resetClock`), so `offerPending` is still true
+    // when it draws. A second tap in that window enqueues a second
+    // `choose-card` and `sim` no-ops it against `H_OFFER_WEEK === H_WEEK` —
+    // which is `applyChooseCard`'s first check, written for exactly this.
+    host.setPaused(false)
+    return PointerOutcome.CARD_CHOSEN
+  }
 
   function endDrag(pointerId: number): PointerOutcomeCode {
     if (!dragging || pointerId !== (slots[D_POINTER_ID] as number)) return PointerOutcome.IGNORED
@@ -405,6 +524,53 @@ export function createPointerInput(host: PointerHost): PointerInput {
     if (host.gameOver()) {
       host.restart()
       return PointerOutcome.RESTART_REQUESTED
+    }
+
+    // **§5.10's modal owns every tap while it is up, and it is ONE branch
+    // rather than a guard on each of the paths below** — M1f Task 8.
+    //
+    // Two guards can disagree, and the HUD clock is the case that proves it: it
+    // is a pause TOGGLE, so under a modal that offers no skip its own guard
+    // going missing would clear `paused` from outside this decision entirely
+    // and put the board back under a screen asking a question.
+    //
+    // **Below the game-over branch**, for the reason that branch is first: a
+    // city that died with a modal up must still offer the restart, and only one
+    // of the two screens has a way out of itself.
+    //
+    // **Above the `dragging` block**, so a modal raised mid-stroke does not
+    // answer the next tap REFUSED_SECOND_POINTER in front of a screen asking
+    // for a choice — which would leave the player unable to take either card
+    // until they lifted a finger nothing had told them was still down.
+    //
+    // `move`, `up` and `cancel` need no companion guard and must not grow one:
+    // the loop is paused whenever this holds (`main.ts`'s `onOfferRaised`),
+    // `move` already refuses every board sample while paused, and `up`/`cancel`
+    // must stay live so a captured pointer can still be released. A second
+    // independently sufficient structure would leave neither half with a
+    // detector.
+    if (host.offerPending()) {
+      // **The return from peek is FIRST, above the rect tests**, so a tap that
+      // happens to land where a card was drawn returns to the modal instead of
+      // spending the week on a card the player could not see.
+      if (peekActive()) {
+        peek = false
+        return PointerOutcome.PEEK_TOGGLED
+      }
+      offerRects(host.camera(), offer)
+      const cssX = clientX - host.canvasLeft()
+      const cssY = clientY - host.canvasTop()
+      if (inRect(offer.peek, cssX, cssY)) {
+        // **No `setPaused` on this path, and that is plan Decision 16 rather
+        // than an omission.** A peek that resumed the sim would be a free
+        // unpause with no cost: hold it for the rest of the week and the offer
+        // is gone. Peek inspects; it does not skip.
+        peek = true
+        return PointerOutcome.PEEK_TOGGLED
+      }
+      if (inRect(offer.cardA, cssX, cssY)) return chooseCard(OFFER_SLOT_A, host.offerA())
+      if (inRect(offer.cardB, cssX, cssY)) return chooseCard(OFFER_SLOT_B, host.offerB())
+      return PointerOutcome.REFUSED_OFFER_MODAL
     }
 
     if (dragging) {
@@ -559,6 +725,9 @@ export function createPointerInput(host: PointerHost): PointerInput {
     },
     get strokeEraseMode(): boolean {
       return dragging ? strokeErase : erase
+    },
+    get peeking(): boolean {
+      return peekActive()
     },
     get dragging(): boolean {
       return dragging

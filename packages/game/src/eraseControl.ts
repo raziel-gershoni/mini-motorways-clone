@@ -308,6 +308,31 @@ export interface EraseControl {
   /** How many times the surface has been written. A count, so "it re-rendered" is checkable. */
   readonly renders: number
   /**
+   * Takes the control off the screen **while a modal owns it** — §5.10's card
+   * offer, M1f Task 8. `resume` puts it back exactly as it was.
+   *
+   * **The same defect `retire` exists for, reached through a different door.**
+   * The scrim is drawn on the CANVAS and this control is not: on Telegram it is
+   * the native full-width `MainButton`, outside the webview's content area, and
+   * the fallback is a `position: fixed` pill above it. So without this, a
+   * player looking at a dimmed board and two cards would also be looking at an
+   * undimmed, full-width, brightly coloured button reading ERASE ROADS — the
+   * largest and brightest thing on a screen asking them to choose a card. M1e
+   * shipped exactly that under the shutdown screen and it took a user to notice.
+   *
+   * **Not `retire`, because this one comes back.** `retire` is sticky by design
+   * — a run does not restart — and using it here would take erase away for the
+   * rest of the session at the first week boundary.
+   *
+   * Idempotent in both directions, and both refuse on a RETIRED control: the
+   * run being over outranks a modal being up.
+   */
+  readonly suspend: () => void
+  /** Puts a suspended control back, rendering the mode as it stands. See `suspend`. */
+  readonly resume: () => void
+  /** True while `suspend()` is in force. False again after `resume()`. */
+  readonly suspended: boolean
+  /**
    * Takes the control off the screen for good — §5.8's shutdown, M1e Task 9.
    *
    * **The scrim is drawn on the CANVAS and this control is not.** On Telegram it
@@ -379,12 +404,16 @@ export function createEraseControl(deps: EraseControlDeps): EraseControl {
 
   /** Sticky. Set only by `retire()`, never cleared — see `EraseControl.retire`. */
   let retired = false
+  /** NOT sticky — `resume()` clears it. See `EraseControl.suspend`. */
+  let suspended = false
 
   function render(erase: boolean): void {
-    // The terminal guard, first and unconditional, in `Loop.setPaused`'s idiom:
-    // refusing only the presses would leave `sync()` able to re-show a button
-    // that must stay gone.
-    if (retired) return
+    // The two off-screen guards, first and unconditional, in `Loop.setPaused`'s
+    // idiom: refusing only the presses would leave `sync()` able to re-show a
+    // button that must stay gone. `resume()` clears `suspended` BEFORE calling
+    // here, which is what lets one guard serve both "stay hidden" and "come
+    // back exactly as you were".
+    if (retired || suspended) return
     renders++
     if (mb !== null) {
       label = erase ? MAIN_BUTTON_LABEL_ON : MAIN_BUTTON_LABEL_OFF
@@ -410,9 +439,55 @@ export function createEraseControl(deps: EraseControlDeps): EraseControl {
   }
 
   function press(): boolean {
+    // **ADDED here rather than moved from `render`, and the difference is a
+    // deleted guard** (M1f Task 8; carry-forward §4). `render()` is also called
+    // from `sync()`, so moving its guard down would remove the terminal check
+    // from a live path — the exact edit that lets `sync()` re-show a retired
+    // control.
+    //
+    // What it fixes: `press()` called `host.toggleEraseMode()` BEFORE
+    // `render()`'s guard ran, so a press that did arrive on an off-screen
+    // control flipped the player's erase mode **with no label anywhere to show
+    // it** — the "an erase mode you cannot see you are in" hazard this whole
+    // file exists to prevent, in its purest form.
+    //
+    // **It is unreachable on every client this ships to, and it is still
+    // wrong.** `retire()`/`suspend()` never UNSUBSCRIBE: `offClick` is declared
+    // on the `MainButton` shape (`telegram.ts`) and called nowhere in
+    // `packages/`, and the DOM fallback's `click` listener is never removed. In
+    // practice a hidden `MainButton` delivers no clicks and `display: none`
+    // takes the pill out of the hit test, so the consequence is bounded and
+    // cosmetic.
+    //
+    // **The alternative was refused, and this records which one and why.**
+    // Unsubscribing properly means holding the handler reference and widening
+    // `mainButton()`'s shape re-check to cover `offClick` — a change to the
+    // Telegram surface detection, which is the one part of this file that has
+    // never run on a phone (`grep -rn "MainButton" spike/src/` returns
+    // nothing). Two lines of guard against a shape change on untested platform
+    // code, for a consequence that is bounded and cosmetic: the guard wins.
+    // `press` is also public — `main.ts` may bind a keyboard shortcut to it —
+    // so the guard covers a caller that has no surface at all.
+    if (retired || suspended) return host.eraseMode
     const next = host.toggleEraseMode()
     render(next)
     return next
+  }
+
+  /**
+   * Get off the screen. Shared by `retire` and `suspend` so there is ONE
+   * mechanism for "not visible" and not two that can disagree about what a
+   * partial client needs.
+   */
+  function hideSurface(): void {
+    // `hide()` and not `setParams({ is_visible: false })`: the params object is
+    // preallocated and frozen, and a second pair of them for one call is two
+    // more constants to keep in sync with the colours.
+    if (mb !== null) mb.hide?.()
+    // The fallback is a DOM pill; `display:none` is the only thing that takes a
+    // `position: fixed` element out of the player's way completely — anything
+    // short of removing it from layout leaves a dead target a thumb can find.
+    else if (element !== null) element.setAttribute('style', FALLBACK_STYLE_HIDDEN)
   }
 
   if (mb !== null) mb.onClick?.(press)
@@ -428,37 +503,47 @@ export function createEraseControl(deps: EraseControlDeps): EraseControl {
     sync(): void {
       render(host.eraseMode)
     },
+    suspend(): void {
+      if (retired || suspended) return
+      // Set BEFORE the surface call, exactly as `retire` does and for the same
+      // reason: a `hide()` that throws on a partial client must still leave the
+      // control refusing every later render rather than half-suspended.
+      suspended = true
+      hideSurface()
+    },
+    resume(): void {
+      // **`retired` outranks `suspended`.** A run that ended while a modal was
+      // up must not get its erase button back when the modal closes — and
+      // ordering the two checks the other way would do exactly that, because
+      // `render` would then be reached with `suspended` already false.
+      if (retired || !suspended) return
+      suspended = false
+      // Re-rendered from the host's CURRENT mode rather than from a remembered
+      // one: `sync()`'s reasoning, and the mode cannot have moved anyway
+      // because `press` refuses while suspended.
+      render(host.eraseMode)
+    },
+    get suspended(): boolean {
+      return suspended
+    },
     retire(): void {
       if (retired) return
       // Set BEFORE the surface calls, so a `hide()` that throws on a partial
       // client still leaves the control refusing every later render rather than
       // half-retired and re-showable.
       //
-      // **What retire does NOT do, recorded at the close of M1e (Task 11) so it
-      // is a known residual rather than a discovered one: it never UNSUBSCRIBES
-      // the click handler.** `offClick` is declared on the `MainButton` shape
-      // (`telegram.ts`) and is called nowhere in `packages/`, and the DOM
-      // fallback's `click` listener is never removed either. On every client
-      // this ships to that is unreachable — a hidden `MainButton` delivers no
-      // clicks and `display: none` takes the pill out of the hit test — so the
-      // consequence is bounded and cosmetic. It is still wrong in one specific
-      // way worth naming: `press()` calls `host.toggleEraseMode()` BEFORE
-      // `render()`'s terminal guard runs, so a press that did somehow arrive on
-      // a retired control would flip the player's erase mode with no label to
-      // show it. **Handed to M1f with the rest of the shutdown surface**
-      // (`docs/superpowers/m1f-carry-forward.md`) rather than fixed here: the
-      // fix is either an `offClick`/`removeEventListener` pair — which means
-      // holding the handler reference and widening the shape re-check — or
-      // moving the `retired` guard into `press`, and choosing between those is
-      // a decision, not a line.
+      // **What retire still does NOT do, and what M1f Task 8 did about it.** It
+      // never UNSUBSCRIBES the click handler: `offClick` is declared on the
+      // `MainButton` shape (`telegram.ts`) and called nowhere in `packages/`,
+      // and the DOM fallback's `click` listener is never removed. That is
+      // unchanged and still unreachable on every client this ships to.
+      //
+      // The half that WAS wrong is fixed: `press` now carries its own guard, so
+      // a press arriving on a retired or suspended control no longer flips the
+      // player's erase mode with no label to show it. See `press` for which of
+      // the two available fixes was taken and why the other was refused.
       retired = true
-      // `hide()` and not `setParams({ is_visible: false })`: the params object
-      // is preallocated and frozen, and a second pair of them for one call is
-      // two more constants to keep in sync with the colours.
-      if (mb !== null) mb.hide?.()
-      // The fallback is a DOM pill; `display:none` is the only thing that takes
-      // a `position: fixed` element out of the player's way completely.
-      else if (element !== null) element.setAttribute('style', FALLBACK_STYLE_HIDDEN)
+      hideSurface()
     },
     get retired(): boolean {
       return retired
