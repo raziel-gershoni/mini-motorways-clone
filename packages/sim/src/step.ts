@@ -627,6 +627,160 @@ export interface TickInputs {
  * with no detector for the pair that matters. `step.test.ts`'s disjointness
  * scan is still the only tripwire for it.
  *
+ * ---------------------------------------------------------------------------
+ * THE RE-MEASUREMENT, AT M1f TASK 5 — THE PHASE COUNT WENT 10 -> 11, BY
+ * INSERTING THE CARD OFFER AT POSITION 4. **THIS IS THE LIVE TABLE.**
+ * ---------------------------------------------------------------------------
+ *
+ * **The complete pairwise set over ELEVEN phases, C(11,2) = 55, stated as an
+ * enumeration so it reproduces from this sentence: every unordered pair
+ * `{i, j}` with `1 <= i < j <= 11`, applied as a POSITIONAL transposition of
+ * the two statement blocks, with the poison check, `const tick`, the `H_EPOCH`
+ * write and the `H_EPOCH` clear excluded as prologue and epilogue exactly as
+ * M1d's and M1e's sweeps excluded them.** The harness asserts that its own
+ * decomposition of these eleven blocks reproduces the function body
+ * byte-for-byte before it mutates anything, so a mutant built from a stale
+ * parse fails loudly instead of scoring a quiet 0.
+ *
+ * Canonical whole-suite invocation, **2,044 tests** (shared 52, render 261,
+ * eslint-rules 69, sim 1,010, game 652), with **six** unmutated baselines
+ * interleaved through the battery.
+ *
+ * ```
+ *          j=2   j=3   j=4   j=5   j=6   j=7   j=8   j=9  j=10  j=11
+ *   i=1      7     7    14    29    56    86*  131*   99    81    57
+ *   i=2            1     1#    2#    1#   76*  120*   72    42    20
+ *   i=3                  0#     1     1   76*  121*   78    47    27
+ *   i=4                         0     0#   71*  119*   71    38    19
+ *   i=5                               0#   71*  126*   73    40    21
+ *   i=6                                    70*  131*   72    45    33
+ *   i=7                                         132*  132*  132*  132*
+ *   i=8                                                71    93*   93*
+ *   i=9                                                      52    53
+ *  i=10                                                             1
+ * ```
+ *
+ * **`#` marks the six cells whose printed value is the RE-MEASURED one and not
+ * the sweep's raw figure, and the reason is one this project has now been
+ * burned by twice.** Raw: `2<->4` 3, `2<->5` 6, `2<->6` 5, `3<->4` 4, `4<->6` 1,
+ * `5<->6` 1. Every discarded detector came from one of six long-running
+ * `packages/game` and `packages/render` cases —
+ * `demoLayout.test.ts`'s seven-road search, `integration.test.ts`'s 25,200-tick
+ * ledger sweep, `placementAllocation.test.ts` (x2), `demoAllocation.test.ts` and
+ * `drawAllocation.test.ts` — and **two of the six baselines in the same battery
+ * failed exactly those cases**, at 4 and at 1. A flaky baseline reads exactly
+ * like a kill.
+ *
+ * The six were re-run **four times each against four fresh unmutated baselines,
+ * with nothing else running on the machine**, at 2,045 tests (the suite gained
+ * one test between the sweep and the re-runs; it is quoted rather than smoothed
+ * over):
+ *
+ * ```
+ *   baselines   0, 0, 0, 0   and, in a second battery, 0, 0, 0, 1
+ *   2<->4       2, 1, 1, 1   -> 1   week.test.ts (the 2 carried an allocation flake)
+ *   2<->5       2, 2, 3, 2   -> 2   spawn.test.ts + week.test.ts
+ *   2<->6       1, 1, 1, 2   -> 1   week.test.ts
+ *   3<->4       0, 0, 0, 0   -> 0
+ *   4<->6       0, 0, 0, 0   -> 0
+ *   5<->6       0, 0, 0, 0   -> 0
+ * ```
+ *
+ * **Measured flake rate on the unmutated tree: 3 of 14 baseline runs scored
+ * non-zero — 21 %** — and it is load-dependent: both of the main sweep's flakes
+ * landed while the machine was doing something else, and the four quiet
+ * baselines of the first re-run battery were clean. Quote that rate beside any
+ * 0-detector claim taken from this table; do not quote a clean run as proof.
+ *
+ * **A per-case TIMEOUT is invisible to BOTH standing screens, and this battery
+ * screened for it explicitly.** `Test timed out in 5000ms` raises no error class,
+ * so the crash screen cannot see it, and it does not change the collection count,
+ * so the complement check cannot either — a timed-out case is indistinguishable
+ * from a genuine assertion kill in both instruments. Several `packages/game`
+ * cases run at roughly half the 5,000 ms default. `Test timed out` is therefore
+ * matched as a first-class class beside the error names; **0 matches across all
+ * 55 mutants and all 14 baselines** of the quiet re-runs, and the flakes above
+ * were assertion failures rather than timeouts. **The exposure is real and it is
+ * a standing hazard for the next sweep, not a solved one.**
+ *
+ * **`*` marks the EIGHTEEN rows that collected a SHORT suite — 1,949 tests
+ * rather than 2,044.** Those reorderings make `step` throw during test
+ * COLLECTION, so `carSmoothing.test.ts` (27) and `integration.test.ts` (68)
+ * never run at all: 95 tests missing, in exactly the eighteen rows marked, and
+ * the shortfall is `packages/game` 652 -> 557 with the other four packages
+ * unchanged. **Their counts are lower bounds on a partly-unrun suite, not clean
+ * kill counts.** All eighteen involve phase 7 or 8 — the sync and the dispatch —
+ * which is the pair that makes `fieldFor` throw *"colour 0 field is stale"* out
+ * of a rig's module scope. M1e's sweep had sixteen such rows at ten phases; the
+ * two new ones are the offer's, `4<->7` and `4<->8`.
+ *
+ * **The crash screen matched NOTHING on all 55 and all 6 baselines**, screened on
+ * lines that are not vitest result lines after the `pnpm -r` package prefix is
+ * stripped — and stripping that prefix is not optional: it is what makes a
+ * result line recognisable as one, and two crash screens on this project have
+ * been defeated by exactly that.
+ *
+ * **THE THREE PREDICTIONS, WRITTEN BEFORE THE BATTERY RAN. ALL THREE HELD.**
+ *
+ * ```
+ *   2<->4   1   predicted NON-ZERO   week.test.ts:71-97, and NOT a refutation
+ *                                    of the phase-2/phase-4 disjointness claim
+ *   3<->4   0   predicted 0 here     nothing enqueues a choose-card yet
+ *   5<->6   0   predicted 0          the register row, unchanged
+ * ```
+ *
+ * **`2 <-> 4` deserves its sentence, because the trap is reading the red row as
+ * a refutation.** Phases 2 and 4 ARE disjoint: phase 2 writes `H_TILES`, phase 4
+ * writes the offer slots, and the card's own tile bonus is paid by
+ * `applyChooseCard` inside phase 3 precisely so that stays true. But a positional
+ * transposition of 2 and 4 also reverses phase 2 against phase 3, and phase 3
+ * spends `H_TILES` **today**, through `placeRoad`, with no card involved. The
+ * detector is `week.test.ts`'s *"grants before inputs are applied, so a
+ * boundary-tick placement can spend the new tiles"* — under the transposition the
+ * grant lands after the spend and the placement is refused for budget. Named in
+ * advance, and it is the only detector the row has.
+ *
+ * **The two ordering mutants the offer phase does NOT have a detector for, and
+ * they are recorded as 0 rather than as coverage.** `3<->4` (the offer before the
+ * input loop) is 0 because nothing enqueues a `choose-card`: **M1f Task 6 owns
+ * giving it one**, and a Task 6 that adds `applyChooseCard` without a
+ * boundary-tick test leaves this row at 0 for a second milestone. `4<->5` (the
+ * offer after the spawner) is 0 because nothing between them reads the offer
+ * slots; **M1f Task 8's frame fold is what makes that position observable**, and
+ * Task 12's closing sweep is where it gets re-measured. Both positions are right
+ * for the reasons `cards.ts` gives; neither reason is currently under test.
+ *
+ * **`1 <-> 2` and `1 <-> 3` produce the identical detector SET for the third
+ * sweep running** — `step.test.ts` x1, `week.test.ts` x2, `integration.test.ts`
+ * x3 — which is the same non-coincidence recorded at eight and ten phases: both
+ * orderings put the grant in front of the advance, so the grant reads `tick - 1`
+ * either way. **They gained a SEVENTH detector in this task, and it is one of
+ * Task 5's own**: `cards.test.ts`'s *"writes H_TILES never, so phases 2 and 4 are
+ * disjoint by construction"* drives to the tick before a boundary and asserts the
+ * grant lands, so it fails when the grant misses the boundary. A test written to
+ * pin phase 4's disjointness turns out to pin phase 1's position as well; that is
+ * a windfall, not a design, and it is recorded as one.
+ *
+ * **`3 <-> 6` is 1, not 0, and the two phases still commute** — `spawn.test.ts`'s
+ * paving test, exactly as M1e Task 12 measured for the same pair under its old
+ * label `3 <-> 5`. `3 <-> 5` itself is also 1, the same detector, for the same
+ * positional reason. Do not read either as the inputs-versus-demand handoff
+ * having been discharged; `step.test.ts`'s disjointness scan is still its only
+ * tripwire.
+ *
+ * **`10 <-> 11` is 1 here and was 2 at M1e Task 12 under its old label
+ * `9 <-> 10`.** `trips.test.ts`'s brink test survives;
+ * `integration.test.ts`'s death-tick arm — which at M1e caught the transposition
+ * as `expected 31457 to be 31456` — does not fire. **The measurement is the
+ * measurement and the explanation is a hypothesis, labelled as one:** M1f Task 3
+ * re-based that arm from 31,456 to 21,783 for crossing-only conflicts, so the
+ * plausible reading is that the meter's one-tick error no longer lands where the
+ * assertion looks. **Nobody has tested that**, and it would take a deliberate
+ * probe to settle. Recorded as a coverage LOSS rather than absorbed: this pair is
+ * one detector poorer than M1e left it, and `trips.test.ts`'s pair of brink tests
+ * is again the only thing standing between the ordering and a silent
+ * regression.
+ *
  * Pure in the sense that matters: the result depends only on the contents of
  * `s.buffer`, `world`, `fields`/`scratch` (both re-derivable from `s.buffer`
  * and `world` per design decision 3), and `inputs`. Nothing is read from
