@@ -277,10 +277,14 @@ export function assertM1fShapeIsPureLayout(s: GameState, map: MapData): void {
  * pair phase 4 raised, **passed in by the caller and hand-computed there** rather
  * than read back off the state.
  *
- * `H_OFFER_WEEK` is still asserted zero, in `assertM1fShapeApartFromTheOffer`:
- * nothing enqueues a `choose-card` until M1f Task 6, so no fixture in the repo
- * resolves a week, and a fixture that started to would fail here rather than in
- * a digest.
+ * `H_OFFER_WEEK` is still asserted zero, in `assertM1fShapeApartFromTheOffer`,
+ * and **M1f Task 6 narrowed what that sentence can claim.** It used to read
+ * "nothing enqueues a `choose-card` until M1f Task 6, so no fixture in the repo
+ * resolves a week". A `choose-card` exists now and `cards.test.ts` enqueues
+ * plenty — what still holds, and what the assertion actually rests on, is that
+ * **no GOLDEN fixture enqueues any action at all**, so none of them resolves a
+ * week. A golden that started to would fail here rather than in a digest, which
+ * is the whole point of asserting the slot beside the hash.
  */
 export function assertM1fShapeIsLayoutPlusOffer(
   s: GameState,

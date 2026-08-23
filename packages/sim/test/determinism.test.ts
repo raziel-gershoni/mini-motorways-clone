@@ -947,8 +947,15 @@ describe('golden replay', () => {
     //
     // This fixture runs 13,499 ticks and therefore crosses the boundaries at
     // 4,500 and 9,000, exactly as it takes two tile grants. Nothing resolves an
-    // offer (no `TickAction` can until Task 6), so at tick 13,499 the slots hold
-    // **week 2's** pair and `H_OFFER_WEEK` is still 0.
+    // offer, so at tick 13,499 the slots hold **week 2's** pair and
+    // `H_OFFER_WEEK` is still 0.
+    //
+    // **The reason for that changed at M1f Task 6 and the digest did not.** The
+    // clause here used to read "no `TickAction` can until Task 6"; one can now,
+    // and the fixture's log is still empty — `NO_INPUT` on every one of the
+    // 13,499 ticks. So the golden is unmoved because this fixture takes no
+    // action, not because no action exists, and a future task that scripts one
+    // into it re-blesses this digest.
     //
     // **What makes this stronger than a re-bless with a story: the M1f splice
     // still reproduces 1058753394.** The offer slots sit inside block A, so the

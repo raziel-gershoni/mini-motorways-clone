@@ -466,9 +466,15 @@ export function runOfferFromPool(state: GameState, pool: number, scratch: Scratc
  *
  * Nothing here allocates: `scratch.offerPair` is preallocated and `poolFor` is a
  * mask. **And unlike `runWeekBoundary`'s grant, this one IS measured.** Phase 4
- * runs its full body on every tick of an unresolved week, and no week resolves
- * until Task 6 wires `choose-card` — so from tick 4,500 onward this is a
- * per-tick path, `allocation.test.ts`'s Task 12 window (three 4,600-tick windows
+ * runs its full body on every tick of an unresolved week, and **no fixture the
+ * allocation harness drives resolves one** — Task 6 wired `choose-card`, but
+ * enqueueing one needs a caller and the first is Task 8's pointer, so every
+ * profiled tick is still an unresolved week. (The sentence here used to read
+ * "no week resolves until Task 6 wires `choose-card`", which stops being true
+ * the moment a rig takes a card; Task 7 gives the headless rigs a card policy
+ * and this window then profiles the RESOLVED body instead, which is an early
+ * return. Task 12 owns re-deriving what the window still covers.) So from tick
+ * 4,500 onward this is a per-tick path, `allocation.test.ts`'s Task 12 window (three 4,600-tick windows
  * from tick 6,000) profiles 13,800 ticks of it under a 4 B/tick budget over the
  * whole `packages/sim/src` scope, and an escaping object here turns that window
  * red naming `cards.ts`. The week gate that made `runWeekBoundary` structurally

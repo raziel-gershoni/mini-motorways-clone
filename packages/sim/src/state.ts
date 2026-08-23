@@ -66,13 +66,26 @@ import { assertWorldMatches, mapIdHash, type WorldData } from './world'
  *   H_INV_UPGRADES  16  junction upgrades held and not yet placed         M1f
  *   H_UPGRADE_COUNT 17  junction upgrades placed on the board             M1f
  *
- * **The five M1f slots are declared empty by Task 4 and NOTHING READS THEM
- * YET.** `runOffer` (Task 5) becomes the only writer of the first three and
- * `applyPlaceUpgrade` (Task 9) of the last two; `offerPending`/`offerSlot` below
- * are their only readers and have no caller until Task 6. This paragraph is the
- * one M1e's equivalent got wrong — it said "nothing reads them yet" for the
- * whole of the milestone that filled them — so when Tasks 5, 6 and 9 land, this
- * sentence is theirs to correct.
+ * **The five M1f slots were declared empty by Task 4, and TASKS 5 AND 6 HAVE
+ * LANDED — this paragraph is corrected by them, as it said it would be.**
+ * Task 4's version read *"NOTHING READS THEM YET ... `offerPending`/`offerSlot`
+ * below are their only readers and have no caller until Task 6"*, and it named
+ * Tasks 5, 6 and 9 as the ones who owed it a correction. Where they stand now:
+ *
+ *   - `H_OFFER_A` / `H_OFFER_B` — written by `runOffer` (`cards.ts`, phase 4,
+ *     Task 5), read through `offerSlot` and by `applyChooseCard`'s echo.
+ *   - `H_OFFER_WEEK` — written by `runOffer` on the degenerate short pool and by
+ *     `applyChooseCard` (phase 3, Task 6) on every choice. It is the SINGLE
+ *     mechanism for both "one card per week" and "already chosen"; a second flag
+ *     would leave neither half with a detector.
+ *   - `H_INV_UPGRADES` — incremented by `applyChooseCard` (Task 6), decremented
+ *     by `applyPlaceUpgrade` (Task 9, **not yet landed**).
+ *   - `H_UPGRADE_COUNT` — still unwritten; Task 9 owns it.
+ *
+ * `offerPending` has three production callers now (`runOffer`,
+ * `applyChooseCard`, `offerSlot`) and `offerSlot` still has none — **Task 8's
+ * frame fold is its first**, and that is the one clause of Task 4's paragraph
+ * still standing.
  *
  * `H_OFFER_A`/`H_OFFER_B` are FUNCTIONALLY PAIRED with `H_OFFER_WEEK` in exactly
  * the way `H_FAILED_DEST` is with `H_GAME_OVER`: both slots are zero-initialised

@@ -936,19 +936,33 @@ describe('applyChooseCard — the echo is the replay-divergence detector', () =>
     const slot = rig.s.header[H_OFFER_A] === CARD_JUNCTION_UPGRADE ? OFFER_SLOT_A : OFFER_SLOT_B
     const card = (slot === OFFER_SLOT_A ? rig.s.header[H_OFFER_A] : rig.s.header[H_OFFER_B]) as number
     expect(card, 'the shipped pool always offers it').toBe(CARD_JUNCTION_UPGRADE)
+    const tiles = rig.s.header[H_TILES] as number
     step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(slot, card))
     // 5.10's table: "Traffic Lights | 2 | 20". TWO, not one, and this is the
     // assertion that would catch it being implemented as one.
     expect(rig.s.header[H_INV_UPGRADES]).toBe(UPGRADES_PER_CARD)
     expect(rig.s.header[H_INV_UPGRADES]).toBe(2)
+    // **And the tile half as a LITERAL, not as `cardTileGrant(card)`.** Measured:
+    // swapping the two grants inside `cardTileGrant` scored ONE detector, the
+    // unit test, because every behavioural assertion in this file computed its
+    // expectation from the same function it was checking — the catalogue's "an
+    // assertion checked against the formula that produced the thing under test".
+    // 20 is 5.10's item row, hand-carried from the table to here.
+    expect(rig.s.header[H_TILES], 'the item card pays 20, per 5.10s table').toBe(tiles + 20)
   })
 
   it('adds no upgrades when the road-tiles card is taken', () => {
     const rig = bootCity('choose-no-upgrades')
     driveTo(rig, TICKS_PER_WEEK)
     const slot = rig.s.header[H_OFFER_A] === CARD_ROAD_TILES ? OFFER_SLOT_A : OFFER_SLOT_B
+    const tiles = rig.s.header[H_TILES] as number
     step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(slot, CARD_ROAD_TILES))
     expect(rig.s.header[H_INV_UPGRADES]).toBe(0)
+    // The other half of the literal pair above: 5.10's Road Tiles row is "30 or
+    // 40 (per-map constant)" and this map takes 30. Together the two literals are
+    // what makes swapping the grants visible in BEHAVIOUR and not only in the
+    // grant table's own unit test.
+    expect(rig.s.header[H_TILES], 'the road-tiles card pays 30, per 5.10s table').toBe(tiles + 30)
   })
 
   it('raises no new offer for the rest of the week', () => {
@@ -1079,6 +1093,35 @@ describe('applyChooseCard — the echo is the replay-divergence detector', () =>
     expect(rig.s.header[H_INV_UPGRADES], 'nor granted its items a second time').toBe(upgrades)
   })
 
+  it('a WRONG echo on an already-resolved week is a no-op too, which is the shape that separates the two orders', () => {
+    // **Measured, and it corrects this task's brief.** The brief expected
+    // "pending below the echo" to die in the stale-choice test — it does not, and
+    // the reason is worth writing down: moving the check below the echo but above
+    // the writes still refuses to pay twice, and a stale RIGHT echo still matches,
+    // so that test cannot tell the two orders apart. Under the mutant it scored 0.
+    //
+    // The shape that does separate them is a stale WRONG echo: correct code sees
+    // `offerPending` false and returns before the comparison exists; with the
+    // check below, the comparison runs first and a resolved week THROWS on an
+    // action it should have ignored. That is the "a double tap must not brick a
+    // run" property in its strongest form — the tap that arrives late AND names
+    // the card the player did not take.
+    const rig = bootCity('choose-stale-wrong-echo')
+    driveTo(rig, TICKS_PER_WEEK)
+    const taken = rig.s.header[H_OFFER_A] as number
+    const other = rig.s.header[H_OFFER_B] as number
+    step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(OFFER_SLOT_A, taken))
+    const tiles = rig.s.header[H_TILES] as number
+    const upgrades = rig.s.header[H_INV_UPGRADES] as number
+    expect(offerPending(rig.s), 'the week really is resolved going in').toBe(false)
+    expect(() =>
+      step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(OFFER_SLOT_A, other)),
+    ).not.toThrow()
+    expect(rig.s.header[H_TILES], 'and nothing was paid for the card it names').toBe(tiles)
+    expect(rig.s.header[H_INV_UPGRADES]).toBe(upgrades)
+    expect(rig.s.header[H_EPOCH], 'the buffer is not poisoned').toBe(0)
+  })
+
   it('THROWS on the boundary tick itself, because phase 3 runs BEFORE phase 4 raises the pair', () => {
     // **This is the `3 <-> 4` detector Task 5 recorded as an absence, and the
     // assertion is the one the RUN produces rather than the one the brief
@@ -1120,6 +1163,28 @@ describe('applyChooseCard — the echo is the replay-divergence detector', () =>
     // And the buffer is poisoned, which is what makes the Worker STOP rather
     // than score: `step` wrote `H_EPOCH` in phase 1 and threw in phase 3.
     expect(rig.s.header[H_EPOCH], 'the throw left the tick unfinished').toBe(TICKS_PER_WEEK)
+  })
+
+  it('FAILS CLOSED on a forged echo of CARD_NONE, through the grant table rather than a fourth guard', () => {
+    // **The one input that reaches the echo and AGREES with an empty slot.** On
+    // the first boundary tick `H_OFFER_A` is `CARD_NONE` and `offerPending` is
+    // already true, so `choose-card(0, CARD_NONE)` passes the comparison. It
+    // still throws — `cardTileGrant` is total over the OFFERABLE set and
+    // `CARD_NONE` is not in it — and the message it throws is the pool-and-table
+    // disagreement one, which is what a `CARD_NONE` in a slot the player is
+    // choosing from actually IS.
+    //
+    // **No fourth guard was added for it, deliberately.** A `cardId ===
+    // CARD_NONE` test in `applyChooseCard` would be independently sufficient
+    // alongside the grant table's throw, and the catalogue's entry on that says
+    // neither half could then have a detector. One mechanism, and this test so
+    // the behaviour is pinned rather than accidental.
+    const rig = bootCity('choose-forged-none')
+    driveTo(rig, TICKS_PER_WEEK - 1)
+    expect(rig.s.header[H_OFFER_A], 'the slot really is empty').toBe(CARD_NONE)
+    expect(() =>
+      step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(OFFER_SLOT_A, CARD_NONE)),
+    ).toThrow(/card 0 has no tile grant/)
   })
 
   it('resolves the OLD pair when a choice arrives WITH a later boundary, and burns the new weeks offer', () => {
