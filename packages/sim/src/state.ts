@@ -83,9 +83,26 @@ import { assertWorldMatches, mapIdHash, type WorldData } from './world'
  *   - `H_UPGRADE_COUNT` — still unwritten; Task 9 owns it.
  *
  * `offerPending` has three production callers now (`runOffer`,
- * `applyChooseCard`, `offerSlot`) and `offerSlot` still has none — **Task 8's
- * frame fold is its first**, and that is the one clause of Task 4's paragraph
- * still standing.
+ * `applyChooseCard`, `offerSlot`) and **so does `offerSlot`.** Every clause of
+ * Task 4's paragraph is now discharged.
+ *
+ * **The sentence here until M1f Task 8 read *"`offerSlot` still has none — Task
+ * 8's frame fold is its first"*, and it was false in both halves when it was
+ * written.** Task 7's own commit gave `offerSlot` its first production caller,
+ * two lines of `game/frame.ts`'s HUD fold — so "still has none" was already
+ * wrong, and naming Task 8 as the one who would land it **mis-assigned
+ * ownership of work that was already done**. It is quoted rather than deleted
+ * because the failure is worth keeping: Task 7's stale-artefact sweep was scoped
+ * to the files it had edited, which is exactly the wrong scope for a claim
+ * about who owns the next task. A diff-scoped sweep cannot find the sentence in
+ * a file you never opened that makes a prediction *about* you. See the
+ * catalogue entry of the same name.
+ *
+ * Where `offerSlot` is read today: `game/frame.ts`'s `buildFrame` (both slots,
+ * M1f Task 7), and `game/main.ts` supplies it to `pointer.ts` as `offerA`/
+ * `offerB` so that the card the player's tap echoes back is the card the modal
+ * drew (M1f Task 8). All of them go through this function rather than the
+ * header, which is the whole reason it exists — see below.
  *
  * `H_OFFER_A`/`H_OFFER_B` are FUNCTIONALLY PAIRED with `H_OFFER_WEEK` in exactly
  * the way `H_FAILED_DEST` is with `H_GAME_OVER`: both slots are zero-initialised
