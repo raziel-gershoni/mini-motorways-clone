@@ -160,7 +160,7 @@ import { roadDegree } from '../src/graph'
  *
  * Tick 81 is the arrival (cursor reaches routeLen, phase flips in place on the
  * carpark cell). Tick 160 is trip end: the car's LAST crossing enters the house
- * cell in phase 6 and `completeTrip` releases it in phase 7, **on the same
+ * cell in phase 9 and `completeTrip` releases it in phase 10, **on the same
  * tick**, which is the strongest form of the release assertion available.
  *
  * The demand timer is frozen for the whole window and that is asserted, not
@@ -237,7 +237,7 @@ const T_SIBLING_TRIP_END = T_TRIP_END + 11 // 171
 const T_QUIET_CROSSING = 9
 /**
  * The end of the CT_REBUILDS window, and it must be strictly AFTER a crossing,
- * not on one: `syncFields` is phase 4 and `runMovement` is phase 6, so an
+ * not on one: `syncFields` is phase 7 and `runMovement` is phase 9, so an
  * occupancy write on tick T is first visible to the field-input hash on tick
  * T+1. Ticks 9 and 17 are the two crossings inside it.
  */
@@ -540,7 +540,7 @@ describe('the tick-0 ruling: cars stack legally at their home cell (Decision 3)'
     //
     // **The main fixture cannot see this and that is worth saying**: its only
     // house cell is the car's own front door, entered by the LAST crossing of
-    // the return leg and released by `completeTrip` in phase 7 of the very same
+    // the return leg and released by `completeTrip` in phase 10 of the very same
     // tick — so an end-of-tick observer never sees the claim at all. The
     // discriminator needs a house the car drives THROUGH, hence `MID_HOUSE_CELL`
     // and a second house of a DIFFERENT COLOUR (a colour-0 house at 145 would be
@@ -761,8 +761,8 @@ describe('claim and release over the L fixture (lifecycle events 2, 3, 4)', () =
     expect(trace.cellAfterTick[T_TRIP_END - 1]).toBe(143)
     expect(trace.phaseAfterTick[T_TRIP_END - 1]).toBe(PHASE_RETURNING)
     expect(trace.slotsAfterTick[T_TRIP_END - 1]!.get(HOUSE_CELL)).toEqual([FREE, FREE])
-    // On the trip-end tick the LAST crossing enters the house cell in phase 6
-    // and `completeTrip` releases it in phase 7 — claim and release inside one
+    // On the trip-end tick the LAST crossing enters the house cell in phase 9
+    // and `completeTrip` releases it in phase 10 — claim and release inside one
     // tick, which is the strongest form this assertion can take.
     expect(trace.phaseAfterTick[T_TRIP_END]).toBe(PHASE_IDLE)
     expect(r.state.header[H_SCORE]).toBe(1)
@@ -1026,7 +1026,7 @@ describe('two cars dispatched from one house in one tick queue at the FIRST cros
   it('the sibling ENTERS the front door its sibling freed, with ENTER_FREE, on the tick it needs it', () => {
     // The observer Task 2's direct slot assertion could not have, stated as an
     // outcome code rather than as "it moved". Car 0's trip ends on tick 160 and
-    // `completeTrip` releases cell 142 in phase 7 of that tick; car 1's last
+    // `completeTrip` releases cell 142 in phase 10 of that tick; car 1's last
     // crossing needs (142, lane 1) on tick 171 — eleven ticks later after M1d
     // Task 7's corner slowdown, eight before it, and the gap is what makes the
     // release observable at all.
@@ -1263,7 +1263,7 @@ describe('CT_REBUILDS does not move on a tick where a car crosses but nothing ro
 
     // The assertion itself, over a window that ENDS AFTER a crossing rather
     // than on one. That is not cosmetic and it was measured: `syncFields` is
-    // phase 4 and `runMovement` is phase 6, so an occupancy write made on tick
+    // phase 7 and `runMovement` is phase 9, so an occupancy write made on tick
     // T is first visible to the field-input hash on tick **T+1**. A window
     // closing on the crossing tick leaves the FIELD_INPUT mutation undetected
     // — this test scored 0 against it until the window was extended, which is

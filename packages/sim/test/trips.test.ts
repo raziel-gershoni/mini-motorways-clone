@@ -33,7 +33,7 @@ import { claimCell, occupantOf, FREE } from '../src/blocking'
 const NO_INPUT: TickInputs = Object.freeze({ actions: Object.freeze([]) })
 
 /**
- * Unit coverage for phase 7 — arrival, pin consumption, reservation release,
+ * Unit coverage for phase 10 — arrival, pin consumption, reservation release,
  * scoring, and the trip-end slot reset. The end-to-end wiring lives in
  * `loop.test.ts`; everything here drives `runArrivals` DIRECTLY, never through
  * `step`, for the reason the plan gives for the arrival-order construction: an
@@ -732,8 +732,8 @@ describe('a trip ending on a ghost cell decrements it (M1d Task 5)', () => {
 // ---------------------------------------------------------------------------
 
 /**
- * The knockback lives here rather than in phase 10 because it is an EVENT — one
- * car arriving — while phase 10 is a per-tick integration. These are the tests
+ * The knockback lives here rather than in phase 11 because it is an EVENT — one
+ * car arriving — while phase 11 is a per-tick integration. These are the tests
  * for the WIRING; the arithmetic is `overcrowd.test.ts`'s.
  */
 describe('the arrival knockback, wired into arrival', () => {
@@ -793,7 +793,7 @@ describe('the arrival knockback, wired into arrival', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Phase 9 before phase 10 — M1e Task 7
+// Phase 10 before phase 11 — M1e Task 7
 // ---------------------------------------------------------------------------
 
 /** The brink destination's index. One destination on the board, so it is 0. */
@@ -803,16 +803,16 @@ const D_BRINK = 0
  * A whole `step` on a board where a car arrives on the exact tick the
  * destination would otherwise be AT its timer capacity.
  *
- * **This is the only fixture in the repo that can tell phases 9 and 10 apart**,
+ * **This is the only fixture in the repo that can tell phases 10 and 11 apart**,
  * and every other mechanism that could produce `destOverTicks === 0` is
  * disabled by construction rather than by luck:
  *
  *   - the board is 8 x 6, so `REVEALED_Y0` = 9 clips the spawn zone to nothing
- *     and phase 4 is structurally absent — no spawn can add a pin;
+ *     and phase 5 is structurally absent — no spawn can add a pin;
  *   - the destination is placed on tick 0 and the step runs tick 1, which is
  *     inside `FIRST_PIN_DELAY_TICKS`, so `computeSlotCounts` returns 0 and
- *     phase 5 cannot fire either;
- *   - there are no roads, so phase 7 can commit nothing and phase 8 moves
+ *     phase 6 cannot fire either;
+ *   - there are no roads, so phase 8 can commit nothing and phase 9 moves
  *     nobody.
  *
  * So the ONLY thing that moves `destPins` on this tick is the arrival, which is
@@ -844,7 +844,7 @@ function arrivalOnTheBrinkRig(): {
 
 describe('the tick order: arrivals before the overcrowd meter', () => {
   it('integrates the meter AFTER arrivals, so a serviced destination is not charged for the tick it cleared', () => {
-    // The detector for transposing phases 9 and 10. The fixture is built so a
+    // The detector for transposing phases 10 and 11. The fixture is built so a
     // car arrives on the exact tick the destination would otherwise be at
     // capacity: with arrivals first the pin count drops below the trigger and
     // `destOverTicks` stays 0; with overcrowd first it charges a tick the

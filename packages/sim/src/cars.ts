@@ -18,7 +18,7 @@ import { PHASE_OUTBOUND, PHASE_RETURNING } from './buildings'
 
 /**
  * Movement: cars advancing along the routes dispatch committed to them, out
- * and back — phase 6 of the tick order, M1c design decision 3 ("Movement
+ * and back — phase 9 of the tick order, M1c design decision 3 ("Movement
  * accumulates progress in the pathfinder's own cost units").
  *
  * **The signature is the primary defence, and it comes before any test.**
@@ -708,7 +708,7 @@ export function advanceCar(state: GameState, world: WorldData, i: number, speed:
 }
 
 /**
- * Phase 6 of the tick order: advance every in-flight car along its committed
+ * Phase 9 of the tick order: advance every in-flight car along its committed
  * route, outbound or returning.
  *
  * Placed AFTER dispatch, so a car dispatched on tick T also moves on tick T —

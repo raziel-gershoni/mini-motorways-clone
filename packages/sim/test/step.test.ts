@@ -167,7 +167,7 @@ describe('step', () => {
     })
 
     it('a road placed through step on tick T is visible in the field read on tick T (input application precedes the sync)', () => {
-      // Rewritten in Task 6: `step` now owns source assembly (phase 4a), which
+      // Rewritten in M1c Task 6: `step` now owns source assembly (phase 7a), which
       // REWRITES `scratch.sourcesFlat`/`sourceCounts` in full from the live
       // destination prefix every tick, so the previous version's hand-poked
       // source no longer survives to the sync. The property under test is
@@ -191,7 +191,7 @@ describe('step', () => {
 
       step(s, WORLD, fields, scratch, { actions: [{ kind: 'place', a: NEIGHBOUR, b: CARPARK }] })
 
-      // Checked BEFORE the field read, deliberately: assembly (phase 4a) runs
+      // Checked BEFORE the field read, deliberately: assembly (phase 7a) runs
       // after input application, so "inputs moved after the sync" shows up
       // here as a plain 1-vs-0 rather than only as `fieldFor`'s staleness
       // throw, which names a different-looking problem.
@@ -209,42 +209,53 @@ describe('step', () => {
     })
 
     /**
-     * **A tripwire on the condition that keeps `3 <-> 4` 0-detector — not a
-     * detector for that transposition** (M1d Task 1c; rewritten in M1e Task 2's
-     * fix round, and the rewrite is most of the point).
+     * **A tripwire on the condition that makes the input loop and demand
+     * commute — not a detector for transposing them** (M1d Task 1c; rewritten in
+     * M1e Task 2's fix round, and the rewrite is most of the point;
+     * re-labelled at M1f Task 5's insertion).
      *
-     * **Read the numbering first: these are EIGHT-phase labels.** Phase 1 is the
-     * clock advance, phase 2 is the week grant (`week.ts`), phase 3 is the input
-     * loop, phase 4 is demand. The version of this comment that stood until the
-     * fix round still used M1c's seven-phase labels and had become actively
-     * misleading in four ways at once: it named `1 <-> 2` and `2 <-> 3` as the
-     * inert pairs, which in this numbering are two of the three pairs M1e Task 2
-     * gave detectors to (3 and 1); it predicted M1e would make building
-     * placement a `TickAction`, which M1e explicitly does not do — spawning is a
-     * PHASE; it said no test that could fail exists for the swaps, when three
-     * now do; and it said "phase 2 still cannot observe the clock" of a phase
-     * whose entire job is now reading `H_TICK`. A tripwire exists to make the
-     * person who trips it read the comment, so a comment that hands them the
-     * wrong pairs is worse than no tripwire.
+     * **Read the numbering first: these are TODAY'S ELEVEN-phase labels.**
+     * Phase 1 is the clock advance, 2 the week grant (`week.ts`), 3 the input
+     * loop, 4 the card offer (`cards.ts`), 5 spawn, **6 demand**. The pair this
+     * tripwire is about is therefore `3 <-> 6`; it was `2 <-> 3` in M1c's seven
+     * phases, `3 <-> 4` in M1e Task 2's eight and `3 <-> 5` in M1e Task 5's ten,
+     * and this comment has now been re-labelled three times for insertions that
+     * changed no code. Re-label, do not re-interpret.
      *
-     * **What is actually still inert, and why.** `3 <-> 4` — the input loop
-     * against demand — scores 0. `step.ts` records the reason in full, and it is
-     * NOT the clock: the review measured `3 <-> 4` at 0 detectors even with
-     * `roads.ts` reading `H_TICK` in a live branch. The two phases commute
-     * because they touch **disjoint state**. So this test pins three things, and
-     * only the third is load-bearing for `3 <-> 4`:
+     * The version of this comment that stood until M1e Task 2's fix round still
+     * used M1c's seven-phase labels and had become actively misleading in four
+     * ways at once: it named `1 <-> 2` and `2 <-> 3` as the inert pairs, which
+     * in that numbering were two of the three pairs M1e Task 2 gave detectors
+     * to (3 and 1); it predicted M1e would make building placement a
+     * `TickAction`, which M1e explicitly does not do — spawning is a PHASE; it
+     * said no test that could fail exists for the swaps, when three now do; and
+     * it said "phase 2 still cannot observe the clock" of a phase whose entire
+     * job is now reading `H_TICK`. A tripwire exists to make the person who
+     * trips it read the comment, so a comment that hands them the wrong pairs is
+     * worse than no tripwire.
+     *
+     * **What is actually still inert, and why.** The input loop and demand
+     * COMMUTE WITH EACH OTHER; `step.ts` records the reason in full, and it is
+     * NOT the clock — the review measured the pair at 0 detectors even with
+     * `roads.ts` reading `H_TICK` in a live branch, because the two phases touch
+     * **disjoint state**. (The positional transposition `3 <-> 6` is not itself
+     * 0-detector today, and has not been since M1e Task 5 put the spawn phase
+     * between them: it also reverses inputs against spawn, which `spawn.test.ts`
+     * catches. That is a fact about DISTANCE, not about these two phases, and
+     * `step.ts` sets it out at length.) So this test pins three things, and only
+     * the third is load-bearing for the commutation:
      *
      *   1. The action set is still exactly the two road edits.
      *   2. `roads.ts` still cannot observe the clock. **Kept, but demoted**: it
      *      is the condition M1c and M1d recorded, it is cheap, and a
      *      clock-reading `roads.ts` is still something whoever writes it should
-     *      re-derive the order for. It is no longer claimed to be what keeps
-     *      `3 <-> 4` inert.
+     *      re-derive the order for. It is no longer claimed to be what makes
+     *      the two phases commute.
      *   3. **`roads.ts` writes nothing `runDemand` reads.** This is the one that
      *      would have caught the scheduled failure: M1f's §5.9 connectivity rule
      *      makes `eraseRoad` drop a disconnected destination's pending pins,
      *      which gains `roads.ts` no `H_TICK` — so guard 2 stays green — while
-     *      making `3 <-> 4` a real one-tick pin error at 0 detectors.
+     *      making the pair a real one-tick pin error at 0 detectors.
      *
      * **What guard 3 cannot see, said here rather than left to be found:** an
      * INDIRECT write, where phase 3 calls a helper exported from `demand.ts` (or
@@ -260,7 +271,7 @@ describe('step', () => {
      * passes with a third kind added, and `tsc` has no opinion about which
      * header fields or state regions a module touches.
      */
-    it('pins the condition that keeps the 3 <-> 4 tick-order transposition inert', () => {
+    it('pins the condition that keeps the inputs/demand tick-order pair commuting (3 <-> 6 today)', () => {
       const stepSrc = readFileSync(new URL('../src/step.ts', import.meta.url), 'utf8')
       const roadsSrc = readFileSync(new URL('../src/roads.ts', import.meta.url), 'utf8')
       // Vacuity: an empty or misresolved read satisfies both scans below.
@@ -278,7 +289,7 @@ describe('step', () => {
        */
       expect(
         stepSrc,
-        'the TickAction set changed — re-derive tick phases 1..4 before widening it; see step.ts',
+        'the TickAction set changed — re-derive tick phases 1..6 before widening it; see step.ts',
       ).toMatch(/^export type TickActionKind = 'place' \| 'erase'$/m)
 
       /**
@@ -305,8 +316,8 @@ describe('step', () => {
       expect(roadsSrc, 'roads.ts now reads H_WEEK — same re-derivation as above').not.toMatch(H_WEEK_RE)
 
       /**
-       * Half 3, and the one that actually keeps `3 <-> 4` inert: **phase 3
-       * writes nothing phase 4 reads.**
+       * Half 3, and the one that actually makes the pair commute: **phase 3
+       * writes nothing phase 6 reads.**
        *
        * The four names `runDemand` WRITES (`destPins`, `pinAccum`,
        * `rotationCursor`, `H_PINS_DROPPED`) plus `destSpawnTick`, which it reads
@@ -333,7 +344,7 @@ describe('step', () => {
       for (const name of DEMAND_STATE) {
         expect(
           roadsSrc,
-          `roads.ts now touches ${name}, which runDemand reads — phases 3 and 4 no longer commute, ` +
+          `roads.ts now touches ${name}, which runDemand reads — phases 3 and 6 no longer commute, ` +
             'and transposing them is a one-tick pin error nothing else catches; see step.ts',
         ).not.toMatch(demandRe(name))
       }
@@ -441,7 +452,7 @@ describe('step', () => {
     // DESCENDING source list onto `scratch` and reached
     // `computeFlowField`'s "strictly ascending" guard. That guard is no
     // longer reachable through `step` at all, and that is a correct
-    // consequence of wiring phase 4a rather than a lost test: `step` now calls
+    // consequence of wiring phase 7a rather than a lost test: `step` now calls
     // `assembleSources`, which rewrites the source slices in full every tick
     // by ascending insertion, so no caller can hand `syncFields` an unsorted
     // list any more. `dispatch.test.ts` and `flowfield.test.ts` still cover
@@ -457,7 +468,7 @@ describe('step', () => {
       // OFF-MANIFOLD, deliberately: decision 4 proves `destReserved <=
       // destPins`, so an outbound car arriving at a pinless destination
       // cannot occur — which is exactly why arrivals ASSERT it. Hand-written
-      // here because a throw out of phase 7 is otherwise unreachable.
+      // here because a throw out of the arrivals phase is otherwise unreachable.
       expect(placeHouse(s, WORLD, 15, 0)).toBe(true)
       s.carRouteLen[0] = 1
       s.carRouteCursor[0] = 1 // outbound route exhausted: this car has arrived
@@ -484,7 +495,7 @@ describe('step', () => {
         entryCell: new Int32Array(1),
         entryNext: new Int32Array(1),
       }
-      // The source now comes from a real placed destination, via phase 4a,
+      // The source now comes from a real placed destination, via phase 7a,
       // rather than being poked onto `scratch` — see the note above.
       const CARPARK = 12
       const NEIGHBOUR = 13

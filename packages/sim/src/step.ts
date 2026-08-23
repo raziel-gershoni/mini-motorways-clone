@@ -7,6 +7,7 @@ import type { FlowField, Scratch } from './scratch'
 import { syncFields } from './flowfield'
 import { placeRoad, eraseRoad } from './roads'
 import { runDemand } from './demand'
+import { runOffer } from './cards'
 import { runSpawn } from './spawn'
 import { assembleSources, runDispatch } from './dispatch'
 import { runMovement } from './cars'
@@ -48,31 +49,44 @@ export interface TickInputs {
  * replaying 2*(N/2) ticks run this exact function the same number of times
  * either way.
  *
- * **The ten phases — seven until M1e Task 2 inserted the week boundary at
- * position 2, eight until M1e Task 5 inserted the spawn phase at position 4,
- * and nine until M1e Task 7 APPENDED the overcrowd meter at position 10. Most
- * positions are forced by a constraint; ONE ADJACENT SWAP STILL IS NOT,
- * and this comment says which** (M1c, "The tick order,
- * derived"). An earlier version opened "each justified by the constraint that
- * forces its position rather than by preference — the order is derived; do not
- * reorder it for tidiness", and that was an overstatement in the one comment
- * that presents the whole order as derived. Under seven phases all 13
- * reorderings were run: 11 were caught by tests and **`1 <-> 2` and `2 <-> 3`
- * were 0-detector no-ops**, re-measured at the close of M1d over the complete
- * pairwise set C(7,2) = 21 with the same answer. In the eight-phase numbering
- * those two pairs were `1 <-> 3` and `3 <-> 4`, and only the second was still
- * inert. **In the NINE-phase numbering — which phases 1..9 still carry, since
- * Task 7 appended rather than inserted — there are TWO inert pairs, not one:
- * `3 <-> 5` (inputs versus demand, inherited) and `4 <-> 5` (spawn versus
- * demand, new in Task 5 and predicted by its brief to have a detector).**
- * `3 <-> 4` now names *inputs versus spawn*, which is a different pair and does
- * have one (`spawn.test.ts`'s paving test). Both no-ops are decomposed below,
- * and they are inert for DIFFERENT reasons. Do not read any of this as licence
- * to reorder.
+ * **THE PHASE COUNT IS FINAL AT ELEVEN AND NO LATER TASK ADDS ONE.** Say that
+ * first, because the next reader has exactly two failure modes here:
+ * renumbering a second time by reflex, and leaving a gap for a phase that never
+ * arrives. An earlier draft of M1f appended a TWELFTH phase at Task 9 to advance
+ * a traffic light's controller once per tick; Amendment 2 deleted the
+ * controller, and M1f's relief object is a flag `canEnter` reads — there is
+ * nothing to advance. Tasks 6 and 9 add ACTION KINDS, which the input loop
+ * dispatches inside phase 3; they add no phase. Eleven.
+ *
+ * **The eleven phases — seven until M1e Task 2 inserted the week boundary at
+ * position 2, eight until M1e Task 5 inserted the spawn phase at what was then
+ * position 4, nine until M1e Task 7 APPENDED the overcrowd meter, ten until M1f
+ * Task 5 inserted the CARD OFFER at position 4. Most positions are forced by a
+ * constraint; ONE ADJACENT SWAP STILL IS NOT, and this comment says which**
+ * (M1c, "The tick order, derived"). An earlier version opened "each justified by
+ * the constraint that forces its position rather than by preference — the order
+ * is derived; do not reorder it for tidiness", and that was an overstatement in
+ * the one comment that presents the whole order as derived. Under seven phases
+ * all 13 reorderings were run: 11 were caught by tests and **`1 <-> 2` and
+ * `2 <-> 3` were 0-detector no-ops**, re-measured at the close of M1d over the
+ * complete pairwise set C(7,2) = 21 with the same answer. In the eight-phase
+ * numbering those two pairs were `1 <-> 3` and `3 <-> 4`, and only the second
+ * was still inert.
+ *
+ * **In today's ELEVEN-phase numbering there is ONE inert pair and it is
+ * `5 <-> 6` — spawn versus demand.** It was `4 <-> 5` for the whole of M1e and
+ * is renumbered here by M1f Task 5's insertion at position 4; a later reader
+ * grepping `4 <-> 5` should land on this sentence rather than on nothing. The
+ * other pair M1e carried, `3 <-> 5` (inputs versus demand), is `3 <-> 6` today
+ * and is NOT inert — for a positional reason set out at length below, which has
+ * nothing to do with the property it used to be inert about. `3 <-> 4` now names
+ * *inputs versus the offer*, which is a THIRD new pair with no detector in M1f
+ * Task 5 and one from Task 6 onward. All three are decomposed below. Do not read
+ * any of this as licence to reorder.
  *
  *   1. `H_EPOCH <- tick`; advance `H_TICK`, `H_WEEK`. **The constraint is "the
  *      advance must precede every clock reader below", and as of M1e Task 2 the
- *      nearest of those is phase 2 rather than phase 4.** Until then the only
+ *      nearest of those is phase 2 rather than phase 6.** Until then the only
  *      in-tick `H_TICK` reader was demand's 4 s eligibility gate, which
  *      compares `H_TICK - destSpawnTick[d]` against `FIRST_PIN_DELAY_TICKS`, and
  *      this bullet recorded the slack that produced honestly: an earlier version
@@ -102,42 +116,56 @@ export interface TickInputs {
  *   3. Apply inputs — the only phase that changes `roads`. Must precede the
  *      field sync, or a road drawn on tick T is invisible to this tick's
  *      field.
- *   4. Spawn (`spawn.ts`, M1e Task 5) — the destination timer and the
+ *   4. The card offer (`cards.ts`, M1f Task 5, spec §5.10) — raise this week's
+ *      pair into `H_OFFER_A`/`H_OFFER_B`. AFTER phase 3, because a `choose-card`
+ *      queued on the boundary tick (Task 6) must resolve THIS week's offer before
+ *      the phase that would raise one. BEFORE phase 5, because nothing
+ *      downstream may observe a half-raised offer. **Both bounds are arguments
+ *      and NEITHER HAS A DETECTOR IN M1f TASK 5** — nothing enqueues a
+ *      `choose-card` yet and nothing reads the slots until Task 8, so both
+ *      displacements scored 0 in Task 5's own battery and are recorded there as
+ *      0 rather than as coverage. It reads `H_WEEK` and `rng[0]`; it writes the
+ *      two offer slots and, on a pool of fewer than two cards, `H_OFFER_WEEK`.
+ *      It writes **no** `H_TILES`: the card's tile bonus is paid by
+ *      `applyChooseCard` in phase 3, so phases 2 and 4 are disjoint BY
+ *      CONSTRUCTION — see the `2 <-> 4` row of Task 5's table for why that does
+ *      not make the positional transposition inert.
+ *   5. Spawn (`spawn.ts`, M1e Task 5) — the destination timer and the
  *      per-colour house timers, and whatever they place. AFTER phase 3,
  *      because §5.9's "nothing spawns on an existing road tile" must see the
  *      road the player laid THIS tick — that is the whole of spawn-blocking,
- *      which §5.9 calls a skill expression. BEFORE phase 5, so a destination
+ *      which §5.9 calls a skill expression. BEFORE phase 6, so a destination
  *      placed on tick T is inside `H_DEST_COUNT` for tick T's rotation, and
  *      before the sync for the ordinary reason: it writes `destCell`/`destMeta`
  *      (both FIELD_INPUT) and, through §5.3.5's redistribution, `destPins`.
  *      It reads `H_TICK` (through `placeDestination`'s `destSpawnTick` stamp)
  *      and `H_WEEK` (colour unlocks), so its position against phase 1 is an
  *      off-by-one with a detector.
- *   5. Demand — accumulators, pins, overflow, drops. Mutates `destPins`,
+ *   6. Demand — accumulators, pins, overflow, drops. Mutates `destPins`,
  *      which decides the source set, so it must precede the sync.
- *   6. Assemble sources, then EXACTLY ONE `syncFields`. Every source-mutating
+ *   7. Assemble sources, then EXACTLY ONE `syncFields`. Every source-mutating
  *      phase is now behind it, and `fieldFor` throws unless the sync ran
  *      against exactly the current sources.
- *   7. Dispatch — the whole tick's only field reader. Mutates `destReserved`
+ *   8. Dispatch — the whole tick's only field reader. Mutates `destReserved`
  *      and car state, never the source set: that is what decision 4 buys, and
  *      it is what makes "no phase between the sync and a field read may mutate
  *      the source set" hold with no in-tick reasoning required.
- *   8. Movement — advances committed routes and reads no field at all
+ *   9. Movement — advances committed routes and reads no field at all
  *      (decision 2). AFTER dispatch, so a car dispatched on tick T also moves
  *      on tick T; the alternative costs every trip one tick and every
  *      exact-tick assertion inherits it.
- *   9. Arrivals — consume the pin, release the reservation, credit the score,
+ *  10. Arrivals — consume the pin, release the reservation, credit the score,
  *      free the car, and apply §5.8's arrival KNOCKBACK to the overcrowd meter.
  *      Mutates `destPins` AFTER the sync, so it must be the last phase that
  *      does. **Stated residual: the fields are stale from here until the next
  *      tick's sync.** Nothing may call `fieldFor` in that window — not a
  *      renderer, not a debug hash, not a test helper. Under decision 2 the
- *      only in-tick reader is phase 7, so this binds external callers only,
- *      and `loop.test.ts` asserts the throw rather than assuming it. Phase 10
+ *      only in-tick reader is phase 8, so this binds external callers only,
+ *      and `loop.test.ts` asserts the throw rather than assuming it. Phase 11
  *      below sits inside that window and is allowed to, because it reads no
  *      field.
- *  10. Overcrowd (`overcrowd.ts`, M1e Task 7, spec §5.8) — integrate each
- *      destination's meter against its timer capacity. AFTER phase 9, and that
+ *  11. Overcrowd (`overcrowd.ts`, M1e Task 7, spec §5.8) — integrate each
+ *      destination's meter against its timer capacity. AFTER phase 10, and that
  *      is a real constraint rather than a tail position: the meter reads
  *      `destPins`, so running it first charges a destination for the tick a car
  *      had already earned back, and a player who cleared a queue on tick T
@@ -145,77 +173,88 @@ export interface TickInputs {
  *      detector. It reads `destPins`/`destMeta` and writes only
  *      `destOvercrowd`/`destOverTicks`, both `FIELD_IRRELEVANT`
  *      (`regions.ts`), so it cannot stale a field and nothing after it needs
- *      re-syncing. **It does not end the run** — Task 8 is what reads
- *      `OVERCROWD_FAIL_MILLITICKS` and shuts the city down.
+ *      re-syncing. **It does not end the run** — M1e Task 8 is what reads
+ *      `OVERCROWD_FAIL_MILLITICKS` and shuts the city down. **It is the LAST
+ *      phase and stays the last one: the count is final at eleven.**
  *   — `H_EPOCH <- 0` on successful exit.
  *
- * **The phase count went 9 -> 10 at M1e Task 7 and phases 1..9 kept their
- * numbers, so every `n <-> m` recorded below still names the pair it named.**
- * The complete pairwise set is C(10,2) = 45 and **M1e Task 12 ran all of it**
- * — the table is at the foot of this comment and it supersedes every earlier
- * count. **One pair is 0-detector and it is `4 <-> 5`. `3 <-> 5` is NOT, any
- * more, and the reason is positional rather than a change in the code**; the
- * Task 12 block says exactly what changed and the paragraph below carries the
- * correction.
+ * **The phase count went 10 -> 11 at M1f Task 5 by INSERTING at position 4, so
+ * every index of 4 or above in every historical block below has moved by one.**
+ * Each block states its own numbering; add one to any index of 4 or above to
+ * reach today's. Re-label, do not re-interpret — the pairs those blocks measured
+ * are the pairs they measured, and rewriting a measurement to agree with today's
+ * labels is how a table stops being evidence.
+ *
+ * The complete pairwise set is C(11,2) = 55 and **M1f Task 5 ran all of it** —
+ * the table is at the foot of this comment and it supersedes every earlier
+ * count. **One pair is 0-detector and it is `5 <-> 6`** (spawn versus demand;
+ * M1e's `4 <-> 5`, renumbered by Task 5's insertion — a later reader grepping
+ * `4 <-> 5` should find this sentence). `3 <-> 6` (inputs versus demand, M1e's
+ * `3 <-> 5`) is NOT inert, and the reason is positional rather than a change in
+ * the code; the paragraph below carries the correction.
  *
  * **The one remaining checked no-op, disclosed in `cars.ts`'s idiom for exactly
  * this shape — and the reason recorded for it for three milestones was the
- * WRONG ONE.** `3 <-> 5` (inputs after demand — M1c's `2 <-> 3`, M1e Task 2's
- * `3 <-> 4`) is 0-detector across the whole suite. Every prior version of this
- * comment said that was
+ * WRONG ONE.** `3 <-> 6` (inputs after demand — M1c's `2 <-> 3`, M1e Task 2's
+ * `3 <-> 4`, M1e Task 5's `3 <-> 5`) was 0-detector across the whole suite while
+ * the two phases were adjacent. Every prior version of this comment said that was
  * because **no `TickAction` reads `H_TICK`**, and M1e Task 2's review measured
  * that claim directly: with the trigger SATISFIED — `roads.ts` reading `H_TICK`
  * in a live branch — transposing the pair still scores **0**. The clock has
  * nothing to do with it.
  *
- * **Task 5's insertion does NOT discharge it, and that is worth saying because
- * the previous insertion did.** Phase 2 discharged `1 <-> 3` by putting a clock
- * reader between two phases whose only relationship was the clock. Phase 4 sits
- * between inputs and demand, so `3 <-> 5` is no longer an ADJACENT
- * transposition — but the pair still commutes for the disjointness reason
- * below.
+ * **Neither insertion between them discharges it, and that is worth saying
+ * because the FIRST insertion — phase 2 — did discharge a different pair.** Phase
+ * 2 discharged `1 <-> 3` by putting a clock reader between two phases whose only
+ * relationship was the clock. The spawn phase and now the offer phase sit
+ * BETWEEN inputs and demand, so the pair is no longer an ADJACENT transposition
+ * — but the two phases still commute with each other, for the disjointness
+ * reason below.
  *
  * **AND THE SENTENCE THAT USED TO FOLLOW WAS WRONG. It read: *"a transposition
  * of two commuting phases is inert however many phases sit between them."*
- * M1e Task 12's full pairwise sweep measured `3 <-> 5` at 1 detector, stably, in
- * 4 of 4 rounds against 4 clean baselines.**
+ * M1e Task 12's full pairwise sweep measured the pair at 1 detector, stably, in
+ * 4 of 4 rounds against 4 clean baselines, and M1f Task 5's re-sweep at the
+ * eleven-phase numbering measures `3 <-> 6` at 1 for the same reason.**
  *
  * Nothing about the code changed; the sentence was false as written. **A
  * POSITIONAL transposition of phases `i` and `j` with `j > i + 1` is not a swap
  * of two adjacent items** — it also reverses phase `i` against everything
  * between them, and everything between them against phase `j`. Transposing
- * positions 3 and 5 yields `clock, grant, DEMAND, spawn, INPUTS, sync, ...`, so
- * the player's road is now applied AFTER the spawner has run: `spawn.test.ts`'s
- * *"will not spawn on a road the player laid this tick"* dies with *"a paved
- * cell must refuse a destination: expected 4 to be 3"*. That is `3 <-> 4`'s
- * detector firing inside `3 <-> 5`'s mutant, exactly as it should.
+ * positions 3 and 6 yields `clock, grant, DEMAND, offer, spawn, INPUTS, sync,
+ * ...`, so the player's road is now applied AFTER the spawner has run:
+ * `spawn.test.ts`'s *"will not spawn on a road the player laid this tick"* dies
+ * with *"a paved cell must refuse a destination"*. That is `3 <-> 5`'s detector
+ * firing inside `3 <-> 6`'s mutant, exactly as it should.
  *
- * **So the claim that survives is narrower and still true: phases 3 and 5
- * commute WITH EACH OTHER**, which is why the pair was inert while they were
- * adjacent and why swapping them still cannot produce a pin-accumulation error.
- * What ends that is a write, not a distance — see the scheduled failure below.
+ * **So the claim that survives is narrower and still true: the input loop and
+ * demand commute WITH EACH OTHER**, which is why the pair was inert while they
+ * were adjacent and why swapping them still cannot produce a pin-accumulation
+ * error. What ends that is a write, not a distance — see the scheduled failure
+ * below.
  *
- * **And the insertion ADDED a second checked no-op rather than only removing
- * one. `4 <-> 5` — spawn versus demand — is also 0-detector, and Task 5's brief
- * predicted it would have a detector.** Of the two new adjacent pairs, only
- * `3 <-> 4` (inputs versus spawn) has one: `spawn.test.ts`'s paving test, 1
- * detector.
+ * **M1e Task 5's insertion ADDED a checked no-op rather than only removing one.
+ * `5 <-> 6` — spawn versus demand, M1e's `4 <-> 5` — is 0-detector, and M1e Task
+ * 5's brief predicted it would have a detector.** Of the adjacent pairs around
+ * the spawn phase, `3 <-> 5` (inputs versus spawn) has one — `spawn.test.ts`'s
+ * paving test, 1 detector — and `4 <-> 5` (the offer versus spawn) does not, in
+ * this task, because nothing between them reads the offer slots yet.
  *
- * **Three measurements of `4 <-> 5`, at three suite sizes, all zero.** Task 5
- * measured it over the suite as it stood at **1,693** tests; Task 12's complete
- * pairwise sweep re-ran it over **1,843** against four fresh baselines (the
- * table below); and M1e's closing sweep re-applied the transposition alone over
- * the canonical invocation at **1,843** — green, five packages, no crash-screen
- * match, and the collection count unchanged, so the mutant ran. The suite size
- * is quoted because a bare *"the whole suite"* in a durable comment reads as
- * *"the suite you have"*, and this one has grown by 150 tests since the
- * sentence was written.
+ * **Four measurements of spawn-versus-demand, at four suite sizes, all zero.**
+ * M1e Task 5 measured it over the suite as it stood at **1,693** tests; M1e Task
+ * 12's complete pairwise sweep re-ran it over **1,843** against four fresh
+ * baselines; M1e's closing sweep re-applied the transposition alone at **1,843**;
+ * and M1f Task 5's 55-pair sweep re-ran it as `5 <-> 6` over **2,044** against
+ * four fresh baselines — green every time, no crash-screen match, and the
+ * collection count unchanged, so the mutant ran. The suite size is quoted because
+ * a bare *"the whole suite"* in a durable comment reads as *"the suite you
+ * have"*, and this one has grown by 351 tests since the sentence was written.
  *
- * **`4 <-> 5` has no business commuting and does anyway, for TWO reasons, both
- * needed.** Spawn writes `destCell`, `destMeta`, `destSpawnTick`,
+ * **Spawn versus demand has no business commuting and does anyway, for TWO
+ * reasons, both needed.** Spawn writes `destCell`, `destMeta`, `destSpawnTick`,
  * `H_DEST_COUNT` and — through §5.3.5's push — `destPins`, `rotationCursor` and
  * `H_PINS_DROPPED`, every one of which demand reads. So this is NOT the
- * disjointness of `3 <-> 5`; it is:
+ * disjointness of inputs-versus-demand; it is:
  *
  *   1. **A destination placed on tick T is INELIGIBLE on tick T.** The gate is
  *      `tick - destSpawnTick >= FIRST_PIN_DELAY_TICKS` and `placeDestination`
@@ -253,7 +292,7 @@ export interface TickInputs {
  * connectivity rule to `placeRoad`/`eraseRoad`: erasing a road that disconnects
  * a destination drops its pending pins. That gains `roads.ts` no `H_TICK` at
  * all — so the clock-shaped tripwire stays green — while making phase 3 write
- * `destPins`, which phase 5 reads. `3 <-> 5` becomes a real one-tick
+ * `destPins`, which phase 6 reads. `3 <-> 6` becomes a real one-tick
  * pin-accumulation error on every tick a road is drawn or erased, at 0
  * detectors.
  *
@@ -293,7 +332,7 @@ export interface TickInputs {
  *   - **The condition has a tripwire rather than only this paragraph.**
  *     `step.test.ts` reads this file and `roads.ts` off disk and pins the action
  *     set, the clock-freedom of `roads.ts`, and the disjointness above. It is
- *     NOT a detector for `3 <-> 4` — nothing can be, while the phases commute —
+ *     NOT a detector for `3 <-> 6` — nothing can be, while the phases commute —
  *     it is a mechanism that makes the person who ends the condition read this
  *     comment. A handoff whose only carrier is a comment is a handoff with no
  *     recipient.
@@ -313,9 +352,10 @@ export interface TickInputs {
  * ---------------------------------------------------------------------------
  *
  * **Historical, and its numbering is M1d's SEVEN-phase one.** Every `n <-> m`
- * in this block counts phases without the week boundary: M1d's `1 <-> 2` is
- * today's `1 <-> 3` and M1d's `2 <-> 3` is today's `3 <-> 4`. Read it with the
- * M1e block below, which supersedes its conclusion for the first of those.
+ * in this block counts phases without the week boundary, the spawn phase or the
+ * offer: M1d's `1 <-> 2` is today's `1 <-> 3` and M1d's `2 <-> 3` is today's
+ * `3 <-> 6`. Read it with the M1e block below, which supersedes its conclusion
+ * for the first of those.
  *
  * **The result at the time was that nothing changed: `1 <-> 2` and `2 <-> 3`
  * were still the only 0-detector transpositions, and still for the same single
@@ -374,16 +414,16 @@ export interface TickInputs {
  * ---------------------------------------------------------------------------
  *
  * **The phase count went from 7 to 8, and `1 <-> 3` is no longer a member of
- * the inert set. `3 <-> 4` still is.**
+ * the inert set. `3 <-> 4` — inputs vs demand, today's `3 <-> 6` — still was.**
  *
  * **This block's numbering is M1e Task 2's EIGHT-phase one, which is NO LONGER
- * this file's — Task 5 has now made the insertion the note below predicted.**
- * Task 5 inserted the spawn phase at position 4, so Task 2's `3 <-> 4` (inputs
- * vs demand) is today's `3 <-> 5`, and today's `3 <-> 4` names *inputs vs
- * spawn* — a different pair with a real detector. Every `n <-> m` in the block
- * below counts phases as Task 2's version of this file listed them; add one to
- * any index of 4 or above to reach today's numbering. Re-label, do not
- * re-interpret.
+ * this file's — TWO insertions have landed at position 4 since.** M1e Task 5
+ * inserted the spawn phase there and M1f Task 5 inserted the card offer there,
+ * so Task 2's `3 <-> 4` (inputs vs demand) is today's `3 <-> 6`, and today's
+ * `3 <-> 4` names *inputs vs the offer* — a different pair again. Every
+ * `n <-> m` in the block below counts phases as Task 2's version of this file
+ * listed them; add TWO to any index of 4 or above to reach today's numbering.
+ * Re-label, do not re-interpret.
  *
  * **The predictions were written into the task brief BEFORE the battery ran**,
  * which is the only thing that makes the numbers evidence: a measurement with
@@ -429,10 +469,12 @@ export interface TickInputs {
  * ---------------------------------------------------------------------------
  *
  * **Phase 10 (`runOvercrowd`) was APPENDED, not inserted, so every index above
- * is unchanged and every `n <-> m` recorded above still names its own pair.**
- * Task 7 did not re-run the complete pairwise set — which is now C(10,2) = 45 —
- * and says so rather than implying it did. What it measured is the one new
- * ADJACENT pair plus the deletion, over the canonical whole-suite invocation
+ * was unchanged at the time and every `n <-> m` recorded above still named its
+ * own pair.** It is phase **11** today: M1f Task 5 inserted the card offer at
+ * position 4, so this block's `9 <-> 10` is today's `10 <-> 11`. Task 7 did not
+ * re-run the complete pairwise set — which was C(10,2) = 45 then and is
+ * C(11,2) = 55 now — and says so rather than implying it did. What it measured
+ * is the one new ADJACENT pair plus the deletion, over the canonical invocation
  * (1,739 tests: shared 49, render 223, eslint-rules 69, sim 838, game 560),
  * against **three** unmutated baselines run in the same battery:
  *
@@ -456,8 +498,8 @@ export interface TickInputs {
  *
  * **No golden sees either**, and that is derivable rather than surprising:
  * every golden fixture in the repo holds at most one pin per destination, five
- * short of the square trigger, so phase 10 writes zeroes on every tick of every
- * one of them whichever side of phase 9 it runs. That pair of tests is
+ * short of the square trigger, so the meter writes zeroes on every tick of every
+ * one of them whichever side of arrivals it runs. That pair of tests is
  * therefore the only thing standing between this ordering and a silent
  * regression, which is why they are written as a pair rather than as one test
  * with two assertions.
@@ -465,6 +507,12 @@ export interface TickInputs {
  * ---------------------------------------------------------------------------
  * THE RE-MEASUREMENT, AT THE CLOSE OF M1e — TASK 12, AT THE FINAL PHASE COUNT
  * ---------------------------------------------------------------------------
+ *
+ * **Historical, and its numbering is M1e's TEN-phase one. Add one to any index
+ * of 4 or above to reach today's** — M1f Task 5 inserted the card offer at
+ * position 4 and re-ran the whole set at eleven phases; that table is the live
+ * one and sits at the foot of this comment. This block's `4 <-> 5` is today's
+ * `5 <-> 6` and its `3 <-> 5` is today's `3 <-> 6`.
  *
  * **The complete pairwise set over TEN phases, C(10,2) = 45, stated as an
  * enumeration so it reproduces from this sentence: every unordered pair
@@ -546,7 +594,17 @@ export interface TickInputs {
  * one-tick error in the meter is now visible as a one-tick error in the run.
  *
  * **ONE 0-detector row, and it is `4 <-> 5`** — spawn versus demand, the pair
- * Task 5's brief predicted would have a detector and which has never had one.
+ * M1e Task 5's brief predicted would have a detector and which has never had
+ * one.
+ *
+ * **RENAMED: `4 <-> 5` IS `5 <-> 6` FROM M1f TASK 5 ONWARD.** That task inserted
+ * the card offer at position 4, so the register entry (M1f carry-forward §7) and
+ * every future reference to this row use the new label. It is the same pair,
+ * with the same two commutation reasons and the same two tripwires, re-measured
+ * at 0 over 2,044 tests in Task 5's own 55-pair sweep — the fourth independent
+ * zero. A reader grepping `4 <-> 5` in a later milestone lands here rather than
+ * on nothing, which is the whole reason this paragraph keeps the old label in
+ * its first line. **Do not manufacture a detector for it.**
  * Re-run **four times against four fresh baselines**: `0, 0, 0` and one round
  * at **1**, which was `allocation.test.ts`'s own Task 12 window charging
  * `sim/src/buildings.ts` 5.16-5.52 B/tick against a 4 B floor — a sampling
@@ -627,6 +685,8 @@ export function step(
       throw new Error(`step: unknown action kind "${String(action.kind)}"`)
     }
   }
+
+  runOffer(s, world, scratch)
 
   runSpawn(s, world, scratch)
 

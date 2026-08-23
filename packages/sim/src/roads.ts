@@ -308,7 +308,7 @@ export type PlaceResult =
 /**
  * **Every value `canPlaceRoad` can return, allocated once at module load.**
  *
- * `canPlaceRoad` runs inside the tick — `step`'s phase 2 calls `placeRoad` for
+ * `canPlaceRoad` runs inside the tick — `step`'s phase 3 calls `placeRoad` for
  * every `place` action in the input log, and a drag enqueues one per sampled
  * cell — and it used to build a fresh `{ ok, ... }` literal on every call.
  * Measured by `packages/game/test/allocation.test.ts` at **40.6 / 41.7 / 44.3

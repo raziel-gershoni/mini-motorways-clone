@@ -504,7 +504,7 @@ describe('destinationFitsSpawnZone', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 4. Where phase 4 sits in the tick, and what a spawn costs
+// 4. Where phase 5 sits in the tick, and what a spawn costs
 // ---------------------------------------------------------------------------
 
 /**
@@ -544,7 +544,7 @@ function scanWindowCells(state: GameState, world: WorldData, nextTick: number): 
 
 describe('the spawn phase inside step', () => {
   it('will not spawn on a road the player laid this tick', () => {
-    // The detector for transposing phases 3 and 4 — the pair that was inert
+    // The detector for transposing phases 3 and 5 (M1e's `3 <-> 4`) — the pair that was inert
     // when it was "inputs vs demand" and is not inert now. The fixture paves
     // every cell the scan can reach on this tick, so the two orderings differ
     // by exactly one destination.
@@ -580,7 +580,7 @@ describe('the spawn phase inside step', () => {
   })
 
   it('stamps destSpawnTick from THIS tick, not the previous one', () => {
-    // The detector for transposing phases 1 and 4: the off-by-one the M1d
+    // The detector for transposing phases 1 and 5 (M1e's `1 <-> 4`): the off-by-one the M1d
     // handoff warned about, in every destination's first-pin delay at once.
     const r = seededCityState('spawn-stamp')
     armDestinationTimerForNextTick(r.state)
@@ -593,6 +593,7 @@ describe('the spawn phase inside step', () => {
 
   it('a destination is INELIGIBLE on its own spawn tick, which is why 4 <-> 5 is inert', () => {
     // **This test was written as "the detector for transposing phases 4 and 5"
+    // — M1e's numbering, today's `5 <-> 6`
     // and it is not one — the transposition scores 0 detectors, measured three
     // times at three suite sizes: 1,693 when Task 5 first ran it, 1,843 in Task
     // 12's complete pairwise sweep, and 1,843 again in M1e's closing sweep,
@@ -1366,7 +1367,7 @@ describe('spawned cars drive, over a long horizon, with occupancy sound every ti
       //
       //   - **the over-capacity regime entirely.** `destOverTicks` and the
       //     overcrowd ramp now read 0 on every tick of this rig, so it exercises
-      //     none of phase 10's live branch. `overcrowd.test.ts` owns that
+      //     none of phase 11's live branch. `overcrowd.test.ts` owns that
       //     directly and `demoLayout.test.ts`'s week-1 window owns it in play.
       //   - **the hard-cap pin-drop path.** At 255 every scheduled pin overflowed
       //     and then dropped; at 5 the cap is never reached, so `H_PINS_DROPPED`

@@ -23,10 +23,14 @@ import { destMetaColour, destMetaKind, DEST_KIND_CIRCLE } from './buildings'
  * **Not wired into `step()` in this task.** Task 3's own file list is
  * `demand.ts`/`demand.test.ts` only, mirroring Task 2's `buildings.ts`,
  * which also shipped with no production caller. `runDemand` below is
- * Task 6's "phase 3" call, slotted between "apply inputs" (phase 2) and
- * "assemble sources + sync" (phase 4) per the plan's "tick order, derived"
- * table: it must run before the sync because it mutates `destPins`, which
- * decides the source set.
+ * M1c Task 6's call, slotted between "apply inputs" and "assemble sources +
+ * sync" per the plan's "tick order, derived" table: it must run before the sync
+ * because it mutates `destPins`, which decides the source set. **The numbers
+ * this sentence used to carry were M1c's SEVEN-phase ones and had been wrong
+ * through three insertions**; it now names the phases rather than their indices,
+ * because a positional index in a paragraph nobody re-derives is the defect this
+ * repo keeps paying for. Today: inputs 3, demand **6**, assemble + sync **7**.
+ * `step.ts` owns the table.
  *
  * **Rotation representation** (decision 1, "chosen rather than left open"):
  * `rotationCursor[c]` packs `destIndex * 2 + subSlot`, naming a destination
@@ -427,11 +431,12 @@ export function advanceAccumulators(state: GameState, scratch: Scratch): void {
 }
 
 /**
- * Demand's whole per-tick job (the plan's tick-order phase 3): recompute
- * slot counts from the live destination prefix, then advance every
+ * Demand's whole per-tick job — **phase 6 of the tick order** (M1c's phase 3;
+ * renumbered by the week boundary, the spawn phase and M1f's card offer):
+ * recompute slot counts from the live destination prefix, then advance every
  * colour's accumulator and fire whichever cross their threshold. Reads
  * `H_TICK` directly off `state` — by the time this runs (after phase 1's
- * tick advance, before phase 4's field sync), it is already the current
+ * tick advance, before phase 7's field sync), it is already the current
  * tick, and demand must precede the sync because it mutates `destPins`,
  * which decides the source set.
  */
@@ -466,7 +471,7 @@ export function hasEligibleDestinationOfColour(state: GameState, colour: number,
  * and the count is only one of the two things it moves.
  *
  * Called from the SPAWN phase, which runs before the field sync, so the
- * `destPins` write it may produce is still ahead of phase 6 exactly as
+ * `destPins` write it may produce is still ahead of phase 7 exactly as
  * `runDemand`'s is.
  */
 export function pushBlockedSpawnDemand(state: GameState, colour: number, scratch: Scratch): void {

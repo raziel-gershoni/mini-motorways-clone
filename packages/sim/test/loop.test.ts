@@ -72,8 +72,13 @@ import { ROUTE_BYTES, routeStep } from '../src/dispatch'
 import { step, type TickAction, type TickInputs } from '../src/step'
 import { pinPeriodForWeek } from '../src/demand'
 import { hashBytes } from '../src/hash'
+import { drawOfferPair, offerSeedFor, poolFor, popCountCards } from '../src/cards'
 import { m1eInsertedRanges, spliceM1eInsertions } from './m1eSplice'
-import { assertM1fShapeIsPureLayout, spliceM1fInsertions } from './m1fSplice'
+import {
+  assertM1fShapeIsLayoutPlusOffer,
+  assertM1fShapeIsPureLayout,
+  spliceM1fInsertions,
+} from './m1fSplice'
 import { junctionRace, ORTHO_THRESHOLD } from './junctionRigs'
 import { roadDegree } from '../src/graph'
 
@@ -149,7 +154,7 @@ import { roadDegree } from '../src/graph'
  * carries across a cell crossing AND across the outbound -> return flip, so a
  * car makes its k-th crossing on the first tick whose accumulated progress
  * reaches `k * 2500`: `rel_k = ceil(k * 2500 / 330)`, counting the DISPATCH
- * tick itself as rel 1 (movement is phase 6, dispatch phase 5, same tick).
+ * tick itself as rel 1 (movement is phase 9, dispatch phase 8, same tick).
  *
  *   rel_k for k = 1..12:  8 16 23 31 38 46 54 61 69 76 84 91
  *
@@ -370,7 +375,7 @@ function assertNoSpawnHappened(r: Rig, tick: number, houses: number, dests: numb
   expect(r.state.header[H_GAME_OVER]).toBe(0)
   expect(r.state.header[H_FAILED_DEST]).toBe(0)
   // **The two overcrowd regions stopped being posture at M1e Task 7**, which
-  // wired `runOvercrowd` as phase 10: both are now written on every tick of
+  // wired `runOvercrowd` as the last phase (11 today): both are now written on every tick of
   // every fixture that reaches this function. They are zero because these
   // fixtures pre-pin at most **1** pin per destination, five short of
   // `PIN_CAP_SQUARE_TIMER`, so the under-capacity branch runs every tick — and
@@ -504,8 +509,8 @@ interface Observations {
    * threshold, one entry per fire.
    *
    * **Counted by CONSERVATION, not by watching `destPins` rise.** One tick can
-   * carry both a fire (phase 5, `destPins` +1 or `H_PINS_DROPPED` +1) and an
-   * arrival (phase 9, `destPins` -1), and the net delta on such a tick is zero
+   * carry both a fire (phase 6, `destPins` +1 or `H_PINS_DROPPED` +1) and an
+   * arrival (phase 10, `destPins` -1), and the net delta on such a tick is zero
    * — so a rising-edge detector would silently drop that fire, which is
    * precisely the failure a fire LADDER exists to catch. `delivered + consumed
    * + dropped` is exact whatever order the two land in, and the demand golden
@@ -548,7 +553,7 @@ function newObservations(): Observations {
  * Every (before, after) phase pair a car may show across one tick.
  *
  * `RETURNING -> OUTBOUND` is absent on purpose and is the one that matters:
- * arrivals (phase 7) run AFTER dispatch (phase 5), so a car freed this tick
+ * arrivals (phase 10) run AFTER dispatch (phase 8), so a car freed this tick
  * cannot be dispatched until the next one, and a dispatch that treated
  * `carPhase !== PHASE_OUTBOUND` as "free" would produce exactly this pair.
  * `OUTBOUND -> IDLE` is absent for the same family of reasons: a trip ends
@@ -1340,7 +1345,15 @@ describe('golden replay: the whole trip loop', () => {
     // spelled as the bare old number would go on matching after the re-bless and
     // report the golden unmoved while it had moved. The needle is the whole
     // golden expression; the prior-digest line cannot satisfy it.
-    expect(determinism, 'the state golden moved').toContain('expect(hashState(s)).toBe(4189191826)')
+    // **M1f Task 5 moved the state golden a fifth time — 4189191826 ->
+    // 2986084740 — and the demand-pin golden a second time (2425471180 ->
+    // 884326142, `DG_GOLDEN` in this file). BEHAVIOURAL, not layout: `step`
+    // phase 4 raises the card offer, and both fixtures cross a week boundary.**
+    // The needle stays the whole golden expression for the reason M1e Task 1
+    // established, and each file's M1f splice proof is unchanged — the offer
+    // slots sit inside block A, so the splice removes them and the prior digest
+    // still reproduces, which is what says nothing else moved.
+    expect(determinism, 'the state golden moved').toContain('expect(hashState(s)).toBe(2986084740)')
     expect(rollback, 'the road-network golden moved').toContain(
       'expect(hashState(state)).toBe(1099508647)',
     )
@@ -1386,11 +1399,30 @@ describe('golden replay: the whole trip loop', () => {
     // The direct assertions the digests borrow their meaning from. A re-bless
     // whose only evidence is "the digest moved" absorbs any regression landing
     // in the same commit; these two calls are what make it not that.
-    expect(determinism, 'determinism.test.ts dropped its pure-layout assertion').toContain(
-      'assertM1fShapeIsPureLayout(s, GOLDEN_MAP)',
+    //
+    // **`determinism.test.ts`'s is now the OFFER-CARRYING variant, and the
+    // needle had to follow it rather than be deleted — M1f Task 5.** That
+    // fixture crosses two week boundaries, so its offer slots are no longer zero
+    // and `assertM1fShapeIsPureLayout` is the wrong assertion there; what
+    // replaced it checks the same five other things and pins the two cards
+    // against a pair computed at the site. `rollback.test.ts`'s fixture never
+    // calls `step`, so its needle is unchanged — and the two being SPELLED
+    // DIFFERENTLY here is the tripwire: quietly widening the offer-carrying
+    // variant back over the static fixture would have to edit this line too.
+    expect(determinism, 'determinism.test.ts dropped its layout-plus-offer assertion').toContain(
+      'assertM1fShapeIsLayoutPlusOffer(s, GOLDEN_MAP, offer[0] as number, offer[1] as number)',
     )
     expect(rollback, 'rollback.test.ts dropped its pure-layout assertion').toContain(
       'assertM1fShapeIsPureLayout(state, GOLDEN_MAP)',
+    )
+    // And the pair `determinism.test.ts` pins must be HAND-COMPUTED there rather
+    // than read back off the state it is checking — the one substitution that
+    // would leave every assertion green while proving nothing.
+    expect(determinism, 'the state golden stopped computing its offer independently').toContain(
+      'drawOfferPair(poolFor(GOLDEN_WORLD), offerSeedFor(s, 2), offer)',
+    )
+    expect(determinism, "the state golden's offer must not be read back off the buffer").not.toContain(
+      'offer[0] = s.header[H_OFFER_A]',
     )
   })
 })
@@ -1650,7 +1682,7 @@ describe('phase 1 sits before demand: the first-pin delay is measured against th
   })
 })
 
-describe('phase 3 sits before phase 4: a pin fired by demand is served by dispatch on the SAME tick', () => {
+describe('phase 6 sits before phase 8: a pin fired by demand is served by dispatch on the SAME tick', () => {
   it('dispatches a car on tick 120, the tick the pin fires, with no stale-field throw in between', () => {
     const r = buildBoundaryRig('same-tick')
     runBoundary(r, 0, FIRST_PIN_DELAY_TICKS - 1)
@@ -2463,6 +2495,13 @@ const DG_SNAPSHOT_TICK = 4300
  * Uint8 flag per cell). This 20x9 fixture goes 3,832 -> 4,032 B: +20 for the
  * header and +180 for the cells.
  *
+ * **Re-blessed again at M1f Task 5: 2425471180 -> 884326142, BEHAVIOURAL** —
+ * `step` phase 4, the card offer. This fixture runs 5,250 ticks and crosses the
+ * boundary at 4,500, so the two offer slots hold week 1's pair from that tick
+ * onward. Unlike Task 4's, this move is NOT pure layout: the splice proof at the
+ * first site still reproduces the pre-M1f digest, which is what says the two
+ * offer slots are the only bytes that moved.
+ *
  * The proof lives at the FIRST of the four sites that read this constant — the
  * one that builds the timeline — and the other three are replays of that same
  * state through `snapshot`/`restore` and a cold Worker. A splice proof at each
@@ -2470,7 +2509,7 @@ const DG_SNAPSHOT_TICK = 4300
  * three establish is that the replays AGREE, which they say by using this
  * constant at all.
  */
-const DG_GOLDEN = 2425471180
+const DG_GOLDEN = 884326142
 
 /** Hand-derived above from `pinPeriodForWeek(0)` = 518 and `(1)` = 466. */
 const DG_EXPECTED_FIRE_TICKS: readonly number[] = [
@@ -2562,7 +2601,7 @@ function assertDemandGoldenPosture(r: Rig, tick: number): void {
   //
   // **Two of the four have stopped being posture, and Task 6's prediction about
   // this golden was WRONG — measured, at Task 7.** That task wired
-  // `runOvercrowd` as phase 10, so `destOvercrowd` and `destOverTicks` are now
+  // `runOvercrowd` as the last phase (11 today), so `destOvercrowd` and `destOverTicks` are now
   // written on EVERY tick of this run, 5,250 times each. Task 6 wrote "this
   // golden will move then". **It did not**: `DG_GOLDEN` is unchanged at
   // 894844668, because both regions are written to ZERO every tick.
@@ -2706,7 +2745,7 @@ describe('golden replay: pins produced by the demand timer, across a week bounda
     expect(r.state.ghostCommitted.every((b) => b === 0)).toBe(true)
 
     // **The premise the two overcrowd assertions in the posture rest on**, and
-    // the reason this golden did NOT move when M1e Task 7 wired phase 10.
+    // the reason this golden did NOT move when M1e Task 7 wired the overcrowd phase.
     // `pinsHeldAfterTick` is the sum over the live prefix, and this board has
     // exactly one destination, so it IS `destPins[0]`. One is five short of the
     // square trigger, so the meter's over-capacity branch is never taken.
@@ -2744,7 +2783,31 @@ describe('golden replay: pins produced by the demand timer, across a week bounda
     // "carries the remainder ACROSS a period change" test, which uses
     // `slotCount` 3 precisely because 3 divides neither period.
     // ---------------------------------------------------------------------
-    assertM1fShapeIsPureLayout(r.state, r.map)
+    // ---------------------------------------------------------------------
+    // **Re-blessed at M1f Task 5: 2425471180 -> 884326142, BEHAVIOURAL — the
+    // card offer, `step` phase 4.** Task 4's move was pure layout; this one is
+    // not, and the two bytes that moved are named and hand-computed here rather
+    // than read back off the state.
+    //
+    // This fixture runs `DG_RUN_TICKS` = 5,250 ticks and therefore crosses
+    // exactly one boundary, at 4,500 — the same crossing its whole pin-cadence
+    // story is built on. Nothing resolves an offer (no `TickAction` can until
+    // Task 6), so the slots hold **week 1's** pair and `H_OFFER_WEEK` is still 0.
+    //
+    // **The M1f splice still reproduces 894844668, and that now says more than
+    // it used to.** The offer slots sit inside block A, so the splice removes
+    // them: across 5,250 ticks of real demand, real dispatch and a week
+    // boundary, phase 4 changed **not one byte outside the two inserted
+    // ranges.** `rng[0]` is never advanced by anything in `sim/src`, so the seed
+    // word the recomputation reads is the word phase 4 read.
+    // ---------------------------------------------------------------------
+    expect(r.state.header[H_WEEK], 'the offer below is week 1s').toBe(1)
+    const dgOffer = new Int32Array(2)
+    drawOfferPair(poolFor(r.world), offerSeedFor(r.state, 1), dgOffer)
+    // And the slots hold real cards, so the fixture is not silently exercising
+    // the short-pool path: this map's pool is two cards.
+    expect(popCountCards(poolFor(r.world)), 'this map can offer a pair').toBe(2)
+    assertM1fShapeIsLayoutPlusOffer(r.state, r.map, dgOffer[0] as number, dgOffer[1] as number)
     expect(
       hashBytes(spliceM1fInsertions(r.state, r.map)),
       'the M1f splice must reproduce the pre-M1f digest',
@@ -3074,7 +3137,7 @@ describe('the demand ramp, given an observable of its own: one board, one fleet,
     // decoration that reads as defence.
     // -------------------------------------------------------------------
     // `fireTicks` counts a fire as `delivered + consumed + dropped` rather
-    // than as a rise in `destPins`, because phase 5 and phase 9 can both touch
+    // than as a rise in `destPins`, because phase 6 and phase 10 can both touch
     // `destPins` on one tick and cancel. **Dropping the `consumed` term from
     // that sum leaves every other fixture in this file green — measured, 0
     // detectors** — because no tick in the demand golden or in the other four

@@ -2018,7 +2018,7 @@ describe('the tick allocates nothing on the blocking path, measured', () => {
     //
     // **Erase-then-place of the same segment inside one action list is what
     // keeps the window rebuild-free**, and that is load-bearing rather than
-    // neat: actions are phase 2 and `syncFields` is phase 4, so `roads` is
+    // neat: actions are phase 3 and `syncFields` is phase 7, so `roads` is
     // byte-identical by the time the field-input hash is taken and no colour
     // rebuilds. `destPins` is asserted unmoved so a window that started
     // rebuilding turns red rather than quietly measuring ~185 KB of legitimate
@@ -2097,8 +2097,8 @@ describe('the tick allocates nothing on the blocking path, measured', () => {
     // scaling with the cause.
 
     // **Erase-then-place of the same segment inside one action list is what
-    // keeps both windows rebuild-free**: actions are phase 2 and `syncFields` is
-    // phase 4, so `roads` is byte-identical by the time the field-input hash is
+    // keeps both windows rebuild-free**: actions are phase 3 and `syncFields` is
+    // phase 7, so `roads` is byte-identical by the time the field-input hash is
     // taken. `destPins` unmoved is asserted per window, and each window gets a
     // FRESH rig — the snake is arrival-free for only ~550 ticks, and three
     // consecutive windows on one rig failed `pinMoves === 0` in 12 of 12.
@@ -2502,7 +2502,7 @@ describe('the tick allocates nothing on the JAM path, with every branch counted 
  * The three windows are 14,059..18,658, 18,659..23,258 and 23,259..27,858, and
  * that placement is measured rather than convenient. **The first tick on which
  * any destination is over its pin capacity is 27,320**, so a window set that
- * stopped earlier would report `overCapacityTicks = 0` and phase 10 would be
+ * stopped earlier would report `overCapacityTicks = 0` and phase 11 would be
  * uncovered — which is the whole shape this block exists to prevent.
  *
  * ---------------------------------------------------------------------------
@@ -2835,19 +2835,19 @@ describe('the tick allocates nothing on the SPAWN, WEEK and OVERCROWD phases (Ta
     // phase it belongs to.
     // -----------------------------------------------------------------------
     expect(counters.weeksCrossed, 'PHASE 2 — no week boundary was crossed').toBe(M1E_WINDOWS)
-    expect(counters.destAttempts, 'PHASE 4 — the destination spawner never ran').toBeGreaterThan(0)
-    expect(counters.destPlaced, 'PHASE 4 — no destination was ever PLACED').toBeGreaterThan(0)
+    expect(counters.destAttempts, 'PHASE 5 — the destination spawner never ran').toBeGreaterThan(0)
+    expect(counters.destPlaced, 'PHASE 5 — no destination was ever PLACED').toBeGreaterThan(0)
     expect(
       counters.destScanExhausted,
-      'PHASE 4 — the 96-call failing scan was never entered, so the expensive path is unmeasured',
+      'PHASE 5 — the 96-call failing scan was never entered, so the expensive path is unmeasured',
     ).toBeGreaterThan(0)
-    expect(counters.houseAttempts, 'PHASE 4 — the house spawner never ran').toBeGreaterThan(0)
-    expect(counters.housePlaced, 'PHASE 4 — no house was ever PLACED').toBeGreaterThan(0)
+    expect(counters.houseAttempts, 'PHASE 5 — the house spawner never ran').toBeGreaterThan(0)
+    expect(counters.housePlaced, 'PHASE 5 — no house was ever PLACED').toBeGreaterThan(0)
     expect(
       counters.rebuildsOnDestSpawnTick,
       'DECISION 6 — a spawn tick rebuilt no field, so the price was accepted rather than measured',
     ).toBeGreaterThan(0)
-    expect(counters.overCapacityTicks, 'PHASE 10 — no destination was ever over capacity').toBeGreaterThan(
+    expect(counters.overCapacityTicks, 'PHASE 11 — no destination was ever over capacity').toBeGreaterThan(
       0,
     )
     expect(counters.knockbacks, '§5.8 — no arrival knockback was ever applied').toBeGreaterThan(0)

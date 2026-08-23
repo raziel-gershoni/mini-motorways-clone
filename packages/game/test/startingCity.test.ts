@@ -164,8 +164,8 @@ import {
  * the remainder carries across every crossing AND across the outbound->return
  * flip. So crossing k lands on the first tick whose accumulated progress
  * reaches the cumulative cost `C_k`, i.e. `n_k = ceil(C_k / 330)`, with the
- * dispatch tick itself counting as `n = 1` (dispatch is phase 5, movement
- * phase 6, same tick). Absolute tick = `dispatchTick + n_k - 1`.
+ * dispatch tick itself counting as `n = 1` (dispatch is phase 8, movement
+ * phase 9, same tick). Absolute tick = `dispatchTick + n_k - 1`.
  */
 
 // --- The board: firstCity is 24 x 40, cell = y * 24 + x ---------------------
@@ -1059,8 +1059,8 @@ describe('a full scored trip on the seeded city, driven through step()', () => {
         expect(state.carPhase[2] as number).toBe(PHASE_IDLE)
       }
       if (t === FIRST_PIN_TICK) {
-        // Demand fires (phase 3), dispatch commits (phase 5) and movement runs
-        // (phase 6) all on this one tick.
+        // Demand fires (phase 6), dispatch commits (phase 8) and movement runs
+        // (phase 9) all on this one tick.
         dispatchObserved = true
         expect(state.carPhase[2] as number).toBe(PHASE_OUTBOUND)
         expect(state.carTargetDest[2] as number).toBe(0)

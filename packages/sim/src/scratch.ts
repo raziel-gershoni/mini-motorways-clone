@@ -351,6 +351,14 @@ export interface Scratch {
   readonly slotCounts: Int32Array // groupCount; Task 3's accumulator input
   readonly counters: Int32Array // CT_SYNCS, CT_REBUILDS, CT_BLOCKED_PUSH_DISCARDED — cumulative, never reset
   readonly fieldInputRanges: Int32Array // (byteOffset, byteLength) pairs, one per FIELD_INPUT region
+  // Caller-owned output for `drawOfferPair` (cards.ts), length 2. The callee
+  // cannot allocate it: `runOffer` is phase 4 and runs on every tick of an
+  // unresolved week, so a two-element array created per call is a per-tick
+  // allocation, and `no-module-mutable-state` forbids the other spelling — a
+  // module-scope buffer in `cards.ts`. Lifetime is a single `runOffer` call;
+  // nothing reads it between ticks, and the two values it carries are copied
+  // straight into `H_OFFER_A`/`H_OFFER_B`.
+  readonly offerPair: Int32Array // 2
 }
 
 export const ST_EXPANSIONS = 0
@@ -379,6 +387,18 @@ const COUNTERS_LENGTH = 3
 export const CUR_TOP = 0
 export const CUR_PENDING = 1
 const CURSOR_LENGTH = 2
+
+/**
+ * `offerPair`'s length: two slots, A and B, indexed by `OFFER_SLOT_A`/
+ * `OFFER_SLOT_B` (cards.ts). Spelled as a named constant here rather than a bare
+ * `2` for the reason `nbrCell` is sized from `DIR_COUNT` — the number is a
+ * property of the offer's shape, and a second hardcoded copy is how the array
+ * and the writer silently drift. It is a LITERAL and not an import of
+ * `CARD_COUNT` or anything else: this file sits inside the `roads.ts ->
+ * dispatch.ts -> scratch.ts -> roads.ts` cycle that made a module-scope value
+ * evaluate to `undefined` at M1f Task 1.
+ */
+const OFFER_PAIR_LENGTH = 2
 
 /**
  * `entryPoolCapacity(cells) = cells * (1 + DISTINCT_EDGE_COSTS)`: one push
@@ -513,5 +533,6 @@ export function createScratch(
     slotCounts: new Int32Array(groupCount),
     counters: new Int32Array(COUNTERS_LENGTH),
     fieldInputRanges,
+    offerPair: new Int32Array(OFFER_PAIR_LENGTH),
   }
 }

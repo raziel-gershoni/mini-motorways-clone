@@ -1,8 +1,16 @@
 import { describe, it, expect } from 'vitest'
-import { firstCity } from '@laneways/shared'
+import { readFileSync } from 'node:fs'
+import {
+  PIN_CAP_SQUARE_TIMER,
+  TICKS_PER_WEEK,
+  WEEKLY_TILE_GRANT,
+  firstCity,
+  parseMap,
+} from '@laneways/shared'
 import {
   CARD_BRIDGE,
   CARD_COUNT,
+  CARD_IMPLEMENTED_MASK,
   CARD_JUNCTION_UPGRADE,
   CARD_MOTORWAY,
   CARD_NONE,
@@ -17,10 +25,94 @@ import {
   nthSetBit,
   offerSeedFor,
   pickFromPool,
+  poolFor,
   popCountCards,
+  runOfferFromPool,
+  tryDrawOfferPair,
 } from '../src/cards'
 import { mixWord } from '../src/rng'
-import { createState } from '../src/state'
+import {
+  createState,
+  hashState,
+  isGameOver,
+  offerPending,
+  H_OFFER_A,
+  H_OFFER_B,
+  H_OFFER_WEEK,
+  H_TICK,
+  H_TILES,
+  H_WEEK,
+  type GameState,
+} from '../src/state'
+import { createWorld, type WorldData } from '../src/world'
+import { createFlowFields, createScratch, type FlowField, type Scratch } from '../src/scratch'
+import { createFieldInputRanges } from '../src/regions'
+import { step, type TickInputs } from '../src/step'
+import { placeDestination, DEST_KIND_SQUARE, ORIENTATION_S } from '../src/buildings'
+
+const NO_INPUT: TickInputs = { actions: [] }
+
+/**
+ * A 4x4 all-land board, on `step.test.ts`'s recipe and for its reason: the
+ * clipped spawn zone is empty on a 4-wide board, so nothing spawns, no car ever
+ * exists, and the only things that move across a week boundary are the tile
+ * grant and — from this task — the two offer slots.
+ */
+const CARDS_MAP = parseMap('cards-test-map', ['....', '....', '....', '....'], 20, 8, 4, 2)
+const CARDS_WORLD = createWorld(CARDS_MAP)
+
+interface Rig {
+  readonly s: GameState
+  readonly world: WorldData
+  readonly fields: readonly FlowField[]
+  readonly scratch: Scratch
+}
+
+function bootCity(id: string): Rig {
+  return {
+    s: createState(id, CARDS_MAP),
+    world: CARDS_WORLD,
+    fields: createFlowFields(CARDS_MAP.groupCount, CARDS_WORLD.cells),
+    scratch: createScratch(
+      CARDS_WORLD.cells,
+      CARDS_MAP.groupCount,
+      CARDS_MAP.maxDestinations,
+      createFieldInputRanges(CARDS_MAP),
+    ),
+  }
+}
+
+/** Steps until `H_TICK` is exactly `tick`. Throws rather than overshooting in silence. */
+function driveTo(rig: Rig, tick: number): void {
+  const from = rig.s.header[H_TICK] as number
+  if (tick < from) throw new Error(`driveTo: already past tick ${tick} (at ${from})`)
+  for (let t = from; t < tick; t++) step(rig.s, rig.world, rig.fields, rig.scratch, NO_INPUT)
+  if ((rig.s.header[H_TICK] as number) !== tick) {
+    throw new Error(`driveTo: landed on ${rig.s.header[H_TICK]}, not ${tick}`)
+  }
+}
+
+/**
+ * A run that has already ended: one square destination pinned at its trigger cap
+ * on a board with no house, so nothing ever arrives and §5.8 shuts the city down
+ * — `step.test.ts`'s `shutdownRig`, which measures the end at tick 3,390, before
+ * the first week boundary. That ordering is load-bearing here: the freeze must be
+ * in place BEFORE the tick that would otherwise raise the first offer.
+ */
+function bootTerminal(id: string): Rig {
+  const rig = bootCity(id)
+  expect(placeDestination(rig.s, rig.world, 0, ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
+  rig.s.destPins[0] = PIN_CAP_SQUARE_TIMER
+  for (let i = 0; i < TICKS_PER_WEEK; i++) {
+    step(rig.s, rig.world, rig.fields, rig.scratch, NO_INPUT)
+    if (isGameOver(rig.s)) break
+  }
+  expect(isGameOver(rig.s), 'the terminal rig never reached game over').toBe(true)
+  expect(rig.s.header[H_TICK], 'and it must end BEFORE the first offer would be raised').toBeLessThan(
+    TICKS_PER_WEEK,
+  )
+  return rig
+}
 
 describe('the card ids', () => {
   it('are a contiguous domain with CARD_COUNT one past the highest', () => {
@@ -146,10 +238,47 @@ describe('the offer draw is a pure function of the seed word and the week', () =
     // week 0 (`offerPending` excludes it), so there is no behavioural detector
     // for the `+ 1` — this is the totality check, labelled as such so nobody
     // reads it as coverage for the offset.
+    //
+    // **The RANGE moved at M1f Task 5 and the reason is allocation, not
+    // arithmetic**: an unsigned return is above Smi range for half its values
+    // and boxes a HeapNumber on every call, which cost nothing until phase 4
+    // made this a per-tick path. The bound is now int32 rather than uint32; the
+    // bits are the same and the test below proves it.
     const s = createState('laneways-m2', firstCity())
-    expect(Number.isInteger(offerSeedFor(s, 0))).toBe(true)
-    expect(offerSeedFor(s, 0)).toBeGreaterThanOrEqual(0)
-    expect(offerSeedFor(s, 0)).toBeLessThanOrEqual(0xffffffff)
+    for (const week of [0, 1, 2, 40]) {
+      const w = offerSeedFor(s, week)
+      expect(Number.isInteger(w), `week ${week}`).toBe(true)
+      expect(w, `week ${week} must be a Smi, not a boxed uint32`).toBeGreaterThanOrEqual(-0x80000000)
+      expect(w).toBeLessThanOrEqual(0x7fffffff)
+    }
+  })
+
+  it('the `| 0` reinterprets the SAME 32 bits, so no draw and no golden can move with it', () => {
+    // **The re-bless discipline applied to a representation change.** Task 5
+    // narrowed this function's return from unsigned to signed to stop it
+    // allocating; that is only safe because the bit pattern is untouched and the
+    // one consumer re-widens it. Both halves are asserted rather than argued:
+    // the word round-trips through `>>> 0` to the unsigned value the previous
+    // body produced, and the PAIR `drawOfferPair` yields is identical from
+    // either representation.
+    const s = createState('laneways-m2', firstCity())
+    const out = new Int32Array(2)
+    const alsoOut = new Int32Array(2)
+    for (let week = 1; week <= 12; week++) {
+      const signed = offerSeedFor(s, week)
+      const unsigned =
+        mixWord(((s.rng[0] as number) ^ Math.imul(week + 1, 0x9e3779b1)) >>> 0)
+      expect(signed >>> 0, `week ${week}`).toBe(unsigned)
+      drawOfferPair(CARD_IMPLEMENTED_MASK, signed, out)
+      drawOfferPair(CARD_IMPLEMENTED_MASK, unsigned, alsoOut)
+      expect([out[0], out[1]], `week ${week}`).toEqual([alsoOut[0], alsoOut[1]])
+    }
+    // Vacuity: the two representations must actually DIFFER somewhere in the
+    // range walked above, or this test compares a number with itself twelve
+    // times. Half of all words are negative once signed.
+    let negatives = 0
+    for (let week = 1; week <= 12; week++) if (offerSeedFor(s, week) < 0) negatives++
+    expect(negatives, 'no week produced a high-bit word, so the round trip proved nothing').toBeGreaterThan(0)
   })
 })
 
@@ -373,5 +502,267 @@ describe('pickFromPool', () => {
         expect(pickFromPool(1 << card, 1, word)).toBe(card)
       }
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M1f Task 5 — the pool, the welded guard, and phase 4
+// ---------------------------------------------------------------------------
+
+describe('CARD_IMPLEMENTED_MASK and poolFor', () => {
+  it('names exactly the two cards M1f can place, and is NOT zero', () => {
+    // **Non-zero is asserted first, and it is not padding.** M1f Task 1 shipped a
+    // module-scope mask computed from an imported value inside a real import
+    // cycle (`roads.ts -> dispatch.ts -> scratch.ts -> roads.ts`); the imported
+    // value was `undefined`, the mask evaluated to 0, and it survived only by
+    // luck of polarity. This mask is built from two literals declared in this
+    // same module, twelve lines above it — but "it cannot happen here" is what
+    // the other one's author would have said, so it is checked rather than
+    // reasoned about.
+    expect(CARD_IMPLEMENTED_MASK, 'a zero pool offers nothing, silently').not.toBe(0)
+    expect(CARD_IMPLEMENTED_MASK).toBe((1 << CARD_ROAD_TILES) | (1 << CARD_JUNCTION_UPGRADE))
+    expect(popCountCards(CARD_IMPLEMENTED_MASK), 'exactly two, so an offer is always drawable').toBe(2)
+    // And the five ids M1f does NOT implement are excluded by this mask rather
+    // than by their absence from the domain — which is the whole reason the
+    // domain declares them.
+    for (const card of [CARD_BRIDGE, CARD_TUNNEL, CARD_ROUNDABOUT, CARD_TRAFFIC_LIGHTS, CARD_MOTORWAY]) {
+      expect((CARD_IMPLEMENTED_MASK & (1 << card)) !== 0, `card ${card} must not be offerable`).toBe(false)
+    }
+  })
+
+  it('poolFor stays inside the card domain and can always be drawn from, on every shipped map', () => {
+    // Task 11 gives `poolFor` its capability half and the signature does not
+    // change. What must hold in BOTH versions is asserted here rather than in
+    // Task 11: the result is a `CARD_COUNT`-bit mask (so `nthSetBit` is total on
+    // it) and it holds at least two cards (so `runOffer` never degrades on a
+    // shipped board). Both are properties of the contract, not of today's body.
+    for (const map of [firstCity(), CARDS_MAP]) {
+      const pool = poolFor(createWorld(map))
+      expect(pool, `pool ${pool} is inside the CARD_COUNT-bit domain`).toBeGreaterThanOrEqual(0)
+      expect(pool).toBeLessThan(1 << CARD_COUNT)
+      expect(canDrawOfferPair(pool), `${map.id} can offer a pair`).toBe(true)
+      expect((pool & 1) === 0, 'bit 0 is CARD_NONE and must never be set').toBe(true)
+    }
+  })
+})
+
+describe('tryDrawOfferPair — the guard and the draw are ONE call', () => {
+  it('never throws, on any mask a pool can be', () => {
+    // **This is the structural half of "runOffer must not reach the throw".**
+    // `canDrawOfferPair` shares the predicate, but nothing forced `runOffer` to
+    // call it — a guard and a draw written as two statements can drift, and the
+    // way they drift is the worst one available: a subtly weaker guard, a throw
+    // inside `step` after `H_EPOCH` is written, and a buffer `restore` then
+    // refuses. Welded into one call there is no second threshold to weaken.
+    const out = new Int32Array(2)
+    for (let pool = 0; pool < 1 << CARD_COUNT; pool++) {
+      expect(() => tryDrawOfferPair(pool, 0x9e3779b1, out), `pool ${pool}`).not.toThrow()
+    }
+  })
+
+  it('agrees with canDrawOfferPair over the whole domain, and draws what drawOfferPair draws', () => {
+    const mine = new Int32Array(2)
+    const theirs = new Int32Array(2)
+    let drawn = 0
+    let refused = 0
+    for (let pool = 0; pool < 1 << CARD_COUNT; pool++) {
+      const ok = tryDrawOfferPair(pool, 12345, mine)
+      expect(ok, `pool ${pool}`).toBe(canDrawOfferPair(pool))
+      if (ok) {
+        drawOfferPair(pool, 12345, theirs)
+        expect([mine[0], mine[1]], `pool ${pool}`).toEqual([theirs[0], theirs[1]])
+        drawn++
+      } else {
+        refused++
+      }
+    }
+    // Vacuity, in both arms: the empty mask and the eight singletons refuse.
+    expect(refused).toBe(9)
+    expect(drawn).toBe(256 - 9)
+  })
+
+  it('FAILS CLOSED: a refused draw leaves CARD_NONE in both slots, not the previous pair', () => {
+    // The boolean is what `runOffer` branches on, and a caller that ignored it
+    // would publish whatever was in the buffer — which, on the second week of a
+    // degraded run, is last week's real cards. So the refusal path overwrites.
+    // This does NOT make ignoring the boolean safe (the week would stay pending
+    // and the shell would wait on a modal with nothing in it); it makes the
+    // unsafe path produce the safe VALUE, which is one failure instead of two.
+    const out = new Int32Array(2)
+    expect(tryDrawOfferPair(CARD_IMPLEMENTED_MASK, 7, out)).toBe(true)
+    expect(out[0], 'vacuity: the slots really held a card before the refusal').not.toBe(CARD_NONE)
+    expect(tryDrawOfferPair(1 << CARD_ROAD_TILES, 7, out)).toBe(false)
+    expect([out[0], out[1]]).toEqual([CARD_NONE, CARD_NONE])
+  })
+})
+
+describe('runOfferFromPool degrades on EVERY short pool, not on one stubbed example', () => {
+  it('resolves the week and raises nothing, for all nine pools that cannot offer a pair', () => {
+    // **This is review Critical 2, closed in the sim rather than argued away,
+    // and closed over the whole domain rather than over one fixture.** The
+    // previous design called `drawOfferPair` unconditionally, so a short pool
+    // threw INSIDE `step`, AFTER `H_EPOCH` had been written — poisoning the
+    // buffer permanently, on a golden fixture, at tick 4,500 of 13,499.
+    //
+    // `runOffer` is `runOfferFromPool(state, poolFor(world), scratch)`, so
+    // sweeping every mask `poolFor` could ever return is a stronger statement
+    // than a single short-pool world: it says the throw is unreachable for ANY
+    // pool, including the ones Task 11's capability filter has not been written
+    // yet to produce.
+    //
+    // ONE rig, driven once and reset between pools: `runOfferFromPool` writes
+    // only the three offer slots, so restoring those three restores everything
+    // it can see. Nine independent 4,500-tick drives would measure the same
+    // thing nine times and cost nine times the budget.
+    const rig = bootCity('short-pool')
+    driveTo(rig, TICKS_PER_WEEK)
+    let short = 0
+    for (let pool = 0; pool < 1 << CARD_COUNT; pool++) {
+      if (canDrawOfferPair(pool)) continue
+      short++
+      // Reset what phase 4 already did with the REAL pool, so this drives the
+      // degenerate branch from a clean week-1 offer state.
+      rig.s.header[H_OFFER_A] = CARD_NONE
+      rig.s.header[H_OFFER_B] = CARD_NONE
+      rig.s.header[H_OFFER_WEEK] = 0
+      expect(offerPending(rig.s), 'vacuity: an offer really is pending before the call').toBe(true)
+      expect(() => runOfferFromPool(rig.s, pool, rig.scratch), `pool ${pool}`).not.toThrow()
+      expect(rig.s.header[H_OFFER_A], `pool ${pool}: no card was offered`).toBe(CARD_NONE)
+      expect(rig.s.header[H_OFFER_B], `pool ${pool}`).toBe(CARD_NONE)
+      expect(
+        rig.s.header[H_OFFER_WEEK],
+        `pool ${pool}: the week is resolved, not skipped-and-retried`,
+      ).toBe(1)
+      // **The assertion that separates "does not throw" from "does not hang the
+      // shell", and they are different failures.** Returning without writing
+      // `H_OFFER_WEEK` also does not throw, and leaves `game`'s frame driver
+      // pausing behind a modal with nothing to show, forever.
+      expect(offerPending(rig.s), `pool ${pool}: nothing is left pending`).toBe(false)
+    }
+    expect(short, 'the empty mask and the eight singletons').toBe(9)
+  })
+
+  it('runOffer cannot reach drawOfferPair except through the welded guard', () => {
+    // A source scan, on the precedent of `step.test.ts`'s tick-order tripwire
+    // and `loop.test.ts`'s cross-file golden scan: the property is "this call
+    // site cannot be written a second way", which has nothing to observe at run
+    // time. The lookbehind is what makes it see `drawOfferPair(` and not the
+    // `drawOfferPair(` inside `tryDrawOfferPair(`.
+    const src = readFileSync(new URL('../src/cards.ts', import.meta.url), 'utf8')
+    expect(src.length, 'cards.ts read back empty').toBeGreaterThan(4000)
+    const body = src.slice(src.indexOf('export function runOfferFromPool'))
+    expect(body.length, 'runOfferFromPool is no longer the last declaration in cards.ts').toBeGreaterThan(200)
+    expect(
+      body,
+      'runOffer now calls drawOfferPair directly — that throw is unguarded inside step, after ' +
+        'H_EPOCH is written, and poisons the buffer permanently. Call tryDrawOfferPair.',
+    ).not.toMatch(/(?<![A-Za-z])drawOfferPair\(/)
+    // Self-check: the pattern must actually match the thing it is banning, or
+    // the guard is a regex that can never fire.
+    expect('  drawOfferPair(pool, seed, out)').toMatch(/(?<![A-Za-z])drawOfferPair\(/)
+    expect('  tryDrawOfferPair(pool, seed, out)').not.toMatch(/(?<![A-Za-z])drawOfferPair\(/)
+  })
+})
+
+describe('runOffer — phase 4', () => {
+  it('raises nothing in week 0', () => {
+    const rig = bootCity('offer-week-0')
+    for (let t = 0; t < 100; t++) step(rig.s, rig.world, rig.fields, rig.scratch, NO_INPUT)
+    expect(rig.s.header[H_OFFER_A]).toBe(CARD_NONE)
+    expect(rig.s.header[H_OFFER_B]).toBe(CARD_NONE)
+    expect(offerPending(rig.s)).toBe(false)
+  })
+
+  it('raises an offer on the first tick of week 1 and not before', () => {
+    const rig = bootCity('offer-week-1')
+    driveTo(rig, TICKS_PER_WEEK - 1)
+    expect(rig.s.header[H_OFFER_A], 'still week 0').toBe(CARD_NONE)
+    step(rig.s, rig.world, rig.fields, rig.scratch, NO_INPUT)
+    expect(rig.s.header[H_TICK]).toBe(TICKS_PER_WEEK)
+    expect(rig.s.header[H_WEEK]).toBe(1)
+    expect(offerPending(rig.s)).toBe(true)
+    expect(rig.s.header[H_OFFER_A]).not.toBe(CARD_NONE)
+    expect(rig.s.header[H_OFFER_B]).not.toBe(rig.s.header[H_OFFER_A])
+  })
+
+  it('matches the pair drawOfferPair gives for this seed and week, computed independently', () => {
+    const rig = bootCity('offer-independent')
+    driveTo(rig, TICKS_PER_WEEK)
+    const out = new Int32Array(2)
+    drawOfferPair(poolFor(rig.world), offerSeedFor(rig.s, 1), out)
+    expect(rig.s.header[H_OFFER_A]).toBe(out[0])
+    expect(rig.s.header[H_OFFER_B]).toBe(out[1])
+  })
+
+  it('is IDEMPOTENT: re-raising the same week rewrites the same pair', () => {
+    // This is what lets ONE flag do both jobs, and it is also what makes the
+    // up-to-7 ticks between the boundary and the shell's pause landing harmless.
+    //
+    // **The property it rests on, asserted rather than assumed: `rng[0]` does
+    // not move.** `offerSeedFor` reads the seed word live, so idempotence is a
+    // joint property of the draw and of the stream standing still. Nothing in
+    // `sim/src` calls `nextRandom` or `randomBelow` at all — `determinism.test.ts`
+    // bans it outside `rng.ts`, and `spawnScanStart` reads `rng[0]` WITHOUT
+    // advancing for exactly this reason — so the word is written once by
+    // `createState` and never again. That is what this assertion pins; without
+    // it, a future draw inside the tick would reshuffle the modal under the
+    // player's finger and this test would still be green on a fixture that
+    // happens not to draw.
+    const rig = bootCity('offer-idempotent')
+    driveTo(rig, TICKS_PER_WEEK)
+    const seed = rig.s.rng[0] as number
+    const a = rig.s.header[H_OFFER_A]
+    const b = rig.s.header[H_OFFER_B]
+    for (let t = 0; t < 50; t++) step(rig.s, rig.world, rig.fields, rig.scratch, NO_INPUT)
+    expect(rig.s.rng[0], 'the tick advanced the rng, so idempotence is not what kept the pair still').toBe(seed)
+    expect(rig.s.header[H_OFFER_A]).toBe(a)
+    expect(rig.s.header[H_OFFER_B]).toBe(b)
+  })
+
+  it('replaces an unresolved offer at the next boundary, and the old card is lost', () => {
+    const rig = bootCity('offer-replaces')
+    driveTo(rig, TICKS_PER_WEEK)
+    const week1 = [rig.s.header[H_OFFER_A], rig.s.header[H_OFFER_B]]
+    driveTo(rig, TICKS_PER_WEEK * 2)
+    expect(rig.s.header[H_WEEK]).toBe(2)
+    expect(offerPending(rig.s), 'still pending, now for week 2').toBe(true)
+    const out = new Int32Array(2)
+    drawOfferPair(poolFor(rig.world), offerSeedFor(rig.s, 2), out)
+    expect([rig.s.header[H_OFFER_A], rig.s.header[H_OFFER_B]]).toEqual([out[0], out[1]])
+    expect([rig.s.header[H_OFFER_A], rig.s.header[H_OFFER_B]], 'week 1 is gone').not.toEqual(week1)
+  })
+
+  it('raises nothing after game over', () => {
+    const rig = bootTerminal('offer-terminal')
+    const frozenAt = rig.s.header[H_TICK] as number
+    const before = hashState(rig.s)
+    for (let t = 0; t < TICKS_PER_WEEK; t++) step(rig.s, rig.world, rig.fields, rig.scratch, NO_INPUT)
+    expect(hashState(rig.s), 'step is a byte-identical no-op past the failure').toBe(before)
+    expect(rig.s.header[H_TICK], 'not one of those ticks was counted').toBe(frozenAt)
+    expect(rig.s.header[H_OFFER_A]).toBe(CARD_NONE)
+
+    // **The CONTROL, and without it this test passes on a phase that never
+    // runs.** "Nothing happened" is also what a board below its first boundary
+    // looks like. The same board, alive, driven the same number of ticks from the
+    // same tick, must raise an offer — so the silence above is the freeze and not
+    // the calendar.
+    const live = bootCity('offer-terminal-control')
+    driveTo(live, frozenAt)
+    expect(live.s.header[H_OFFER_A], 'the control is below its first boundary too').toBe(CARD_NONE)
+    for (let t = 0; t < TICKS_PER_WEEK; t++) step(live.s, live.world, live.fields, live.scratch, NO_INPUT)
+    expect(live.s.header[H_TICK]).toBe(frozenAt + TICKS_PER_WEEK)
+    expect(live.s.header[H_OFFER_A], 'the live control DID raise one over the same span').not.toBe(
+      CARD_NONE,
+    )
+  })
+
+  it('writes H_TILES never, so phases 2 and 4 are disjoint by construction', () => {
+    const rig = bootCity('offer-disjoint')
+    driveTo(rig, TICKS_PER_WEEK - 1)
+    const tiles = rig.s.header[H_TILES] as number
+    step(rig.s, rig.world, rig.fields, rig.scratch, NO_INPUT)
+    expect(rig.s.header[H_TILES], 'the boundary granted exactly the weekly tiles').toBe(
+      tiles + WEEKLY_TILE_GRANT,
+    )
   })
 })

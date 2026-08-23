@@ -63,7 +63,7 @@ import {
  * EXACTLY ONE DISCONTINUITY, RE-DERIVED AGAINST THE REAL TICK ORDER
  * ---------------------------------------------------------------------------
  *
- * `step` runs dispatch at phase 5, movement at phase 6 and arrivals at phase 7,
+ * `step` runs dispatch at phase 8, movement at phase 9 and arrivals at phase 10,
  * so every transition is observed across a tick boundary with the phase byte
  * already changed. Every way a car's resolved position can move between two
  * snapshots:

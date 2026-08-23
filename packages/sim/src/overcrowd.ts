@@ -176,7 +176,8 @@ export function applyArrivalKnockback(state: GameState, d: number): void {
 }
 
 /**
- * Phase 10 of the tick order, and **the one place the run can end.**
+ * Phase 11 of the tick order — the LAST one, and **the one place the run can
+ * end.**
  *
  * Iterates the LIVE destination prefix, `H_DEST_COUNT`, and not the whole
  * region: a slot past the prefix holds a zero `destMeta`, which decodes as a

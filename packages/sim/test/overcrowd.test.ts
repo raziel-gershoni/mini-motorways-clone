@@ -44,7 +44,7 @@ import {
 } from '../src/overcrowd'
 
 /**
- * Unit coverage for phase 10 — the per-destination overcrowd meter (spec §5.8).
+ * Unit coverage for phase 11 — the per-destination overcrowd meter (spec §5.8).
  *
  * Everything here drives `runOvercrowd` and its helpers DIRECTLY rather than
  * through `step`, on `trips.test.ts`'s reasoning: a throw part-way through a
@@ -477,7 +477,7 @@ interface Observation {
 
 /**
  * One period, driven to `horizon`, in the **production within-tick order**:
- * the arrival knockback is phase 9 and the meter integration is phase 10, so a
+ * the arrival knockback is phase 10 and the meter integration is phase 11, so a
  * car arriving on tick T knocks the meter back BEFORE that tick's integration.
  *
  * **The order matters to every death tick this sweep reports, so it is a
@@ -500,7 +500,7 @@ interface Observation {
  * rather than six. Where the crossing lands inside the cycle decides it.
  *
  * The brief's draft of this sweep had the two lines the other way, which models
- * phase 10 running before phase 9 — the exact transposition the brink test in
+ * phase 11 running before phase 10 — the exact transposition the brink test in
  * `trips.test.ts` exists to refuse. Its stated numbers were right; its code was
  * not.
  */

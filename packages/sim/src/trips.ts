@@ -8,13 +8,13 @@ import { ROUTE_BYTES } from './dispatch'
 
 /**
  * Trips: arrival, pin consumption, reservation release, scoring, and the
- * trip-end slot reset — **phase 9 of ten**, and the only phase that mutates
+ * trip-end slot reset — **phase 10 of eleven**, and the only phase that mutates
  * `destPins` after the field sync.
  *
  * **It stopped being the LAST phase at M1e Task 7**, and the sentence that said
  * so is corrected rather than deleted because the reasoning under it is still
  * live: arrivals must come after the sync's last source-mutating phase, and
- * phase 10 (`overcrowd.ts`) is allowed to follow them precisely because it only
+ * phase 11 (`overcrowd.ts`) is allowed to follow them precisely because it only
  * READS `destPins` and calls no field. The "why arrivals are last" paragraph
  * below is therefore now "why arrivals are last among the phases that mutate
  * the source set".
@@ -52,8 +52,9 @@ import { ROUTE_BYTES } from './dispatch'
  * car that finished its trip on tick T holds its own house cell's slot for the
  * whole of T's movement phase — and its sibling, which is the most common thing
  * in the game to be standing behind it, is refused there. Measured at the close
- * of M1d rather than argued: transposing phases 6 and 7 is killed by **27**
- * tests across `sim` and `game`. (That transposition was caught before M1d too
+ * of M1d rather than argued: transposing movement and arrivals is killed by
+ * **27** tests across `sim` and `game`. (That pair was `6 <-> 7` in M1d's
+ * seven-phase numbering and is `9 <-> 10` in today's eleven.) (That transposition was caught before M1d too
  * — M1c recorded 11 of its 13 reorderings as pinned and this was one of them —
  * so 27 is a detector count at the close of M1d and NOT evidence that blocking
  * is what made it visible. The mechanism above is a reading of the code; the
@@ -255,8 +256,8 @@ function arriveAtDestination(state: GameState, i: number): void {
   assertArrivalHonoured(pins, reserved, d, i)
   state.destPins[d] = pins - 1
   state.destReserved[d] = reserved - 1
-  // §5.8's arrival knockback (M1e Task 7). Here and not in phase 10, because it
-  // is an EVENT — one car arriving — and phase 10 is a per-tick integration.
+  // §5.8's arrival knockback (M1e Task 7). Here and not in phase 11, because it
+  // is an EVENT — one car arriving — and phase 11 is a per-tick integration.
   // Placed after the pin decrement so a destination that just dropped back
   // under capacity gets the knockback AND the unwind on the same tick, which is
   // the whole relief a player feels when a queue finally clears.
@@ -352,7 +353,7 @@ function completeTrip(state: GameState, i: number): void {
 }
 
 /**
- * Phase 7 of the tick order: collect every car whose leg ran out this tick.
+ * Phase 10 of the tick order: collect every car whose leg ran out this tick.
  *
  * **The anti-double-act invariant ("at most one phase transition per car per
  * tick") rests on TWO structures here, and either one alone is enough.** An

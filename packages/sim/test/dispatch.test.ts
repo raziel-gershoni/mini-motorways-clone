@@ -103,7 +103,7 @@ function corridor(fromX: number, toX: number): number[] {
   return out
 }
 
-/** Phases 4 and 5 of the tick order, in order: assemble sources, sync once, dispatch. */
+/** Phases 7 and 8 of the tick order, in order: assemble sources, sync once, dispatch. */
 function assembleAndSync(r: Rig): void {
   assembleSources(r.state, r.world, r.scratch)
   syncFields(r.state, r.world, r.fields, r.scratch)

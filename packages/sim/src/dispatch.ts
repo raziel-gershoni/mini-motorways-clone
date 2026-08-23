@@ -15,8 +15,8 @@ import {
 } from './buildings'
 
 /**
- * Dispatch: source assembly (phase 4 of the tick order), house selection,
- * route commitment and reservation (phase 5) — M1c design decisions 2 and 4.
+ * Dispatch: source assembly (phase 7 of the tick order), house selection,
+ * route commitment and reservation (phase 8) — M1c design decisions 2 and 4.
  *
  * **This module also owns the `carRoute` nibble codec.** `packRouteStep` and
  * `routeStep` are the ONLY two places in the codebase that know how a step
@@ -33,8 +33,8 @@ import {
  * **Not wired into `step()` in this task** — Task 4's file list is
  * `dispatch.ts`/`dispatch.test.ts` only, mirroring `buildings.ts` (Task 2)
  * and `demand.ts` (Task 3), both of which shipped with no production caller.
- * `assembleSources` is phase 4's first half and must run BEFORE `syncFields`
- * (it decides the source set); `runDispatch` is phase 5 and is the whole
+ * `assembleSources` is phase 7's first half and must run BEFORE `syncFields`
+ * (it decides the source set); `runDispatch` is phase 8 and is the whole
  * tick's only field reader.
  *
  * **Nothing here allocates.** No object literal, no array, no closure, no
@@ -656,7 +656,7 @@ function dispatchColour(
 }
 
 /**
- * Phase 5 of the tick order: the whole tick's only field reader. Mutates
+ * Phase 8 of the tick order: the whole tick's only field reader. Mutates
  * `destReserved` and car state, never the source set — which is exactly what
  * makes "no phase between the sync and a field read may mutate the source
  * set" hold.

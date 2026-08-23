@@ -251,6 +251,16 @@ export function spliceM1fInsertions(s: GameState, map: MapData): Uint8Array {
  *
  * It takes `map` rather than reading `s.upgradeAt.length`, so a state built on
  * the wrong map fails here rather than passing a self-consistent check.
+ *
+ * **M1f Task 5 split this into two entry points and the split is the point.**
+ * Wiring phase 4 made two of the nine fixtures cross a week boundary with a real
+ * offer in the slots, so "every inserted byte is still zero" stopped being true
+ * of them — and the wrong repair, which is what a hurried task does here, is to
+ * loosen the shared helper for all nine. That would silently stop checking the
+ * offer slots at the seven sites where they genuinely must be zero. Instead:
+ * `assertM1fShapeIsPureLayout` keeps every clause it had and still has seven
+ * callers, and `assertM1fShapeIsLayoutPlusOffer` below takes the pair it expects
+ * and checks the other five things unchanged.
  */
 export function assertM1fShapeIsPureLayout(s: GameState, map: MapData): void {
   // The five header slots. Zero is `CARD_NONE` for the two card slots, "resolved
@@ -258,7 +268,40 @@ export function assertM1fShapeIsPureLayout(s: GameState, map: MapData): void {
   // the two upgrade counters — so `createState` writes none of them.
   expect(s.header[H_OFFER_A], 'H_OFFER_A must be CARD_NONE').toBe(0)
   expect(s.header[H_OFFER_B], 'H_OFFER_B must be CARD_NONE').toBe(0)
-  expect(s.header[H_OFFER_WEEK], 'H_OFFER_WEEK must be week 0').toBe(0)
+  assertM1fShapeApartFromTheOffer(s, map)
+}
+
+/**
+ * The same proof for a fixture that has crossed a week boundary: everything
+ * `assertM1fShapeIsPureLayout` checks, except that the two card slots hold the
+ * pair phase 4 raised, **passed in by the caller and hand-computed there** rather
+ * than read back off the state.
+ *
+ * `H_OFFER_WEEK` is still asserted zero, in `assertM1fShapeApartFromTheOffer`:
+ * nothing enqueues a `choose-card` until M1f Task 6, so no fixture in the repo
+ * resolves a week, and a fixture that started to would fail here rather than in
+ * a digest.
+ */
+export function assertM1fShapeIsLayoutPlusOffer(
+  s: GameState,
+  map: MapData,
+  expectedA: number,
+  expectedB: number,
+): void {
+  // Vacuity: a caller that passed `0, 0` would turn this into the pure-layout
+  // assertion under a name that says otherwise, and an offer of two identical
+  // cards is not an offer at all.
+  expect(expectedA, 'the expected slot A is CARD_NONE — use assertM1fShapeIsPureLayout').not.toBe(0)
+  expect(expectedB, 'the expected slot B is CARD_NONE').not.toBe(0)
+  expect(expectedA, 'the two offered cards must differ').not.toBe(expectedB)
+  expect(s.header[H_OFFER_A], 'H_OFFER_A is not the card phase 4 should have raised').toBe(expectedA)
+  expect(s.header[H_OFFER_B], 'H_OFFER_B is not the card phase 4 should have raised').toBe(expectedB)
+  assertM1fShapeApartFromTheOffer(s, map)
+}
+
+/** The five clauses both entry points share. Not exported: there is no third caller. */
+function assertM1fShapeApartFromTheOffer(s: GameState, map: MapData): void {
+  expect(s.header[H_OFFER_WEEK], 'H_OFFER_WEEK must be week 0 — nothing chose').toBe(0)
   expect(s.header[H_INV_UPGRADES], 'no upgrade is held yet').toBe(0)
   expect(s.header[H_UPGRADE_COUNT], 'and none is placed').toBe(0)
   expect(s.header.length, 'the header is HEADER_LENGTH slots wide').toBe(HEADER_LENGTH)

@@ -35,7 +35,7 @@ import {
 import { pushBlockedSpawnDemand } from './demand'
 
 /**
- * The spawn phase — phase 4 of the tick order. Houses and destinations appear
+ * The spawn phase — phase 5 of the tick order. Houses and destinations appear
  * over time, inside the revealed rect, on an authored schedule (spec §5.9).
  *
  * **This module carries the codebase's THIRD index arithmetic and it must not
@@ -477,7 +477,7 @@ export function attemptDestinationSpawn(
 }
 
 /**
- * Phase 4 of the tick order. Countdown timers, not last-spawn stamps: a
+ * Phase 5 of the tick order. Countdown timers, not last-spawn stamps: a
  * countdown resets to a different value on success and on failure, which is
  * exactly what §5.9's separate interval and retry constants describe.
  *
@@ -491,7 +491,7 @@ export function attemptDestinationSpawn(
  * **Position.** AFTER phase 3, because "nothing ever spawns on an existing road
  * tile" must see the road the player laid this tick — that is the entire basis
  * of spawn-blocking, which §5.9 calls a major skill expression that must not be
- * accidentally optimised away. BEFORE phase 5, so a destination placed on tick
+ * accidentally optimised away. BEFORE phase 6, so a destination placed on tick
  * T is inside `H_DEST_COUNT` for tick T's rotation. It reads `H_TICK`
  * (through `placeDestination`'s `destSpawnTick` stamp) and `H_WEEK` (colour
  * unlocks), so its position against phase 1 is an off-by-one with a detector.

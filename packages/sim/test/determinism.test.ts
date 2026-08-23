@@ -36,8 +36,9 @@ import {
   placeHouse,
 } from '../src/buildings'
 import { hashBytes } from '../src/hash'
+import { drawOfferPair, offerSeedFor, poolFor, popCountCards } from '../src/cards'
 import { m1eInsertedRanges, spliceM1eInsertions } from './m1eSplice'
-import { assertM1fShapeIsPureLayout, spliceM1fInsertions } from './m1fSplice'
+import { assertM1fShapeIsLayoutPlusOffer, spliceM1fInsertions } from './m1fSplice'
 
 /**
  * The determinism boundary is the sim *plus everything it depends on*. Spec §4
@@ -388,7 +389,7 @@ describe('sim source obeys the determinism rules', () => {
       'sim/src/hash.ts',
       'sim/src/index.ts',
       'sim/src/layout.ts',
-      // M1e Task 7: the per-destination overcrowd meter, `step` phase 10. Named
+      // M1e Task 7: the per-destination overcrowd meter, `step` phase 11. Named
       // here for the same reason every other entry is — a new source file must
       // be added deliberately, and a module that skips this scan skips every
       // determinism rule below it.
@@ -397,7 +398,7 @@ describe('sim source obeys the determinism rules', () => {
       'sim/src/rng.ts',
       'sim/src/roads.ts',
       'sim/src/scratch.ts',
-      // M1e Task 5: the spawn phase, `step` phase 4 and the first module in
+      // M1e Task 5: the spawn phase, `step` phase 5 and the first module in
       // `sim` to read `REVEALED_*`. Named here for the same reason every other
       // entry is — a new source file must be added deliberately, and a module
       // that skips this scan skips every determinism rule below it, which for
@@ -897,13 +898,13 @@ describe('golden replay', () => {
     expect(s.header[H_FAILED_DEST]).toBe(0)
     // **The two overcrowd regions are a STRUCTURAL zero on this board and the
     // label that said "Task 3 owns this region, not Task 5" is no longer the
-    // reason.** Task 7 wired `runOvercrowd` as phase 10, so it runs on all
+    // reason.** Task 7 wired `runOvercrowd` as the last phase, so it runs on all
     // 13,499 ticks here — over a live prefix of **zero** destinations, because
     // this 4x4 golden map places none. The loop body is never entered, which is
     // a stronger statement than "no destination reached a cap", and it is
     // asserted rather than read off the map.
     expect(s.header[H_DEST_COUNT], 'the golden board has no destination at all').toBe(0)
-    expect(s.destOvercrowd.every((v) => v === 0), 'so phase 10 writes nothing here').toBe(true)
+    expect(s.destOvercrowd.every((v) => v === 0), 'so phase 11 writes nothing here').toBe(true)
     expect(s.destOverTicks.every((v) => v === 0)).toBe(true)
     const m1e = m1eInsertedRanges(GOLDEN_MAP)
     expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 424, 464])
@@ -933,15 +934,47 @@ describe('golden replay', () => {
     //
     // **The digest is not the evidence; these two lines are.** The splice removes
     // exactly the two inserted ranges and must reproduce the PRIOR digest
-    // bit-for-bit, which says no pre-existing byte changed value; and
-    // `assertM1fShapeIsPureLayout` says every inserted byte is still zero. A move
+    // bit-for-bit, which says no pre-existing byte changed value; and the shape
+    // assertion says every inserted byte is at the value it should be. A move
     // that was partly layout and partly a stray write fails the first, and one
     // that quietly initialised a new slot fails the second.
-    assertM1fShapeIsPureLayout(s, GOLDEN_MAP)
+    //
+    // ---------------------------------------------------------------------
+    // **Re-blessed at M1f Task 5: 4189191826 -> 2986084740, BEHAVIOURAL — the
+    // card offer, `step` phase 4.** Task 4's move was pure layout; this one is
+    // not, and the two bytes that moved are named and hand-computed rather than
+    // read back.
+    //
+    // This fixture runs 13,499 ticks and therefore crosses the boundaries at
+    // 4,500 and 9,000, exactly as it takes two tile grants. Nothing resolves an
+    // offer (no `TickAction` can until Task 6), so at tick 13,499 the slots hold
+    // **week 2's** pair and `H_OFFER_WEEK` is still 0.
+    //
+    // **What makes this stronger than a re-bless with a story: the M1f splice
+    // still reproduces 1058753394.** The offer slots sit inside block A, so the
+    // splice removes them — which means that assertion now says something it
+    // could not say before: across 13,499 ticks and two week boundaries, phase 4
+    // changed **not one byte outside the two inserted ranges.**
+    //
+    // **Why the pair can be recomputed from the FINAL `rng[0]`.** `offerSeedFor`
+    // reads the seed word live, and this fixture is the one place in the repo
+    // that advances it deliberately — `nextRandom(s.rng, 0)` every 1,000
+    // iterations, to keep the generator inside the golden path. The last such
+    // draw is at `i = 13,000`; `13,499 % 1000 !== 0`, so no draw follows the
+    // final tick and the word phase 4 read on it is the word still in the
+    // buffer. That premise is asserted below rather than described here.
+    expect((ticks - 1) % 1000, 'a draw after the last tick would invalidate the recomputation').not.toBe(0)
+    expect(s.header[H_WEEK], 'the offer below is week 2s').toBe(2)
+    const offer = new Int32Array(2)
+    drawOfferPair(poolFor(GOLDEN_WORLD), offerSeedFor(s, 2), offer)
+    // And the slots hold real cards, so the fixture is not silently exercising
+    // the short-pool path: this map's pool is two cards.
+    expect(popCountCards(poolFor(GOLDEN_WORLD)), 'GOLDEN_MAP can offer a pair').toBe(2)
+    assertM1fShapeIsLayoutPlusOffer(s, GOLDEN_MAP, offer[0] as number, offer[1] as number)
     expect(
       hashBytes(spliceM1fInsertions(s, GOLDEN_MAP)),
       'the M1f splice must reproduce the pre-M1f digest',
     ).toBe(1058753394)
-    expect(hashState(s)).toBe(4189191826)
+    expect(hashState(s)).toBe(2986084740)
   })
 })
