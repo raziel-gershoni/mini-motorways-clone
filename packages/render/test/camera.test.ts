@@ -3,6 +3,7 @@ import {
   DPR_CAP_DEFAULT,
   DPR_CAP_LOW,
   HUD_BAND_CSS,
+  OFFER_CARD_MAX_H_CSS,
   OFFER_GAP_CSS,
   OFFER_MARGIN_CSS,
   OFFER_PEEK_H_CSS,
@@ -739,25 +740,48 @@ describe('offerRects — two cards and a way out, laid out inside the board band
     //
     //   top    = originY 95      bottom = hudTop 738      innerH = 643
     //   left   = 16              innerW = 390 - 32 = 358
-    //   titleH = 28   peekH = 44   gap = 12
-    //   cardH  = floor((643 - 28 - 44 - 36) / 2) = floor(535 / 2) = 267
-    //   cardA  y = 95 + 28 + 12 = 135          cardB y = 135 + 267 + 12 = 414
-    //   peek   y = 738 - 44 = 694              peek  x = 16 + floor((358-132)/2) = 129
+    //   titleH = 28   peekH = 44   gap = 12   cardMaxH = 200
+    //   fitH   = floor((643 - 28 - 44 - 36) / 2) = 267  ->  capped to 200
+    //   blockH = 28 + 44 + 2*200 + 36 = 508
+    //   blockTop = 95 + floor((643 - 508) / 2) = 95 + 67 = 162
+    //   cardA y = 162 + 28 + 12 = 202     cardB y = 202 + 200 + 12 = 414
+    //   peek  y = 414 + 200 + 12 = 626    peek x = 16 + floor((358-132)/2) = 129
     const r = offerRects(phone390Camera(), createOfferRects())
-    expect([r.cardA.x, r.cardA.y, r.cardA.w, r.cardA.h]).toEqual([16, 135, 358, 267])
-    expect([r.cardB.x, r.cardB.y, r.cardB.w, r.cardB.h]).toEqual([16, 414, 358, 267])
-    expect([r.peek.x, r.peek.y, r.peek.w, r.peek.h]).toEqual([129, 694, 132, 44])
+    expect([r.cardA.x, r.cardA.y, r.cardA.w, r.cardA.h]).toEqual([16, 202, 358, 200])
+    expect([r.cardB.x, r.cardB.y, r.cardB.w, r.cardB.h]).toEqual([16, 414, 358, 200])
+    expect([r.peek.x, r.peek.y, r.peek.w, r.peek.h]).toEqual([129, 626, 132, 44])
+  })
+
+  it('leaves a strip of the frozen board above and below the modal, on both phones', () => {
+    // **The cap's whole purpose, as a measurement rather than as a comment.**
+    // Uncapped, the two cards fill the band and the player sees no board at
+    // all — which reads as a different screen rather than as a stopped game,
+    // and which would leave `REFUSED_OFFER_MODAL` with no reachable fixture
+    // because every board pixel would be under a card.
+    for (const [view, above, below] of [
+      [PHONE_390, 67, 68],
+      [M0_DEVICE, 85, 85],
+    ] as const) {
+      const cam = fitCamera(view, REVEALED_RECT)
+      const r = offerRects(cam, createOfferRects())
+      // The title sits one gap above card A, so the visible board above the
+      // modal runs from the band's top to the title's own top edge.
+      expect(r.cardA.y - OFFER_GAP_CSS - OFFER_TITLE_H_CSS - cam.originY).toBe(above)
+      expect(cam.hudTop - (r.peek.y + r.peek.h)).toBe(below)
+      expect(r.cardA.h, 'and the cap is what bought it').toBe(OFFER_CARD_MAX_H_CSS)
+    }
   })
 
   it('lays them out against the M0 device too, so nothing is a property of one viewport', () => {
     //   top 86, bottom 764, innerH 678, innerW 406 - 32 = 374
-    //   cardH = floor((678 - 28 - 44 - 36) / 2) = floor(570 / 2) = 285
-    //   cardA y = 86 + 40 = 126     cardB y = 126 + 285 + 12 = 423
-    //   peek  y = 764 - 44 = 720    peek x = 16 + floor((374-132)/2) = 137
+    //   fitH = floor((678 - 28 - 44 - 36) / 2) = 285  ->  capped to 200
+    //   blockTop = 86 + floor((678 - 508) / 2) = 86 + 85 = 171
+    //   cardA y = 171 + 40 = 211    cardB y = 211 + 212 = 423
+    //   peek  y = 423 + 212 = 635   peek x = 16 + floor((374-132)/2) = 137
     const r = offerRects(fitCamera(M0_DEVICE, REVEALED_RECT), createOfferRects())
-    expect([r.cardA.x, r.cardA.y, r.cardA.w, r.cardA.h]).toEqual([16, 126, 374, 285])
-    expect([r.cardB.y, r.cardB.h]).toEqual([423, 285])
-    expect([r.peek.x, r.peek.y, r.peek.w, r.peek.h]).toEqual([137, 720, 132, 44])
+    expect([r.cardA.x, r.cardA.y, r.cardA.w, r.cardA.h]).toEqual([16, 211, 374, 200])
+    expect([r.cardB.y, r.cardB.h]).toEqual([423, 200])
+    expect([r.peek.x, r.peek.y, r.peek.w, r.peek.h]).toEqual([137, 635, 132, 44])
   })
 
   it('keeps every rect inside the canvas and out of the HUD band, at three viewports', () => {
@@ -874,6 +898,17 @@ describe('offerRects — two cards and a way out, laid out inside the board band
       expect(r.peek.h).toBe(OFFER_PEEK_H_CSS)
       expect(r.peek.h, '44 CSS px is the floor, not a look').toBeGreaterThanOrEqual(44)
     }
+  })
+
+  it('lets the derived height win where it is SMALLER than the cap, so the cap is a ceiling', () => {
+    // SHORT_WIDE's band is 491 CSS px, which gives 191 per card — under the
+    // 200 cap. A `cardH = OFFER_CARD_MAX_H_CSS` assignment rather than a `min`
+    // would push the block past the band here and clip the peek control.
+    const cam = fitCamera(SHORT_WIDE, REVEALED_RECT)
+    const r = offerRects(cam, createOfferRects())
+    expect(r.cardA.h).toBe(191)
+    expect(r.cardA.h).toBeLessThan(OFFER_CARD_MAX_H_CSS)
+    expect(r.peek.y + r.peek.h).toBeLessThanOrEqual(cam.hudTop)
   })
 
   it("writes into the caller's object and returns it, allocating nothing", () => {

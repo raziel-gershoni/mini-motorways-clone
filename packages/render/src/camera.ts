@@ -337,6 +337,30 @@ export const OFFER_GAP_CSS = 12
 export const OFFER_TITLE_H_CSS = 28
 
 /**
+ * The tallest a card is drawn, CSS px.
+ *
+ * **Without a cap the two cards fill the whole board band** — 267 CSS px each on
+ * a 390x844 phone — and the modal stops reading as something held in front of
+ * the board and starts reading as a different screen. Two consequences, and the
+ * second is the one that decided it:
+ *
+ *  - The player has just had the game stop for the first time in the run. A
+ *    strip of the frozen city visible above and below the cards is what says
+ *    *this is a pause*, not *the game ended*. The board is the only thing on
+ *    screen that carries that.
+ *  - Every pixel of the board would be under a tappable card, so "a tap that
+ *    misses both cards" would be unreachable on any real viewport and
+ *    `REFUSED_OFFER_MODAL` would be a branch no fixture could enter without a
+ *    contrived camera. A guard with no reachable fixture is a guard with no
+ *    detector.
+ *
+ * 200 leaves ~67 CSS px of board above the title and ~68 below the peek control
+ * on that phone, and the cap is inert on a viewport short enough that the
+ * derived height is already smaller (SHORT_WIDE gets 191).
+ */
+export const OFFER_CARD_MAX_H_CSS = 200
+
+/**
  * The peek control's size, CSS px. **44 is a touch target and not a look** — the
  * same figure `eraseControl.ts`'s fallback pill is built to, and the reason a
  * DOM strip below the canvas was rejected there (`fitCamera` leaves 40-49 px of
@@ -406,11 +430,19 @@ export function offerRects(camera: Camera, out: OfferRects): OfferRects {
   // because a viewport too short for the chrome gives a negative numerator, and
   // `floor(-32 / 2)` is -16 — a negative height, which is the one thing a rect
   // in this file must never carry.
-  const cardH = Math.floor(Math.max(0, innerH - titleH - peekH - 3 * OFFER_GAP_CSS) / 2)
+  const fitH = Math.floor(Math.max(0, innerH - titleH - peekH - 3 * OFFER_GAP_CSS) / 2)
+  const cardH = fitH < OFFER_CARD_MAX_H_CSS ? fitH : OFFER_CARD_MAX_H_CSS
 
-  const aY = clampTo(top + titleH + OFFER_GAP_CSS, top, bottom)
+  // The whole modal is laid out as ONE block and centred in the band, rather
+  // than pinned to its top and bottom edges. That is what puts the leftover
+  // board above the title AND below the peek control instead of all of it in
+  // one strip — see `OFFER_CARD_MAX_H_CSS` for why the leftover is the point.
+  const blockH = titleH + peekH + 2 * cardH + 3 * OFFER_GAP_CSS
+  const blockTop = top + Math.floor(Math.max(0, innerH - blockH) / 2)
+
+  const aY = clampTo(blockTop + titleH + OFFER_GAP_CSS, top, bottom)
   const bY = clampTo(aY + cardH + OFFER_GAP_CSS, top, bottom)
-  const pY = clampTo(bottom - peekH, top, bottom)
+  const pY = clampTo(bY + cardH + OFFER_GAP_CSS, top, bottom)
 
   setRect(out.cardA, left, aY, innerW, clampTo(cardH, 0, bottom - aY))
   setRect(out.cardB, left, bY, innerW, clampTo(cardH, 0, bottom - bY))
