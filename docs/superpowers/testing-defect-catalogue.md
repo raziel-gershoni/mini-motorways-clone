@@ -1018,3 +1018,41 @@ holds in and the condition that ends it — here, *"identical for |pool| ≤ 2; 
 
 Note the shape of the failure: the comment **cites this document's own rule about enumerating the axes
 before writing the sentence**, and then enumerates the wrong axis. Citing a rule is not applying it.
+
+## Scope a stale-claim sweep to the claim, not to your diff
+
+M1f Task 7 falsified five durable artefacts and swept four. The one it missed was the one that
+mattered most: a comment in `state.ts` reading *"`offerSlot` still has none — **Task 8's frame fold is
+its first** [production caller]."* Task 7's own commit had given `offerSlot` its first production
+caller. The sentence was false in both halves, and it **mis-assigned ownership to the task already in
+flight** — a Task 8 implementer reading it would believe work already done was still theirs to land.
+
+The implementer's own diagnosis is the entry:
+
+> **"My sweep was scoped to files I had edited, which is exactly the wrong scope for a claim about who
+> owns the next task."**
+
+A diff-scoped sweep finds every artefact *you* touched. It cannot find the artefact in a file you
+never opened that made a prediction *about* what you did — and that is precisely the class that
+misleads the next task, because it is written in the future tense by someone who could not see your
+commit.
+
+**Grep for the claim, not the file.** If your task gives a symbol its first caller, search the repo
+for that symbol's name and read every sentence around it. If your task lands a mechanism a previous
+task predicted, search for the predicting task's number. The cost is one grep; the failure mode is a
+false authorisation handed to whoever comes next.
+
+## A forward reference is dead until it is live, and which one you see depends on where you measure
+
+The same task carried a comment naming two `RenderFrame` fields that did not exist. A reviewer at the
+task's own commit confirmed a repo-wide grep found them nowhere — correctly, and the obvious repair is
+to delete the sentence.
+
+Measured against the **tip** instead, the answer inverts: the very next task had landed both fields.
+The sentence was a forward reference that had been dead for three tasks and had just become live, and
+deleting it would have removed a correct cross-reference.
+
+So: **when a comment names something that does not exist, check whether it exists yet.** A claim can
+be wrong at your base and right at HEAD, and in a milestone executed as a sequence of tasks the
+distance between those is one commit. Name the owner rather than deleting the reference — that reads
+correctly on both sides, which is what a cherry-picked fix has to do.
