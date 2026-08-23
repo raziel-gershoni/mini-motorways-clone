@@ -12,19 +12,29 @@ import {
 import {
   createState,
   hashState,
+  isGameOver,
+  H_WEEK,
   H_DEST_COUNT,
   H_DEST_SPAWN_TIMER,
   H_FAILED_DEST,
   H_GAME_OVER,
   H_HOUSE_COUNT,
   H_SPAWN_COLOUR_CURSOR,
+  H_TICK,
   H_TILES,
 } from '../src/state'
 import { createWorld } from '../src/world'
 import { createFlowFields, createScratch } from '../src/scratch'
 import { createFieldInputRanges } from '../src/regions'
 import { nextRandom } from '../src/rng'
-import { step, type TickInputs } from '../src/step'
+import { spawnScanStart } from '../src/spawn'
+import { step, type TickAction, type TickInputs } from '../src/step'
+import {
+  DEST_KIND_SQUARE,
+  ORIENTATION_W,
+  placeDestination,
+  placeHouse,
+} from '../src/buildings'
 import { hashBytes } from '../src/hash'
 import { m1eInsertedRanges, spliceM1eInsertions } from './m1eSplice'
 
@@ -530,6 +540,183 @@ describe('fields[ direct indexing is banned outside flowfield.ts (1e, fix-list #
       expect(scanText(sample, [FIELDS_INDEXING_RULE]), `false positive: ${sample}`).toEqual([])
     }
   })
+})
+
+describe('RNG consumption is banned outside rng.ts (M1f Task 4)', () => {
+  // **Why this is a standalone rule and NOT an entry in `RULES` above, which is
+  // where the brief asked for it: it cannot be one.** The `RULES` loop scans
+  // EVERY file in `SCAN_ROOTS`, and `rng.ts` both declares `nextRandom` and
+  // calls it twice inside `randomBelow` — so a `RULES` entry would report its
+  // own definition site and go red on the tree it was written to bless. The
+  // only regex that would make it green there is one narrowed to miss the
+  // declaration, which disarms the guard for the case it exists to catch. So it
+  // takes `fields[`'s shape instead: its own describe, its own filtered file
+  // list, an assertion that the filter excludes EXACTLY `sim/src/rng.ts`, and an
+  // assertion that `rng.ts` itself does contain a hit — so the exclusion is
+  // proved non-vacuous rather than assumed.
+  //
+  // The rule itself: the weekly offer draw (M1f Task 5) must be a pure function
+  // of `rng[0]` and the week. **Measured: ONE `nextRandom` per week boundary
+  // moves the greedy arm's death tick 31,456 -> 34,088, freezes
+  // `spawn.test.ts` at 2,640,000 and fails Gate C** — every downstream consumer
+  // shifts by one, so a draw on a schedule couples every later draw to that
+  // schedule. `spawnScanStart` (spawn.ts) already reads the word without
+  // advancing it, for the same reason and with the reason at the site;
+  // `offerSeedFor` (cards.ts) is the second.
+  //
+  // This is the source-scan half. The behavioural half is
+  // `a full multi-week run never advances state.rng[0]` below, and neither is
+  // sufficient alone: the scan cannot see a hand-rolled `store[i] += 0x6d2b79f5`
+  // and the behavioural test cannot see a draw on a path its fixture never
+  // reaches.
+  const RNG_CONSUMPTION_RULE: Rule = {
+    name: 'RNG consumption outside rng.ts',
+    re: /\b(?:nextRandom|randomBelow)\s*\(/,
+    why: 'a consumer that draws on a schedule couples every later draw to that schedule',
+    hits: ['const v = nextRandom(state.rng, 0)', 'randomBelow (store, 0, 6)'],
+    // **These MUST NOT match the regex above**, and the previous draft's second
+    // entry was `'export function nextRandom(store, i)'`, which matches its own
+    // rule and turns the self-test below red on the first run.
+    misses: ['const v = mixWord(state.rng[0] as number)', 'offerSeedFor(state, week)'],
+  }
+
+  const allFiles = SCAN_ROOTS.flatMap(sourceFiles)
+  const filesOutsideRng = allFiles.filter((f) => label(f) !== 'sim/src/rng.ts')
+
+  it('excludes exactly sim/src/rng.ts, and nothing else, from the scanned set', () => {
+    expect(filesOutsideRng.some((f) => label(f) === 'sim/src/rng.ts')).toBe(false)
+    expect(filesOutsideRng.length).toBe(allFiles.length - 1)
+  })
+
+  it('rng.ts itself DOES consume the stream, proving the exclusion is real and not vacuous', () => {
+    const rngFile = allFiles.find((f) => label(f) === 'sim/src/rng.ts')
+    expect(rngFile).toBeDefined()
+    const hits = scanText(readFileSync(rngFile as string, 'utf8'), [RNG_CONSUMPTION_RULE])
+    expect(hits.length).toBeGreaterThan(0)
+  })
+
+  it('contains no nextRandom/randomBelow call anywhere else in sim/shared sources', () => {
+    const hits = filesOutsideRng.flatMap((f) =>
+      scanText(readFileSync(f, 'utf8'), [RNG_CONSUMPTION_RULE]).map((h) => `${label(f)}:${h}`),
+    )
+    expect(hits, `banned RNG consumption\n${hits.join('\n')}`).toEqual([])
+  })
+
+  it('the rule fires on a real violation and leaves its counter-examples alone', () => {
+    for (const sample of RNG_CONSUMPTION_RULE.hits) {
+      expect(scanText(sample, [RNG_CONSUMPTION_RULE]), `not caught: ${sample}`).not.toEqual([])
+    }
+    for (const sample of RNG_CONSUMPTION_RULE.misses) {
+      expect(scanText(sample, [RNG_CONSUMPTION_RULE]), `false positive: ${sample}`).toEqual([])
+    }
+  })
+
+  it('uses no global-flagged regex, whose test() alternates between calls', () => {
+    expect(RNG_CONSUMPTION_RULE.re.flags).not.toContain('g')
+  })
+})
+
+describe('the seed word is read, never consumed', () => {
+  const NO_INPUT: TickInputs = { actions: [] }
+
+  /**
+   * A 24x40 all-land board seeded with two CONNECTED colour-0 destinations, two
+   * colour-0 houses, and a corridor laid on tick 0 — and `maxDestinations`
+   * capped at exactly the two that are seeded.
+   *
+   * **Every clause of that is load-bearing, and the first draft of this rig had
+   * none of them.** A bare board (`firstCity`, or an all-land copy of it) dies
+   * at tick 8,618 of overcrowd, because the destination spawner keeps placing
+   * destinations no road reaches; `step` then returns immediately and the run
+   * spends its remaining ticks frozen. A frozen run satisfies "rng[0] did not
+   * move" trivially — the catalogue's "safety properties are satisfied trivially
+   * by a frozen system" — so the vacuity clauses below are what make the horizon
+   * mean anything, and they are the reason this rig exists rather than a
+   * three-line one. Measured across five bare configurations: 8,296 / 8,614 /
+   * 8,618 / 8,618 / 8,762 ticks, every one dead, every one crossing a single
+   * week boundary.
+   *
+   * Capping `maxDestinations` at 2 makes `attemptDestinationSpawn` return
+   * `BOARD_FULL` forever, so no unconnected destination can ever appear, while
+   * `attemptHouseSpawn` keeps firing on its own ladder — and `spawnScanStart`
+   * is the first thing it reaches. That is what puts `rng[0]` on a live read
+   * path for the whole run instead of only naming it.
+   */
+  const CORRIDOR_X = 8
+  const CORRIDOR_TOP = 10
+  const CORRIDOR_BOTTOM = 28
+
+  function invarianceRig(): {
+    s: ReturnType<typeof createState>
+    world: ReturnType<typeof createWorld>
+    fields: ReturnType<typeof createFlowFields>
+    scratch: ReturnType<typeof createScratch>
+    opening: TickAction[]
+  } {
+    const rows: string[] = []
+    for (let y = 0; y < 40; y++) rows.push('.'.repeat(24))
+    const map = parseMap('rng-invariance-v1', rows, 400, 40, 2, 5)
+    const world = createWorld(map)
+    const s = createState('rng-invariance-v1', map)
+    const fields = createFlowFields(map.groupCount, world.cells)
+    const scratch = createScratch(
+      world.cells,
+      map.groupCount,
+      map.maxDestinations,
+      createFieldInputRanges(map),
+    )
+    const cell = (x: number, y: number): number => y * world.w + x
+    expect(
+      placeDestination(s, world, cell(9, CORRIDOR_TOP), ORIENTATION_W, 0, DEST_KIND_SQUARE),
+    ).toBe(true)
+    expect(
+      placeDestination(s, world, cell(9, CORRIDOR_TOP + 4), ORIENTATION_W, 0, DEST_KIND_SQUARE),
+    ).toBe(true)
+    expect(placeHouse(s, world, cell(CORRIDOR_X, CORRIDOR_BOTTOM), 0)).toBe(true)
+    expect(placeHouse(s, world, cell(CORRIDOR_X, CORRIDOR_BOTTOM - 2), 0)).toBe(true)
+    const opening: TickAction[] = []
+    for (let y = CORRIDOR_TOP; y < CORRIDOR_BOTTOM; y++) {
+      opening.push({ kind: 'place', a: cell(CORRIDOR_X, y), b: cell(CORRIDOR_X, y + 1) })
+    }
+    return { s, world, fields, scratch, opening }
+  }
+
+  it('a full multi-week run never advances state.rng[0]', () => {
+    const rig = invarianceRig()
+    const before = rig.s.rng[0] as number
+    const ticks = TICKS_PER_WEEK * 3
+    for (let t = 0; t < ticks; t++) {
+      step(
+        rig.s,
+        rig.world,
+        rig.fields,
+        rig.scratch,
+        t === 0 ? { actions: rig.opening } : NO_INPUT,
+      )
+    }
+    expect(rig.s.rng[0], 'the seed word is read, never consumed').toBe(before)
+
+    // ---- Vacuity, four ways ------------------------------------------------
+    // A run that did nothing, a run that froze partway, a run whose spawner
+    // never fired, and a run that never put the word on a read path would each
+    // satisfy the line above for a reason that has nothing to do with the rule.
+    expect(rig.s.header[H_TICK], 'the run reached the horizon').toBe(ticks)
+    expect(isGameOver(rig.s), 'and all 13,500 of those ticks were LIVE').toBe(false)
+    expect(rig.s.header[H_WEEK], 'crossing three week boundaries, which is the named hazard').toBe(3)
+    // **Exact, not a floor.** Two of these seven houses are seeded and five were
+    // SPAWNED, and a spawner that stopped firing is exactly the way this guard
+    // goes quietly vacuous. If a later balance change moves this number, re-pin
+    // it against the new measurement — do not widen it to an inequality, which
+    // would swallow the spawner falling to zero.
+    expect(rig.s.header[H_HOUSE_COUNT], 'and the spawner really ran: 2 seeded + 5 spawned').toBe(7)
+    expect(rig.s.header[H_DEST_COUNT], 'with the destination cap holding at 2').toBe(2)
+    // And the word was genuinely READ rather than merely left alone.
+    // `spawnScanStart` is the reader — a pure function of the word and the tick,
+    // reached on every house-spawn attempt — so this recomputes what it returned.
+    expect(spawnScanStart(rig.s, 97), 'the word is on a live read path').toBe(
+      ((before >>> 0) + ticks) % 97,
+    )
+  }, 60000)
 })
 
 describe('golden replay', () => {
