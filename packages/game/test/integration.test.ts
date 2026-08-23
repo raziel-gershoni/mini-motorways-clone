@@ -4077,6 +4077,54 @@ describe('the weekly card offer stops the board', () => {
     expect(rig.game.state.header[H_TICK]).toBeGreaterThan(TICKS_PER_WEEK)
   })
 
+  it('shows the frozen board under the modal without letting the clock move', () => {
+    // **The peek clause of the milestone's acceptance criterion, end to end**
+    // (plan Decision 16). Peek is the one part of the modal whose wiring
+    // crosses all three packages and is invisible in each: `pointer.ts` owns
+    // the flag, `main.ts` hands it to the driver as `() => pointer.peeking`,
+    // `buildFrame` folds it, and `canvas.ts` reads it. Only a rig with all four
+    // can say the chain is joined.
+    const rig = buildRig({ layoutId: undefined, warmStartTicks: TICKS_PER_WEEK - 1 })
+    rig.advanceRaw(16.7)
+    while (!rig.game.loop.paused) rig.advanceRaw(16.7)
+    expect(rig.game.builder.frame.offerPending).toBe(true)
+    expect(rig.game.builder.frame.offerPeek, 'the modal opens showing itself').toBe(false)
+
+    const rects = offerRects(rig.game.shell.camera, createOfferRects())
+    const tickBefore = rig.game.state.header[H_TICK] as number
+    expect(rig.game.pointer.down(1, ...[CANVAS_LEFT + rects.peek.x + rects.peek.w / 2,
+      CANVAS_TOP + rects.peek.y + rects.peek.h / 2] as [number, number])).toBe(
+      PointerOutcome.PEEK_TOGGLED,
+    )
+    // **The loop is still paused, and that is the whole rule.** A peek that
+    // resumed the sim would be a free unpause with no cost: hold it for the
+    // rest of the week and the offer is gone.
+    expect(rig.game.loop.paused, 'peek inspects; it does not skip').toBe(true)
+
+    // Frames keep drawing — that is what makes a peek visible at all — and the
+    // frame reports the board, not the modal.
+    for (let f = 0; f < 30; f++) rawTick(rig)
+    const frame = rig.game.builder.frame
+    expect(frame.offerPeek, 'the renderer is told to stand aside').toBe(true)
+    expect(frame.offerPending, 'while the offer is still up').toBe(true)
+    expect(rig.game.state.header[H_TICK], 'and the clock did not move').toBe(tickBefore)
+    expect(rig.game.queue.length, 'nothing reached the sim').toBe(0)
+
+    // Any tap returns, and the card is takeable again from the same rect.
+    expect(rig.game.pointer.down(2, rig.cx(10), rig.cy(14))).toBe(PointerOutcome.PEEK_TOGGLED)
+    expect(rig.game.pointer.peeking, 'the flag is down the moment the tap lands').toBe(false)
+    // `builder.frame` is the LAST frame built, so it still says `true` here —
+    // asserting it now would be asserting that the tap redraws the screen
+    // synchronously, which no input in this codebase does. The next frame is
+    // where the renderer finds out.
+    expect(rig.game.builder.frame.offerPeek, 'the drawn frame is still last frame’s').toBe(true)
+    rawTick(rig)
+    expect(rig.game.builder.frame.offerPeek, 'and the next frame agrees').toBe(false)
+    expect(
+      rig.game.pointer.down(3, CANVAS_LEFT + rects.cardA.x + 4, CANVAS_TOP + rects.cardA.y + 4),
+    ).toBe(PointerOutcome.CARD_CHOSEN)
+  })
+
   it('gives the modal the whole screen: the erase control leaves and comes back', () => {
     // **The scrim is canvas paint and the erase control is not** — on Telegram
     // it is the native full-width `MainButton`, outside the webview's content
