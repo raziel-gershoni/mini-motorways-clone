@@ -129,6 +129,51 @@ export function regionsFor(map: MapData): readonly Region[] {
     // — so `roads.ts` guards the decrement with `assertGhostCommittedPositive`
     // rather than letting a `--` at 0 wrap to 255.
     { name: 'ghostCommitted', ctor: Uint8Array, len: cells },
+    // M1f Task 4. **ONE region, appended to the end of the last tier, and that
+    // is what keeps the padding at zero**: on `firstCity` the 4-byte tier goes
+    // 1,824 -> 1,844 B (a multiple of 4), the Int16 tier is UNCHANGED at 4,320,
+    // the Uint8 tier goes 7,848 -> 8,808, and the total 13,992 -> 14,972 is a
+    // multiple of 4 — so `computeLayout` inserts no pad byte and
+    // `regions.test.ts`'s zero-padding assertion still holds. Verified by
+    // running `computeLayout`, not by trusting this comment.
+    //
+    // **`firstCity` is not every map, and the difference matters to
+    // `m1fSplice.ts`.** `demoCity` carries a 2-byte TAIL pad both before and
+    // after this change (its last region ends at 9,890 of 9,892, and at 10,870
+    // of 10,872), because its 4-byte tier is 824 B and its Uint8 tier 5,082.
+    // The pad is unchanged only because both insertions are multiples of 4 —
+    // 5 header slots is 20 B, and `cells` is 960 on both shipped maps. A map
+    // with `cells % 4 != 0` would change the tail pad and the splice proof
+    // would not reproduce its prior digest; `m1fSplice.ts` guards that
+    // condition by name rather than assuming it.
+    //
+    // **ONE APPEND and one mid-buffer INSERTION** — the header's five new slots,
+    // landing in the same commit, grow a region in the middle of the 4-byte tier.
+    // `m1fSplice.ts` depends on knowing which is which, and it has TWO ranges:
+    // the header's slots, and this tail. (An earlier draft of this milestone had
+    // four ranges, because its relief object added a tail to every tier.)
+    //
+    // `upgradeAt` is a FLAG, not an index: 1 means "the junction mutual-exclusion
+    // rule does not apply at this cell", 0 means it does, and 0 is the correct
+    // initial value with no write in `createState`. `canEnter` reaches it in one
+    // array read through `junctionAdmitsOne` (graph.ts) and that read IS the
+    // whole entry rule of M1f's relief object.
+    //
+    // **It owns no timer and no phase.** The previous design's `lightSince` and
+    // `lightIdle` were Int16 because their caps were above 255; there is nothing
+    // here to cap. If a later milestone gives an upgraded junction a schedule,
+    // that is a new region and a new shape change, and it must not be smuggled
+    // into this byte by widening it.
+    //
+    // FIELD_IRRELEVANT. A junction upgrade changes a car's right to ENTER a cell
+    // and nothing else — not its SPEED through one (`isJunctionCell` is
+    // unchanged, so `INTERSECTION_SPEED_MUL` still applies) and never the distance
+    // of a step. Routing is upgrade-blind for exactly the reason it is
+    // congestion-blind — see the 2026-08-21 amendment to spec §5.4. Note that this
+    // is the very region the five FIELD_IRRELEVANT reasons above were dated
+    // against ("M1f's demand-actuated lights"), and the relief object shipped
+    // without making one of them a field input.
+    { name: 'upgradeAt', ctor: Uint8Array, len: cells },
   ]
 }
 
@@ -293,6 +338,21 @@ export const FIELD_INPUT_REGIONS = Object.freeze(['mapIdentity', 'destCell', 'ro
  * rather than adding a per-cell term, and the demand-actuated light M1f deferred,
  * if it returns and prices waiting — and either would have to beat the amendment
  * first.
+ *
+ * M1f Task 4 adds the last one, and it is FIELD_IRRELEVANT:
+ *
+ *   - upgradeAt:      the relief object itself, one flag per cell. It changes a
+ *                     car's RIGHT TO ENTER a cell and nothing else: not the
+ *                     cell's speed (`isJunctionCell` is untouched, so
+ *                     `INTERSECTION_SPEED_MUL` still applies) and never the
+ *                     distance of a step, so no edge cost, source set or `dir`
+ *                     read depends on it. **This is the region the five reasons
+ *                     above were dated against, and it did not become a field
+ *                     input** — the spec amendment of 2026-08-21 settles the
+ *                     condition they set in the negative, in writing: junction,
+ *                     traffic-light and roundabout cost is NOT edge weight.
+ *                     Dated: M1g, with the rest, and only if that amendment is
+ *                     beaten first.
  */
 export const FIELD_IRRELEVANT_REGIONS = Object.freeze([
   'rng',
@@ -319,6 +379,7 @@ export const FIELD_IRRELEVANT_REGIONS = Object.freeze([
   'carRoute',
   'ghostMask',
   'ghostCommitted',
+  'upgradeAt',
 ] as const)
 
 /**

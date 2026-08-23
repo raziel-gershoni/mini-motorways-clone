@@ -339,8 +339,8 @@ describe('M1f Task 3: the junction triage, applied to the arm that ships', () =>
 
       // **The criterion the roundabout failed.** If a junction-eligible hot cell
       // accepts in zero windows, stop and report — an early card would have to
-      // be held forever rather than merely held, and §2.2 only licenses the
-      // latter.
+      // be held forever rather than merely held, and the dossier's Inventory
+      // section only licenses the latter (see the citation below).
       const seatable = hot.filter((cell) =>
         SAMPLES.some((t) => {
           const snap = snaps.get(t)
@@ -367,8 +367,14 @@ describe('M1f Task 3: the junction triage, applied to the arm that ships', () =>
       // **The timing finding this survey exists to produce.** Not every hot cell
       // is a legal site at every boundary: `(12,19)` accepts from boundary 2 and
       // the other two only from boundary 3. So an early relief card must be
-      // HELD, which §2.2 permits ("items sit unplaced indefinitely"), and this
-      // is how long for.
+      // HELD, which the research dossier permits — §2.2 INVENTORY of
+      // `docs/research/2026-08-02-original-game-research-dossier.md`, "Items sit
+      // unplaced indefinitely" — and this is how long for. **Naming the document
+      // is the correction, made at M1f Task 4**: a bare "§2.2" resolves in the
+      // DESIGN SPEC to "Deferred", which is about expert mode and rail terrain.
+      // The spec clause that does govern this mechanism is §5.10's "no skip, no
+      // bank, no reroll", and it applies to the OFFER rather than to the item the
+      // card grants — two different objects.
       const accepted = (cell: number, b: number): boolean =>
         WINDOW.some((w) => {
           const snap = snaps.get(b + w)

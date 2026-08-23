@@ -9,8 +9,10 @@ import {
   m1eRangesFromLayout,
   spliceM1eInsertions,
   M1D_HEADER_LENGTH,
+  M1E_HEADER_LENGTH,
   M1E_REGION_NAMES,
 } from './m1eSplice'
+import { M1F_HEADER_SLOT_COUNT, M1F_REGION_NAME } from './m1fSplice'
 
 /**
  * The re-bless proof's own tests.
@@ -74,9 +76,15 @@ function syntheticRegions(over: Partial<{
   const header: Region = { name: 'header', ctor: Int32Array, len: headerLen }
   const filler: Region = { name: 'carTargetDest', ctor: Int32Array, len: 7 }
   const tail: Region = { name: 'carRouteLen', ctor: Int16Array, len: 7 }
+  // **M1f Task 4: the synthetic layout has to carry `upgradeAt` too**, because
+  // `m1eRangesFromLayout` now composes `m1fRangesFromLayout` rather than
+  // restating M1f's two ranges. Length 12 so the composed splice removes
+  // 16 + 20 + 148 + 12 = 196 bytes, a multiple of 4 — the condition
+  // `m1fSplice.ts` guards and `m1fSplice.test.ts` feeds a violation of.
+  const upgrade: Region = { name: M1F_REGION_NAME, ctor: Uint8Array, len: 12 }
   return over.blockBFirst
-    ? [...head, ...kept, header, filler, tail]
-    : [...head, header, filler, ...kept, tail]
+    ? [...head, ...kept, header, filler, tail, upgrade]
+    : [...head, header, filler, ...kept, tail, upgrade]
 }
 
 describe('the splice helper accepts a well-formed layout', () => {
@@ -88,10 +96,18 @@ describe('the splice helper accepts a well-formed layout', () => {
     // [16 + 9*4, 16 + 13*4) = [52, 68) on any layout of this shape — the same
     // range every one of the seven real fixtures reports.
     expect([r.aStart, r.aEnd]).toEqual([52, 68])
-    // Block B: header ends at 68, filler is 7 Int32 = 28 B, so B starts at 96
-    // and runs 5 + 16 + 16 = 37 Int32 = 148 B.
-    expect([r.bStart, r.bEnd]).toEqual([96, 244])
+    // Block B: header is now 18 slots and ends at 88, filler is 7 Int32 = 28 B,
+    // so B starts at 116 and runs 5 + 16 + 16 = 37 Int32 = 148 B. **The +20 is
+    // M1f Task 4's five header slots**, which sit between block A and block B
+    // and are removed by `m1f.a` rather than by either of M1e's own ranges.
+    expect([r.bStart, r.bEnd]).toEqual([116, 264])
     expect(r.bEnd - r.bStart).toBe(148)
+    // M1f's two, imported rather than restated. Its block A is ADJACENT to
+    // M1e's — [52, 68) then [68, 88) — which is why the ordering guard demands
+    // `aEnd === m1f.aStart` rather than merely `<=`.
+    expect([r.m1f.aStart, r.m1f.aEnd]).toEqual([68, 88])
+    expect(r.m1f.aStart, 'the two header blocks are contiguous').toBe(r.aEnd)
+    expect(r.m1f.bEnd - r.m1f.bStart, 'the whole of upgradeAt').toBe(12)
   })
 
   it('names the M1D header length and the three regions as constants, not as inline literals', () => {
@@ -99,8 +115,21 @@ describe('the splice helper accepts a well-formed layout', () => {
     // guess. If it ever equalled `HEADER_LENGTH` the block would be empty and
     // the degenerate-range guard is what would catch it (below).
     expect(M1D_HEADER_LENGTH).toBe(9)
-    expect(HEADER_LENGTH).toBe(13)
-    expect(M1D_HEADER_LENGTH).toBeLessThan(HEADER_LENGTH)
+    expect(M1E_HEADER_LENGTH).toBe(13)
+    expect(HEADER_LENGTH).toBe(18)
+    expect(M1D_HEADER_LENGTH).toBeLessThan(M1E_HEADER_LENGTH)
+    // **The tripwire that makes freezing block A's upper bound safe, and it is
+    // an EQUALITY on purpose.** M1f Task 4 grew the header 13 -> 18 and block A
+    // was frozen at `M1E_HEADER_LENGTH` so this file's prose keeps describing
+    // what it removes; the composed splice then relies on M1f's own block
+    // covering slots 13..18. The brief proposed `M1E_HEADER_LENGTH <
+    // HEADER_LENGTH` for this job — which is satisfied by EVERY future growth
+    // and is therefore not a tripwire at all. This one fails by name the day a
+    // task adds a slot without adding a block.
+    expect(
+      M1E_HEADER_LENGTH + M1F_HEADER_SLOT_COUNT,
+      'a task grew HEADER_LENGTH without giving its slots a splice block',
+    ).toBe(HEADER_LENGTH)
     expect(Array.from(M1E_REGION_NAMES)).toEqual([
       'houseSpawnTimer',
       'destOvercrowd',
@@ -116,10 +145,10 @@ describe('the splice helper refuses a layout its arithmetic would silently misre
     // not re-derive block A). Under a short header, block A would run PAST the
     // region and eat the next one's bytes.
     expect(() => m1eRangesFromLayout(computeLayout(syntheticRegions({ headerLen: 9 })))).toThrow(
-      /header is 9 slots, expected 13/,
+      /header is 9 slots, expected 18/,
     )
-    expect(() => m1eRangesFromLayout(computeLayout(syntheticRegions({ headerLen: 14 })))).toThrow(
-      /header is 14 slots, expected 13/,
+    expect(() => m1eRangesFromLayout(computeLayout(syntheticRegions({ headerLen: 19 })))).toThrow(
+      /header is 19 slots, expected 18/,
     )
   })
 
@@ -163,7 +192,7 @@ describe('the splice helper refuses a layout its arithmetic would silently misre
     // Both ranges are individually well-formed and the copy loop would run
     // happily; the ORDER is the only thing wrong, and the loop assumes A first.
     expect(() => m1eRangesFromLayout(computeLayout(syntheticRegions({ blockBFirst: true })))).toThrow(
-      /degenerate ranges A=\[200,216\) B=\[16,164\)/,
+      /degenerate ranges A=\[200,216\) M1F-A=\[216,236\) B=\[16,164\)/,
     )
   })
 })
@@ -175,21 +204,36 @@ describe('spliceM1eInsertions removes exactly the two ranges and nothing else', 
     const src = new Uint8Array(s.buffer)
     const out = spliceM1eInsertions(s, MAP)
 
-    expect(out.length).toBe(src.length - (r.aEnd - r.aStart) - (r.bEnd - r.bStart))
+    // **FOUR ranges as of M1f Task 4**, in ascending buffer order: M1e's header
+    // slots, M1f's header slots (adjacent), M1e's three regions, and
+    // `upgradeAt` at the very end. 16 + 20 + 148 + 960 = 1,144.
+    const removed =
+      r.aEnd - r.aStart + (r.m1f.aEnd - r.m1f.aStart) + (r.bEnd - r.bStart) + (r.m1f.bEnd - r.m1f.bStart)
+    expect(removed).toBe(1144)
+    expect(out.length).toBe(src.length - removed)
     expect(out.length).toBe(13828) // M1d's own total for firstCity
 
     // Rebuilt independently of the helper's copy loop, by concatenating the
-    // three surviving spans — so a loop that dropped or duplicated a byte at a
+    // surviving spans — so a loop that dropped or duplicated a byte at a
     // boundary fails here rather than only showing up as a wrong digest.
+    const spans: Array<[number, number]> = [
+      [0, r.aStart],
+      [r.m1f.aEnd, r.bStart],
+      [r.bEnd, r.m1f.bStart],
+      [r.m1f.bEnd, src.length],
+    ]
     const expected = new Uint8Array(out.length)
-    expected.set(src.subarray(0, r.aStart), 0)
-    expected.set(src.subarray(r.aEnd, r.bStart), r.aStart)
-    expected.set(src.subarray(r.bEnd), r.aStart + (r.bStart - r.aEnd))
+    let w = 0
+    for (const [from, to] of spans) {
+      expected.set(src.subarray(from, to), w)
+      w += to - from
+    }
+    expect(w, 'the four surviving spans account for every kept byte').toBe(out.length)
     expect(Array.from(out)).toEqual(Array.from(expected))
 
-    // The two boundary bytes named directly: position `aStart` in the output
-    // must be whatever followed block A in the source.
-    expect(out[r.aStart]).toBe(src[r.aEnd])
+    // The boundary byte named directly: position `aStart` in the output must be
+    // whatever followed the two adjacent header blocks in the source.
+    expect(out[r.aStart]).toBe(src[r.m1f.aEnd])
   })
 
   it('is blind to the two initial timer writes, and that is what makes the re-bless PURE LAYOUT', () => {
@@ -214,8 +258,12 @@ describe('spliceM1eInsertions removes exactly the two ranges and nothing else', 
 
   it('reports the real firstCity ranges, which are what the golden sites quote', () => {
     const r = m1eInsertedRanges(MAP)
-    expect([r.aStart, r.aEnd, r.bStart, r.bEnd]).toEqual([52, 68, 1676, 1824])
-    expect(r.totalBytes).toBe(13992)
+    // **Re-derived at M1f Task 4: block B moved 1,676 -> 1,696 and the total
+    // 13,992 -> 14,972**, both for M1f's own insertions and neither for anything
+    // M1e did. Block A is unmoved because `header` still starts at 16.
+    expect([r.aStart, r.aEnd, r.bStart, r.bEnd]).toEqual([52, 68, 1696, 1844])
+    expect([r.m1f.aStart, r.m1f.aEnd, r.m1f.bStart, r.m1f.bEnd]).toEqual([68, 88, 14012, 14972])
+    expect(r.totalBytes).toBe(14972)
     // Block B is sized by colours and destinations, never by cells — which is
     // why `demoCity` splices 156 B and the two 2-colour fixtures splice 40.
     expect(r.bEnd - r.bStart).toBe((MAP.groupCount + 2 * MAP.maxDestinations) * 4)

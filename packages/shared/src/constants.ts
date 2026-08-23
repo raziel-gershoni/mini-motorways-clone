@@ -573,6 +573,48 @@ export const SPAWN_CANDIDATE_LIMIT = 24
  */
 export const WEEKLY_TILE_GRANT = 30
 
+/**
+ * How many junction upgrades one run may place on the board.
+ *
+ * **Derived, not chosen.** The rate is **2 per card**, and that figure is one
+ * ROW of spec §5.10's table rather than a property of the table: Traffic Lights
+ * grants "2 items for 20 tiles" where Tunnel, Roundabout and Motorway grant 1
+ * and Bridge grants 1 or 2. `CARD_JUNCTION_UPGRADE` is M1f's substitution for
+ * the light and inherits that row, so 2 per card is right here and would be
+ * wrong quoted as a general grant rate. The card is offered once per week.
+ *
+ * The longest death tick across the eight measured `RUN_SEED` values is 51,275
+ * (M1f plan, "A single-seed claim smaller than 2x is inside the noise"), which
+ * is 11 whole weeks at `TICKS_PER_WEEK` = 4,500 — so no run this project has
+ * measured can be granted more than 22. 24 is that bound plus one card's worth
+ * of slack. `applyPlaceUpgrade` refuses with `'capacity'` at the cap
+ * rather than dropping silently, and M1f Task 12 asserts
+ * `2 * maxBoundaries <= MAX_UPGRADES` on the eight-seed sweep so the derivation
+ * cannot rot.
+ *
+ * **It sizes NOTHING, and that is new at M1f Amendment 2.** The earlier design
+ * was a metered traffic light with a five-column prefix-packed table of this many
+ * rows, and `lightAt` held `slot + 1` — so this constant bounded a region and
+ * `MAX_LIGHTS < 255` was a real width constraint. An upgrade is one bit per cell:
+ * `upgradeAt` holds 0 or 1, there is no table, and this is a **pure placement
+ * cap**. The `< 255` assertion is deleted with the index it guarded, and
+ * `constants.test.ts` therefore asserts the VALUE and no tier.
+ *
+ * **And on the board that ships it is 3x larger than anything reachable.** The
+ * arm that ships dies at tick **21,783** (`MAX_BLOCKED_TICKS`'s table above), so
+ * only **four** week boundaries occur before death — 4,500 / 9,000 / 13,500 /
+ * 18,000 — and at most **8** upgrades can ever be granted. The 51,275 derivation
+ * above is a property of the eight-seed sweep, not of the shipped arm, and the
+ * two must not be conflated: the cap is kept because it is cheap and because M1g
+ * may lengthen runs again, but **no task may cite it as a binding constraint.**
+ *
+ * **A global constant rather than a per-map layout size**, because it is a
+ * property of §5.10's grant rate and the week clock and not of the board. A
+ * `maxUpgrades` field on `MapData` would fold into `mapIdHash` and move every
+ * whole-buffer golden a second time.
+ */
+export const MAX_UPGRADES = 24
+
 // --- Movement (M1c decision 3, "Movement accumulates progress in the pathfinder's own cost units") ---
 /**
  * Progress units per unit of pathfinder edge weight. A car's threshold to

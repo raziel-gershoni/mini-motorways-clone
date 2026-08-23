@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { firstCity, CARS_PER_HOUSE } from '@laneways/shared'
+import { firstCity, CARS_PER_HOUSE, MAX_UPGRADES } from '@laneways/shared'
 import { computeLayout, type LayoutEntry } from '../src/layout'
 import {
   regionsFor,
@@ -44,14 +44,59 @@ describe('regionsFor', () => {
     expect(totalBytes).toBe(declaredBytes)
   })
 
-  it('totals exactly 13,992 bytes for firstCity, per the M1e region table', () => {
-    // M1d closed at 13,828 B over 26 regions. M1e Task 1 appends three Int32
-    // regions to the END of the 4-byte tier and grows `header` from 9 to 13
+  it('totals exactly 14,972 bytes for firstCity, per the M1f region table', () => {
+    // M1d closed at 13,828 B over 26 regions. M1e Task 1 appended three Int32
+    // regions to the END of the 4-byte tier and grew `header` from 9 to 13
     // slots: +16 (header) + 20 (houseSpawnTimer) + 64 (destOvercrowd) + 64
-    // (destOverTicks) = +164. The 4-byte tier goes 1,660 -> 1,824, which is a
-    // multiple of 4, so no pad byte is inserted anywhere.
+    // (destOverTicks) = +164, landing at 13,992 over 29 regions.
+    //
+    // **M1f Task 4 is the milestone's only shape change and takes it to 14,972
+    // over 30**: `header` 13 -> 18 slots is +20 in the middle of the 4-byte
+    // tier, and `upgradeAt` is +960 appended to the END of the Uint8 tier,
+    // which is the end of the buffer. +980, or +7.00 %.
+    //
+    // **Every tier, so the total is not the only evidence.** A total of 14,972
+    // is satisfied by putting the 980 bytes almost anywhere, and where they go
+    // is what decides whether a pad byte appears and whether `m1fSplice.ts` can
+    // compute two contiguous ranges.
+    const regions = regionsFor(MAP)
+    const tierBytes = (align: number): number =>
+      regions
+        .filter((r) => r.ctor.BYTES_PER_ELEMENT === align)
+        .reduce((sum, r) => sum + r.len * align, 0)
+    expect(tierBytes(4), '4-byte tier: 1,824 + 20 header slots').toBe(1844)
+    expect(tierBytes(2), 'Int16 tier: UNCHANGED — M1f declares no Int16 region').toBe(4320)
+    expect(tierBytes(1), 'Uint8 tier: 7,848 + 960 for upgradeAt').toBe(8808)
+    expect(tierBytes(4) + tierBytes(2) + tierBytes(1)).toBe(14972)
     const { totalBytes } = computeLayout(regionsFor(MAP))
-    expect(totalBytes).toBe(13992)
+    expect(totalBytes).toBe(14972)
+    expect(totalBytes - 13992, 'the delta this task is licensed for').toBe(980)
+    // No pad byte anywhere: 1,844 % 4 === 0 keeps the Int16 tier aligned, and
+    // 14,972 % 4 === 0 keeps the tail empty. The zero-padding test above asserts
+    // the same thing from the other direction; this states the arithmetic that
+    // makes it true, so a future append that breaks it fails with a reason.
+    expect(1844 % 4, 'the 4-byte tier stays a multiple of 4').toBe(0)
+    expect(totalBytes % 4, 'and so does the whole buffer').toBe(0)
+  })
+
+  it('the M1f Task 4 upgrade region has the exact element count and byte size the plan predicts', () => {
+    // Spelled out separately from the total for the reason every sibling block
+    // here gives: a total of +960 is satisfied by any region of that size,
+    // including a `MAX_UPGRADES`-long table (24 entries, the design Amendment 2
+    // deleted) padded out, or a per-LANE flag at `2 * cells`. It is one flag per
+    // CELL, and the two are only distinguishable by asserting the length against
+    // the map rather than against a literal.
+    const byName = new Map(regionsFor(MAP).map((r) => [r.name, r]))
+    const upgrade = byName.get('upgradeAt')!
+    expect(upgrade.ctor).toBe(Uint8Array)
+    expect(upgrade.len).toBe(MAP.w * MAP.h)
+    expect(upgrade.len * upgrade.ctor.BYTES_PER_ELEMENT).toBe(960)
+    expect(upgrade.len, 'one flag per cell, NOT MAX_UPGRADES rows').not.toBe(MAX_UPGRADES)
+    expect(upgrade.len, 'and not one per lane either').not.toBe(2 * MAP.w * MAP.h)
+    // It is the LAST region, which is what makes `m1fSplice.ts`'s tail range
+    // contiguous and is guarded there by name.
+    const all = regionsFor(MAP)
+    expect(all[all.length - 1]!.name).toBe('upgradeAt')
   })
 
   it('the three M1e Task 1 regions have the exact element counts and byte sizes the plan predicts', () => {
@@ -113,7 +158,7 @@ describe('regionsFor', () => {
     expect(blocked.len * blocked.ctor.BYTES_PER_ELEMENT).toBe(160)
   })
 
-  it('declares exactly the 29 named regions the plan lists, no more and no fewer', () => {
+  it('declares exactly the 30 named regions the plan lists, no more and no fewer', () => {
     const names = regionsFor(MAP).map((r) => r.name)
     expect(names).toEqual([
       'rng',
@@ -145,7 +190,11 @@ describe('regionsFor', () => {
       'carRoute',
       'ghostMask',
       'ghostCommitted',
+      // M1f Task 4, and the ONE region this milestone adds. Appended to the end
+      // of the Uint8 tier, which is the end of the buffer.
+      'upgradeAt',
     ])
+    expect(names.length, '29 -> 30 at M1f Task 4').toBe(30)
   })
 })
 

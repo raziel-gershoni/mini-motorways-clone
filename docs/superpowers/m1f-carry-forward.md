@@ -1261,6 +1261,37 @@ each move, so a golden that moves for an unlisted reason still stops the world."
 A false authorisation to re-bless is worse than no authorisation, because it is a
 standing permission that absorbs an unrelated regression silently.
 
+> **SUPERSEDED FOR THE DIGEST COLUMN ONLY, at M1f Task 4 (the milestone's single
+> shape change). Every other column still holds.** `HEADER_LENGTH` 13 -> 18 plus
+> one region (`upgradeAt`, one `Uint8` flag per cell) moved **eight of the nine**
+> for pure layout. The field golden did not, because it hashes flow fields rather
+> than the buffer — which is the tripwire this table says it is, and it held.
+>
+> | name | this table | after M1f Task 4 |
+> |---|---|---|
+> | state | `1058753394` | **`4189191826`** |
+> | road-network | `2312109239` | **`1099508647`** |
+> | field | `252514232` | **`252514232` — unmoved** |
+> | loop | `1877236894` | **`1219899230`** |
+> | seed | `968680755` | **`613441763`** (both sites) |
+> | queue | `307910575` | **`3831930847`** |
+> | multipliers | `1531344761` | **`2274456329`** |
+> | demo | `3152640907` | **`4178976587`** |
+> | demand-pin | `894844668` | **`2425471180`** |
+>
+> The table below is left as written because it is the handoff INTO M1f and is
+> correct as history — the catalogue's own classification warns against
+> "correcting" a historical figure to today's number. What it is NOT safe to do
+> is read the digest column as current, which is what this note exists to stop.
+> Each new digest is asserted with an `spliceM1fInsertions` proof against the
+> value in this table, so the two are linked by a running assertion rather than
+> by this paragraph.
+>
+> A tenth digest joined the set here: the **rejected circle variant**,
+> `3282272491` -> `2889011739`, which lived only in a `startingCity.ts` comment
+> that instructed the reader to re-derive it by hand. M1f Task 4 put a runner
+> under it (`startingCity.test.ts`), so it is now pinned like the rest.
+
 | digest | name | asserted at | what moves it |
 |---|---|---|---|
 | `1058753394` | **state** | `sim/test/determinism.test.ts:733` | any change to the state buffer's SHAPE or to `createState`'s initialisation. Moved twice in M1e (`883875991 -> 1058753394` at Task 5). Mirror-scanned as a string by `loop.test.ts:1322`, so a re-bless must edit both. |

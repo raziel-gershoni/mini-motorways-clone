@@ -2,6 +2,7 @@ import type { MapData } from '@laneways/shared'
 import { computeLayout, type Layout, type LayoutEntry } from '../src/layout'
 import { regionsFor } from '../src/regions'
 import { HEADER_LENGTH, type GameState } from '../src/state'
+import { m1fRangesFromLayout, type M1fInsertion } from './m1fSplice'
 
 /**
  * The M1e Task 1 re-bless proof, in one place, imported by every one of the
@@ -37,10 +38,46 @@ import { HEADER_LENGTH, type GameState } from '../src/state'
  * the splice is blind to those two writes — see the mutation table in the
  * task report: dropping them is caught by `state.test.ts` and NOT here, and
  * that is the point rather than a hole.
+ *
+ * ---------------------------------------------------------------------------
+ * M1f Task 4 (2026-08) — TWO MORE BLOCKS, and why block A had to be frozen
+ * ---------------------------------------------------------------------------
+ *
+ * Reproducing the PRE-M1e digest means removing every byte inserted since M1e
+ * opened, not only M1e's own — so when M1f Task 4 grew the header 13 -> 18 and
+ * appended `upgradeAt`, this file had to grow with it or the seven digests it
+ * licenses would all have gone red at once.
+ *
+ * Block A used to be `header.offset + M1D_HEADER_LENGTH * 4 ..
+ * header.offset + HEADER_LENGTH * 4`, reading the CURRENT length. **That form
+ * stays arithmetically correct as the header grows** — the pre-M1e buffer has 9
+ * slots, so removing every slot at or above 9 is exactly right, whatever the
+ * count. It was frozen at `M1E_HEADER_LENGTH` anyway, for a reason that is about
+ * attribution rather than arithmetic: an auto-growing block A silently absorbs
+ * every future milestone's slots into a range this file's own prose calls "the
+ * four new header slots", and prose that quietly stops describing the code is
+ * this project's dominant defect family. `M1D_HEADER_LENGTH` already exists for
+ * exactly this reason; `M1E_HEADER_LENGTH` is its sibling.
+ *
+ * The tripwire that makes the freeze safe is in `m1eSplice.test.ts`:
+ * `HEADER_LENGTH === M1E_HEADER_LENGTH + M1F_HEADER_SLOT_COUNT`, which fails by
+ * name the day a task grows the header without reading this file. (`M1E_HEADER_LENGTH
+ * < HEADER_LENGTH` would NOT — it is satisfied by every future growth, which is
+ * the opposite of a tripwire.)
+ *
+ * **M1f's two ranges are IMPORTED, not restated.** `m1fRangesFromLayout`
+ * (`m1fSplice.ts`) owns their derivation and every structural guard on it,
+ * including the one the M1f brief got wrong — `upgradeAt` ends at its own last
+ * byte and NOT at `totalBytes`, because `demoCity` carries a 2-byte tail pad.
+ * A second copy here could disagree with the first, and the way it would
+ * disagree is by reproducing a digest that means nothing.
  */
 
 /** `HEADER_LENGTH` as M1d closed it. The splice's block A is the difference. */
 export const M1D_HEADER_LENGTH = 9
+
+/** `HEADER_LENGTH` as M1e closed it. M1f's slots are `m1fSplice.ts`'s, not this file's. */
+export const M1E_HEADER_LENGTH = 13
 
 /** The three regions M1e Task 1 declares, in declaration order. */
 export const M1E_REGION_NAMES = Object.freeze([
@@ -58,6 +95,12 @@ export interface M1eInsertion {
   readonly bStart: number
   /** One past the last byte of `destOverTicks`. */
   readonly bEnd: number
+  /**
+   * The two ranges M1f Task 4 inserted, which the composed splice must remove as
+   * well to reach the pre-M1e buffer. Imported rather than restated — see the
+   * M1f block in this module's header.
+   */
+  readonly m1f: M1fInsertion
   /** `computeLayout`'s total for this map, AFTER the change. */
   readonly totalBytes: number
 }
@@ -109,7 +152,7 @@ export function m1eRangesFromLayout(layout: Layout): M1eInsertion {
     throw new Error(`m1eRangesFromLayout: header is ${header.len} slots, expected ${HEADER_LENGTH}`)
   }
   const aStart = header.offset + M1D_HEADER_LENGTH * 4
-  const aEnd = header.offset + HEADER_LENGTH * 4
+  const aEnd = header.offset + M1E_HEADER_LENGTH * 4
 
   // Block B: the three new regions, which must be CONTIGUOUS. If a later task
   // ever declares something between them, splicing `bStart..bEnd` would remove
@@ -126,14 +169,34 @@ export function m1eRangesFromLayout(layout: Layout): M1eInsertion {
   const bStart = timer.offset
   const bEnd = over.offset + bytesOf(over)
 
-  // Both ranges must be non-empty, disjoint and in order — a no-op or an
-  // overlapping splice would reproduce a digest for the wrong reason.
-  if (!(aStart < aEnd && aEnd <= bStart && bStart < bEnd && bEnd <= totalBytes)) {
+  // M1f's own two ranges, from the one function that derives them.
+  const m1f = m1fRangesFromLayout(layout)
+
+  // All four ranges must be non-empty, disjoint and in ascending buffer order —
+  // a no-op or an overlapping splice would reproduce a digest for the wrong
+  // reason. The order is: M1e's header slots, M1f's header slots (adjacent to
+  // them, which is why `aEnd === m1f.aStart` rather than `<`), M1e's three
+  // regions at the end of the 4-byte tier, and finally `upgradeAt` at the end of
+  // the buffer.
+  if (
+    !(
+      aStart < aEnd &&
+      aEnd === m1f.aStart &&
+      m1f.aStart < m1f.aEnd &&
+      m1f.aEnd <= bStart &&
+      bStart < bEnd &&
+      bEnd <= m1f.bStart &&
+      m1f.bStart < m1f.bEnd &&
+      m1f.bEnd <= totalBytes
+    )
+  ) {
     throw new Error(
-      `m1eRangesFromLayout: degenerate ranges A=[${aStart},${aEnd}) B=[${bStart},${bEnd}) of ${totalBytes}`,
+      `m1eRangesFromLayout: degenerate ranges A=[${aStart},${aEnd}) ` +
+        `M1F-A=[${m1f.aStart},${m1f.aEnd}) B=[${bStart},${bEnd}) ` +
+        `M1F-B=[${m1f.bStart},${m1f.bEnd}) of ${totalBytes}`,
     )
   }
-  return { aStart, aEnd, bStart, bEnd, totalBytes }
+  return { aStart, aEnd, bStart, bEnd, m1f, totalBytes }
 }
 
 /**
@@ -141,17 +204,43 @@ export function m1eRangesFromLayout(layout: Layout): M1eInsertion {
  * fixture's pre-M1e digest exactly.
  */
 export function spliceM1eInsertions(s: GameState, map: MapData): Uint8Array {
-  const { aStart, aEnd, bStart, bEnd } = m1eInsertedRanges(map)
+  const { aStart, aEnd, bStart, bEnd, m1f } = m1eInsertedRanges(map)
   const src = new Uint8Array(s.buffer)
-  const out = new Uint8Array(src.length - (aEnd - aStart) - (bEnd - bStart))
+  const removed =
+    aEnd - aStart + (bEnd - bStart) + (m1f.aEnd - m1f.aStart) + (m1f.bEnd - m1f.bStart)
+  // **The layout's TAIL PAD is reconstructed, not copied — added at M1f Task 4
+  // and it is not a refinement, it is a correction.** `m1f.bEnd` is where the
+  // content ends (`upgradeAt` is the last region) and `m1f.padAfter` is the
+  // 0..3 alignment bytes after it. The pre-M1e content was `removed` bytes
+  // shorter, so its own pad was `(padAfter + removed) mod 4` — the same
+  // arithmetic `m1fSplice.ts` documents in full.
+  //
+  // Copying this layout's pad instead was wrong on a REAL fixture, not a
+  // hypothetical one: `rollback.test.ts`'s 6x5 golden has 30 cells, the composed
+  // splice removes 16 + 20 + 40 + 30 = 106 bytes, and 106 is not a multiple of 4
+  // — so the output came out 2 bytes long and the pre-M1e digest could not
+  // reproduce. On `firstCity` (1,144), `demoCity` (1,152) and the 4x4 state
+  // golden (92) the removal IS a multiple of 4 and this term is zero, which is
+  // exactly why the defect was invisible until the 6x5 fixture ran.
+  const padBefore = (m1f.padAfter + removed) % 4
+  for (let i = m1f.bEnd; i < m1f.bEnd + m1f.padAfter; i++) {
+    if (src[i] !== 0) {
+      throw new Error(`spliceM1eInsertions: tail pad byte ${i} is ${src[i]}, not zero`)
+    }
+  }
+  const out = new Uint8Array(m1f.bEnd - removed + padBefore)
   let w = 0
-  for (let i = 0; i < src.length; i++) {
+  for (let i = 0; i < m1f.bEnd; i++) {
     if (i >= aStart && i < aEnd) continue
+    if (i >= m1f.aStart && i < m1f.aEnd) continue
     if (i >= bStart && i < bEnd) continue
+    if (i >= m1f.bStart && i < m1f.bEnd) continue
     out[w++] = src[i] as number
   }
-  if (w !== out.length) {
-    throw new Error(`spliceM1eInsertions: wrote ${w} of ${out.length} bytes`)
+  // `out` is zero-initialised, so the reconstructed pad needs no write — but its
+  // LENGTH is the point, and `w` must land exactly `padBefore` short.
+  if (w !== out.length - padBefore) {
+    throw new Error(`spliceM1eInsertions: wrote ${w} of ${out.length - padBefore} content bytes`)
   }
   return out
 }

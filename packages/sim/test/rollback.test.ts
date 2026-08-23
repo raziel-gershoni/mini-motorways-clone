@@ -16,6 +16,7 @@ import { placeRoad, tilesLeft, DIR_COUNT, DX, DY } from '../src/roads'
 import { seedFromString, randomBelow, nextRandom } from '../src/rng'
 import { hashBytes } from '../src/hash'
 import { m1eInsertedRanges, spliceM1eInsertions } from './m1eSplice'
+import { assertM1fShapeIsPureLayout, spliceM1fInsertions } from './m1fSplice'
 import {
   createFlowField,
   createFlowFields,
@@ -810,14 +811,26 @@ describe('blessed goldens', () => {
     expect(state.ghostMask.every((b) => b === 0), 'no fixture cell is a ghost').toBe(true)
     expect(state.ghostCommitted.every((b) => b === 0)).toBe(true)
     const m1e = m1eInsertedRanges(GOLDEN_MAP)
-    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 404, 444])
+    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 424, 464])
     const spliced = spliceM1eInsertions(state, GOLDEN_MAP)
     // Vacuity: the splice must land on M1d's own total for this map, or a
     // no-op splice would "prove" a digest that never moved.
     expect(spliced.length, "the splice must land on M1d's buffer size").toBe(1528)
-    expect(m1e.totalBytes).toBe(1584)
+    expect(m1e.totalBytes).toBe(1636)
     expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(2076760277)
-    expect(hashState(state)).toBe(2312109239)
+    // **Re-blessed at M1f Task 4: 2312109239 -> 1099508647, PURE LAYOUT.** Same
+    // shape change as every other M1f re-bless. This 6x5 fixture has 30 cells, so
+    // it is the ONE golden map whose TAIL PAD moves under the splice — 20 + 30 is
+    // not a multiple of 4 — and `m1fSplice.ts` reconstructs the prior pad rather
+    // than copying this one's. The brief's guard ("no trailing pad") and this
+    // file's own first replacement for it ("the splice removes a multiple of 4")
+    // were both wrong here; see that module's tail-pad note.
+    assertM1fShapeIsPureLayout(state, GOLDEN_MAP)
+    expect(
+      hashBytes(spliceM1fInsertions(state, GOLDEN_MAP)),
+      'the M1f splice must reproduce the pre-M1f digest',
+    ).toBe(2312109239)
+    expect(hashState(state)).toBe(1099508647)
   })
 
   it("field golden: pins hashBytes over each colour's dist/dir bytes, folded together, computed over the SAME fixed network above", () => {

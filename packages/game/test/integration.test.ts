@@ -4301,6 +4301,34 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     expect(r.weeks.map((w) => w.refusals), 'not one route refused, in any week').toEqual([0, 0, 0, 0, 0])
     expect(r.trips).toBe(368)
     expect(r.fires).toBe(413)
+
+    // ---------------------------------------------------------------------
+    // WHAT M1f TASK 4'S EIGHT RE-BLESSED GOLDENS BORROW THEIR MEANING FROM
+    // ---------------------------------------------------------------------
+    //
+    // **The three assertions below already existed and already passed — this
+    // block adds no coverage, it adds an ANCHOR, and saying which is the point.**
+    //
+    // Task 4 moved eight whole-buffer digests for PURE LAYOUT. A layout re-bless
+    // carries no behavioural claim of its own, so it is a blank cheque unless it
+    // borrows one: a genuine regression landing in the same commit is absorbed
+    // by the new literals with no trace anywhere. What Task 4 borrowed is this
+    // arm, unchanged from what Task 3 left it at — death tick 21,783, 368 trips,
+    // `H_ROUTES_REFUSED` 0 in every week — plus the splice proof at each of the
+    // nine digest sites, which says no pre-existing byte changed VALUE, and
+    // `assertM1fShapeIsPureLayout`, which says every inserted byte is still zero.
+    //
+    // **These three are re-based again at M1f Task 7**, when frame-driven arms
+    // acquire a card policy and start receiving `CARD_GRANT_*` on top of
+    // `WEEKLY_TILE_GRANT`. That is expected and named in Task 7 Step 6. They are
+    // not permanent; what is permanent is that a shape task must point at
+    // something behavioural that did NOT move.
+    expect(r.deathTick, 'the anchor M1f Task 4 re-blessed eight goldens against').toBe(21783)
+    expect(r.trips, 'unchanged from Task 3').toBe(368)
+    expect(
+      r.weeks.reduce((n, w) => n + w.refusals, 0),
+      'H_ROUTES_REFUSED across the whole run, unchanged from Task 3',
+    ).toBe(0)
     // **The delivery fraction DOES fall now, and this is the sentence that
     // changed rather than the number.** Pre-M1f this arm delivered 97.5 % of
     // everything demand fired and died distributionally; under Task 2's wide

@@ -17,9 +17,10 @@ import { DEMO_RUN_SEED, DEMO_WARM_START_TICKS, seedDemoLayout } from './demoLayo
  * and the demo's four in `demoLayout.ts` — so this file rebinds which entry the
  * no-token path reaches and edits neither. Every golden is pinned to an
  * explicit board by the test that owns it (`startingCity.test.ts` holds the
- * seed golden `968680755` on `firstCity`; `demoLayout.test.ts` holds
- * `3152640907` on the demo — `1178110182` and `1039862014` respectively until
- * M1e Task 1's pure-layout re-bless), never to "whatever the default is", and
+ * seed golden `613441763` on `firstCity`; `demoLayout.test.ts` holds
+ * `4178976587` on the demo — `968680755` and `3152640907` until M1f Task 4's
+ * pure-layout re-bless, and `1178110182`/`1039862014` before M1e Task 1's),
+ * never to "whatever the default is", and
  * `layouts.test.ts` asserts each entry's four values rather than trusting the
  * reading.
  *

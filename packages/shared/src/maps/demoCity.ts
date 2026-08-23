@@ -14,7 +14,7 @@ import { parseMap, type MapData } from '../mapFormat'
  * `startingTiles`, `maxHouses`, `maxDestinations`, `groupCount` and every
  * terrain byte into `mapIdentity[MI_MAP]`, which lives in the state buffer. So
  * changing ONE integer on `firstCity` moves the one golden folded over a state
- * built on it — the seed golden `968680755` — plus `world.test.ts`'s
+ * built on it — the seed golden `613441763` — plus `world.test.ts`'s
  * `mapIdHash` pin, which exists to fire on exactly this edit. That is the trap
  * `docs/superpowers/plans/2026-08-04-m2-playable-renderer.md:20` records. A new
  * file, a new `id`, and `firstCity` untouched byte-for-byte is the shape that
@@ -26,14 +26,14 @@ import { parseMap, type MapData } from '../mapFormat'
  * stale digest, noticed three of those run on hand-authored fixture maps of
  * their own — `golden-fixture-v1` in `determinism.test.ts`, and the `parseMap`
  * calls at `rollback.test.ts:637` and `loop.test.ts:282` — and cut it to two by
- * READING. Still wrong: it kept the demo golden `3152640907`, which is
+ * READING. Still wrong: it kept the demo golden (then `3152640907`), which is
  * `hashState` over a state built on `demoCity()` and which `firstCity` cannot
  * reach either. The error was conflating *"`demoLayout.test.ts` also asserts the
  * seed golden"* with *"the demo golden moves"* — a filename read as a golden.
  *
  * **The figure is now MEASURED, not read.** With `firstCity`'s `startingTiles`
  * changed 30 -> 31 and the canonical suite run: 8 tests fail, the only golden
- * among them is `968680755` at both its sites, `world.test.ts`'s `mapIdHash`
+ * among them is the seed golden at both its sites, `world.test.ts`'s `mapIdHash`
  * pin fires, and `demoLayout.test.ts`'s demo-golden assertion **stays green**.
  * A blast-radius claim is a measurement. Change the thing and run the suite;
  * do not re-derive this list by reading.)

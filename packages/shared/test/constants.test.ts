@@ -18,7 +18,7 @@ import {
   MAX_GROUP_COUNT, MAX_PATH_LEN,
   COST_UNIT_SCALE, CAR_SPEED_UNITS_PER_TICK,
   MS_PER_SECOND, DESTINATIONS_PER_WEEK, DEST_SPAWN_PERIOD_TICKS, HOUSE_SPAWN_PERIOD_TICKS,
-  WEEKLY_TILE_GRANT,
+  WEEKLY_TILE_GRANT, MAX_UPGRADES,
 } from '../src/index'
 import * as C from '../src/index'
 
@@ -371,6 +371,38 @@ describe('rule constants', () => {
     // and adding `toBeGreaterThan(0)` here would be a decorative assertion
     // that reads as a load-bearing one.
     expect(WEEKLY_TILE_GRANT).toBe(30)
+  })
+
+  it('caps junction upgrades on the board at a number the shipped arm cannot reach', () => {
+    // M1f Task 4, spec §5.10's grant row "2 items for 20 tiles". Derived: 2
+    // items per card, one card per week, and the longest of the eight measured
+    // `RUN_SEED` death ticks is 51,275 = 11 whole weeks, so 22 is the most any
+    // measured run can be granted and 24 is that plus one card of slack.
+    //
+    // **One assertion and no tier check, deliberately.** `upgradeAt` is one FLAG
+    // per cell rather than a table this many rows deep, and `H_INV_UPGRADES` /
+    // `H_UPGRADE_COUNT` are `Int32` — so unlike the metered light this replaced,
+    // nothing here is width-constrained and a `MAX_UPGRADES < 255` assertion
+    // would be a decorative one that reads as load-bearing. The registry above
+    // already covers integer/finite/non-negative automatically.
+    expect(MAX_UPGRADES).toBe(24)
+  })
+
+  it('leaves MAX_UPGRADES unreachable on the arm that ships, and says so out loud', () => {
+    // The catalogue's "a milestone can pass every gate it has and still change
+    // nothing a player can see", applied to a cap: the shipped greedy arm dies
+    // at 21,783 ticks, which is FOUR week boundaries, so at most 8 upgrades can
+    // ever be granted. Asserted here rather than left in prose, so the day a
+    // task cites this cap as a binding constraint the arithmetic is on the
+    // record. `Math.floor` is fine in a test — the determinism scan covers
+    // `src`, not `test`.
+    const SHIPPED_ARM_DEATH_TICK = 21783
+    const boundaries = Math.floor(SHIPPED_ARM_DEATH_TICK / TICKS_PER_WEEK)
+    expect(boundaries, 'four week boundaries before the shipped arm dies').toBe(4)
+    expect(2 * boundaries, 'so 8 upgrades are obtainable against a cap of 24').toBe(8)
+    expect(2 * boundaries, 'the cap is not binding on the board that ships').toBeLessThan(
+      MAX_UPGRADES,
+    )
   })
 
   it('names the millisecond conversion so a /1000 cannot be misread as DENOM', () => {

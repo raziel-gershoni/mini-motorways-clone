@@ -26,6 +26,13 @@ import {
   H_FAILED_DEST,
   H_DEST_SPAWN_TIMER,
   H_SPAWN_COLOUR_CURSOR,
+  H_OFFER_A,
+  H_OFFER_B,
+  H_OFFER_WEEK,
+  H_INV_UPGRADES,
+  H_UPGRADE_COUNT,
+  offerPending,
+  offerSlot,
   HEADER_LENGTH,
   isGameOver,
   failedDestination,
@@ -295,6 +302,10 @@ describe('view layout wiring', () => {
     { name: 'carRoute', ctor: Uint8Array, len: maxCars * routeBytes },
     { name: 'ghostMask', ctor: Uint8Array, len: cells },
     { name: 'ghostCommitted', ctor: Uint8Array, len: cells },
+    // M1f Task 4. Hand-declared here rather than read from `regionsFor`, for
+    // the reason this whole list exists: a fixture built from the table under
+    // test agrees with any bug in that table.
+    { name: 'upgradeAt', ctor: Uint8Array, len: cells },
   ] as const
 
   it('wires every view to its own layout entry, with no gap or overlap beyond declared padding', () => {
@@ -330,6 +341,7 @@ describe('view layout wiring', () => {
       carRoute: s.carRoute,
       ghostMask: s.ghostMask,
       ghostCommitted: s.ghostCommitted,
+      upgradeAt: s.upgradeAt,
     }
 
     let sumOfViewBytes = 0
@@ -394,17 +406,83 @@ describe('the new M1c header slots exist and start at 0', () => {
     expect(s.header[H_ROUTES_REFUSED]).toBe(0)
   })
 
-  it('HEADER_LENGTH is exactly 13 — one slot per named constant, in order 0..12', () => {
-    // Re-derived in M1e Task 1 (was 9, slots 0..8). The point of this test is
-    // that the header has no unnamed slots and no gaps: a header grown by
-    // bumping the length without declaring a constant is bytes in every
-    // golden that nothing can ever read, and the digest cannot tell you.
-    expect(HEADER_LENGTH).toBe(13)
+  it('HEADER_LENGTH is exactly 18 — one slot per named constant, in order 0..17', () => {
+    // Re-derived in M1f Task 4 (was 13, slots 0..12 at M1e Task 1; 9, slots
+    // 0..8 before that). **This test MUST go red on a header change and be
+    // re-derived rather than widened**: the point of it is that the header has
+    // no unnamed slots and no gaps, so a header grown by bumping the length
+    // without declaring a constant is bytes in every golden that nothing can
+    // ever read, and the digest cannot tell you.
+    expect(HEADER_LENGTH).toBe(18)
     expect([
       H_TICK, H_SCORE, H_WEEK, H_TILES, H_HOUSE_COUNT, H_DEST_COUNT, H_PINS_DROPPED,
       H_ROUTES_REFUSED, H_EPOCH, H_GAME_OVER, H_FAILED_DEST, H_DEST_SPAWN_TIMER,
-      H_SPAWN_COLOUR_CURSOR,
-    ]).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+      H_SPAWN_COLOUR_CURSOR, H_OFFER_A, H_OFFER_B, H_OFFER_WEEK, H_INV_UPGRADES,
+      H_UPGRADE_COUNT,
+    ]).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
+  })
+})
+
+describe('the M1f Task 4 header slots and the two guarded offer readers', () => {
+  it('leaves all five new slots at zero on a fresh state, which is their correct initial value', () => {
+    const s = createState('m1f-shape', MAP)
+    expect(s.header[H_OFFER_A], 'CARD_NONE').toBe(0)
+    expect(s.header[H_OFFER_B], 'CARD_NONE').toBe(0)
+    // Zero means "resolved through week 0", and week 0 has no offer — so
+    // "resolved" and "nothing yet" are the same statement and `createState`
+    // needs no write. That is the whole reason one slot can carry both
+    // "one card per week" and "already chosen this week".
+    expect(s.header[H_OFFER_WEEK]).toBe(0)
+    expect(s.header[H_INV_UPGRADES]).toBe(0)
+    expect(s.header[H_UPGRADE_COUNT]).toBe(0)
+  })
+
+  it('offerPending is false at week 0 and true at the first boundary', () => {
+    const s = createState('m1f-shape', MAP)
+    // Week 0 is excluded because the first boundary is the START of week 1; a
+    // week-0 offer would raise the modal before the run has begun.
+    expect(offerPending(s), 'week 0 has no offer').toBe(false)
+    s.header[H_WEEK] = 1
+    expect(offerPending(s), 'week 1, nothing resolved').toBe(true)
+    s.header[H_OFFER_WEEK] = 1
+    expect(offerPending(s), 'week 1, resolved').toBe(false)
+    s.header[H_WEEK] = 2
+    expect(offerPending(s), 'week 2, only week 1 resolved').toBe(true)
+  })
+
+  it('offerSlot refuses to hand back a stale card off a RESOLVED week', () => {
+    // `applyChooseCard` (M1f Task 6) deliberately does not clear the two card
+    // slots, so this guard is the only thing standing between a resolved week
+    // and a frame that shows last week's card forever. Same construction as
+    // `failedDestination`'s -1, and for the same reason.
+    const s = createState('m1f-shape', MAP)
+    s.header[H_WEEK] = 3
+    s.header[H_OFFER_A] = 1
+    s.header[H_OFFER_B] = 7
+    expect(offerSlot(s, 0)).toBe(1)
+    expect(offerSlot(s, 1)).toBe(7)
+    s.header[H_OFFER_WEEK] = 3
+    expect(offerSlot(s, 0), 'the slot still HOLDS 1 — the guard is what hides it').toBe(0)
+    expect(offerSlot(s, 1)).toBe(0)
+    expect(s.header[H_OFFER_A], 'and the byte really is untouched').toBe(1)
+    expect(s.header[H_OFFER_B]).toBe(7)
+  })
+
+  it('offerSlot throws on a slot index that is neither 0 nor 1', () => {
+    const s = createState('m1f-shape', MAP)
+    s.header[H_WEEK] = 1
+    expect(() => offerSlot(s, 2)).toThrow(/offer slot 2 is not 0 or 1/)
+    expect(() => offerSlot(s, -1)).toThrow(/offer slot -1 is not 0 or 1/)
+  })
+
+  it('offerSlot returns 0 for an out-of-range slot when nothing is pending, and that is the pending guard talking', () => {
+    // Decomposed deliberately: the pending guard runs FIRST, so on a resolved
+    // week even a bad index returns 0 rather than throwing. Recorded so nobody
+    // reads the throw above as unconditional, and so the ORDER of the two
+    // branches has a test that fails if they are swapped.
+    const s = createState('m1f-shape', MAP)
+    expect(offerPending(s)).toBe(false)
+    expect(offerSlot(s, 99)).toBe(0)
   })
 })
 
@@ -509,6 +587,10 @@ describe('a building-free fresh state is all-zero outside rng/mapIdentity/header
     'carRoute',
     'ghostMask',
     'ghostCommitted',
+    // M1f Task 4: one flag per cell, and 0 — "the junction rule DOES apply
+    // here" — is the correct initial value, so `createState` writes nothing.
+    // It is in this list and not the armed one, which is the whole claim.
+    'upgradeAt',
   ] as const)
 
   /** The live views, by region name, so both tests below index the same way. */

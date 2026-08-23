@@ -42,13 +42,39 @@ function assertStreamIndex(store: Uint32Array, i: number): void {
   }
 }
 
+/**
+ * mulberry32's OUTPUT TRANSFORM, with no state. `nextRandom` is exactly this
+ * applied to the advanced word.
+ *
+ * **Extracted at M1f Task 4 so there is one copy of this arithmetic rather than
+ * two.** The weekly offer needs a well-mixed value from the seed word and the
+ * week WITHOUT advancing the stream — see `offerSeedFor` (cards.ts) and
+ * `determinism.test.ts`'s ban on `nextRandom`/`randomBelow` outside this file.
+ *
+ * **The extraction is output-preserving and `rng.test.ts`'s sequence golden is
+ * the proof**, not this comment: the previous body assigned the advanced word to
+ * a local and applied these three statements to it in place, which is what this
+ * function does to its parameter.
+ *
+ * **And that golden did not exist until this extraction was written.** Every
+ * other test in `rng.test.ts` is self-referential — same seed, same sequence —
+ * and stays green under any consistently-applied change to these three lines;
+ * no whole-buffer golden covers them either, because the digests fold the
+ * ADVANCED WORD, which is computed before this function runs. The literals were
+ * captured at commit `41051cb`, one commit before this one.
+ */
+export function mixWord(t0: number): number {
+  let t = t0 >>> 0
+  t = Math.imul(t ^ (t >>> 15), t | 1)
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+  return (t ^ (t >>> 14)) >>> 0
+}
+
 /** Advances the stream at `store[i]` and returns the next uint32. */
 export function nextRandom(store: Uint32Array, i: number): number {
   assertStreamIndex(store, i)
-  let t = (store[i] = (((store[i] as number) + 0x6d2b79f5) | 0) >>> 0)
-  t = Math.imul(t ^ (t >>> 15), t | 1)
-  t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
-  return ((t ^ (t >>> 14)) >>> 0)
+  const t = (store[i] = (((store[i] as number) + 0x6d2b79f5) | 0) >>> 0)
+  return mixWord(t)
 }
 
 /**

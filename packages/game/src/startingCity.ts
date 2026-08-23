@@ -20,8 +20,9 @@ import {
  * ended the "six cars that never move" clause that demoted it and Task 10's
  * gate measured that it did. Nothing about this file changed when the default
  * moved, in either direction: same map, same seeder, same `RUN_SEED`, same
- * 258-tick warm start, same seed golden `968680755` (was `1178110182` before
- * M1e Task 1's pure-layout re-bless), all pinned by
+ * 258-tick warm start, same seed golden `613441763` (was `968680755` before
+ * M1f Task 4's pure-layout re-bless and `1178110182` before M1e Task 1's), all
+ * pinned by
  * `test/startingCity.test.ts` against the explicit `city` id rather than
  * against whatever the default happens to be.
  *
@@ -308,22 +309,27 @@ export function seedStartingCity(state: GameState, world: WorldData): void {
  * re-bless. It is also the weaker lever: 292 ticks is still **9.7 s** of dead
  * board, against 4.0 s here.
  *
- * The two figures, restated at **M1e Task 1** because the state buffer grew
- * from 13,828 to 13,992 bytes there (four header slots plus `houseSpawnTimer`,
- * `destOvercrowd` and `destOverTicks`) and both moved for layout: the seeded
- * golden is **`968680755`** (was `1178110182` at M1d Task 5, `3576722662` at
- * M1d Task 2, `2505371110` at M2) and the rejected circle variant is
- * **`3282272491`** (was `996383454`, `947517150`, `4171132894`). Nothing greps
- * this comment, so it is re-derived rather than trusted whenever the buffer
- * changes shape — both numbers were re-measured here, and splicing the two
- * inserted ranges back out (`packages/sim/test/m1eSplice.ts`) reproduced the
- * two M1d Task 5 values (`1178110182` and `996383454`) exactly, which is what
- * confirms the pair still describes the same two states. That the REJECTED
- * figure reproduces as well as the accepted one is a second, independent check
- * on the splice method itself — and it is the only place that check is made,
- * because no test builds the rejected variant. **M1e changes the buffer shape
- * once and no more; Task 1 is it, so these two numbers are final for the
- * milestone.**
+ * The two figures, restated at **M1f Task 4** because the state buffer grew
+ * from 13,992 to 14,972 bytes there (five header slots plus `upgradeAt`, one
+ * flag per cell) and both moved for layout: the seeded golden is
+ * **`613441763`** (was `968680755` at M1e Task 1, `1178110182` at M1d Task 5,
+ * `3576722662` at M1d Task 2, `2505371110` at M2) and the rejected circle
+ * variant is **`2889011739`** (was `3282272491`, `996383454`, `947517150`,
+ * `4171132894`).
+ *
+ * **Both now have a runner, and that is the M1f change that matters more than
+ * the numbers.** This comment used to say "Nothing greps this comment, so it is
+ * re-derived rather than trusted whenever the buffer changes shape" — an
+ * instruction, not a mechanism, and the catalogue's own entry on `6,357` is what
+ * happens next: a figure that nothing runs is a figure that comes back, in a new
+ * comment, three commits later. `startingCity.test.ts` now BUILDS the rejected
+ * variant and pins both arms on one rig, each with an `spliceM1fInsertions`
+ * proof against its own prior digest.
+ *
+ * That the REJECTED figure reproduces its prior digest as well as the accepted
+ * one is a second, independent check on the splice method itself — the method
+ * validated against two states rather than one — and it is now an assertion
+ * rather than a claim.
  *
  * **What it costs, measured:** 258 `step` calls at boot, 6.8 ms on the
  * development machine, once. Nothing visible changes across those ticks — no

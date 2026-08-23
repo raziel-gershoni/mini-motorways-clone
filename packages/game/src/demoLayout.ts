@@ -26,7 +26,8 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  * because Task 5's spawner ended the "six cars that never move" clause that
  * demoted it and Task 10's gate measured that it did. Nothing here changed in
  * either direction: `demoCity.ts` and this file are untouched byte-for-byte,
- * the demo golden `3152640907` holds, and the board is one token away.
+ * the demo golden holds (`4178976587` as of M1f Task 4's pure-layout re-bless,
+ * `3152640907` before it), and the board is one token away.
  *
  * **It is not survivable, and that is why it is not the default.** Seven traces
  * were driven at M1e Task 10 and `demoLayout.test.ts` §8 is the detector:

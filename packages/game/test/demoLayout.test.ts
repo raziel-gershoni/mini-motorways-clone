@@ -58,6 +58,7 @@ import { hashBytes } from '@laneways/sim'
 // See the note on the same import in `startingCity.test.ts`: one shared M1e
 // re-bless proof rather than a second copy of the splice.
 import { m1eInsertedRanges, spliceM1eInsertions } from '../../sim/test/m1eSplice'
+import { assertM1fShapeIsPureLayout, spliceM1fInsertions } from '../../sim/test/m1fSplice'
 import {
   DEMO_DESTINATIONS,
   DEMO_HOUSES,
@@ -566,12 +567,26 @@ describe('the demo-layout golden', () => {
     // `firstCity`'s 5 and 16, so `(3 + 18 + 18) * 4 = 156`. Quoting
     // `startingCity.test.ts`'s figures here would be a fabricated derivation.
     const m1e = m1eInsertedRanges(demoCity())
-    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 668, 824])
+    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 688, 844])
     const spliced = spliceM1eInsertions(state, demoCity())
     expect(spliced.length, "the splice must land on M1d's buffer size").toBe(9720)
-    expect(m1e.totalBytes).toBe(9892)
+    expect(m1e.totalBytes).toBe(10872)
     expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(1039862014)
-    expect(hashState(state)).toBe(3152640907)
+    // **Re-blessed at M1f Task 4: 3152640907 -> 4178976587, PURE LAYOUT.** The
+    // milestone's only shape change — `HEADER_LENGTH` 13 -> 18 and one region,
+    // `upgradeAt`, one Uint8 flag per cell. `demoCity` goes 9,892 -> 10,872 B.
+    //
+    // **And this map is why `m1fSplice.ts` does not assert "no trailing pad".**
+    // `demoCity`'s last region ends at 10,870 of 10,872 — a 2-byte tail pad,
+    // present before and after — so the brief's specified guard would have
+    // thrown here, on the map behind this very digest, and the splice it
+    // described would have removed 962 bytes instead of 960.
+    assertM1fShapeIsPureLayout(state, demoCity())
+    expect(
+      hashBytes(spliceM1fInsertions(state, demoCity())),
+      'the M1f splice must reproduce the pre-M1f digest',
+    ).toBe(3152640907)
+    expect(hashState(state)).toBe(4178976587)
   })
 
   it('differs from an unseeded demoCity — otherwise the golden pins nothing', () => {
@@ -581,22 +596,23 @@ describe('the demo-layout golden', () => {
     )
   })
 
-  it('leaves the shipped seed golden 968680755 exactly where it was', () => {
+  it('leaves the shipped seed golden 613441763 exactly where it was', () => {
     // In the SAME file and the same run as the demo golden, deliberately: the
     // one thing a demo-board change must not do is move the CITY's number.
     // `startingCity.test.ts:237` fixes the seed this golden was blessed under;
     // it is 'm2-starting-city', NOT `RUN_SEED`, and the RNG state is inside the
     // hashed buffer, so the wrong seed here reads as a moved golden.
     //
-    // Re-blessed in M1e Task 1 (was 1178110182) for the same pure-layout reason
-    // as its owner in `startingCity.test.ts`. Deliberately NOT given a splice
-    // proof of its own: this is a duplicate of that golden, and the proof lives
-    // once, beside the assertion that owns the number.
+    // Re-blessed in M1e Task 1 (was 1178110182) and again at M1f Task 4
+    // (968680755 -> 613441763), both times for the same pure-layout reason as
+    // its owner in `startingCity.test.ts`. Deliberately NOT given a splice proof
+    // of its own: this is a duplicate of that golden, and the proof lives once,
+    // beside the assertion that owns the number.
     const map = firstCity()
     const world = createWorld(map)
     const state = createState('m2-starting-city', map)
     seedStartingCity(state, world)
-    expect(hashState(state)).toBe(968680755)
+    expect(hashState(state)).toBe(613441763)
   })
 })
 

@@ -60,6 +60,24 @@ import { assertWorldMatches, mapIdHash, type WorldData } from './world'
  *   H_FAILED_DEST   10  which destination that was; read via the guard    M1e
  *   H_DEST_SPAWN_TIMER   11  ticks to the next destination attempt        M1e
  *   H_SPAWN_COLOUR_CURSOR 12 round-robin colour cursor for spawning       M1e
+ *   H_OFFER_A       13  the card in offer slot A, or CARD_NONE            M1f
+ *   H_OFFER_B       14  the card in offer slot B                          M1f
+ *   H_OFFER_WEEK    15  the week whose offer has been RESOLVED            M1f
+ *   H_INV_UPGRADES  16  junction upgrades held and not yet placed         M1f
+ *   H_UPGRADE_COUNT 17  junction upgrades placed on the board             M1f
+ *
+ * **The five M1f slots are declared empty by Task 4 and NOTHING READS THEM
+ * YET.** `runOffer` (Task 5) becomes the only writer of the first three and
+ * `applyPlaceUpgrade` (Task 9) of the last two; `offerPending`/`offerSlot` below
+ * are their only readers and have no caller until Task 6. This paragraph is the
+ * one M1e's equivalent got wrong — it said "nothing reads them yet" for the
+ * whole of the milestone that filled them — so when Tasks 5, 6 and 9 land, this
+ * sentence is theirs to correct.
+ *
+ * `H_OFFER_A`/`H_OFFER_B` are FUNCTIONALLY PAIRED with `H_OFFER_WEEK` in exactly
+ * the way `H_FAILED_DEST` is with `H_GAME_OVER`: both slots are zero-initialised
+ * and 0 is `CARD_NONE`, but a RESOLVED week leaves the two card slots holding
+ * last week's cards. `offerSlot` below is the only correct reader.
  *
  * **The four M1e slots were declared empty in Task 1 and all four are now
  * live** — this paragraph said "nothing reads them yet" for the whole of the
@@ -147,7 +165,75 @@ export const H_FAILED_DEST = 10
 export const H_DEST_SPAWN_TIMER = 11
 /** Round-robin cursor over colours for destination spawning (spawn.ts). */
 export const H_SPAWN_COLOUR_CURSOR = 12
-export const HEADER_LENGTH = 13
+/**
+ * The card offered in slot A this week, or `CARD_NONE`. Written only by
+ * `runOffer` (cards.ts), read only through `offerSlot` below.
+ */
+export const H_OFFER_A = 13
+/** The card offered in slot B. Always a different card from `H_OFFER_A`. */
+export const H_OFFER_B = 14
+/**
+ * The week whose offer has been RESOLVED — i.e. whose card the player took, or
+ * which was skipped because the pool was too short to offer from.
+ *
+ * **This one slot is the whole mechanism for BOTH "one card per week" and
+ * "already chosen this week", and a second flag would be a defect rather than a
+ * clarification.** With two flags — "an offer exists" and "it has been taken" —
+ * neither half can have a detector of its own, because either alone upholds the
+ * invariant; a mutation table would then show two survivors that are not coverage
+ * holes. One flag, one meaning, one test.
+ *
+ * Zero-initialised is correct with no write in `createState`: it means week 0,
+ * and week 0 has no offer, so "resolved through week 0" and "nothing resolved
+ * yet" are the same statement.
+ */
+export const H_OFFER_WEEK = 15
+/**
+ * Junction upgrades held and not yet placed. `Int32`, so the
+ * `Uint8Array`-decrement wrap class does not apply — and it IS decremented, in
+ * `applyPlaceUpgrade` (upgrades.ts, M1f Task 9).
+ *
+ * **May exceed `MAX_UPGRADES`**, because the cap is on upgrades ON THE BOARD and
+ * not on upgrades in hand; `applyPlaceUpgrade` refuses with `'capacity'`.
+ *
+ * **The authority for holding is §2.2 INVENTORY of
+ * `docs/research/2026-08-02-original-game-research-dossier.md`** — *"Items sit
+ * unplaced indefinitely"* — and naming the document matters, because §2.2 of
+ * `docs/superpowers/specs/2026-08-02-mini-motorways-clone-design.md` is
+ * **"Deferred"** and is about expert mode and rail terrain. A bare "§2.2" sends
+ * the next reader to the wrong section of the wrong file.
+ *
+ * **And it does not contradict the design spec's §5.10 "no skip, no bank, no
+ * reroll".** That clause governs the OFFER — you must take one of the two cards
+ * when the modal opens — not the ITEM the card grants, which the dossier says
+ * may sit in hand forever. Two different objects, and reading the first as
+ * forbidding the second would delete this slot.
+ *
+ * **Holding is not hypothetical on the board that ships.** M1f Task 3's site
+ * survey counted 1 / 2 / 6 / 6 legal upgrade sites across the four week
+ * boundaries — **none at boundary 1** — so an early card must be held, and this
+ * counter is what makes holding possible rather than a dropped grant. Those
+ * counts are UPPER BOUNDS: they were taken against `isJunctionCell` alone, which
+ * is one of `canPlaceUpgrade`'s five refusals, so the real predicate can only
+ * refuse more and the load-bearing negative holds a fortiori.
+ *
+ * `H_TILES` is the existence proof that an indefinitely-held resource is already
+ * expressible here: `runWeekBoundary` grants tiles with no expiry anywhere in
+ * the codebase. This is the second one, and the first that counts items.
+ */
+export const H_INV_UPGRADES = 16
+/**
+ * How many upgrades are placed on the board.
+ *
+ * **It indexes nothing.** The previous design was a metered light with a
+ * prefix-packed table and this slot was that table's length; `upgradeAt` is one
+ * flag per cell, so this is a COUNT and its only jobs are `canPlaceUpgrade`'s
+ * `capacity` refusal and the HUD. Task 12 Step 5 asserts it equals the number of
+ * non-zero entries in `upgradeAt`, in both directions, so it cannot drift from
+ * the flag array it summarises.
+ */
+export const H_UPGRADE_COUNT = 17
+export const HEADER_LENGTH = 18
 
 export const MI_MAP = 0
 export const MI_MAP_W = 1
@@ -257,6 +343,19 @@ export interface GameState {
    * name (`assertGhostCommittedPositive`, roads.ts).
    */
   readonly ghostCommitted: Uint8Array
+  /**
+   * One flag per cell: 1 means the junction mutual-exclusion rule does not apply
+   * here, 0 means it does — spec §5.10's item, M1f Task 4 declares the shape and
+   * Task 9 gives it its semantics.
+   *
+   * **A FLAG and not an index, which is the whole difference from the design it
+   * replaced.** The earlier draft was a metered traffic light whose `lightAt`
+   * held `slot + 1` into a five-column table of `MAX_UPGRADES` rows; that made
+   * `MAX_UPGRADES` a width constraint and needed six regions across three tiers.
+   * This is one bit, 0 is the correct initial value, and `createState` writes
+   * nothing.
+   */
+  readonly upgradeAt: Uint8Array
 }
 
 /** Every field of `GameState` besides `buffer`, in the exact order `regionsFor` declares them. */
@@ -290,6 +389,7 @@ const REGION_FIELD_NAMES = Object.freeze([
   'carRoute',
   'ghostMask',
   'ghostCommitted',
+  'upgradeAt',
 ] as const)
 
 function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
@@ -306,6 +406,21 @@ function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
     const name = REGION_FIELD_NAMES[i] as string
     if (!views.has(name)) {
       throw new Error(`state layout: no view constructed for region "${name}"`)
+    }
+  }
+  // The converse of the check above, added at M1f Task 4 because this task
+  // declares a region and five header slots at once and a typo in a name would
+  // otherwise surface as a hash change with no failing assertion: the loop above
+  // throws for a NAME with no layout entry and never for a LAYOUT ENTRY with no
+  // name, so a region declared in `regions.ts` alone is laid out, hashed by
+  // `hashState`, copied by `snapshot`/`restore` — and its `GameState` field is
+  // `undefined` until `tsc` happens to notice.
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i] as { name: string }
+    if (!REGION_FIELD_NAMES.includes(e.name as (typeof REGION_FIELD_NAMES)[number])) {
+      throw new Error(
+        `state layout: region "${e.name}" is laid out but is not in REGION_FIELD_NAMES`,
+      )
     }
   }
   const rng = views.get('rng')
@@ -337,6 +452,7 @@ function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
   const carRoute = views.get('carRoute')
   const ghostMask = views.get('ghostMask')
   const ghostCommitted = views.get('ghostCommitted')
+  const upgradeAt = views.get('upgradeAt')
   if (
     !(rng instanceof Uint32Array) ||
     !(mapIdentity instanceof Int32Array) ||
@@ -366,7 +482,8 @@ function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
     !(carPhase instanceof Uint8Array) ||
     !(carRoute instanceof Uint8Array) ||
     !(ghostMask instanceof Uint8Array) ||
-    !(ghostCommitted instanceof Uint8Array)
+    !(ghostCommitted instanceof Uint8Array) ||
+    !(upgradeAt instanceof Uint8Array)
   ) {
     throw new Error('state layout: view construction did not produce the expected region types')
   }
@@ -402,6 +519,7 @@ function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
     carRoute,
     ghostMask,
     ghostCommitted,
+    upgradeAt,
   }
 }
 
@@ -541,6 +659,43 @@ export function isGameOver(s: GameState): boolean {
  */
 export function failedDestination(s: GameState): number {
   return isGameOver(s) ? (s.header[H_FAILED_DEST] as number) : -1
+}
+
+/**
+ * Is a card offer waiting for the player?
+ *
+ * Read by `runOffer` (to decide whether to raise one), by `applyChooseCard` (to
+ * no-op a duplicate) and by `game`'s frame driver (to raise the pause). Week 0 is
+ * excluded because the first boundary is the START of week 1.
+ */
+export function offerPending(s: GameState): boolean {
+  const week = s.header[H_WEEK] as number
+  return week > 0 && (s.header[H_OFFER_WEEK] as number) !== week
+}
+
+/**
+ * The card in slot 0 or 1, or "no card" when no offer is pending — so no caller
+ * can read a stale card off a resolved week. Same construction as
+ * `failedDestination`'s -1, and for the same reason.
+ *
+ * **`applyChooseCard` deliberately does NOT clear `H_OFFER_A`/`H_OFFER_B`**, so
+ * this guard is the only thing standing between a resolved week and a frame that
+ * shows last week's card forever. Every reader goes through here.
+ *
+ * **Returns the literal `0` rather than `CARD_NONE`, and that is not sloppiness:**
+ * importing `CARD_NONE` would put a RUNTIME edge from this module into
+ * `cards.ts`, and this module is imported by nearly every file in the package —
+ * `cards.ts` type-imports `GameState` back, which erases, so the dependency is
+ * one-way only for as long as nobody adds this import. M1f Task 1 paid for the
+ * other outcome (`roads.ts -> dispatch.ts -> scratch.ts -> roads.ts`, a
+ * module-scope mask that evaluated to 0). `cards.test.ts` asserts
+ * `CARD_NONE === 0` beside the declaration so the two cannot drift.
+ */
+export function offerSlot(s: GameState, slot: number): number {
+  if (!offerPending(s)) return 0
+  if (slot === 0) return s.header[H_OFFER_A] as number
+  if (slot === 1) return s.header[H_OFFER_B] as number
+  throw new Error(`state: offer slot ${slot} is not 0 or 1`)
 }
 
 /**

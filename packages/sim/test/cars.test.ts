@@ -16,6 +16,7 @@ import {
 import { createState, snapshot, restore, hashState, H_TILES, type GameState } from '../src/state'
 import { hashBytes } from '../src/hash'
 import { m1eInsertedRanges, spliceM1eInsertions } from './m1eSplice'
+import { assertM1fShapeIsPureLayout, spliceM1fInsertions } from './m1fSplice'
 import { createWorld, type WorldData } from '../src/world'
 import { createFlowFields } from '../src/scratch'
 import { packRouteStep, routeStep, ROUTE_BYTES } from '../src/dispatch'
@@ -1801,12 +1802,21 @@ describe('golden replay: a route through every lane-speed multiplier (M1d Task 7
     // so nothing behavioural in M1e can reach it.
     // ---------------------------------------------------------------------
     const m1e = m1eInsertedRanges(world.map)
-    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 1676, 1824])
+    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 1696, 1844])
     const spliced = spliceM1eInsertions(state, world.map)
     expect(spliced.length, "the splice must land on M1d's buffer size").toBe(8068)
-    expect(m1e.totalBytes).toBe(8232)
+    expect(m1e.totalBytes).toBe(8492)
     expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(3113654132)
-    expect(hashState(state)).toBe(1531344761)
+    // **Re-blessed at M1f Task 4: 1531344761 -> 2274456329, PURE LAYOUT.** The
+    // milestone's only shape change; this 20x12 fixture goes 8,232 -> 8,492 B
+    // (+20 header, +240 cells). The splice below reproduces the prior digest,
+    // so not one byte of any pre-existing region moved across a live crossing.
+    assertM1fShapeIsPureLayout(state, world.map)
+    expect(
+      hashBytes(spliceM1fInsertions(state, world.map)),
+      'the M1f splice must reproduce the pre-M1f digest',
+    ).toBe(1531344761)
+    expect(hashState(state)).toBe(2274456329)
   })
 })
 

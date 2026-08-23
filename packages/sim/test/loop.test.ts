@@ -73,6 +73,7 @@ import { step, type TickAction, type TickInputs } from '../src/step'
 import { pinPeriodForWeek } from '../src/demand'
 import { hashBytes } from '../src/hash'
 import { m1eInsertedRanges, spliceM1eInsertions } from './m1eSplice'
+import { assertM1fShapeIsPureLayout, spliceM1fInsertions } from './m1fSplice'
 import { junctionRace, ORTHO_THRESHOLD } from './junctionRigs'
 import { roadDegree } from '../src/graph'
 
@@ -1271,10 +1272,10 @@ describe('golden replay: the whole trip loop', () => {
     expect(r.state.ghostCommitted.every((b) => b === 0)).toBe(true)
     assertNoSpawnHappened(r, GOLDEN_TICK, 2, 2)
     const m1e = m1eInsertedRanges(r.map)
-    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 1676, 1824])
+    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 1696, 1844])
     const spliced = spliceM1eInsertions(r.state, r.map)
     expect(spliced.length, "the splice must land on M1d's buffer size").toBe(8068)
-    expect(m1e.totalBytes).toBe(8232)
+    expect(m1e.totalBytes).toBe(8492)
     expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(2942219448)
     // **And the digest is a live board's, not a frozen one — M1e Task 8.**
     // `H_GAME_OVER` lives in the hashed buffer, so a fixture that reached the
@@ -1284,7 +1285,18 @@ describe('golden replay: the whole trip loop', () => {
     // "this run ended" rather than "the digest moved", which is the difference
     // between a five-minute diagnosis and an afternoon.
     expect(isGameOver(r.state), 'this golden was taken over a LIVE sim').toBe(false)
-    expect(hashState(r.state)).toBe(1877236894)
+    // **Re-blessed at M1f Task 4: 1877236894 -> 1219899230, PURE LAYOUT.** The
+    // milestone's only shape change — `HEADER_LENGTH` 13 -> 18 and one region,
+    // `upgradeAt`, one Uint8 flag per cell. This 20x12 fixture goes
+    // 8,232 -> 8,492 B (+20 header, +240 cells) and `regionsFor` 29 -> 30.
+    // The splice below reproduces the prior digest, so no pre-existing byte
+    // moved across the live trip loop, occupancy included.
+    assertM1fShapeIsPureLayout(r.state, r.map)
+    expect(
+      hashBytes(spliceM1fInsertions(r.state, r.map)),
+      'the M1f splice must reproduce the pre-M1f digest',
+    ).toBe(1877236894)
+    expect(hashState(r.state)).toBe(1219899230)
   })
 
   it('leaves the three existing goldens alone — this task adds a golden, it does not move one', () => {
@@ -1321,9 +1333,16 @@ describe('golden replay: the whole trip loop', () => {
     // **M1e Task 5 moved it a third and final time — 883875991 -> 1058753394 —
     // for the spawn timers cycling, which is the last move the plan's golden
     // table licenses in this milestone. A fourth from any task is a defect.**
-    expect(determinism, 'the state golden moved').toContain('expect(hashState(s)).toBe(1058753394)')
+    // **M1f Task 4 moved both a fourth time — 1058753394 -> 4189191826 and
+    // 2312109239 -> 1099508647 — for the buffer shape, and the needles had to
+    // change SHAPE again for the same reason M1e Task 1's did.** Each file now
+    // carries an M1f splice proof asserting its own PRIOR digest, so a needle
+    // spelled as the bare old number would go on matching after the re-bless and
+    // report the golden unmoved while it had moved. The needle is the whole
+    // golden expression; the prior-digest line cannot satisfy it.
+    expect(determinism, 'the state golden moved').toContain('expect(hashState(s)).toBe(4189191826)')
     expect(rollback, 'the road-network golden moved').toContain(
-      'expect(hashState(state)).toBe(2312109239)',
+      'expect(hashState(state)).toBe(1099508647)',
     )
     expect(rollback, 'the field golden moved — that one is a tripwire, not a re-bless').toContain(
       'expect(foldedFieldsHash(fields)).toBe(252514232)',
@@ -1340,7 +1359,7 @@ describe('golden replay: the whole trip loop', () => {
     // opposite requirement from the three assertions above, and the reason it
     // is spelled differently.
     expect(determinism, "the road-network golden turned up in the state golden's file").not.toContain(
-      '2312109239',
+      '1099508647',
     )
     // And the M1e re-bless PROOF must survive alongside the number it
     // licenses. Deleting the splice assertion is the cheapest way to make a
@@ -1352,6 +1371,26 @@ describe('golden replay: the whole trip loop', () => {
     )
     expect(rollback, 'the M1e splice proof left rollback.test.ts').toContain(
       "expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(2076760277)",
+    )
+    // **And the M1f proof beside it, pinned the same way and for the same
+    // reason.** Deleting a splice assertion is the cheapest way to make the next
+    // layout re-bless unfalsifiable, and it leaves every other test in the repo
+    // green — so each file's one occurrence is named here. These needles quote
+    // the PRIOR digest, which is what the M1f splice must reproduce.
+    expect(determinism, 'the M1f splice proof left determinism.test.ts').toContain(
+      "'the M1f splice must reproduce the pre-M1f digest',\n    ).toBe(1058753394)",
+    )
+    expect(rollback, 'the M1f splice proof left rollback.test.ts').toContain(
+      "'the M1f splice must reproduce the pre-M1f digest',\n    ).toBe(2312109239)",
+    )
+    // The direct assertions the digests borrow their meaning from. A re-bless
+    // whose only evidence is "the digest moved" absorbs any regression landing
+    // in the same commit; these two calls are what make it not that.
+    expect(determinism, 'determinism.test.ts dropped its pure-layout assertion').toContain(
+      'assertM1fShapeIsPureLayout(s, GOLDEN_MAP)',
+    )
+    expect(rollback, 'rollback.test.ts dropped its pure-layout assertion').toContain(
+      'assertM1fShapeIsPureLayout(state, GOLDEN_MAP)',
     )
   })
 })
@@ -2282,10 +2321,10 @@ describe('golden replay: a jammed same-direction queue', () => {
     // ---------------------------------------------------------------------
     assertNoSpawnHappened(r, Q_GOLDEN_TICK, 2, 1)
     const m1e = m1eInsertedRanges(r.map)
-    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 1676, 1824])
+    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 1696, 1844])
     const spliced = spliceM1eInsertions(r.state, r.map)
     expect(spliced.length, "the splice must land on M1d's buffer size").toBe(8068)
-    expect(m1e.totalBytes).toBe(8232)
+    expect(m1e.totalBytes).toBe(8492)
     expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(294084758)
     // **And the digest is a live board's, not a frozen one — M1e Task 8.**
     // `H_GAME_OVER` lives in the hashed buffer, so a fixture that reached the
@@ -2295,7 +2334,16 @@ describe('golden replay: a jammed same-direction queue', () => {
     // "this run ended" rather than "the digest moved", which is the difference
     // between a five-minute diagnosis and an afternoon.
     expect(isGameOver(r.state), 'this golden was taken over a LIVE sim').toBe(false)
-    expect(hashState(r.state)).toBe(307910575)
+    // **Re-blessed at M1f Task 4: 307910575 -> 3831930847, PURE LAYOUT.** Same
+    // shape change as the trip-loop golden above, same 20x12 fixture,
+    // 8,232 -> 8,492 B. The splice reproduces the prior digest mid-jam, with
+    // two cars refused and the occupancy array contended.
+    assertM1fShapeIsPureLayout(r.state, r.map)
+    expect(
+      hashBytes(spliceM1fInsertions(r.state, r.map)),
+      'the M1f splice must reproduce the pre-M1f digest',
+    ).toBe(307910575)
+    expect(hashState(r.state)).toBe(3831930847)
   })
 })
 
@@ -2407,8 +2455,22 @@ const DG_RUN_TICKS = 5250
  */
 const DG_SNAPSHOT_TICK = 4300
 
-/** Blessed for the first time in M1e Task 6. See the golden's own comment. */
-const DG_GOLDEN = 894844668
+/**
+ * Blessed for the first time in M1e Task 6. See the golden's own comment.
+ *
+ * **Re-blessed at M1f Task 4: 894844668 -> 2425471180, PURE LAYOUT** — the
+ * milestone's only shape change (`HEADER_LENGTH` 13 -> 18 plus `upgradeAt`, one
+ * Uint8 flag per cell). This 20x9 fixture goes 3,832 -> 4,032 B: +20 for the
+ * header and +180 for the cells.
+ *
+ * The proof lives at the FIRST of the four sites that read this constant — the
+ * one that builds the timeline — and the other three are replays of that same
+ * state through `snapshot`/`restore` and a cold Worker. A splice proof at each
+ * would be the same assertion four times over the same bytes; what the other
+ * three establish is that the replays AGREE, which they say by using this
+ * constant at all.
+ */
+const DG_GOLDEN = 2425471180
 
 /** Hand-derived above from `pinPeriodForWeek(0)` = 518 and `(1)` = 466. */
 const DG_EXPECTED_FIRE_TICKS: readonly number[] = [
@@ -2682,6 +2744,11 @@ describe('golden replay: pins produced by the demand timer, across a week bounda
     // "carries the remainder ACROSS a period change" test, which uses
     // `slotCount` 3 precisely because 3 divides neither period.
     // ---------------------------------------------------------------------
+    assertM1fShapeIsPureLayout(r.state, r.map)
+    expect(
+      hashBytes(spliceM1fInsertions(r.state, r.map)),
+      'the M1f splice must reproduce the pre-M1f digest',
+    ).toBe(894844668)
     expect(hashState(r.state)).toBe(DG_GOLDEN)
   })
 

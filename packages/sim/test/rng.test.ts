@@ -1,10 +1,18 @@
 import { describe, it, expect } from 'vitest'
-import { seedFromString, nextRandom, randomBelow } from '../src/rng'
+import { seedFromString, mixWord, nextRandom, randomBelow } from '../src/rng'
 
 function store(seed: number): Uint32Array {
   const s = new Uint32Array(1)
   s[0] = seed
   return s
+}
+
+/** The first `n` draws from a fresh store seeded with `seed`. */
+function seqOf(seed: number, n = 8): number[] {
+  const s = store(seed)
+  const out: number[] = []
+  for (let i = 0; i < n; i++) out.push(nextRandom(s, 0))
+  return out
 }
 
 describe('seedFromString', () => {
@@ -22,6 +30,97 @@ describe('seedFromString', () => {
       expect(Number.isInteger(v)).toBe(true)
       expect(v).toBeGreaterThanOrEqual(0)
       expect(v).toBeLessThanOrEqual(0xffffffff)
+    }
+  })
+})
+
+/**
+ * **The literal sequence golden, and it did not exist before M1f Task 4.**
+ *
+ * Every other test in this file is self-referential — "the same seed gives the
+ * same sequence", "a different seed gives a different one", "a restored state
+ * restores the sequence". All of them stay green under any change to the output
+ * transform that is applied consistently, which is precisely the class of change
+ * Task 4 makes when it extracts `mixWord` out of `nextRandom`. The whole-buffer
+ * goldens cannot cover it either: they fold `rng[0]`, which is the ADVANCED WORD
+ * and is computed before the transform runs, so breaking the transform moves no
+ * digest in the repo.
+ *
+ * So these literals were captured from the tree at commit `41051cb`, BEFORE the
+ * extraction, and they are what makes "the extraction is output-preserving" a
+ * measurement rather than a claim. `randomBelow`'s row is here for the same
+ * reason one layer up: it consumes `nextRandom` and its rejection loop would
+ * hide a small transform change behind a modulo.
+ */
+describe('the sequence golden', () => {
+  it('reproduces the exact uint32 sequence three seeds produced before mixWord was extracted', () => {
+    expect(seqOf(12345)).toEqual([
+      4207900869, 1317490944, 2079646450, 3513001552, 2187978186, 1492380277, 316786230, 3291647763,
+    ])
+    expect(seqOf(1)).toEqual([
+      2693262067, 11749833, 2265367787, 4213581821, 4159151403, 1207330352, 2632122864, 3095568220,
+    ])
+    expect(seqOf(0xdeadbeef)).toEqual([
+      4043151706, 1147597007, 3315858022, 1538288752, 2042435954, 3600176436, 484360372, 1362401224,
+    ])
+  })
+
+  it('reproduces randomBelow(6) over the same window, so the rejection loop is pinned too', () => {
+    const s = store(42)
+    const out: number[] = []
+    for (let i = 0; i < 12; i++) out.push(randomBelow(s, 0, 6))
+    expect(out).toEqual([0, 4, 0, 5, 0, 3, 4, 5, 0, 3, 3, 1])
+  })
+
+  it('leaves the store where it left it, so the ADVANCE is pinned beside the TRANSFORM', () => {
+    // The two halves of `nextRandom` fail independently: the advance is
+    // `+0x6d2b79f5` on the stored word and the transform is `mixWord` on the
+    // result. A golden on the returned values alone would not see the advance
+    // change, and one on the store alone would not see the transform change.
+    const s = store(12345)
+    for (let i = 0; i < 8; i++) nextRandom(s, 0)
+    expect(s[0]).toBe(1767636961)
+  })
+})
+
+describe('mixWord', () => {
+  it('is exactly the transform nextRandom applies to its advanced word', () => {
+    const s = store(12345)
+    const advanced = ((12345 + 0x6d2b79f5) | 0) >>> 0
+    expect(advanced, 'the advance itself, hand-computed').toBe(1831578158)
+    expect(nextRandom(s, 0)).toBe(mixWord(advanced))
+    expect(s[0], 'and nextRandom advanced the store while mixWord touched nothing').toBe(advanced)
+  })
+
+  it('is a pure function of its argument: no store, no state, idempotent', () => {
+    expect(mixWord(0)).toBe(mixWord(0))
+    expect(mixWord(1831578158)).toBe(4207900869)
+  })
+
+  it('returns a uint32 for every input including the extremes', () => {
+    for (const v of [0, 1, 0x7fffffff, 0x80000000, 0xffffffff, -1, 2 ** 32]) {
+      const r = mixWord(v)
+      expect(Number.isInteger(r), `mixWord(${v})`).toBe(true)
+      expect(r).toBeGreaterThanOrEqual(0)
+      expect(r).toBeLessThanOrEqual(0xffffffff)
+    }
+  })
+
+  it('avalanches: flipping one input bit changes many output bits', () => {
+    // Not decoration — `offerSeedFor` (cards.ts, M1f Task 4) derives the whole
+    // weekly offer from `mixWord(rng[0] ^ imul(week + 1, GOLDEN))`, and adjacent
+    // weeks differ in few input bits. A transform that merely permuted bits
+    // would satisfy every other test in this file.
+    for (let bit = 0; bit < 32; bit++) {
+      const a = mixWord(0x1234abcd)
+      const b = mixWord((0x1234abcd ^ (1 << bit)) >>> 0)
+      let x = (a ^ b) >>> 0
+      let bits = 0
+      while (x !== 0) {
+        bits += x & 1
+        x >>>= 1
+      }
+      expect(bits, `flipping input bit ${bit} moved only ${bits} output bits`).toBeGreaterThan(5)
     }
   })
 })

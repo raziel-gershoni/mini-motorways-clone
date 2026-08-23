@@ -71,6 +71,7 @@ import { longestQueue } from '../src/queueProbe'
 // deliberate: the alternative is a second copy of the splice, and two copies
 // of a proof drift in exactly the direction that makes the proof stop proving.
 import { m1eInsertedRanges, spliceM1eInsertions } from '../../sim/test/m1eSplice'
+import { assertM1fShapeIsPureLayout, spliceM1fInsertions } from '../../sim/test/m1fSplice'
 import { CITY_DEATH_TICK } from './deathTicks'
 import {
   armCarpark as gateCarpark,
@@ -771,13 +772,75 @@ describe('the seeded-state golden', () => {
     expect(state.ghostMask.every((b) => b === 0), 'the seed erases nothing').toBe(true)
     expect(state.ghostCommitted.every((b) => b === 0)).toBe(true)
     const m1e = m1eInsertedRanges(firstCity())
-    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 1676, 1824])
+    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 1696, 1844])
     const spliced = spliceM1eInsertions(state, firstCity())
     // Vacuity: the splice must land on M1d's own total for `firstCity`.
     expect(spliced.length, "the splice must land on M1d's buffer size").toBe(13828)
-    expect(m1e.totalBytes).toBe(13992)
+    expect(m1e.totalBytes).toBe(14972)
     expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(1178110182)
-    expect(hashState(state)).toBe(968680755)
+    // **Re-blessed at M1f Task 4: 968680755 -> 613441763, PURE LAYOUT.** The
+    // milestone's only shape change. `firstCity` goes 13,992 -> 14,972 B (+980,
+    // +7.00 %) and `regionsFor` 29 -> 30. Nothing about this seed changed: same
+    // map, same six placements, same `RUN_SEED`, same warm start.
+    assertM1fShapeIsPureLayout(state, firstCity())
+    expect(
+      hashBytes(spliceM1fInsertions(state, firstCity())),
+      'the M1f splice must reproduce the pre-M1f digest',
+    ).toBe(968680755)
+    expect(hashState(state)).toBe(613441763)
+  })
+
+  it('pins the REJECTED circle variant too, so the figure in startingCity.ts stops being unrunnable prose', () => {
+    // **`startingCity.ts`'s design note quotes two digests — the accepted seed
+    // and the rejected "destination 0 as a circle" variant — and says of itself
+    // "Nothing greps this comment, so it is re-derived rather than trusted
+    // whenever the buffer changes shape". M1f Task 4 changes the buffer shape,
+    // and this is the runner that means the next task does not have to
+    // re-derive it by hand.**
+    //
+    // The catalogue's closing-sweep entry is the reason for the shape of this
+    // fix rather than a second hand-edit: `6,357` was correctly retired and
+    // **re-entered the tree three commits later in a new comment**, because the
+    // right number lived only in prose. "A figure that nothing runs is a figure
+    // that comes back", and the repair that held was to assert BOTH arms on one
+    // rig. That is what this does.
+    //
+    // The variant is `STARTING_DESTINATIONS[0]` with `kind` flipped to
+    // `DEST_KIND_CIRCLE`, placed by hand rather than through
+    // `seedStartingCity`, because the seeder reads the frozen table.
+    const map = firstCity()
+    const world = createWorld(map)
+    const state = createState('m2-starting-city', map)
+    const d0 = STARTING_DESTINATIONS[0] as (typeof STARTING_DESTINATIONS)[number]
+    expect(d0.kind, 'the accepted seed places a SQUARE here').toBe(DEST_KIND_SQUARE)
+    expect(
+      placeDestination(state, world, d0.y * world.w + d0.x, d0.orientation, d0.colour, DEST_KIND_CIRCLE),
+    ).toBe(true)
+    for (let i = 1; i < STARTING_DESTINATIONS.length; i++) {
+      const d = STARTING_DESTINATIONS[i] as (typeof STARTING_DESTINATIONS)[number]
+      expect(placeDestination(state, world, d.y * world.w + d.x, d.orientation, d.colour, d.kind)).toBe(true)
+    }
+    for (const h of STARTING_HOUSES) {
+      expect(placeHouse(state, world, h.y * world.w + h.x, h.colour)).toBe(true)
+    }
+    // Vacuity: the variant must actually differ from the accepted seed, or both
+    // digests below are the same number twice and the pair proves nothing.
+    const accepted = createState('m2-starting-city', map)
+    seedStartingCity(accepted, world)
+    expect(hashState(state), 'the variant must differ from the accepted seed').not.toBe(
+      hashState(accepted),
+    )
+    // **Re-blessed at M1f Task 4: 3282272491 -> 2889011739, PURE LAYOUT**, the
+    // same shape change as its accepted sibling above. And the splice proof is
+    // worth more here than anywhere else in the repo: it is a check on the
+    // SPLICE METHOD itself against a state no other test builds, so the method
+    // is validated on two independent states rather than one.
+    assertM1fShapeIsPureLayout(state, map)
+    expect(
+      hashBytes(spliceM1fInsertions(state, map)),
+      'the M1f splice must reproduce the pre-M1f digest of the rejected variant',
+    ).toBe(3282272491)
+    expect(hashState(state)).toBe(2889011739)
   })
 
   it('differs from the unseeded state — otherwise the golden pins nothing', () => {

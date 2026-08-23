@@ -37,6 +37,7 @@ import {
 } from '../src/buildings'
 import { hashBytes } from '../src/hash'
 import { m1eInsertedRanges, spliceM1eInsertions } from './m1eSplice'
+import { assertM1fShapeIsPureLayout, spliceM1fInsertions } from './m1fSplice'
 
 /**
  * The determinism boundary is the sim *plus everything it depends on*. Spec §4
@@ -370,6 +371,14 @@ describe('sim source obeys the determinism rules', () => {
       'shared/src/maps/firstCity.ts',
       'sim/src/blocking.ts',
       'sim/src/buildings.ts',
+      // M1f Task 4: the card pool, the non-consuming weekly draw and the
+      // rejection sampler. Named here for the same reason every other entry is —
+      // a new source file must be added deliberately, and a module that skips
+      // this scan skips every determinism rule below it. For THIS module that is
+      // the worst possible omission twice over: it is the one file whose whole
+      // purpose is to derive randomness, and it is the file the RNG-consumption
+      // ban below was written to police.
+      'sim/src/cards.ts',
       'sim/src/cars.ts',
       'sim/src/clock.ts',
       'sim/src/demand.ts',
@@ -897,7 +906,7 @@ describe('golden replay', () => {
     expect(s.destOvercrowd.every((v) => v === 0), 'so phase 10 writes nothing here').toBe(true)
     expect(s.destOverTicks.every((v) => v === 0)).toBe(true)
     const m1e = m1eInsertedRanges(GOLDEN_MAP)
-    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 404, 444])
+    expect([m1e.aStart, m1e.aEnd, m1e.bStart, m1e.bEnd]).toEqual([52, 68, 424, 464])
     // Back the grant out for the splice, then put it back. `H_TILES` sits at
     // header slot 3, in front of block A, so it is NOT one of the bytes the
     // splice removes — see the paragraph above for why this step exists and
@@ -915,8 +924,24 @@ describe('golden replay', () => {
     // inserted, landing on M1d's own total for this map. A no-op splice would
     // otherwise "prove" a digest that never moved.
     expect(spliced.length, "the splice must land on M1d's buffer size").toBe(1416)
-    expect(m1e.totalBytes).toBe(1472)
+    expect(m1e.totalBytes).toBe(1508)
     expect(hashBytes(spliced), 'the splice must reproduce the pre-M1e digest').toBe(340556353)
-    expect(hashState(s)).toBe(1058753394)
+    // **Re-blessed at M1f Task 4: 1058753394 -> 4189191826, PURE LAYOUT.** The
+    // milestone's ONLY shape change — `HEADER_LENGTH` 13 -> 18 and one region,
+    // `upgradeAt`, one Uint8 flag per cell. On this 4x4 fixture the buffer goes
+    // 1,472 -> 1,508 B (+20 header, +16 cells) and `regionsFor` 29 -> 30.
+    //
+    // **The digest is not the evidence; these two lines are.** The splice removes
+    // exactly the two inserted ranges and must reproduce the PRIOR digest
+    // bit-for-bit, which says no pre-existing byte changed value; and
+    // `assertM1fShapeIsPureLayout` says every inserted byte is still zero. A move
+    // that was partly layout and partly a stray write fails the first, and one
+    // that quietly initialised a new slot fails the second.
+    assertM1fShapeIsPureLayout(s, GOLDEN_MAP)
+    expect(
+      hashBytes(spliceM1fInsertions(s, GOLDEN_MAP)),
+      'the M1f splice must reproduce the pre-M1f digest',
+    ).toBe(1058753394)
+    expect(hashState(s)).toBe(4189191826)
   })
 })
