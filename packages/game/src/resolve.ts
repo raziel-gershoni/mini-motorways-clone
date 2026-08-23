@@ -415,9 +415,17 @@ export function resolveCar(
 // (0.9920 cells, 4.96x `MAX_DRAW_LAG_CELLS`, on the every-frame-drains-7-ticks
 // schedule), which is a different quantity and must not be quoted here.
 //
-// Measured, on the demo board with 15+ cars in flight, at the two cadences the
-// repo drives: **0.0886 cells on even 33.4 ms frames and 0.2200 through
-// `integration.test.ts`'s mixed-length rig.**
+// **Measured three times, and each figure is labelled with the rig that
+// produced it, because the residual is a property of the frame cadence at the
+// instant of the pause and not of this code.** All three on the demo board,
+// which is the only shipped board carrying moving cars with no player input:
+//
+// ```
+//   pause                       cadence                          worst gap
+//   the shutdown freeze         even 33.4 ms frames              0.0886
+//   the shutdown freeze         integration.test.ts, mixed       0.2200
+//   M1f Task 7's offer pause    integration.test.ts, 16.7 ms     0.1319
+// ```
 //
 // **0.2200 is ABOVE `MAX_DRAW_LAG_CELLS`, and a bound of 0.2 here would be
 // wrong** — that clamp holds between `drawCurrXY` and the sim position at a
@@ -433,7 +441,9 @@ export function resolveCar(
 // takes to choose — four times on a run that reaches week 4.** So a frozen
 // offset of up to 0.22 cells, about 6 CSS px at the smallest tile size
 // `fitCamera` produces, is on screen for seconds at a time rather than for a
-// frame.
+// frame. **0.22 remains the band's top and the offer pause measured under it**,
+// which is worth stating in that direction: the shutdown rig is the one that
+// produced the largest reading, so the new audience is not the new worst case.
 //
 // **Not fixed here, and the reason is a property this file would have to give
 // up.** Converging while paused means advancing the chase with `ticks = 0`,

@@ -582,6 +582,33 @@ export interface FrameDriverDeps {
    * the shell; a replay reaches the same bytes whether or not anybody stopped
    * to read a modal, which is what lets M3's Worker verify a run it never
    * rendered.
+   *
+   * ---------------------------------------------------------------------------
+   * **THIS PAUSE IS LOAD-BEARING FOR A `sim` CORRECTNESS PROPERTY, AND `sim`
+   * KNOWS NOTHING ABOUT IT. OWNER: THIS LINE.**
+   * ---------------------------------------------------------------------------
+   *
+   * M1f Task 6 measured and pinned it (`sim/test/cards.test.ts`, *"arrives WITH
+   * a later boundary"*): a `choose-card` that reaches `step` on a tick which is
+   * ITSELF a later week boundary resolves the OLD pair and **burns the new
+   * week's offer** — `applyChooseCard` writes `H_OFFER_WEEK = H_WEEK`, and
+   * `H_WEEK` has already advanced in phase 1, so week N+1 is marked resolved by
+   * a choice made about week N. A card the player never saw, silently lost.
+   *
+   * **It is unreachable today for exactly one reason, and the reason is this
+   * callback.** The shell cannot cross a boundary with an offer up, because the
+   * first tick of the offer stops the drain and nothing resumes it until the
+   * week is resolved. `sim` has no notion of pause, so it cannot defend itself:
+   * the guard is entirely here.
+   *
+   * **What ends it.** Anything that lets ticks run while an offer is pending —
+   * a "keep playing behind the modal" decision, a resume that does not re-pause
+   * (which is why this fires on the condition rather than the edge), a headless
+   * driver of `step` that enqueues a `choose-card` late, or M3's Worker
+   * replaying a log without this shell. A replay is the sharp one: the Worker
+   * runs `step` from a log and has no loop at all, so the property holds there
+   * only because the LOG cannot contain a late `choose-card` — and the log is
+   * produced by a client that had this pause. State that before removing it.
    */
   readonly onOfferRaised: () => void
 }

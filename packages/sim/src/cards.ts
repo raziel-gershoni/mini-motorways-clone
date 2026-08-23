@@ -525,13 +525,28 @@ export function cardItemGrant(cardId: number): number {
  *      end the run over a UI event. `H_OFFER_WEEK === H_WEEK` absorbs it, which
  *      is why `pointer.ts` (Task 8) needs no second guard — a second guard here
  *      would be the catalogue's independently-sufficient-structures defect.
- *      **This check must come FIRST, and the reason is narrower than it looks:
- *      once a week is RESOLVED the slots still hold that week's real cards, so
- *      an echo evaluated first would MATCH a repeat tap and pay the card a
- *      second time — silently, with no throw to notice.** It is not, as an
- *      earlier draft of this comment said, that a later week's offer has
- *      overwritten the slots: a later week is PENDING again, so check 1 does not
- *      fire there at all and check 3 does the work. See the two tests named
+ *      **This check must come FIRST — and the reason recorded here until M1f
+ *      Task 7 was the wrong one, so it is quoted and refuted rather than
+ *      replaced.** It said: *"once a week is RESOLVED the slots still hold that
+ *      week's real cards, so an echo evaluated first would MATCH a repeat tap
+ *      and pay the card a second time — silently, with no throw to notice."*
+ *      **Moving this check below the echo does NOT pay twice**: it still sits
+ *      above the three writes, so the second tap returns before any grant
+ *      lands. Task 6 measured exactly that — its mutant 2 (move the pending
+ *      check below the echo) scored 1, and NOT in the test written for it,
+ *      because nothing was ever paid twice. Double payment is what DELETING
+ *      this check does (Task 6's mutant 1, 5 detectors), which is a different
+ *      edit.
+ *      **The real reason is the opposite polarity: with the echo first, a tap
+ *      this function is supposed to IGNORE becomes a run-ending throw.** On a
+ *      resolved week an echo that does not match — a duplicate carrying a card
+ *      id the slots no longer hold — reaches check 3 and poisons `H_EPOCH` over
+ *      a UI event, which is the "a double tap bricks the run" failure in its
+ *      strongest form. `cards.test.ts`'s resolved-week-plus-wrong-echo case is
+ *      the detector, and it is the one that took mutant 2 from 1 to 2.
+ *      It is also not, as a still earlier draft said, that a later week's offer
+ *      has overwritten the slots: a later week is PENDING again, so check 1 does
+ *      not fire there at all and check 3 does the work. See the two tests named
  *      *"same resolved week"* and *"arrives WITH a later boundary"*.
  *   2. **A slot outside {0, 1} -> throw.** A malformed action, exactly like
  *      `step`'s unknown-kind throw.

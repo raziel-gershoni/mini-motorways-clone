@@ -2784,6 +2784,30 @@ function buildSpawnRig(): SpawnRig {
 }
 
 /**
+ * **THIS BLOCK MUST NEVER BE GIVEN M1f TASK 7'S CARD POLICY, AND THE REASON IS
+ * THAT IT IS THE ONLY ALLOCATION INSTRUMENT COVERING `cards.ts` AT ALL.**
+ *
+ * Task 7 pauses the production loop on every tick `offerPending(state)` holds,
+ * and gives every FRAME-driven rig a `takeCardPolicy` so it does not freeze.
+ * `buildSpawnRig` and `recordGreedyLog` drive **`step` directly** — no
+ * `createLoop`, no `createFrameDriver`, no `game.frame` — so `sim` has no notion
+ * of pause and there is nothing here to unfreeze. The rule is: frame-driven rigs
+ * need a card policy; `step`-driven rigs do not.
+ *
+ * **And adding one anyway would silently DELETE coverage.** The three windows
+ * below start at tick 6,000 and span 13,800 ticks, all of them past the week-1
+ * boundary at 4,500, and no action in the greedy log is a `choose-card`. So
+ * `H_OFFER_WEEK` never catches up, `offerPending` is true on every profiled
+ * tick, and phase 4 runs `runOffer`'s **full draw** 13,800 times. That is what
+ * caught M1f Task 5's HeapNumber box in `offerSeedFor` — reverting its `| 0`
+ * charges `cards.ts` at 16.84 / 15.93 / 9.69 B/tick against a 4 B budget, in all
+ * three windows. A card policy here would make every profiled tick take
+ * `runOffer`'s early return instead, `cards.ts` would leave the profile
+ * entirely, and **nothing would go red** — the catalogue's *"a coverage
+ * instrument's scope does not follow the code"*, which this project has now hit
+ * five times. `cards.ts`'s own comment above `runOffer` names Task 12 as the
+ * owner of re-deriving what this window still covers.
+ *
  * The greedy arm's action log, recorded once by driving a THROWAWAY rig.
  *
  * Recorded rather than computed live for one reason: `armGreedyActions` runs a
