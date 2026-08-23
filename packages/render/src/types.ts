@@ -425,6 +425,35 @@ export interface RenderFrame {
   readonly gameOver: boolean
   /** The destination that ended the run, or -1 while it is live. */
   readonly failedDest: number
+  /**
+   * True while §5.10's weekly card offer is waiting to be taken — M1f Task 7.
+   *
+   * **The board behind it is frozen and the freeze is the SHELL's, not the
+   * sim's.** `game`'s frame driver pauses the loop on every tick this holds;
+   * `sim` has no notion of pause and never will, because a replay has to reach
+   * the same bytes whether or not a player stopped to read a modal.
+   *
+   * It is folded from `sim`'s own `offerPending`, so it goes false the tick the
+   * week is resolved even though the two card ids below are still sitting in the
+   * header — see `offerA`.
+   */
+  readonly offerPending: boolean
+  /**
+   * The card id in slot A, or `0` (no card) when nothing is pending.
+   *
+   * **A plain number, because `render` imports nothing from `sim`** — the ids
+   * are §5.10's and `sim`'s `cards.ts` is their only declaration. `0` is
+   * `CARD_NONE` and is unreachable as an offered card.
+   *
+   * **It reads 0 on a resolved week even though the header does not.**
+   * `applyChooseCard` deliberately leaves `H_OFFER_A`/`H_OFFER_B` holding the
+   * real cards, so `game`'s fold goes through `offerSlot`, which is the one
+   * guard between a resolved week and a modal showing last week's card for the
+   * rest of the run.
+   */
+  readonly offerA: number
+  /** The card id in slot B. Always a different card from `offerA` while pending. */
+  readonly offerB: number
 }
 
 /**

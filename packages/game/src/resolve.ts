@@ -398,6 +398,53 @@ export function resolveCar(
 //     new position on the very next drain, with no special case and nothing to
 //     forget. There is no separate teleport guard because the clamp IS one.
 //
+// ---------------------------------------------------------------------------
+// A PAUSED CAR DOES NOT SETTLE, AND M1f GIVES THAT ITS FIRST LONG-LIVED
+// AUDIENCE
+// ---------------------------------------------------------------------------
+//
+// The chase advances inside `afterDrain`, and `loop.ts` skips the whole drain
+// while paused — so **a paused car stops wherever the chase had got to, short
+// of its sim position, and stays there.** It does not converge; there is no
+// frame on which it could.
+//
+// **The reference frame matters, because two different divergence figures live
+// in this repo and they are not comparable.** This one is the gap between the
+// DRAWN position and the SIM position at the moment the pause lands. It is NOT
+// the mid-frame `drawCar`-against-`lerpCar` divergence in the table above
+// (0.9920 cells, 4.96x `MAX_DRAW_LAG_CELLS`, on the every-frame-drains-7-ticks
+// schedule), which is a different quantity and must not be quoted here.
+//
+// Measured, on the demo board with 15+ cars in flight, at the two cadences the
+// repo drives: **0.0886 cells on even 33.4 ms frames and 0.2200 through
+// `integration.test.ts`'s mixed-length rig.**
+//
+// **0.2200 is ABOVE `MAX_DRAW_LAG_CELLS`, and a bound of 0.2 here would be
+// wrong** — that clamp holds between `drawCurrXY` and the sim position at a
+// DRAIN, and a frozen frame is a lerp at the frozen `alpha` between
+// `drawPrevXY` and `drawCurrXY`, so the residual depends on the frame cadence
+// at the instant of the pause. The bound that holds for both readings is
+// `MAX_DRAW_LAG_CELLS + MAX_SIM_CELLS_PER_TICK` = **0.3333** — one lag plus one
+// tick of travel — and it is asserted rather than argued at two sites in
+// `integration.test.ts` (the shutdown freeze, and M1f Task 7's offer pause).
+//
+// **Until M1f the only pauses were a HUD-clock tap and the terminal freeze;
+// from M1f Task 7 the weekly card modal holds one for as long as the player
+// takes to choose — four times on a run that reaches week 4.** So a frozen
+// offset of up to 0.22 cells, about 6 CSS px at the smallest tile size
+// `fitCamera` produces, is on screen for seconds at a time rather than for a
+// frame.
+//
+// **Not fixed here, and the reason is a property this file would have to give
+// up.** Converging while paused means advancing the chase with `ticks = 0`,
+// which is a drawn position moving while the sim's does not — and that gives
+// up "a drawn car is never ahead of its sim car", which is what the clamp and
+// the ordering guarantees above are for. What makes it acceptable meanwhile is
+// measured rather than assumed: 0.22 is well inside a cell's half-width of
+// 0.5, so **every frozen car is still drawn on its own road**, which is the
+// assertion the two sites carry beside the band. Task 12's device session is
+// the instrument for whether it reads as a stop or as a stutter.
+//
 // **Nothing here allocates.** Three more caller-owned typed arrays, sized at
 // boot, written in place forever after.
 

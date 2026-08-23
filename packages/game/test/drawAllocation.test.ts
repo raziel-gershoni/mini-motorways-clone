@@ -11,6 +11,7 @@ import { PALETTE, type AtlasContext, type AtlasSurface } from '@laneways/render'
 import { createGame, type GameContext } from '../src/main'
 import { CITY_LAYOUT_ID } from '../src/layouts'
 import { CITY_DEATH_TICK } from './deathTicks'
+import { takeCardPolicy } from './cardPolicy'
 import { repoRelative } from './allocationPaths'
 
 /**
@@ -396,6 +397,8 @@ interface Driven {
   readonly game: ReturnType<typeof createGame>
   readonly drive: (count: number) => void
   readonly counts: DrawCounts
+  /** Weekly card offers this rig resolved — M1f Task 7. See `cardPolicy.ts`. */
+  readonly cardsTaken: number
 }
 
 /**
@@ -445,7 +448,14 @@ function deadGame(): Driven {
       game.frame(now)
     }
   }
-  return { game, drive, counts }
+  // **No card policy here, deliberately, and it is not an omission.** This rig
+  // is already terminal at boot: `createGame` called `loop.end()`, `setPaused`
+  // is refused for the rest of the run and `advance` never runs again, so no
+  // offer can be raised and none can be resolved. `takeCardPolicy` would return
+  // false on every call — its own `over` guard — and enqueue nothing. See
+  // `cardPolicy.ts` for why that guard exists rather than being left to this
+  // call site.
+  return { game, drive, counts, cardsTaken: 0 }
 }
 
 /**
@@ -458,6 +468,7 @@ function deadGame(): Driven {
  */
 function drivenGame(): Driven {
   const counts = zeroCounts()
+  let cardsTaken = 0
   const surfaces: { ghost: unknown } = { ghost: null }
   const game = createGame({
     // Never called: this rig's board dies at tick 5,580 and the window ends at
@@ -510,6 +521,13 @@ function drivenGame(): Driven {
       // value that would end the run.
       game.state.destOvercrowd[0] = RING_METER
       now += 16.7
+      // M1f Task 7's card policy. This rig drives `WARMUP_FRAMES + WINDOW_COUNT
+      // * PROFILED_FRAMES` = 10,500 frames at ~0.5 ticks a frame from a
+      // 258-tick warm start, so it crosses `TICKS_PER_WEEK` (4,500) inside its
+      // LAST window; without the policy that window profiles a stopped board
+      // and every budget in this file passes while measuring nothing. See
+      // `cardPolicy.ts`.
+      if (takeCardPolicy(game, 0)) cardsTaken++
       game.frame(now)
     }
   }
@@ -527,12 +545,20 @@ function drivenGame(): Driven {
   game.pointer.up(1)
   seedGhosts(game)
 
-  return { game, drive, counts }
+  return {
+    game,
+    drive,
+    counts,
+    get cardsTaken(): number {
+      return cardsTaken
+    },
+  }
 }
 
 describe('the real draw path allocates nothing, measured', () => {
   it('charges no packages/render/src file beyond its budget over three 3,000-frame windows', () => {
-    const { drive } = drivenGame()
+    const rig = drivenGame()
+    const { drive, game } = rig
     drive(WARMUP_FRAMES)
     const windows: Map<string, number>[] = []
     for (let w = 0; w < WINDOW_COUNT; w++) {
@@ -542,6 +568,30 @@ describe('the real draw path allocates nothing, measured', () => {
         }),
       )
     }
+
+    // ---------------------------------------------------------------------
+    // **LIVENESS FIRST, because every budget below is a claim about a running
+    // board** — the order `demoAllocation.test.ts` had to learn.
+    // ---------------------------------------------------------------------
+    //
+    // M1f Task 7 pauses the loop at each week boundary. This rig crosses the
+    // first one inside its last window, so without the card policy in `drive`
+    // the third of three profiles would be taken over a frozen sim and every
+    // offender list would be empty for the wrong reason.
+    // **AND THE MARGIN IS 63 TICKS, WHICH IS A STANDING HAZARD RATHER THAN A
+    // COMFORT — 1.1 %, against the 10 % criterion M1f Task 3 set for the demo
+    // rig after that one drove past its own death tick.** It is PRE-EXISTING:
+    // 10,500 frames x 16.7 ms / TICK_MS = 5,260.5 ticks on top of the 258-tick
+    // warm start is 5,518, and this task's card policy costs the one frame a
+    // resume eats (16.7 ms, half a tick), so the figure moved 5,518 -> 5,517.
+    // Any balance change that pulls `CITY_DEATH_TICK` in by 2 % puts these
+    // windows on a corpse. Until this task there was **no liveness guard on
+    // this test at all**, so that would have been silent; now it is red.
+    expect(isGameOver(game.state), 'the city dies at 5,580 and this rig must stop short').toBe(false)
+    expect(game.state.header[H_TICK], 'the measured end tick').toBe(5517)
+    expect(game.state.header[H_TICK]).toBeLessThan(CITY_DEATH_TICK)
+    expect(CITY_DEATH_TICK - 5517, 'the margin, in ticks — 2.1 s, and it is thin').toBe(63)
+    expect(rig.cardsTaken, 'the week-1 offer was raised inside window 3 and resolved').toBe(1)
 
     // **The harness must fail loudly when it resolves nothing.** A measurement
     // instrument that reports "clean" while measuring zero files is worse than

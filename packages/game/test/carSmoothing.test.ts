@@ -540,6 +540,11 @@ describe('the frame path actually draws the smoothed position', () => {
         onGameOver: (): void => {
           throw new Error('the smoothing rig reached game over — the chase would then be measured frozen')
         },
+        // This rig never calls `advance` at all — it drives `beforeStep` and
+        // `afterDrain` by hand — so this can only fire if that changes.
+        onOfferRaised: (): void => {
+          throw new Error('the smoothing rig stepped the sim — it only drives beforeStep and afterDrain')
+        },
       })
       driver.beforeStep()
       // The sim moves one tick's worth; the DRAIN is declared as `ticks`.

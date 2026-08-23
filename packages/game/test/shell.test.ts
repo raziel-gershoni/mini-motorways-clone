@@ -547,6 +547,13 @@ describe('the five matte fills tile the backing store the shell actually created
       // is what would have caught it silently going to six.
       gameOver: false,
       failedDest: -1,
+      // **No offer, for the same reason as `gameOver` above.** M1f Task 8's
+      // modal is another fill on top of these five, so a fixture that left
+      // these absent would assert the five-fill tiling against `undefined`
+      // rather than against a decision.
+      offerPending: false,
+      offerA: 0,
+      offerB: 0,
     }
   }
 

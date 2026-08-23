@@ -371,6 +371,26 @@ export function createGame(deps: GameDeps): Game {
         loop.end()
         erase.retire()
       },
+      // §5.10's weekly offer stopping the board — M1f Task 7.
+      //
+      // **`setPaused`, not `end()`**: this pause is temporary and the player
+      // is expected out of it. `end()` is sticky by design and would freeze
+      // the run permanently at the first week boundary.
+      //
+      // **Fired on the CONDITION rather than the edge** (`frame.ts`'s
+      // `onOfferRaised`), so this runs on every tick an offer is up.
+      // `setPaused(true)` early-returns when it is already true, so the repeat
+      // costs a comparison — and it buys the property that the HUD-clock tap
+      // cannot leave a modal standing over a live board: a resume runs one
+      // zero-tick frame (the clock reference resets), then one frame that
+      // drains a tick, and that tick re-arms this.
+      //
+      // **Between this task and Task 8 that is a board with no way out**, at
+      // 2:21 on the default layout — disclosed in the commit message and
+      // interlocked by `test/offerInterlock.test.ts`, which Task 8 deletes.
+      onOfferRaised: () => {
+        loop.setPaused(true)
+      },
     }),
     queue,
   )

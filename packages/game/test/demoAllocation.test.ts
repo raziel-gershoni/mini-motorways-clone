@@ -1,8 +1,16 @@
 import { describe, it, expect } from 'vitest'
 import { Session } from 'node:inspector'
-import { CT_REBUILDS, isGameOver, H_TICK, PHASE_OUTBOUND, PHASE_RETURNING } from '@laneways/sim'
+import {
+  CT_REBUILDS,
+  isGameOver,
+  offerPending,
+  H_TICK,
+  PHASE_OUTBOUND,
+  PHASE_RETURNING,
+} from '@laneways/sim'
 import type { AtlasContext, AtlasSurface } from '@laneways/render'
 import { DEMO_DEATH_TICK } from './deathTicks'
+import { takeCardPolicy } from './cardPolicy'
 import { createGame, type GameContext } from '../src/main'
 import { DEMO_LAYOUT_ID } from '../src/layouts'
 import { repoRelative } from './allocationPaths'
@@ -316,6 +324,7 @@ const M0_VIEW = {
 
 function demoRig(escapePerFrame: boolean) {
   const counts: DrawCounts = { blits: 0, fills: 0 }
+  let cardsTaken = 0
   const game = createGame({
     canvas: {
       width: 0,
@@ -336,6 +345,14 @@ function demoRig(escapePerFrame: boolean) {
   const drive = (count: number): void => {
     for (let i = 0; i < count; i++) {
       now += 16.7
+      // **M1f Task 7's card policy, and without it this file's third window
+      // profiles a STOPPED BOARD.** The demo board's 1,200-tick warm start plus
+      // ~0.5 ticks a frame reaches `TICKS_PER_WEEK` (4,500) around frame 6,600
+      // of the 9,500 this rig drives, at which point `onOfferRaised` pauses the
+      // loop and every tick after it is a frame that draws and simulates
+      // nothing. The budgets would all pass. See `cardPolicy.ts`; the liveness
+      // guards below are what turn that from silent into red.
+      if (takeCardPolicy(game, 0)) cardsTaken++
       game.frame(now)
       if (escapePerFrame) {
         // **It has to ESCAPE.** A non-escaping literal is removed by scalar
@@ -345,7 +362,14 @@ function demoRig(escapePerFrame: boolean) {
       }
     }
   }
-  return { game, drive, counts }
+  return {
+    game,
+    drive,
+    counts,
+    get cardsTaken(): number {
+      return cardsTaken
+    },
+  }
 }
 
 function inFlight(game: ReturnType<typeof createGame>): number {
@@ -359,7 +383,8 @@ function inFlight(game: ReturnType<typeof createGame>): number {
 
 describe('the frame loop on the demo board allocates nothing, measured', () => {
   it('charges no game, sim or render source file beyond its budget, over three windows', () => {
-    const { game, drive } = demoRig(false)
+    const rig = demoRig(false)
+    const { game, drive } = rig
     drive(WARMUP_FRAMES)
 
     // **The minimum over three windows, which is the instrument this repo
@@ -441,6 +466,13 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
       'this rig drove past the demo board’s death tick — the budgets below were measured on a corpse',
     ).toBeLessThan(DEMO_DEATH_TICK)
     expect(game.state.header[H_TICK], 'and the measured end tick is 5,958').toBe(5958)
+    // **The card policy fired, so the third window profiled a RUNNING board.**
+    // A policy that never runs is a policy that is not being tested, and here
+    // it is also the difference between the two liveness guards above being
+    // evidence and being decoration: they pass on a frozen board too, provided
+    // the freeze happens after the tick they compare against.
+    expect(rig.cardsTaken, 'the rig crossed the week-1 boundary and resolved the offer').toBe(1)
+    expect(offerPending(game.state), 'and left nothing pending behind it').toBe(false)
 
     const files = new Set<string>()
     for (const window of windows) {

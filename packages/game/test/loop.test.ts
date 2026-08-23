@@ -483,6 +483,61 @@ describe('pause and stall', () => {
     expect(rec.renderPaused).toEqual([false, true, true])
   })
 
+  /**
+   * **THE TICK-ACCOUNTING FACT M1f TASK 7 RESTS ON, PINNED HERE RATHER THAN
+   * DISCOVERED ON A DEVICE.**
+   *
+   * `frame` reads `paused` ONCE, above the `while` — so a pause raised from
+   * inside `driver.advance` does not stop the drain in progress. It stops the
+   * NEXT one. Task 7's `onOfferRaised` is raised from exactly there, so §5.10's
+   * modal opens up to **6 ticks past the week boundary** on a clamped catch-up
+   * frame (7 ticks in the burst, the first of which is the boundary itself),
+   * and 0 ticks past it on the 30–60 Hz frames a foreground tab actually runs.
+   *
+   * **Deliberately not changed, and the reasons are enumerated because the
+   * obvious repair looks free.** Re-checking `paused` inside the `while` would
+   * only DEFER the burst: the accumulator keeps the unspent time, so the same
+   * ticks run on the next unpaused frame. The ticks are invisible (the frame
+   * renders once, after the drain), replay-safe (`sim` has no notion of pause,
+   * so a log replays identically either way) and idempotent-safe (`runOffer`
+   * redraws the same pair on every tick of an unresolved week, because the draw
+   * is a pure function of `rng[0]` and the week and `rng[0]` never moves). So
+   * the player is shown the offer that was raised at the boundary whichever
+   * tick the pause lands on.
+   *
+   * The same is true of `end()`, which is where this was first measured.
+   */
+  it('a pause raised from INSIDE advance does not stop the drain in progress', () => {
+    let loopRef: Loop | null = null
+    let raised = 0
+    const rec = recorder(() => {
+      raised++
+      loopRef?.setPaused(true)
+    })
+    const loop = createLoop(rec.driver, createInputQueue())
+    loopRef = loop
+
+    loop.frame(1000)
+    expect(loop.paused).toBe(false)
+    // 2,000 ms, clamped to MAX_FRAME_DT_MS — the backgrounded-tab case, and the
+    // worst one available from a cold accumulator.
+    loop.frame(3000)
+
+    expect(loop.ticksLastFrame, 'the clamped drain ran to completion').toBe(7)
+    expect(raised, 'and advance was called on every one of them').toBe(7)
+    expect(loop.paused, 'the pause is live from the FIRST of the seven').toBe(true)
+    expect(rec.drainTicks, 'afterDrain still saw the whole burst').toEqual([7])
+    // One draw for the whole burst, so the six ticks past the pause are never
+    // on screen — which is why this is an accounting note and not a defect.
+    expect(rec.renderAlphas.length).toBe(2)
+
+    // ...and the pause bites on the NEXT frame, which is the half that makes
+    // it a pause at all.
+    loop.frame(3500)
+    expect(loop.ticksLastFrame).toBe(0)
+    expect(raised).toBe(7)
+  })
+
   it('ignores a redundant setPaused(false) — it must not reset the clock mid-run', () => {
     const { loop } = rig()
     loop.frame(1000)

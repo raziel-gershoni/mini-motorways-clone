@@ -8,6 +8,8 @@ import {
   failedDestination,
   isGameOver,
   neighbours,
+  offerPending,
+  offerSlot,
   step,
   tilesLeft,
   weekOfTick,
@@ -197,6 +199,9 @@ export function createFrameBuilder(state: GameState, world: WorldData, camera: C
     paused: false,
     gameOver: false,
     failedDest: -1,
+    offerPending: false,
+    offerA: 0,
+    offerB: 0,
   }
   return {
     frame,
@@ -505,6 +510,15 @@ export function buildFrame(
   // that and it returns -1 while the flag is clear.
   frame.gameOver = isGameOver(state)
   frame.failedDest = failedDestination(state)
+  // §5.10's offer, and **through `sim`'s own guards for the same reason as the
+  // two lines above**. `applyChooseCard` never clears `H_OFFER_A`/`H_OFFER_B`
+  // — deliberately, so that `offerSlot`'s `pending ? slot : CARD_NONE` is the
+  // single mechanism — so a fold that read the header directly would report
+  // last week's card on every frame for the rest of the run, and the modal
+  // that Task 8 draws off these three fields would be up over a live board.
+  frame.offerPending = offerPending(state)
+  frame.offerA = offerSlot(state, 0)
+  frame.offerB = offerSlot(state, 1)
 
   return frame
 }
@@ -545,6 +559,31 @@ export interface FrameDriverDeps {
    * hands it) announces nothing, and a frozen tick does not re-announce.
    */
   readonly onGameOver: () => void
+  /**
+   * Called on **every** tick §5.10's weekly offer is waiting to be taken.
+   * `main.ts` pauses the loop from it — M1f Task 7.
+   *
+   * **Required, not optional, and the type says so**, for the same reason as
+   * `onGameOver` above: an optional dependency here compiles a `main.ts` whose
+   * modal is drawn over a running sim, with cars moving behind it and the week
+   * advancing under it, and nothing at runtime says so. M2's optional
+   * `createFallback` is the precedent this project already paid for.
+   *
+   * **On the CONDITION, not the EDGE, and the contrast with `onGameOver` is the
+   * point.** Game over is terminal and must announce once. An offer is
+   * recurring and self-healing: firing whenever it holds means any path that
+   * unpauses with an offer still pending — the HUD-clock tap, a lost
+   * `choose-card`, a `setPaused` caller nobody has written yet — re-pauses on
+   * the next frame that drains a tick, so a modal can never be left standing
+   * over a live board. `setPaused(true)` is already idempotent, so the
+   * repetition costs one boolean read per tick.
+   *
+   * **`sim` gains nothing from this and must not.** The pause is a property of
+   * the shell; a replay reaches the same bytes whether or not anybody stopped
+   * to read a modal, which is what lets M3's Worker verify a run it never
+   * rendered.
+   */
+  readonly onOfferRaised: () => void
 }
 
 /**
@@ -588,6 +627,21 @@ export function createFrameDriver(deps: FrameDriverDeps): LoopDriver {
       const wasOver = isGameOver(state)
       step(state, world, fields, scratch, inputs)
       if (!wasOver && isGameOver(state)) deps.onGameOver()
+      // **On the CONDITION, not the edge, and the contrast with the line above
+      // is deliberate** — see `onOfferRaised`. One boolean read per tick, and
+      // it is what stops any resume from stranding a modal over a live board.
+      //
+      // **The pause it raises does not stop THIS drain**, because `loop.ts`
+      // reads `paused` once, above its `while`. Measured: a clamped 250 ms
+      // frame runs all 7 of its ticks with the pause live from the first, so
+      // the modal opens up to 6 ticks past the boundary on a catch-up frame and
+      // 0 past it on the frames a foreground tab runs. That is invisible (the
+      // frame renders once, after the drain), replay-safe (`sim` has no pause)
+      // and idempotent-safe (`runOffer` rewrites the same pair on every tick of
+      // an unresolved week), so it is accounted for rather than fixed —
+      // re-checking inside the `while` would only defer the same ticks.
+      // `loop.test.ts`'s *"a pause raised from INSIDE advance"* pins it.
+      if (offerPending(state)) deps.onOfferRaised()
     },
     afterDrain(ticks: number): void {
       // `ticks` stopped being ignorable at the smoothing change: it is the

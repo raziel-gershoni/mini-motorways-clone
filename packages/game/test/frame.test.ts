@@ -23,6 +23,7 @@ import {
   createFlowFields,
   createFieldInputRanges,
   isGameOver,
+  offerPending,
   placeHouse,
   placeDestination,
   placeRoad,
@@ -35,6 +36,7 @@ import {
   destMetaColour,
   destMetaKind,
   destMetaOrientation,
+  CARD_NONE,
   DEST_KIND_CIRCLE,
   DEST_KIND_SQUARE,
   ORIENTATION_E,
@@ -49,9 +51,13 @@ import {
   H_FAILED_DEST,
   H_GAME_OVER,
   H_HOUSE_COUNT,
+  H_OFFER_A,
+  H_OFFER_B,
+  H_OFFER_WEEK,
   H_SCORE,
   H_TICK,
   H_TILES,
+  H_WEEK,
   type FlowField,
   type GameState,
   type Scratch,
@@ -670,6 +676,56 @@ describe('the HUD scalars', () => {
     expect(frame.paused).toBe(true)
   })
 
+  /**
+   * §5.10's offer, folded onto the frame — M1f Task 7.
+   *
+   * **Through `sim`'s own `offerPending`/`offerSlot`, never off the header**, and
+   * the third block below is the whole reason. `applyChooseCard` deliberately
+   * does NOT clear `H_OFFER_A`/`H_OFFER_B` (see its comment: `offerSlot` already
+   * folds `pending ? slot : CARD_NONE`, and clearing would be a second mechanism
+   * for one fact), so a `buildFrame` that read the header directly would draw
+   * last week's card on every frame for the rest of the run — including over a
+   * running board, since the modal is up exactly while `offerPending` holds.
+   *
+   * **Every expected value here is a LITERAL read off `cards.ts`'s ids, not a
+   * call to `offerSlot`.** Deriving the expectation from the function under test
+   * is this repo's catalogue entry that cost M1f Task 6 two detectors.
+   */
+  it('carries the offer through offerSlot, and reads as NO CARD once the week is resolved', () => {
+    const r = rig(true)
+    const fb = builderFor(r)
+
+    // Week 0 has no offer at all — `offerPending` excludes it, because the
+    // first boundary is the START of week 1.
+    let frame = build(r, fb)
+    expect(frame.offerPending, 'week 0 cannot have an offer').toBe(false)
+    expect(frame.offerA).toBe(CARD_NONE)
+    expect(frame.offerB).toBe(CARD_NONE)
+
+    // A raised offer. `1` is CARD_ROAD_TILES and `7` is CARD_JUNCTION_UPGRADE —
+    // the two bits of `CARD_IMPLEMENTED_MASK`, written as the numbers the
+    // renderer will receive.
+    r.state.header[H_WEEK] = 1
+    r.state.header[H_OFFER_A] = 1
+    r.state.header[H_OFFER_B] = 7
+    frame = build(r, fb)
+    expect(frame.offerPending).toBe(true)
+    expect(frame.offerA, 'CARD_ROAD_TILES, as a plain number — render imports nothing from sim').toBe(1)
+    expect(frame.offerB, 'CARD_JUNCTION_UPGRADE').toBe(7)
+    expect(CARD_NONE, 'and the "no card" value the two above are distinguishable from').toBe(0)
+
+    // Resolved, exactly as `applyChooseCard` leaves it: `H_OFFER_WEEK` catches
+    // up and the two slots are left holding the real cards.
+    r.state.header[H_OFFER_WEEK] = 1
+    frame = build(r, fb)
+    expect(frame.offerPending).toBe(false)
+    expect(frame.offerA, 'reads as no offer').toBe(CARD_NONE)
+    expect(frame.offerB, 'and so does B').toBe(CARD_NONE)
+    expect(r.state.header[H_OFFER_A], 'while the header still holds the raw card, deliberately').toBe(1)
+    expect(r.state.header[H_OFFER_B]).toBe(7)
+    expect(offerPending(r.state), 'and the frame agrees with sim rather than with a copy').toBe(false)
+  })
+
   it('carries the camera it was handed, so a viewport change reaches the renderer', () => {
     const r = rig()
     const fb = builderFor(r)
@@ -1235,6 +1291,7 @@ function driverFor(
   fb: FrameBuilder,
   draw?: (f: RenderFrame) => void,
   onGameOver?: () => void,
+  onOfferRaised?: () => void,
 ): ReturnType<typeof createFrameDriver> {
   return createFrameDriver({
     state: r.state,
@@ -1246,8 +1303,10 @@ function driverFor(
     draw: draw ?? ((): void => {}),
     // Required in `FrameDriverDeps` and optional HERE: a default in the test
     // helper is not a default in the type, and the `@ts-expect-error` in
-    // section 8b is what pins the difference.
+    // section 8b is what pins the difference. The same is true of
+    // `onOfferRaised` (M1f Task 7) and section 8c pins that one.
     onGameOver: onGameOver ?? ((): void => {}),
+    onOfferRaised: onOfferRaised ?? ((): void => {}),
   })
 }
 
@@ -1552,6 +1611,11 @@ describe('createFrameDriver', () => {
         onGameOver: (): void => {
           throw new Error('the camera re-fit rig reached game over — it must not')
         },
+        // Two frames from a cold state: no week boundary is reachable, so a
+        // call here means the rig is no longer the two-frame rig it claims.
+        onOfferRaised: (): void => {
+          throw new Error('the camera re-fit rig crossed a week boundary — it runs two frames')
+        },
         camera: () => current,
         draw: (f): void => {
           drawn.push(f.camera)
@@ -1749,7 +1813,139 @@ describe('the frame driver follows the sim into game over', () => {
     // Vacuity for the `@ts-expect-error`: adding the property must make the
     // very same object legal, or the directive could be suppressing a
     // completely different error and still read as this guard.
-    const ok = createFrameDriver({ ...deps, onGameOver: (): void => {} })
+    //
+    // **BOTH required properties, and that is what keeps this arm honest.**
+    // M1f Task 7 made `onOfferRaised` required too, so `{ ...deps, onGameOver }`
+    // alone is now ALSO a type error — the directive above would still be
+    // "used" and this line would silently stop being a vacuity check. Section
+    // 8c pins `onOfferRaised`'s own requiredness separately.
+    const ok = createFrameDriver({
+      ...deps,
+      onGameOver: (): void => {},
+      onOfferRaised: (): void => {},
+    })
+    expect(typeof driver.advance).toBe('function')
+    expect(typeof ok.advance).toBe('function')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 8c. onOfferRaised: the CONDITION, not the edge — M1f Task 7
+// ---------------------------------------------------------------------------
+
+/**
+ * The pause behind §5.10's modal, at the driver.
+ *
+ * **The contrast with 8b is the whole content of this section.** `onGameOver`
+ * is terminal and must announce ONCE, so `advance` reads `wasOver` before the
+ * step. An offer is recurring and self-healing, so `advance` fires whenever
+ * `offerPending(state)` holds AFTER the step — which means any path that
+ * unpauses with an offer still up (the HUD clock tap; a lost `choose-card`; a
+ * future `setPaused` caller nobody has written yet) re-pauses on the next frame
+ * that drains a tick. `setPaused(true)` is idempotent, so the repetition costs
+ * one boolean read per tick and buys "a modal can never be left over a live
+ * board".
+ *
+ * The fixture pokes `H_TICK` to one tick short of the boundary rather than
+ * driving 4,499 real ticks, in `oneTickFromShutdown`'s idiom and for the same
+ * reason: phase 1 recomputes `H_WEEK` from `H_TICK`, so the boundary is exact
+ * and the 4,499 ticks would be testing `clock.ts` a second time.
+ */
+function oneTickFromTheBoundary(): Rig {
+  const r = rig(true)
+  r.state.header[H_TICK] = TICKS_PER_WEEK - 1
+  return r
+}
+
+describe('the frame driver raises the offer pause on the CONDITION', () => {
+  it('fires on EVERY tick an offer is pending, not once on the edge', () => {
+    const r = oneTickFromTheBoundary()
+    const fb = builderFor(r)
+    let calls = 0
+    const driver = driverFor(r, fb, undefined, undefined, () => {
+      calls++
+    })
+
+    driver.advance(NO_ACTIONS)
+    expect(r.state.header[H_TICK], 'the boundary tick itself').toBe(TICKS_PER_WEEK)
+    expect(offerPending(r.state), 'the sim raised one').toBe(true)
+    expect(calls, 'and the driver said so').toBe(1)
+
+    driver.advance(NO_ACTIONS)
+    driver.advance(NO_ACTIONS)
+    // **An EDGE-fired callback scores 1 here.** That is mutant 1 in this task's
+    // table, and this is its detector: the offer is still pending, so the shell
+    // must still be being told.
+    expect(calls, 'three ticks with an offer up, three notifications').toBe(3)
+  })
+
+  it('says nothing at all while no offer is pending', () => {
+    const r = rig(true)
+    const fb = builderFor(r)
+    let calls = 0
+    const driver = driverFor(r, fb, undefined, undefined, () => {
+      calls++
+    })
+    for (let i = 0; i < 20; i++) driver.advance(NO_ACTIONS)
+    expect(r.state.header[H_TICK]).toBe(20)
+    expect(offerPending(r.state), 'week 0 — the first boundary is the START of week 1').toBe(false)
+    expect(calls).toBe(0)
+  })
+
+  it('stops the moment the week is RESOLVED, through the real choose-card action', () => {
+    // The production loop out of the pause: the player takes a card, `step`
+    // applies it in phase 3, `H_OFFER_WEEK` catches up and the condition is
+    // false on the next tick. Driven through `TickInputs` rather than by poking
+    // `H_OFFER_WEEK`, so the path the shell actually uses is the path pinned.
+    const r = oneTickFromTheBoundary()
+    const fb = builderFor(r)
+    let calls = 0
+    const driver = driverFor(r, fb, undefined, undefined, () => {
+      calls++
+    })
+    driver.advance(NO_ACTIONS)
+    expect(calls).toBe(1)
+
+    const card = r.state.header[H_OFFER_A] as number
+    expect(card, 'the pool has two implemented cards, so a real one was raised').not.toBe(CARD_NONE)
+    const tilesBefore = tilesLeft(r.state)
+    driver.advance({ actions: [{ kind: 'choose-card', a: 0, b: card }] })
+
+    expect(offerPending(r.state), 'the week is resolved').toBe(false)
+    expect(calls, 'and the driver went quiet on the tick that resolved it').toBe(1)
+    // The grant landed: 30 for CARD_ROAD_TILES (1), 20 for
+    // CARD_JUNCTION_UPGRADE (7). Hand-carried off §5.10's table, NOT read back
+    // through `cardTileGrant` — that is the formula under test.
+    expect(tilesLeft(r.state) - tilesBefore, `card ${card}`).toBe(card === 1 ? 30 : 20)
+
+    for (let i = 0; i < 10; i++) driver.advance(NO_ACTIONS)
+    expect(calls, 'and stays quiet for the rest of the week').toBe(1)
+  })
+
+  it('requires onOfferRaised in the TYPE, so a caller that forgets it does not compile', () => {
+    // **The same mutation, and the same absence of a runtime detector, as
+    // `onGameOver` in 8b.** An OPTIONAL `onOfferRaised` compiles a `main.ts`
+    // that draws §5.10's modal over a board that is still running: cars keep
+    // moving behind it, the week keeps advancing under it, and the offer the
+    // player is looking at is replaced while they read it. Nothing at runtime
+    // would say so, which is exactly M2's optional `createFallback`.
+    const r = rig()
+    const fb = builderFor(r)
+    const deps = {
+      state: r.state,
+      world: r.world,
+      fields: r.fields,
+      scratch: r.scratch,
+      builder: fb,
+      camera: () => r.camera,
+      draw: (): void => {},
+      onGameOver: (): void => {},
+    }
+    // @ts-expect-error onOfferRaised is REQUIRED — see the comment above.
+    const driver = createFrameDriver(deps)
+    // Vacuity, exactly as in 8b: the same object plus the one property must
+    // compile, or the directive could be suppressing an unrelated error.
+    const ok = createFrameDriver({ ...deps, onOfferRaised: (): void => {} })
     expect(typeof driver.advance).toBe('function')
     expect(typeof ok.advance).toBe('function')
   })

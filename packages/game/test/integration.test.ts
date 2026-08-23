@@ -15,6 +15,10 @@ import {
 import {
   H_DEST_COUNT,
   H_HOUSE_COUNT,
+  H_INV_UPGRADES,
+  H_OFFER_A,
+  H_OFFER_B,
+  H_OFFER_WEEK,
   H_SCORE,
   H_TICK,
   H_TILES,
@@ -29,6 +33,8 @@ import {
   failedDestination,
   isGameOver,
   occupantOf,
+  offerPending,
+  offerSlot,
   packRouteStep,
   assertOccupancyComplete,
   assertOccupancySound,
@@ -40,7 +46,14 @@ import {
   H_ROUTES_REFUSED,
   type TickAction,
 } from '@laneways/sim'
-import { MAX_BLOCKED_TICKS, TICKS_PER_SECOND, TICKS_PER_WEEK } from '@laneways/shared'
+import {
+  CARD_GRANT_ITEM,
+  CARD_GRANT_ROAD_TILES,
+  MAX_BLOCKED_TICKS,
+  TICKS_PER_SECOND,
+  TICKS_PER_WEEK,
+  UPGRADES_PER_CARD,
+} from '@laneways/shared'
 import { PALETTE, type AtlasContext, type AtlasSurface } from '@laneways/render'
 import {
   buildJamRig,
@@ -63,6 +76,7 @@ import { SizingOutcome } from '../src/shell'
 import { DEMO_WARM_START_TICKS } from '../src/demoLayout'
 import { CITY_LAYOUT_ID, DEMO_LAYOUT_ID, DEFAULT_LAYOUT_ID, LAYOUT_IDS } from '../src/layouts'
 import { CITY_DEATH_TICK, DEMO_DEATH_TICK } from './deathTicks'
+import { takeCardPolicy } from './cardPolicy'
 import {
   armCarpark,
   armGreedyActions,
@@ -305,6 +319,26 @@ interface Rig {
   readonly oneTick: (alpha: number) => void
   /** Runs one frame `ms` later, whatever that turns out to be. Returns the tick count. */
   readonly advance: (ms: number) => number
+  /**
+   * One frame, `ms` later, **with the card policy switched off** — M1f Task 7.
+   *
+   * The cases that are ABOUT the offer pause have to be able to sit inside it:
+   * `advance` and `oneTick` resolve an offer the moment one is up, which is
+   * exactly what every other case in this file needs and exactly what a test of
+   * the pause must not have. Returns the tick count, like `advance`.
+   */
+  readonly advanceRaw: (ms: number) => number
+  /**
+   * How many weekly card offers this rig has resolved — M1f Task 7.
+   *
+   * **The policy lives inside the rig's two frame helpers rather than at each
+   * of the nine drive loops in this file**, because a per-loop policy is a
+   * policy somebody forgets: measured before it existed, the offer pause put
+   * **11 genuine reds** into this file and `demoAllocation.test.ts` and skipped
+   * four more cases behind a failed `beforeAll`. It is a no-op on every case
+   * that stops inside week 0, which is most of them. See `cardPolicy.ts`.
+   */
+  readonly cardsTaken: number
   /** Swaps the viewport the shell will measure next. */
   readonly setView: (view: (typeof M0_VIEW) | (typeof NARROW_VIEW)) => void
   readonly viewportChanged: (stable: boolean) => void
@@ -344,6 +378,7 @@ function buildRig(
   const ctx = new RecordingContext()
   let view: (typeof M0_VIEW) | (typeof NARROW_VIEW) = M0_VIEW
   let restarts = 0
+  let cardsTaken = 0
   const game = createGame({
     restart: () => {
       restarts++
@@ -388,6 +423,9 @@ function buildRig(
     get restarts(): number {
       return restarts
     },
+    get cardsTaken(): number {
+      return cardsTaken
+    },
     cx: (gx) => {
       const c = camera()
       return CANVAS_LEFT + c.originX + (gx - c.x0) * c.tileSize + c.tileSize / 2
@@ -399,11 +437,27 @@ function buildRig(
     oneTick: (alpha) => {
       // `accumulator` is in [0, TICK_MS), so this delta puts `accumulator + dt`
       // in [TICK_MS, 2 * TICK_MS): exactly one tick, remainder `alpha * TICK_MS`.
+      //
+      // **Except on the frame after a resume, which runs ZERO ticks whatever
+      // the delta is** — `setPaused(false)` sets `resetClock`, so the next
+      // frame assigns `lastTime = now` and `rawDt` is 0. Every caller in this
+      // file either loops until the tick lands (`driveArm`, the death loops) or
+      // stops inside week 0, where the policy below never fires.
       now += TICK_MS + alpha * TICK_MS - game.loop.accumulator
       ctx.log = []
+      // BEFORE the frame, so the action is enqueued and consumed inside one
+      // call and `driveArm`'s "the queue was drained" check still holds.
+      if (takeCardPolicy(game, 0)) cardsTaken++
       game.frame(now)
     },
     advance: (ms) => {
+      now += ms
+      ctx.log = []
+      if (takeCardPolicy(game, 0)) cardsTaken++
+      game.frame(now)
+      return game.loop.ticksLastFrame
+    },
+    advanceRaw: (ms) => {
       now += ms
       ctx.log = []
       game.frame(now)
@@ -3754,6 +3808,234 @@ describe('a boot that throws puts the reason on the screen', () => {
 })
 
 // ---------------------------------------------------------------------------
+// M1f TASK 7 — THE WEEK BOUNDARY STOPS THE BOARD
+// ---------------------------------------------------------------------------
+
+/**
+ * §5.10's weekly offer, reaching the shell — and **the first change in this
+ * milestone a player cannot miss.**
+ *
+ * Six tasks in a row have shipped "a human sees nothing". This one stops the
+ * board, on the board a plain load opens, at a time this block asserts rather
+ * than asserts around. Everything here is driven through `advanceRaw`, which is
+ * `advance` with the card policy switched off: the policy is what keeps the
+ * other nine drive loops in this file alive, and a test OF the pause must be
+ * able to sit inside it.
+ */
+/**
+ * One frame that advances EXACTLY one tick, **with the card policy off**.
+ *
+ * `buildRig`'s `oneTick` without the policy: the delta is self-correcting
+ * against the live accumulator, so it cannot drift into the zero-tick /
+ * two-tick alternation that `now += TICK_MS` produces (`driveArm`'s own note
+ * measures it). **After a resume it still runs zero ticks** — `resetClock`
+ * forces `rawDt` to 0 whatever the delta says — which is the property the
+ * two-frame cases below are about.
+ */
+function rawTick(rig: Rig): number {
+  return rig.advanceRaw(TICK_MS + 0.5 * TICK_MS - rig.game.loop.accumulator)
+}
+
+describe('the weekly card offer stops the board', () => {
+  it('stops the board a plain load opens at 2:21.4 on a stopwatch, with no card and no way past it', () => {
+    const rig = buildRig({ layoutId: undefined })
+    expect(rig.game.layoutId, 'the board a plain load opens').toBe(DEFAULT_LAYOUT_ID)
+    expect(rig.game.warmStartTicks, "the city's own warm start").toBe(WARM_START_TICKS)
+
+    // 60 Hz frames — a real display, and the cadence that makes the claim below
+    // exact: at 16.7 ms every frame runs 0 or 1 ticks, never 2, so the pause
+    // lands ON the boundary tick and not up to 6 past it. `loop.test.ts`'s
+    // *"a pause raised from INSIDE advance"* owns the other end of that range.
+    let frames = 0
+    while (!rig.game.loop.paused && frames < 20000) {
+      rig.advanceRaw(16.7)
+      frames++
+    }
+
+    expect(rig.game.loop.paused, 'the board stopped, unprompted').toBe(true)
+    expect(rig.game.state.header[H_TICK], 'on the week-1 boundary tick itself').toBe(TICKS_PER_WEEK)
+    expect(offerPending(rig.game.state), 'because the sim raised an offer').toBe(true)
+
+    // **The stopwatch reading, in §14's units — `(tick - warmStart) / 30`.**
+    // (4500 - 258) / 30 = 141.4 s = 2 min 21.4 s. The raw tick counter says
+    // 150.0 s; the two are different counters and this says which is which.
+    expect((TICKS_PER_WEEK - WARM_START_TICKS) / TICKS_PER_SECOND).toBeCloseTo(141.4, 1)
+    expect(Math.floor(141.4 / 60), 'minutes').toBe(2)
+    expect(TICKS_PER_WEEK / TICKS_PER_SECOND, 'and the raw-counter reading, which is NOT it').toBe(150)
+
+    // What a person sees, in the three things the frame carries. The HUD clock
+    // stops at week 1 day 0 and the pause bars go up beside it (`canvas.ts`
+    // draws them on `frame.paused && !frame.gameOver`).
+    const frame = rig.game.builder.frame
+    expect(frame.paused, 'the pause bars are drawn').toBe(true)
+    expect(frame.gameOver, 'and they are not the shutdown scrim').toBe(false)
+    expect([frame.week, frame.day], 'the clock stops here').toEqual([1, 0])
+    expect(frame.offerPending, 'and Task 8 has three fields to draw a modal from').toBe(true)
+
+    // **And there is no way past it, which is why this commit ships an
+    // interlock.** The HUD clock is the only pause control a player has; the
+    // pause fires on the CONDITION, so a tap buys exactly one tick and the next
+    // drained tick re-arms it. `offerInterlock.test.ts` is the red test that
+    // says this state must not be deployed.
+    const tapClock = (): void => {
+      rig.game.loop.setPaused(false)
+      // Two frames, and `rawTick` rather than 16.7 ms: the first frame after
+      // any resume runs zero ticks whatever its length, and at 60 Hz the
+      // second one only drains if the frozen accumulator happened to be over
+      // half a tick. One tick per tap is the honest count.
+      rawTick(rig)
+      rawTick(rig)
+    }
+    const before = rig.game.state.header[H_TICK] as number
+    for (let taps = 0; taps < 5; taps++) tapClock()
+    expect(
+      (rig.game.state.header[H_TICK] as number) - before,
+      'five taps, five ticks — 4,500 to a week, so this is not an escape',
+    ).toBe(5)
+    expect(rig.game.loop.paused, 'and it is stopped again after every one').toBe(true)
+  })
+
+  it('re-pauses when anything resumes with an offer still up — and it takes TWO frames', () => {
+    // **The condition, not the edge, and the two-frame count is `loop.ts`
+    // rather than a tolerance.** `setPaused(false)` sets `resetClock`, so the
+    // next `frame(now)` assigns `lastTime = now` before computing `rawDt`:
+    // `rawDt` is 0, the accumulator is untouched, and that frame runs ZERO
+    // ticks. `advance` is never called, so nothing can re-raise the pause. The
+    // SECOND frame is the first one that can drain, and it re-arms.
+    //
+    // An EDGE-fired callback leaves the board running here for the rest of the
+    // week with a modal over it. That is mutant 1 of this task's table and this
+    // is its end-to-end detector.
+    const rig = buildRig({ layoutId: undefined, warmStartTicks: TICKS_PER_WEEK - 1 })
+    expect(rig.game.state.header[H_TICK]).toBe(TICKS_PER_WEEK - 1)
+    expect(offerPending(rig.game.state), 'still week 0 — no offer yet').toBe(false)
+
+    rig.advanceRaw(16.7) // the clock reference: zero ticks, by construction
+    while (!rig.game.loop.paused) rig.advanceRaw(16.7)
+    expect(rig.game.state.header[H_TICK]).toBe(TICKS_PER_WEEK)
+
+    rig.game.loop.setPaused(false)
+    expect(rawTick(rig), 'the first frame after ANY resume runs no ticks').toBe(0)
+    expect(rig.game.loop.paused, 'so nothing could have re-armed it yet').toBe(false)
+    expect(rawTick(rig), 'the second frame is the first that can drain').toBe(1)
+    expect(rig.game.loop.paused, 'and the condition re-armed on it').toBe(true)
+  })
+
+  it('does not pause ten ticks short of the boundary, and the offer is not up either', () => {
+    const rig = buildRig({ layoutId: undefined, warmStartTicks: TICKS_PER_WEEK - 11 })
+    for (let f = 0; f < 21; f++) rig.advanceRaw(16.7)
+    expect(rig.game.state.header[H_TICK], 'ten ticks short').toBe(TICKS_PER_WEEK - 1)
+    expect(offerPending(rig.game.state)).toBe(false)
+    expect(rig.game.loop.paused).toBe(false)
+    expect(rig.game.builder.frame.offerPending).toBe(false)
+    expect(rig.game.builder.frame.offerA).toBe(0)
+  })
+
+  it('carries the offer onto the render frame, and stops carrying it the tick it is taken', () => {
+    const rig = buildRig({ layoutId: undefined, warmStartTicks: TICKS_PER_WEEK - 1 })
+    rig.advanceRaw(16.7)
+    while (!rig.game.loop.paused) rig.advanceRaw(16.7)
+
+    const frame = rig.game.builder.frame
+    // Against the header, which is where the cards actually are — and both
+    // slots are real, distinct, implemented cards.
+    expect(frame.offerA).toBe(rig.game.state.header[H_OFFER_A])
+    expect(frame.offerB).toBe(rig.game.state.header[H_OFFER_B])
+    expect(new Set([frame.offerA, frame.offerB]).size, 'two DIFFERENT cards').toBe(2)
+    expect([1, 7], 'and both are in CARD_IMPLEMENTED_MASK').toContain(frame.offerA)
+    expect([1, 7]).toContain(frame.offerB)
+    expect(frame.offerA).toBe(offerSlot(rig.game.state, 0))
+
+    // Take slot A through the queue, exactly as the policy and Task 8's pointer
+    // will, and let the two frames a resume costs run.
+    const tilesBefore = tilesLeft(rig.game.state)
+    const taken = frame.offerA
+    expect(takeCardPolicy(rig.game, 0), 'the policy fires while the modal is up').toBe(true)
+    expect(rawTick(rig), 'the resume frame drains nothing').toBe(0)
+    expect(rawTick(rig), 'and the next one applies the choice').toBe(1)
+
+    expect(rig.game.loop.paused, 'the board runs again').toBe(false)
+    expect(rig.game.state.header[H_OFFER_WEEK], 'the week is resolved').toBe(1)
+    // §5.10's grants, hand-carried: ROAD TILES (1) pays 30 tiles and 0 items,
+    // JUNCTION UPGRADE (7) pays 20 tiles and 2 items.
+    expect(tilesLeft(rig.game.state) - tilesBefore).toBe(taken === 1 ? 30 : 20)
+    expect(rig.game.state.header[H_INV_UPGRADES]).toBe(taken === 1 ? 0 : 2)
+
+    // **And the frame stops reporting an offer, while the HEADER still holds
+    // the cards.** `applyChooseCard` never clears the slots, so a `buildFrame`
+    // reading them directly would draw this week's modal over every remaining
+    // frame of the run.
+    expect(frame.offerPending).toBe(false)
+    expect(frame.offerA, 'reads as no offer').toBe(0)
+    expect(frame.offerB).toBe(0)
+    expect(rig.game.state.header[H_OFFER_A], 'while the header still holds the raw card').toBe(taken)
+    expect(rig.game.state.header[H_OFFER_A]).not.toBe(0)
+
+    // ...and it does not come back until the NEXT boundary.
+    for (let f = 0; f < 40; f++) rawTick(rig)
+    expect(rig.game.loop.paused).toBe(false)
+    expect(rig.game.builder.frame.offerPending).toBe(false)
+  })
+
+  it('freezes the demo board mid-traffic, with the cars a measured 0.09-0.22 cells short of the sim', () => {
+    // **The city is the wrong board for this claim and the demo is the right
+    // one.** With no input the starting city has no road, so no car ever
+    // leaves its house — `maxInFlight` is 0 on its no-input arm — and "the cars
+    // freeze" would be satisfied by a board on which nothing was moving. The
+    // demo board seeds 71 road cells and carries 15+ cars in flight.
+    const rig = buildRig({ layoutId: DEMO_LAYOUT_ID, warmStartTicks: TICKS_PER_WEEK - 1 })
+    rig.advanceRaw(16.7)
+    while (!rig.game.loop.paused) rig.advanceRaw(16.7)
+    expect(rig.game.state.header[H_TICK]).toBe(TICKS_PER_WEEK)
+
+    const frame = rig.game.builder.frame
+    const snaps = rig.game.builder.snapshots
+    expect(frame.carCount, 'cars on the board').toBeGreaterThanOrEqual(15)
+
+    // The picture is a still one: frames of different lengths, so a residual
+    // accumulator or a live alpha would show as movement.
+    const drawn = (): string => Array.from(frame.carXY.slice(0, frame.carCount * 2)).join(',')
+    const still = drawn()
+    for (let k = 0; k < 30; k++) rig.advanceRaw(20 + (k % 7) * 5)
+    expect(drawn(), 'the board is a still image while the offer is up').toBe(still)
+    expect(rig.game.loop.ticksLastFrame, 'and no tick ran').toBe(0)
+
+    // ---------------------------------------------------------------------
+    // **THE CARS DO NOT SETTLE, AND M1f IS WHAT GIVES THAT AN AUDIENCE.**
+    // ---------------------------------------------------------------------
+    //
+    // The drawn position chases the sim position inside the drain; pausing
+    // stops the drain, so the chase stops wherever it was. Until this task the
+    // only pauses were a HUD-clock tap and the terminal freeze; from this task
+    // the weekly modal holds one for as long as the player takes to choose,
+    // four times a run. Measured here and bounded by the same derivation
+    // `resolve.ts` carries: `MAX_DRAW_LAG_CELLS + MAX_SIM_CELLS_PER_TICK`.
+    let worst = 0
+    let n = 0
+    for (let i = 0; i < snaps.slots; i++) {
+      if ((snaps.currLive[i] as number) === 0) continue
+      worst = Math.max(
+        worst,
+        Math.hypot(
+          (frame.carXY[n * 2] as number) - (snaps.currXY[i * 2] as number),
+          (frame.carXY[n * 2 + 1] as number) - (snaps.currXY[i * 2 + 1] as number),
+        ),
+      )
+      n++
+    }
+    expect(worst, 'the drawn cars did NOT converge onto the sim positions').toBeGreaterThan(0)
+    expect(worst, 'one lag plus one tick of travel, which is the bound that holds').toBeLessThan(
+      MAX_DRAW_LAG_CELLS + MAX_SIM_CELLS_PER_TICK,
+    )
+    // The property that makes it acceptable rather than merely bounded: a
+    // cell's half-width is 0.5, so every frozen car is still drawn on its own
+    // road rather than beside it. Task 12's device session is the instrument
+    // for whether it reads as a stop or as a stutter.
+    expect(worst, 'a frozen car is still on the road').toBeLessThan(0.5)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // M1e TASK 12 — THE RUN CAN BE LOST END TO END, ON THE PRODUCTION BOOT PATH
 // ---------------------------------------------------------------------------
 
@@ -3791,6 +4073,10 @@ interface ArmWeek {
   readonly peakDestPins: number
   readonly peakOvercrowd: number
   readonly tilesLeft: number
+  /** Cards resolved so far, cumulative — M1f Task 7. */
+  readonly cardsTaken: number
+  /** `H_INV_UPGRADES` at the close of this week, cumulative. */
+  readonly upgradesHeld: number
 }
 
 interface ArmRun {
@@ -3819,6 +4105,24 @@ interface ArmRun {
   readonly firstRuleEventTick: number
   /** `[cell, count]`, count descending. */
   readonly ruleEventCells: readonly (readonly [number, number])[]
+  /**
+   * How many weekly card offers this arm resolved — M1f Task 7. One per week
+   * boundary it crossed, taken from slot A. **A policy that never fires is a
+   * policy that is not being tested**, so every arm asserts this is non-zero.
+   */
+  readonly cardsTaken: number
+  /**
+   * `H_INV_UPGRADES` at the end of the run: `UPGRADES_PER_CARD` (2) per
+   * JUNCTION UPGRADE card taken, and nothing else writes it in M1f.
+   *
+   * **This is what makes the moved tile ledger a derivation rather than a
+   * paste.** Slot A's card is a draw, so the split between the two implemented
+   * cards is not knowable in advance — but the two counters together pin it:
+   * `upgradeCards = upgradesHeld / 2`, `tileCards = cardsTaken - upgradeCards`,
+   * and the extra tiles are `20 * upgradeCards + 30 * tileCards` off §5.10's
+   * table. Each arm below checks its own ledger against that identity.
+   */
+  readonly upgradesHeld: number
 }
 
 /** Twelve weeks, which is 54,000 ticks — long enough for every arm to end. */
@@ -3889,6 +4193,8 @@ function driveArm(arm: CityArm): ArmRun {
       peakDestPins: wkPins,
       peakOvercrowd: wkOvercrowd,
       tilesLeft: tilesLeft(state),
+      cardsTaken: rig.cardsTaken,
+      upgradesHeld: state.header[H_INV_UPGRADES] as number,
     })
     weekTrips = state.header[H_SCORE] as number
     weekFires = firesSoFar(state)
@@ -4033,7 +4339,52 @@ function driveArm(arm: CityArm): ArmRun {
     ruleEvents,
     firstRuleEventTick,
     ruleEventCells: censusCellTable(ruleTally),
+    cardsTaken: rig.cardsTaken,
+    upgradesHeld: state.header[H_INV_UPGRADES] as number,
   }
+}
+
+/**
+ * The tiles the CARDS added on top of `WEEKLY_TILE_GRANT`, from the two
+ * counters the run recorded — M1f Task 7.
+ *
+ * **The grants are hand-carried literals off spec §5.10's table, NOT read back
+ * through `cardTileGrant`.** M1f Task 6 measured what the alternative costs:
+ * every behavioural assertion in `cards.test.ts` computed its expected tile
+ * total from the same function the mutation edits, so swapping the two grants
+ * was invisible everywhere except that function's own unit test — 1 detector,
+ * repaired to 3 by writing the two numbers out. The two `expect`s below are the
+ * watcher on the copy, so a retune fails here instead of silently rescaling
+ * every arm's ledger.
+ */
+function armCardTiles(r: ArmRun): number {
+  expect(CARD_GRANT_ROAD_TILES, '§5.10: ROAD TILES pays 30').toBe(30)
+  expect(CARD_GRANT_ITEM, '§5.10: the item row pays 20').toBe(20)
+  expect(UPGRADES_PER_CARD, '§5.10: 2 items for 20 tiles').toBe(2)
+  const upgradeCards = r.upgradesHeld / 2
+  const tileCards = r.cardsTaken - upgradeCards
+  expect(tileCards, 'the two card counts must partition the cards taken').toBeGreaterThanOrEqual(0)
+  return upgradeCards * 20 + tileCards * 30
+}
+
+/**
+ * The per-week `tilesLeft` series **with M1f Task 7's card grants subtracted
+ * back out** — i.e. the ledger this arm carried before it had a card policy.
+ *
+ * **This is the reproduce-before-you-contradict step, and it is the only reason
+ * the moved ledger below is a derivation rather than a paste.** The catalogue's
+ * rule is that a rig which disagrees with the record is more likely to be wrong
+ * than the record is; here the record is `37` and `94`, measured at M1f Task 3,
+ * and this function has to give them back before the new figures mean anything.
+ * Cards are taken immediately after a boundary, so a card taken at the start of
+ * week `w` is fully inside week `w`'s row.
+ */
+function armLedgerWithoutCards(weeks: readonly ArmWeek[]): number[] {
+  return weeks.map((w) => {
+    const upgradeCards = w.upgradesHeld / 2
+    const tileCards = w.cardsTaken - upgradeCards
+    return w.tilesLeft - (upgradeCards * 20 + tileCards * 30)
+  })
 }
 
 const armRuns = new Map<CityArm, ArmRun>()
@@ -4152,9 +4503,29 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     // entity count is not growth in the behaviour anyone wanted.
     expect(r.weeks.at(-1)?.dests).toBe(5)
     expect(r.weeks.at(-1)?.houses).toBe(10)
-    // The tile grant landed exactly once inside 5,580 ticks: 30 + 30.
+    // -------------------------------------------------------------------
+    // THE TILE LEDGER, AND THE ONE FIGURE M1f TASK 7 MOVED ON THIS ARM
+    // -------------------------------------------------------------------
+    //
+    // The weekly grant landed exactly once inside 5,580 ticks: 30 + 30 = 60 at
+    // the week-1 boundary, and week 0's row is closed ON that boundary tick,
+    // before the card can be taken. **Unmoved.**
     expect(r.weeks[0]?.tilesLeft).toBe(60)
-    expect(r.weeks[1]?.tilesLeft).toBe(60)
+    // **Week 1's row MOVED, 60 -> 80, and this is the whole behavioural
+    // footprint of the card policy on a board nobody plays.** The rig takes
+    // slot A's card the moment the offer pauses the loop, one tick after the
+    // boundary; slot A drew the JUNCTION UPGRADE, which pays 20 tiles and 2
+    // items. Nothing spends either, so the run is otherwise byte-for-byte the
+    // arm Task 3 measured — the death tick, the killer, the score, the peak
+    // pins and the population above are all unmoved, and they are the
+    // assertions that say so.
+    expect(r.cardsTaken, 'one week boundary crossed, one offer resolved').toBe(1)
+    expect(r.upgradesHeld, 'slot A drew the junction upgrade: UPGRADES_PER_CARD items').toBe(2)
+    expect(armCardTiles(r), 'so the cards added 20 tiles and no more').toBe(20)
+    expect(r.weeks[1]?.tilesLeft).toBe(80)
+    // Reproduced against the figure this arm carried BEFORE the card policy.
+    expect(armLedgerWithoutCards(r.weeks), 'the pre-Task-7 ledger, recovered').toEqual([60, 60])
+    expect(WEEKLY_TILE_GRANT, 'and the grant those 60s are two of').toBe(30)
     // The killer runs past the CIRCLE's hard cap, which is the roadless
     // signature: nothing consumes a pin, so the count only climbs.
     expect(r.weeks[1]?.peakDestPins).toBe(PIN_CAP_CIRCLE_HARD)
@@ -4199,6 +4570,15 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     expect(r.weeks[1]?.fires).toBe(55)
     expect(32 / 38).toBeCloseTo(0.842, 3)
     expect(39 / 55).toBeCloseTo(0.709, 3)
+
+    // **M1f Task 7: this arm crosses one boundary and takes one card, and NOT
+    // ONE FIGURE ABOVE MOVED.** The opening is a fixed 20-tile stroke laid on
+    // the first tick, so the arm has nothing to spend a bonus on — the extra
+    // tiles sit in the ledger, which this arm does not assert, and the two
+    // items sit in `H_INV_UPGRADES`, which nothing in M1f places. Task 8 owns
+    // the modal; Task 9 owns spending the upgrade.
+    expect(r.cardsTaken, 'one boundary at 4,500 inside 8,661 ticks').toBe(1)
+    expect(r.upgradesHeld + armCardTiles(r), 'a card WAS taken, and it granted something').toBeGreaterThan(0)
 
     // Degeneracy guards. Both are satisfied by construction above and are here
     // because the failure they catch — an arm that stops driving — is exactly
@@ -4368,12 +4748,52 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     expect(r.maxInFlight, "Gate A's peak cars in motion — 11 pre-M1f, 12 under the wide rule").toBe(11)
     expect(r.weeks.map((w) => w.dests)).toEqual([5, 6, 8, 10, 10])
     expect(r.weeks.map((w) => w.houses)).toEqual([8, 13, 17, 21, 21])
-    // Tiles never bind. The run is two weeks shorter so the ceiling falls with
-    // it — 151 was week 6's figure and there is no week 6 — but the FLOOR is
-    // unmoved at 37, which is the half this assertion is about.
-    expect(Math.min(...r.weeks.map((w) => w.tilesLeft))).toBe(37)
-    expect(Math.max(...r.weeks.map((w) => w.tilesLeft))).toBe(94)
+    // ---------------------------------------------------------------------
+    // **THE TILE LEDGER — THE ONLY THING M1f TASK 7 MOVED ON THIS ARM, AND THE
+    // PREDICTION THAT SAID SO BEFORE IT WAS RUN.**
+    // ---------------------------------------------------------------------
+    //
+    // Task 7 gives every frame-driven rig a card policy, so this arm now
+    // receives `CARD_GRANT_ITEM` (20) or `CARD_GRANT_ROAD_TILES` (30) on top of
+    // `WEEKLY_TILE_GRANT` at each of the four boundaries it crosses. The task
+    // brief predicted that this re-bases *"the death tick, the trips, the tile
+    // ledger, the week rows"* and all six census figures, on the reasoning that
+    // more tiles build more road sooner.
+    //
+    // **It does not, and the refutation was derivable from the line below
+    // before the run.** `armGreedyActions` reads the budget in exactly ONE
+    // place — `if (found.cost > tilesLeft(state)) { tally.unaffordable++;
+    // continue }` — and `r.unaffordable` is **0** across all 21,783 ticks, with
+    // a floor of 37 tiles in hand. The connector was never once refused for
+    // money, so money it did not need changes nothing it does: same strokes,
+    // same order, same ticks. Every behavioural figure in this case is
+    // therefore UNMOVED, and the assertions above are the evidence rather than
+    // the claim.
+    //
+    // The floor and the ceiling below ARE moved, and both are re-derived:
+    // `armLedgerWithoutCards` subtracts the grants back out and must give the
+    // pre-Task-7 pair `37` / `94` — reproduce before you contradict.
     expect(r.unaffordable, 'the greedy policy never once could not afford its next connection').toBe(0)
+    expect(r.cardsTaken, 'four boundaries inside 21,783 ticks: 4,500 / 9,000 / 13,500 / 18,000').toBe(4)
+    const preCards = armLedgerWithoutCards(r.weeks)
+    expect(Math.min(...preCards), 'the pre-Task-7 floor, recovered exactly').toBe(37)
+    expect(Math.max(...preCards), 'and the pre-Task-7 ceiling').toBe(94)
+    expect(preCards, 'week by week, so the recovery is visible and not just its extremes').toEqual([
+      37, 50, 74, 94, 94,
+    ])
+    // ...and the ledger the arm now carries. Every row differs from the row
+    // above it by that week's cumulative card grant and by nothing else.
+    // ...and the ledger the arm now carries. Row by row the difference is
+    // `0 / 20 / 40 / 60 / 90` — three JUNCTION UPGRADE cards at 20 in weeks 1,
+    // 2 and 3 and a ROAD TILES card at 30 in week 4 — which is `armCardTiles`
+    // below, and nothing else moved with it.
+    expect(r.weeks.map((w) => w.tilesLeft), 'the post-Task-7 ledger').toEqual([37, 70, 114, 154, 184])
+    expect(r.upgradesHeld, 'three upgrade cards at UPGRADES_PER_CARD items each').toBe(6)
+    expect(armCardTiles(r), '3 x 20 + 1 x 30').toBe(90)
+    expect(
+      r.weeks.map((w, i) => (w.tilesLeft - (preCards[i] as number))),
+      'the cumulative card grant, week by week — the whole difference between the two ledgers',
+    ).toEqual([0, 20, 40, 60, 90])
 
     // ---------------------------------------------------------------------
     // THE FIRST HONEST COUNT OF THE ANTI-DEADLOCK VALVE ON A PLAYED BOARD

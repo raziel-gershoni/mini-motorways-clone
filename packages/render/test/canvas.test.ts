@@ -401,6 +401,14 @@ function frameA(paused = false): RenderFrame {
     // shutdown describe at the bottom of this file.
     gameOver: false,
     failedDest: -1,
+    // **The three offer fields, explicit and false/zero for the same reason
+    // `gameOver` above is** — M1f Task 7 put them on the frame and M1f Task 8
+    // draws the modal off them. A fixture that left them absent would make
+    // every "the modal is not drawn" assertion pass on `undefined` rather than
+    // on a decision.
+    offerPending: false,
+    offerA: 0,
+    offerB: 0,
   }
 }
 
@@ -629,6 +637,14 @@ function frameB(paused = false): RenderFrame {
     paused,
     gameOver: false,
     failedDest: -1,
+    // **The three offer fields, explicit and false/zero for the same reason
+    // `gameOver` above is** — M1f Task 7 put them on the frame and M1f Task 8
+    // draws the modal off them. A fixture that left them absent would make
+    // every "the modal is not drawn" assertion pass on `undefined` rather than
+    // on a decision.
+    offerPending: false,
+    offerA: 0,
+    offerB: 0,
   }
 }
 

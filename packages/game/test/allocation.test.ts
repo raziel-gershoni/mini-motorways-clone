@@ -562,6 +562,21 @@ function buildRig(draw: (frame: RenderFrame) => void): Rig {
           'the allocation rig reached game over — every budget in this file was measured on a frozen sim',
         )
       },
+      // **A throw rather than a card policy, and that is a claim this file can
+      // make and the two allocation files on `createGame` cannot** — M1f Task
+      // 7. This rig has no warm start and drives `WARMUP_FRAMES + PROFILED_FRAMES`
+      // = 4,200 frames of 16.7 ms at ~0.5 ticks a frame, so it ends around tick
+      // 2,100 and never reaches `TICKS_PER_WEEK` (4,500). A call here means the
+      // knobs grew past the first week boundary, at which point the shipped
+      // `onOfferRaised` would pause the loop and every window below would be
+      // profiling a stopped board — the failure mode this file's own
+      // `onGameOver` throw exists for, reached through a different door.
+      onOfferRaised: (): void => {
+        throw new Error(
+          'the allocation rig crossed a week boundary — the offer pause would freeze it, and the ' +
+            'budgets below would be measured on a stopped board. See TICKS_PER_WEEK against the frame count.',
+        )
+      },
     }),
     queue,
   )
