@@ -942,3 +942,28 @@ Related, and this milestone produced both within a day: [a durable artefact that
 of the measurement]. There the correction was written **beside** the defect — one file quoted a wrong
 figure and corrected it while the header two directories away kept asserting it. Here the correction
 was **reported** but never written. Same failure, different half.
+
+## A snapshot of a mid-edit tree becomes a verification in exactly one hop
+
+An agent finishing M1f Task 4 noticed a second agent writing to the shared checkout, stopped, and —
+before standing down — ran two greps to check whether the in-flight code respected the interlock and
+the RNG ban it had just built. Both looked right. It reported that as *"a snapshot of a mid-edit tree,
+not a review."*
+
+**I relayed it as "the interlock is being used exactly as designed" and "the RNG ban is holding."**
+One hop, and a qualified observation became an unqualified fact. The agent caught it and said so:
+those greps are evidence the other task was on the right path *at that instant*, not evidence about
+its eventual commit — the file was being edited while the grep ran, and its own test suite was
+mid-flight.
+
+This document already records that **a secondhand claim gains confidence at each hop while gaining no
+evidence**. What this instance adds is how short the chain can be. There was no misunderstanding, no
+paraphrase drift, and the original was explicitly hedged. The hedge simply did not survive being
+useful — the observation was reassuring, and reassuring things get repeated without their conditions.
+
+Two practical rules. **A measurement taken against a tree someone else is writing to is provisional by
+construction**, and the provisionality belongs in the same sentence as the number, every time it is
+repeated. And **schedule the re-check rather than trusting the snapshot**: both facts here are cheap
+to confirm at the real commit — the RNG ban re-verifies itself the moment the suite runs, and the
+interlock is one grep — so the correct response to a hedged snapshot is a queued verification, not a
+confident restatement.
