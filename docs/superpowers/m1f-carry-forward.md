@@ -1278,6 +1278,25 @@ M1e's restart is `location.reload()`: correct by construction, preserves
 > `n = 2` slot B has one candidate — measured, 0 of 20,000 seeds differ at n = 2
 > against 13,320 of 20,000 at n = 4. A three-card pin in `cards.test.ts` covers
 > that line instead. **Do not diagnose a moved golden as the re-mix.**
+>
+> **M1f Task 6 moved NOTHING, and the reason is worth one line because it is the
+> reason Task 7 and Task 8 will move things.** Task 6 wired `choose-card` as a
+> `TickActionKind` and `applyChooseCard` as its phase-3 handler, which writes
+> `H_TILES`, `H_INV_UPGRADES` and `H_OFFER_WEEK`. **No golden fixture enqueues
+> any action at all**, so all nine are unmoved and `H_OFFER_WEEK` is 0 in every
+> one of them — verified by running them, and re-verified as a property by
+> `m1fSplice.ts`'s `assertM1fShapeApartFromTheOffer`, which asserts the slot
+> beside the hash so a golden that started to resolve a week fails there rather
+> than in a digest. The clause that ends this is **Task 7 giving the headless
+> rigs a card policy**: from that point a rig that takes a card moves `H_TILES`
+> by 20 or 30 on top of the weekly grant, and any golden it drives re-blesses.
+> Task 7 owns naming which.
+>
+> **The nine, at Task 6, all green and all unmoved:** state `2986084740`,
+> road-network `1099508647`, field `252514232`, loop `1219899230`, queue
+> `3831930847`, demand-pin `884326142`, multipliers `2274456329`, seed
+> `613441763` (both sites), demo `4178976587` — plus the rejected circle variant
+> `2889011739`.
 
 M1e opened with seven goldens and closes with **nine**. Two were minted in the
 milestone (Task 1's re-bless produced no new digest; Task 6's demand-pin golden

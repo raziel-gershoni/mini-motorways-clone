@@ -792,92 +792,66 @@ export interface TickInputs {
  * 12.**
  *
  * **The predictions were written into this comment before the battery ran, and
- * FOUR OF THE FIVE HELD.** Canonical invocation, 2,070 tests, nineteen
- * unmutated baselines interleaved through the battery — one control per mutant
- * — crash screen (error classes plus `Test timed out`) **0 matches on all 38
- * runs**, and the collection count **2,068 on every one of them at the time**,
- * so no row is a crash count wearing a kill count's clothes.
+ * FOUR OF THE FIVE HELD.** Canonical invocation, **2,070 tests**, with one
+ * unmutated baseline per mutant; crash screen (the error classes **plus
+ * `Test timed out`**) **0 matches across all 90 runs of this task's batteries**,
+ * screened on lines that are not vitest result lines after the `pnpm -r` package
+ * prefix is stripped; collection **2,070 on every run of the final table**, so
+ * no row is a crash count wearing a kill count's clothes.
  *
  * ```
  *   pair    Task 5   predicted   measured   detectors
- *   1<->3      7          7        **13**   step.test x1, week.test x2,
- *                                           integration x3, cards.test x7
+ *   1<->3      7          7        16 #     step.test x1, week.test x2,
+ *                                           integration x3, cards.test x10
  *   2<->3      1          1            1    week.test x1
- *   2<->4      1          1          2 #    week.test x1 + cards.test x1
- *   3<->4      0     NON-ZERO        1 #    **cards.test.ts, "THROWS on the
- *                                           boundary tick itself"**
- *   3<->6      1          1            2    spawn.test x1 + cards.test x1
+ *   2<->4      1          1            3    week.test x1 + cards.test x2
+ *   3<->4      0     NON-ZERO          2    **cards.test x2** — the boundary-tick
+ *                                           throw and the forged CARD_NONE
+ *   3<->6      1          1            3    spawn.test x1 + cards.test x2
  * ```
  *
- * `#` = the quiet re-measured figure. `2<->4`'s battery run read 3 and `3<->4`'s
- * read 2; the discarded detector in each case was an allocation window — game's
- * `allocation.test.ts` ghost-path budget and render's `drawAllocation.test.ts`
- * respectively — and `packages/render` imports nothing from `packages/sim`, so
- * that one is unreachable by construction rather than by judgement. **Measured
- * flake rate on the unmutated tree in this battery: 2 of 19 baselines non-zero,
- * both allocation windows.**
+ * `2<->4`, `3<->4`, `M1`, `M2` and `M8` were each re-run **four times against
+ * four fresh baselines** and every one of them scored the same value in 4 of 4;
+ * `3<->6` scored 3 in 3 of 3.
  *
- * **`1 <-> 3` is the prediction that was WRONG, and it was wrong in the
- * direction that matters least and is still worth recording: 7 -> 13.** Every
- * one of the six new detectors is a Task 6 test in `cards.test.ts` that drives
- * to a week boundary and then asserts an exact tile total, so it fails when the
- * grant reads `tick - 1` and lands a tick late. Not one of them was written for
- * the tick order. That is the same windfall Task 5 recorded for its own
- * disjointness test, at six times the size — and the reason to write it down is
- * that a later reader comparing 13 against Task 5's 7 must not read the
- * difference as the tick order having become better defended. It has not; the
- * suite simply grew a describe block full of boundary-crossing tile arithmetic.
+ * **`#` marks the one cell whose printed value is not its raw reading, and the
+ * discount is EVIDENCED rather than judged.** `1<->3` read **17** in two runs of
+ * three, and the extra red was always `packages/game`'s `allocation.test.ts`
+ * *"charges nothing to sim/roads.ts — canPlaceRoad allocates 0 B per call, drag
+ * and idle"*. That mutant does move the input loop, which that window profiles,
+ * so reachability alone would NOT license discounting it — what settles it is
+ * that **an unmutated baseline in the same battery failed the identical case**.
+ * Run the control as many times as the mutant. **Measured flake rate on the
+ * unmutated tree across this task: 4 of 33 baselines non-zero — 12 %** — every
+ * one an allocation window, none a timeout.
+ *
+ * **`1 <-> 3` is the prediction that was WRONG: 7 -> 16.** All nine new
+ * detectors are Task 6 tests in `cards.test.ts` that cross a week boundary and
+ * then assert an exact tile total, so they fail when the grant reads `tick - 1`
+ * and lands a tick late. **Not one was written for the tick order.** A later
+ * reader comparing 16 against Task 5's 7 must not read the difference as this
+ * ordering having become better defended — it has not; the suite grew a describe
+ * block full of boundary-crossing tile arithmetic. Same windfall Task 5 recorded
+ * for its own disjointness test, at nine times the size.
  *
  * **`3 <-> 4` is the row this task existed to close.** On the boundary tick the
  * clock has already advanced, so `offerPending` is TRUE while `H_OFFER_A` still
  * holds `CARD_NONE`; a `choose-card` echoing week 1's real card therefore
  * throws. Put `runOffer` in front of the input loop and the pair is already
- * raised, the echo matches, and the choice resolves the week in silence. One
- * detector, and it is the first evidence this ordering has ever had.
+ * raised, the echo matches, and the choice resolves the week in silence. Two
+ * detectors, and they are the first evidence this ordering has ever had.
  *
- * **`2 <-> 4` gained the same test as a second detector, and `2 <-> 4` is still
- * NOT a refutation of the phase-2 / phase-4 disjointness claim.** The positional
- * transposition of 2 and 4 also reverses 3 against 4, so it moves the offer in
- * front of the input loop exactly as `3 <-> 4` does; that is what the new
- * detector sees. The card's tile bonus is still paid in phase 3 and 2 <-> 4
- * still cannot reach it.
+ * **`2 <-> 4` gained the same two tests, and it is still NOT a refutation of the
+ * phase-2 / phase-4 disjointness claim.** A positional transposition of 2 and 4
+ * also reverses 3 against 4, so it moves the offer in front of the input loop
+ * exactly as `3 <-> 4` does; that is what the two new detectors see. The card's
+ * tile bonus is still paid in phase 3 and `2 <-> 4` still cannot reach it.
  *
- * **`4 <-> 5` was NOT re-run in this task and is still Task 5's 0.** Nothing
- * between the offer and the spawner reads the offer slots yet; **M1f Task 8's
- * frame fold** is what makes that position observable and Task 12's closing
- * sweep is where it gets re-measured. The other fifty rows are Task 5's,
- * unchanged by a task that moved no phase, and Task 12 owns re-running them.
- *
- * **`1 <-> 2` and `1 <-> 3` produce the identical detector SET for the third
- * sweep running** — `step.test.ts` x1, `week.test.ts` x2, `integration.test.ts`
- * x3 — which is the same non-coincidence recorded at eight and ten phases: both
- * orderings put the grant in front of the advance, so the grant reads `tick - 1`
- * either way. **They gained a SEVENTH detector in this task, and it is one of
- * Task 5's own**: `cards.test.ts`'s *"runOffer writes H_TILES never, so phases 2
- * and 4 are disjoint by construction"* drives to the tick before a boundary and asserts the
- * grant lands, so it fails when the grant misses the boundary. A test written to
- * pin phase 4's disjointness turns out to pin phase 1's position as well; that is
- * a windfall, not a design, and it is recorded as one.
- *
- * **`3 <-> 6` is 1, not 0, and the two phases still commute** — `spawn.test.ts`'s
- * paving test, exactly as M1e Task 12 measured for the same pair under its old
- * label `3 <-> 5`. `3 <-> 5` itself is also 1, the same detector, for the same
- * positional reason. Do not read either as the inputs-versus-demand handoff
- * having been discharged; `step.test.ts`'s disjointness scan is still its only
- * tripwire.
- *
- * **`10 <-> 11` is 1 here and was 2 at M1e Task 12 under its old label
- * `9 <-> 10`.** `trips.test.ts`'s brink test survives;
- * `integration.test.ts`'s death-tick arm — which at M1e caught the transposition
- * as `expected 31457 to be 31456` — does not fire. **The measurement is the
- * measurement and the explanation is a hypothesis, labelled as one:** M1f Task 3
- * re-based that arm from 31,456 to 21,783 for crossing-only conflicts, so the
- * plausible reading is that the meter's one-tick error no longer lands where the
- * assertion looks. **Nobody has tested that**, and it would take a deliberate
- * probe to settle. Recorded as a coverage LOSS rather than absorbed: this pair is
- * one detector poorer than M1e left it, and `trips.test.ts`'s pair of brink tests
- * is again the only thing standing between the ordering and a silent
- * regression.
+ * **`4 <-> 5` was NOT re-run here and is still Task 5's 0.** Nothing between the
+ * offer and the spawner reads the offer slots yet; **M1f Task 8's frame fold** is
+ * what makes that position observable and Task 12's closing sweep is where it
+ * gets re-measured. The other fifty rows are Task 5's, unchanged by a task that
+ * moved no phase, and Task 12 owns re-running them.
  *
  * Pure in the sense that matters: the result depends only on the contents of
  * `s.buffer`, `world`, `fields`/`scratch` (both re-derivable from `s.buffer`
