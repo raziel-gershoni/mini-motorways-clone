@@ -3,8 +3,14 @@ import {
   DPR_CAP_DEFAULT,
   DPR_CAP_LOW,
   HUD_BAND_CSS,
+  OFFER_GAP_CSS,
+  OFFER_MARGIN_CSS,
+  OFFER_PEEK_H_CSS,
+  OFFER_PEEK_W_CSS,
+  OFFER_TITLE_H_CSS,
   createGridHit,
   createHudRects,
+  createOfferRects,
   createPoint,
   effectiveDpr,
   fitCamera,
@@ -12,12 +18,15 @@ import {
   gridToScreenX,
   gridToScreenY,
   hudRects,
+  offerRects,
   screenToGrid,
 } from '../src/camera'
 import {
   HitRegion,
   type Camera,
   type GridHit,
+  type OfferRects,
+  type Rect,
   type RevealedRect,
   type ViewportMetrics,
 } from '../src/types'
@@ -682,5 +691,201 @@ describe('hudRects — three elements, all inside the HUD band and below the gri
     const returned = hudRects(cam, out)
     expect(returned).toBe(out)
     expect(returned.clock).toBe(clock) // the nested rects are reused, not replaced
+  })
+})
+
+// ---------------------------------------------------------------------------
+// offerRects — §5.10's modal, M1f Task 8
+// ---------------------------------------------------------------------------
+
+/**
+ * The three rects, as a list with names, so every loop below reports WHICH one
+ * failed rather than that something did.
+ */
+function threeRects(r: OfferRects): readonly (readonly [string, Rect])[] {
+  return [
+    ['cardA', r.cardA],
+    ['cardB', r.cardB],
+    ['peek', r.peek],
+  ] as const
+}
+
+function overlaps(a: Rect, b: Rect): boolean {
+  return (
+    Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) > 0 &&
+    Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y)) > 0
+  )
+}
+
+/**
+ * The viewport `fitCamera` clamps for — a hidden webview, or a measurement taken
+ * mid-rotation. Not hypothetical: `fitCamera` has a documented `Math.max(1, …)`
+ * on the tile for exactly this input, and the plain formula puts `originY` at
+ * **-47** and `hudTop` at **-25**, both off the canvas entirely.
+ */
+const DEGENERATE: ViewportMetrics = {
+  cssW: 0,
+  cssH: 0,
+  topInset: 0,
+  bottomInset: 0,
+  rawDpr: 1,
+  performanceClass: null,
+}
+
+describe('offerRects — two cards and a way out, laid out inside the board band', () => {
+  it('lays the three rects out at hand-computed coordinates on the 390 px fixture', () => {
+    // Every number is written as a literal, computed by hand from the fixture
+    // and never from the expression under test:
+    //
+    //   top    = originY 95      bottom = hudTop 738      innerH = 643
+    //   left   = 16              innerW = 390 - 32 = 358
+    //   titleH = 28   peekH = 44   gap = 12
+    //   cardH  = floor((643 - 28 - 44 - 36) / 2) = floor(535 / 2) = 267
+    //   cardA  y = 95 + 28 + 12 = 135          cardB y = 135 + 267 + 12 = 414
+    //   peek   y = 738 - 44 = 694              peek  x = 16 + floor((358-132)/2) = 129
+    const r = offerRects(phone390Camera(), createOfferRects())
+    expect([r.cardA.x, r.cardA.y, r.cardA.w, r.cardA.h]).toEqual([16, 135, 358, 267])
+    expect([r.cardB.x, r.cardB.y, r.cardB.w, r.cardB.h]).toEqual([16, 414, 358, 267])
+    expect([r.peek.x, r.peek.y, r.peek.w, r.peek.h]).toEqual([129, 694, 132, 44])
+  })
+
+  it('lays them out against the M0 device too, so nothing is a property of one viewport', () => {
+    //   top 86, bottom 764, innerH 678, innerW 406 - 32 = 374
+    //   cardH = floor((678 - 28 - 44 - 36) / 2) = floor(570 / 2) = 285
+    //   cardA y = 86 + 40 = 126     cardB y = 126 + 285 + 12 = 423
+    //   peek  y = 764 - 44 = 720    peek x = 16 + floor((374-132)/2) = 137
+    const r = offerRects(fitCamera(M0_DEVICE, REVEALED_RECT), createOfferRects())
+    expect([r.cardA.x, r.cardA.y, r.cardA.w, r.cardA.h]).toEqual([16, 126, 374, 285])
+    expect([r.cardB.y, r.cardB.h]).toEqual([423, 285])
+    expect([r.peek.x, r.peek.y, r.peek.w, r.peek.h]).toEqual([137, 720, 132, 44])
+  })
+
+  it('keeps every rect inside the canvas and out of the HUD band, at three viewports', () => {
+    // SHORT_WIDE is in the list because HEIGHT binds there — it is the only
+    // fixture that can see a layout derived from the width alone.
+    for (const view of [M0_DEVICE, PHONE_390, SHORT_WIDE]) {
+      const cam = fitCamera(view, REVEALED_RECT)
+      const r = offerRects(cam, createOfferRects())
+      for (const [name, rect] of threeRects(r)) {
+        expect(rect.x, `${name} starts left of the canvas`).toBeGreaterThanOrEqual(0)
+        expect(rect.y, `${name} starts above the canvas`).toBeGreaterThanOrEqual(0)
+        expect(rect.x + rect.w, `${name} runs past the canvas`).toBeLessThanOrEqual(cam.cssW)
+        expect(rect.y + rect.h, `${name} runs past the canvas`).toBeLessThanOrEqual(cam.cssH)
+        expect(rect.y, `${name} is above the safe-area top`).toBeGreaterThanOrEqual(cam.originY)
+        expect(rect.y + rect.h, `${name} runs into the HUD band`).toBeLessThanOrEqual(cam.hudTop)
+        // **The non-vacuity half.** Every bound above is satisfied by a rect of
+        // zero area, and zero-area rects also "never overlap" — so without this
+        // the whole describe would pass on a function that wrote nothing.
+        expect(rect.w, `${name} is empty`).toBeGreaterThan(0)
+        expect(rect.h, `${name} is empty`).toBeGreaterThan(0)
+      }
+    }
+  })
+
+  it('never overlaps its own three rects, and the peek control overlaps neither card', () => {
+    for (const view of [M0_DEVICE, PHONE_390, SHORT_WIDE]) {
+      const r = offerRects(fitCamera(view, REVEALED_RECT), createOfferRects())
+      expect(overlaps(r.cardA, r.cardB), 'the two cards overlap').toBe(false)
+      expect(overlaps(r.cardA, r.peek), 'peek is under card A').toBe(false)
+      expect(overlaps(r.cardB, r.peek), 'peek is under card B').toBe(false)
+      // Ordered top to bottom, which is what makes "the second card" a thing a
+      // player can point at rather than a slot index.
+      expect(r.cardA.y + r.cardA.h).toBeLessThanOrEqual(r.cardB.y)
+      expect(r.cardB.y + r.cardB.h).toBeLessThanOrEqual(r.peek.y)
+      // Non-vacuous on `overlaps` itself: it must report true for something.
+      expect(overlaps(r.cardA, { x: r.cardA.x, y: r.cardA.y, w: 4, h: 4 })).toBe(true)
+    }
+  })
+
+  it('never covers the HUD clock, which is a pause control the modal refuses', () => {
+    // The scrim DOES cover it — deliberately, so it cannot read as live — but
+    // the tappable rects must not, or a player aiming at a card lands on a
+    // control `pointer.ts` answers with REFUSED_OFFER_MODAL.
+    for (const view of [M0_DEVICE, PHONE_390, SHORT_WIDE]) {
+      const cam = fitCamera(view, REVEALED_RECT)
+      const r = offerRects(cam, createOfferRects())
+      const hud = hudRects(cam, createHudRects())
+      for (const [name, rect] of threeRects(r)) {
+        for (const el of ['clock', 'score', 'tiles'] as const) {
+          expect(overlaps(rect, hud[el]), `${name} covers the ${el}`).toBe(false)
+        }
+      }
+    }
+  })
+
+  it('collapses to zero area on the viewport fitCamera clamps for, rather than going off-canvas', () => {
+    // **Stated as an outcome rather than left to pass as "nothing overlaps".**
+    // On this viewport the plain formula puts the board band at
+    // `[-47, -25)` — entirely off the canvas — so an unclamped layout would
+    // hand `pointer.ts` three touch targets at negative coordinates and
+    // `canvas.ts` three negative-height fills.
+    const cam = fitCamera(DEGENERATE, REVEALED_RECT)
+    expect(cam.originY, 'the unclamped band really is off-canvas').toBe(-47)
+    expect(cam.hudTop).toBe(-25)
+    const r = offerRects(cam, createOfferRects())
+    for (const [name, rect] of threeRects(r)) {
+      expect([rect.x, rect.y, rect.w, rect.h], `${name} left the canvas`).toEqual([0, 0, 0, 0])
+    }
+  })
+
+  it('keeps the way OUT when the space runs out before the cards do', () => {
+    // A viewport with a real but tiny board band. The cards lose their height
+    // first and the peek control keeps the strip, because a modal a player
+    // cannot dismiss and cannot see past is the state M1f Task 7 shipped on
+    // purpose and interlocked against.
+    const tight = fitCamera(
+      { cssW: 320, cssH: 160, topInset: 0, bottomInset: 0, rawDpr: 1, performanceClass: null },
+      REVEALED_RECT,
+    )
+    const r = offerRects(tight, createOfferRects())
+    const band = Math.max(0, Math.min(tight.hudTop, tight.cssH) - Math.max(0, tight.originY))
+    expect(band, 'the band is real but tiny').toBeGreaterThan(0)
+    expect(band).toBeLessThan(OFFER_TITLE_H_CSS + OFFER_PEEK_H_CSS + 3 * OFFER_GAP_CSS)
+    expect(r.peek.h, 'the way out survives').toBeGreaterThan(0)
+    expect(r.cardA.h, 'the cards do not').toBe(0)
+    expect(r.cardB.h).toBe(0)
+    for (const [name, rect] of threeRects(r)) {
+      expect(rect.y, `${name} left the canvas`).toBeGreaterThanOrEqual(0)
+      expect(rect.y + rect.h, `${name} left the canvas`).toBeLessThanOrEqual(tight.cssH)
+    }
+  })
+
+  it('never lets the side margin swallow the canvas on a viewport narrower than it', () => {
+    // `left` is clamped to half the width, so a 20 px canvas gets a 10 px
+    // margin and a zero-width card rather than a card of width -12.
+    const narrow = fitCamera(
+      { cssW: 20, cssH: 600, topInset: 0, bottomInset: 0, rawDpr: 1, performanceClass: null },
+      REVEALED_RECT,
+    )
+    const r = offerRects(narrow, createOfferRects())
+    for (const [name, rect] of threeRects(r)) {
+      expect(rect.w, `${name} has a negative width`).toBeGreaterThanOrEqual(0)
+      expect(rect.x + rect.w, `${name} runs past the canvas`).toBeLessThanOrEqual(narrow.cssW)
+    }
+    expect(OFFER_MARGIN_CSS * 2, 'and the fixture really is narrower than two margins').toBeGreaterThan(
+      narrow.cssW,
+    )
+  })
+
+  it('sizes the peek control as a real touch target wherever there is room for one', () => {
+    for (const view of [M0_DEVICE, PHONE_390, SHORT_WIDE]) {
+      const r = offerRects(fitCamera(view, REVEALED_RECT), createOfferRects())
+      expect(r.peek.w).toBe(OFFER_PEEK_W_CSS)
+      expect(r.peek.h).toBe(OFFER_PEEK_H_CSS)
+      expect(r.peek.h, '44 CSS px is the floor, not a look').toBeGreaterThanOrEqual(44)
+    }
+  })
+
+  it("writes into the caller's object and returns it, allocating nothing", () => {
+    const out = createOfferRects()
+    const cardA = out.cardA
+    const returned = offerRects(phone390Camera(), out)
+    expect(returned).toBe(out)
+    expect(returned.cardA).toBe(cardA) // the nested rects are reused, not replaced
+    // ...and calling it twice with a different camera rewrites the SAME objects
+    // rather than leaving the first camera's numbers behind.
+    offerRects(fitCamera(M0_DEVICE, REVEALED_RECT), out)
+    expect(out.cardA).toBe(cardA)
+    expect(out.cardA.w).toBe(374)
   })
 })

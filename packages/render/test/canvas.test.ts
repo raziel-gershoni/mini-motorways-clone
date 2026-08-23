@@ -11,12 +11,18 @@ import {
   type AtlasVariantCode,
 } from '../src/atlas'
 import {
+  CARD_LABELS,
+  CARD_LABEL_COUNT,
   CAR_SIZE_FRACTION,
   DEST_ORIENTATION_N,
   DEST_ORIENTATION_S,
   HUD_FONT,
+  OFFER_TITLE_TEXT,
   PAUSE_BAR_FRACTION,
+  PEEK_RETURN_TEXT,
+  PEEK_TEXT,
   MAX_DRAWN_PINS,
+  RESTART_TEXT,
   RING_MIN_SWEEP,
   RING_RADIUS_FRACTION,
   RING_WIDTH_FRACTION,
@@ -29,7 +35,7 @@ import {
   type DrawContext,
   type DrawImageSource,
 } from '../src/canvas'
-import { createHudRects, fitCamera, hudRects } from '../src/camera'
+import { createHudRects, createOfferRects, fitCamera, hudRects, offerRects } from '../src/camera'
 import { PALETTE } from '../src/palette'
 import { TerrainClass } from '../src/types'
 import type { Camera, Palette, Rect, RenderFrame } from '../src/types'
@@ -409,6 +415,14 @@ function frameA(paused = false): RenderFrame {
     offerPending: false,
     offerA: 0,
     offerB: 0,
+    // The five M1f Task 8 fields, explicit for the same reason. `offerPeek` in
+    // particular gates a phase inside a phase: a fixture that left it absent
+    // would make the peek arm unreachable while every assertion still passed.
+    offerGrantA: 0,
+    offerGrantB: 0,
+    offerItemsA: 0,
+    offerItemsB: 0,
+    offerPeek: false,
   }
 }
 
@@ -645,6 +659,14 @@ function frameB(paused = false): RenderFrame {
     offerPending: false,
     offerA: 0,
     offerB: 0,
+    // The five M1f Task 8 fields, explicit for the same reason. `offerPeek` in
+    // particular gates a phase inside a phase: a fixture that left it absent
+    // would make the peek arm unreachable while every assertion still passed.
+    offerGrantA: 0,
+    offerGrantB: 0,
+    offerItemsA: 0,
+    offerItemsB: 0,
+    offerPeek: false,
   }
 }
 
@@ -3439,5 +3461,263 @@ describe('failedText: the fourth single-slot cache in this file', () => {
     expect(shutdownTexts(drawWith(gameOverFrame({ failedDest: 1, destCount: 2 })))).toContain(
       'NOTHING CAN REACH DESTINATION 1',
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 12: §5.10's offer modal — M1f Task 8
+// ---------------------------------------------------------------------------
+
+/**
+ * Fixture B with an offer up. **Every field is a knob**, because the whole point
+ * of this phase is that the numbers on screen come from the frame rather than
+ * from literals in `canvas.ts`, and a fixture that could not vary them could not
+ * tell the two apart.
+ *
+ * The two card ids are **bare integer literals with a comment naming the sim
+ * constant each stands for**, because `packages/render/package.json` declares no
+ * dependencies at all: `import { CARD_ROAD_TILES } from '@laneways/sim'` does
+ * not resolve here and never will (spec §4, `test/boundary.test.ts`). Their
+ * agreement with `cards.ts` is pinned in `packages/game/test/frame.test.ts`,
+ * which is the only package that can see both.
+ */
+const ROAD_TILES = 1 //       CARD_ROAD_TILES, pinned in game/test/frame.test.ts
+const JUNCTION_UPGRADE = 7 // CARD_JUNCTION_UPGRADE, same pin
+
+function offerFrame(
+  options: {
+    offerPending?: boolean
+    offerA?: number
+    offerB?: number
+    offerGrantA?: number
+    offerGrantB?: number
+    offerItemsA?: number
+    offerItemsB?: number
+    offerPeek?: boolean
+    gameOver?: boolean
+    camera?: Camera
+  } = {},
+): RenderFrame {
+  const base = frameB()
+  return {
+    ...base,
+    camera: options.camera ?? base.camera,
+    gameOver: options.gameOver ?? false,
+    offerPending: options.offerPending ?? true,
+    offerA: options.offerA ?? ROAD_TILES,
+    offerB: options.offerB ?? JUNCTION_UPGRADE,
+    offerGrantA: options.offerGrantA ?? 30,
+    offerGrantB: options.offerGrantB ?? 20,
+    offerItemsA: options.offerItemsA ?? 0,
+    offerItemsB: options.offerItemsB ?? 2,
+    offerPeek: options.offerPeek ?? false,
+  }
+}
+
+/** Every string this frame drew, in draw order. */
+function textsOf(log: readonly Command[]): string[] {
+  return log.filter((c): c is FillTextCommand => c.op === 'fillText').map((c) => c.text)
+}
+
+/** The HUD's own score line on a frame that drew no modal — fixture B's, whatever it is. */
+function scoreLine(log: readonly Command[]): string {
+  const found = textsOf(log).find((t) => t.endsWith(' TRIPS'))
+  expect(found, 'the HUD drew no score at all').toBeDefined()
+  return found as string
+}
+
+/** How many atlas tiles this frame blitted — the board layers, in one number. */
+function blitCount(log: readonly Command[]): number {
+  return log.filter((c) => c.op === 'drawImage').length
+}
+
+/** Every fill in a given colour, as plain rects, in issue order. */
+function fillsIn(log: readonly Command[], style: string): Rect[] {
+  return log
+    .filter((c): c is FillRectCommand => c.op === 'fillRect' && c.fillStyle === style)
+    .map((c) => ({ x: c.x, y: c.y, w: c.w, h: c.h }))
+}
+
+describe('phase 12: the offer modal', () => {
+  it('draws NOTHING when no offer is pending', () => {
+    // The gate, on the fixture that sets every OTHER offer field to a live
+    // value — so this cannot pass because the cards happen to be blank.
+    const log = drawWith(offerFrame({ offerPending: false }))
+    const texts = textsOf(log)
+    expect(texts).not.toContain('ROAD TILES')
+    expect(texts).not.toContain(OFFER_TITLE_TEXT)
+    expect(texts).not.toContain(PEEK_TEXT)
+    expect(fillsIn(log, PALETTE.cardFace), 'no card face either').toEqual([])
+    expect(fillsIn(log, PALETTE.scrim), 'and the board is not dimmed').toEqual([])
+  })
+
+  it('covers the whole canvas, not just the board, so the HUD cannot read as live', () => {
+    // **The opposite choice from the shutdown scrim, deliberately.** That one
+    // stops at the grid rect's bottom edge so the HUD keeps its contrast,
+    // because the score is part of what it is telling the player. Here the HUD
+    // clock is a PAUSE TOGGLE and §5.10's modal has no skip, so a legible pause
+    // control under it is an invitation to press the one thing that looks like
+    // a way out and is not.
+    const log = drawWith(offerFrame())
+    expect(fillsIn(log, PALETTE.scrim)).toEqual([{ x: 0, y: 0, w: B_CSS_W, h: B_CSS_H }])
+    // Non-vacuous on the difference: the HUD band really is inside that rect
+    // and really is outside the shutdown scrim's.
+    const hud = hudRects(cameraB(), createHudRects())
+    expect(hud.clock.y + hud.clock.h).toBeLessThanOrEqual(B_CSS_H)
+    expect(hud.clock.y, 'the clock is below the board, where the shutdown scrim stops').toBeGreaterThan(
+      B_ORIGIN_Y + 4 * B_TILE,
+    )
+  })
+
+  it('draws both card names and both grant lines, with the numbers coming from the FRAME', () => {
+    const texts = textsOf(drawWith(offerFrame()))
+    expect(texts).toContain('ROAD TILES')
+    expect(texts).toContain('30 TILES')
+    expect(texts).toContain('JUNCTION UPGRADE')
+    expect(texts).toContain('20 TILES')
+    expect(texts).toContain('x2')
+    expect(texts, 'and the one line that says what to do about them').toContain(OFFER_TITLE_TEXT)
+  })
+
+  it('follows the frame when the grants change, which a string literal could not', () => {
+    // **Review finding I6's sharp half.** If `'30 TILES'` were a literal in
+    // `canvas.ts`, changing `CARD_GRANT_ROAD_TILES` to 40 would leave every
+    // test in both packages green while the modal told the player 30.
+    const texts = textsOf(drawWith(offerFrame({ offerGrantA: 40, offerGrantB: 55 })))
+    expect(texts).toContain('40 TILES')
+    expect(texts).toContain('55 TILES')
+    expect(texts).not.toContain('30 TILES')
+    expect(texts).not.toContain('20 TILES')
+  })
+
+  it('keeps the two grant memos apart, so the second card does not print the first card’s number', () => {
+    // **A single shared memo slot would MISS on every call** — the two grants
+    // differ on the shipped pair — and would still produce the right strings,
+    // so no assertion above can see it. What a shared slot CANNOT survive is
+    // this: draw a frame, then draw a second frame that changes only slot B,
+    // and check slot A's line is still A's. With one slot, the cache is
+    // rebuilt each time and the output is still correct; with one slot keyed
+    // per CARD, it is not. The real failure a shared slot would produce is a
+    // per-frame re-format, which no recorded text can distinguish — so this
+    // test pins the observable half and the module comment owns the rest.
+    const first = textsOf(drawWith(offerFrame()))
+    expect(first).toContain('30 TILES')
+    expect(first).toContain('20 TILES')
+    const second = textsOf(drawWith(offerFrame({ offerGrantB: 20 })))
+    expect(second.filter((t) => t === '30 TILES').length, 'A still reads 30').toBe(1)
+    expect(second.filter((t) => t === '20 TILES').length, 'and B still reads 20').toBe(1)
+  })
+
+  it('draws the item badge only when the card grants items, so a tiles card shows no x0', () => {
+    const texts = textsOf(drawWith(offerFrame({ offerItemsA: 0, offerItemsB: 2 })))
+    expect(texts.filter((t) => t.startsWith('x')), 'exactly one badge, B’s').toEqual(['x2'])
+    // ...and it follows the number rather than the slot.
+    expect(textsOf(drawWith(offerFrame({ offerItemsA: 3, offerItemsB: 0 })))).toContain('x3')
+    expect(textsOf(drawWith(offerFrame({ offerItemsA: 3, offerItemsB: 0 })))).not.toContain('x0')
+  })
+
+  it('draws the two faces at exactly the rects offerRects reports, so the hit test cannot drift', () => {
+    // `game/pointer.ts` hit-tests the SAME function. If the draw used its own
+    // arithmetic the player would tap a card and miss, or miss a card and tap
+    // it — the class of bug neither package's own tests can see.
+    const rects = offerRects(cameraB(), createOfferRects())
+    const faces = fillsIn(drawWith(offerFrame()), PALETTE.cardFace)
+    expect(faces).toEqual([
+      { x: rects.cardA.x, y: rects.cardA.y, w: rects.cardA.w, h: rects.cardA.h },
+      { x: rects.cardB.x, y: rects.cardB.y, w: rects.cardB.w, h: rects.cardB.h },
+    ])
+    // Non-vacuous: the two rects are genuinely different and genuinely non-empty
+    // on this camera, so `toEqual` on the pair is not two copies of one number.
+    expect(rects.cardA.y).not.toBe(rects.cardB.y)
+    expect(rects.cardA.h).toBeGreaterThan(0)
+  })
+
+  it('puts the peek control on its own rect, in both states, with only the label changing', () => {
+    const rects = offerRects(cameraB(), createOfferRects())
+    const expected = { x: rects.peek.x, y: rects.peek.y, w: rects.peek.w, h: rects.peek.h }
+    expect(fillsIn(drawWith(offerFrame()), PALETTE.cardAccent)).toEqual([expected])
+    expect(fillsIn(drawWith(offerFrame({ offerPeek: true })), PALETTE.cardAccent)).toEqual([expected])
+  })
+
+  it('suppresses the chrome and keeps the scrim off while peeking', () => {
+    // Plan Decision 16: peek shows the FROZEN BOARD, so a dimmed peek would be
+    // a peek at nothing. The loop stays paused — that is `pointer.ts`'s half,
+    // and `pointer.test.ts` owns it.
+    const log = drawWith(offerFrame({ offerPeek: true }))
+    const texts = textsOf(log)
+    expect(texts).not.toContain('ROAD TILES')
+    expect(texts).not.toContain('JUNCTION UPGRADE')
+    expect(texts).not.toContain(OFFER_TITLE_TEXT)
+    expect(fillsIn(log, PALETTE.scrim), 'the board is visible').toEqual([])
+    expect(fillsIn(log, PALETTE.cardFace), 'and no card is in the way').toEqual([])
+    expect(texts, 'and the way back is still on screen').toContain(PEEK_RETURN_TEXT)
+    expect(texts, 'which is not the same label as the way IN').not.toContain(PEEK_TEXT)
+  })
+
+  it('draws the board underneath while peeking — the whole point of the control', () => {
+    // A peek that suppressed the board as well as the chrome would be a blank
+    // screen with one button on it. The board layers are phases 1-10 and run
+    // whatever this phase does; asserted rather than assumed, because "the
+    // modal draws nothing" and "the frame draws nothing" are the same log.
+    const peeking = drawWith(offerFrame({ offerPeek: true }))
+    const plain = drawWith(offerFrame({ offerPending: false }))
+    expect(blitCount(peeking), 'the road layer still blitted').toBe(blitCount(plain))
+    expect(textsOf(peeking), 'and the HUD is still readable').toContain(scoreLine(plain))
+  })
+
+  it('draws the modal ABOVE the shutdown screen when both are somehow true', () => {
+    // Unreachable in production — `step` freezes past the failure, so no
+    // boundary can be crossed on a dead board and no offer can be raised behind
+    // a shutdown screen. Drawn in a defined order anyway, because a scrim over
+    // a modal over a scrim is the one composition nobody can debug from a
+    // screenshot.
+    const log = drawWith(offerFrame({ gameOver: true }))
+    const styles = log.map((c) => (c.op === 'fillRect' ? c.fillStyle : undefined))
+    const texts = log.map((c) => (c.op === 'fillText' ? c.text : undefined))
+    expect(styles.lastIndexOf(PALETTE.scrim)).toBeGreaterThan(-1)
+    expect(texts.lastIndexOf('ROAD TILES')).toBeGreaterThan(styles.lastIndexOf(PALETTE.scrim))
+    // Non-vacuous: BOTH screens really drew. Two scrims, and the shutdown's own
+    // line is in the log below the modal's.
+    expect(fillsIn(log, PALETTE.scrim).length, 'both scrims').toBe(2)
+    expect(texts).toContain(RESTART_TEXT)
+    expect(texts.indexOf(RESTART_TEXT)).toBeLessThan(texts.lastIndexOf('ROAD TILES'))
+  })
+
+  it('has one label per card id, so an eighth card fails here rather than drawing undefined', () => {
+    // 8 is `CARD_COUNT`, pinned against this number in game/test/frame.test.ts.
+    // Bare literal because this package cannot import it.
+    expect(CARD_LABEL_COUNT).toBe(8)
+    expect(CARD_LABELS[0], 'id 0 is CARD_NONE and is never drawn').toBe('')
+  })
+
+  it('draws an empty card rather than the word undefined for an id it has no label for', () => {
+    // The fallback is not decoration: `fillStyle = undefined` is silently
+    // ignored by a real context, and `fillText(undefined)` paints the literal
+    // string "undefined" across a card. An id past the table means the two
+    // packages have already disagreed; `render` cannot detect that and can
+    // decline to print the JavaScript for it.
+    const texts = textsOf(drawWith(offerFrame({ offerA: 99 })))
+    expect(texts).not.toContain('undefined')
+    expect(texts, 'B is unaffected').toContain('JUNCTION UPGRADE')
+  })
+
+  it('condenses every run inside its own rect rather than letting it leave the card', () => {
+    // The same construction guarantee `fillCentred` gives the HUD: with
+    // `textAlign = 'center'` the canvas spec puts the run in
+    // `[cx - maxWidth/2, cx + maxWidth/2]`, so containment is recorded rather
+    // than measured — there is no font engine anywhere in this workspace.
+    const rects = offerRects(cameraB(), createOfferRects())
+    const runs = drawWith(offerFrame()).filter((c): c is FillTextCommand => c.op === 'fillText')
+    for (const run of runs) {
+      expect(run.maxWidth, `"${run.text}" has no maxWidth`).toBeGreaterThan(0)
+    }
+    const onCardA = runs.filter((c) => c.text === 'ROAD TILES' || c.text === '30 TILES')
+    expect(onCardA.length).toBe(2)
+    for (const run of onCardA) {
+      expect(run.x - run.maxWidth / 2).toBeGreaterThanOrEqual(rects.cardA.x)
+      expect(run.x + run.maxWidth / 2).toBeLessThanOrEqual(rects.cardA.x + rects.cardA.w)
+      expect(run.y).toBeGreaterThan(rects.cardA.y)
+      expect(run.y).toBeLessThan(rects.cardA.y + rects.cardA.h)
+    }
   })
 })

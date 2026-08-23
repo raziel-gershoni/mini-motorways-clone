@@ -6,9 +6,18 @@ import {
   type Atlases,
   type AtlasSurface,
 } from './atlas'
-import { createHudRects, gridToScreenX, gridToScreenY, hudRects } from './camera'
+import {
+  OFFER_GAP_CSS,
+  OFFER_TITLE_H_CSS,
+  createHudRects,
+  createOfferRects,
+  gridToScreenX,
+  gridToScreenY,
+  hudRects,
+  offerRects,
+} from './camera'
 import { TerrainClass } from './types'
-import type { Camera, HudRects, Palette, Rect, RenderFrame } from './types'
+import type { Camera, HudRects, OfferRects, Palette, Rect, RenderFrame } from './types'
 
 /**
  * `drawFrame` — the whole per-frame draw path, and the only function in this
@@ -366,6 +375,94 @@ export const RESTART_TEXT = 'TAP TO PLAY AGAIN'
 export const ADVICE_TEXT = 'CONNECT EVERY DESTINATION WITH A ROAD'
 
 /**
+ * §5.10's offer modal — the strings, the fonts and the one label table, all
+ * preallocated at module scope for the reason `HUD_FONT` is (M1f Task 8).
+ *
+ * ---------------------------------------------------------------------------
+ * NAMES ONLY — NO NUMBERS. THIS IS REVIEW FINDING I6 AND IT HAS TEETH
+ * ---------------------------------------------------------------------------
+ *
+ * Every QUANTITY the modal shows — the tile grant, the item count — arrives on
+ * `RenderFrame` as a number (`offerGrantA`, `offerItemsA`, ...) and is formatted
+ * below by a memoised number->string cache. **A literal `'30 TILES'` in this
+ * file is a UI that keeps telling the player 30 after `CARD_GRANT_ROAD_TILES`
+ * becomes 40, with a green suite in both packages and no observer anywhere.**
+ * `canvas.test.ts` › *"follows the frame when the grants change"* is what makes
+ * that a caught mutation rather than an intention.
+ *
+ * ---------------------------------------------------------------------------
+ * THE ARRAY IS ID-INDEXED, AND ITS AGREEMENT WITH `sim` IS PINNED IN `game`
+ * ---------------------------------------------------------------------------
+ *
+ * `render` declares no dependencies at all (spec §4, `test/boundary.test.ts`),
+ * so this file cannot import `CARD_ROAD_TILES` or `CARD_COUNT` and cannot assert
+ * its own agreement with them. The watcher lives in
+ * **`packages/game/test/frame.test.ts`** — the only package that can see both
+ * copies — in the idiom `TerrainClass` already established there:
+ * `CARD_LABEL_COUNT === CARD_COUNT`, and each offerable id's label by name.
+ * A copied constant needs a watcher, and this is where this one's lives.
+ */
+export const CARD_LABELS: readonly string[] = Object.freeze([
+  '', //                0 CARD_NONE — never drawn; present so the array is id-indexed
+  'ROAD TILES', //      1
+  'BRIDGE', //          2
+  'TUNNEL', //          3
+  'ROUNDABOUT', //      4
+  'TRAFFIC LIGHTS', //  5 — declared, not offerable; deferred to M1g with its measurement
+  'MOTORWAY', //        6
+  'JUNCTION UPGRADE', //7 — M1f's own item, and the only offerable one besides road tiles
+])
+
+/** One past the highest card id this file can name. Pinned against `CARD_COUNT` in `game`. */
+export const CARD_LABEL_COUNT = CARD_LABELS.length
+
+/**
+ * The modal's one instruction, and the reason it is here rather than left to
+ * the two cards to imply.
+ *
+ * The board has just stopped for the first time in the run, with no explanation
+ * anywhere else on screen. Two card faces say what is on offer; they do not say
+ * that the game is waiting, that the choice is compulsory, or that the board
+ * comes back afterwards. This project has already shipped one screen that named
+ * a state and left the verb to be inferred (`ADVICE_TEXT` above is the repair),
+ * and `startingCity.ts` measures what inference produces.
+ */
+export const OFFER_TITLE_TEXT = 'CHOOSE A CARD'
+
+/** The peek control's label while the modal is up. Says what a press DOES. */
+export const PEEK_TEXT = 'SEE THE BOARD'
+
+/**
+ * The peek control's label while peeking, and **the one thing on screen that is
+ * still the modal**. Peek hides the chrome and keeps the loop paused (plan
+ * Decision 16), so without this the player is looking at a frozen board with no
+ * visible reason and no visible way forward — the exact state M1f Task 7 shipped
+ * on purpose and interlocked against. Any tap returns; this says so.
+ */
+export const PEEK_RETURN_TEXT = 'TAP TO RETURN'
+
+/** The modal's heading font — the title and the two card names. */
+export const OFFER_TITLE_FONT = '700 22px system-ui, -apple-system, sans-serif'
+
+/** The modal's smaller font — the grant lines, the item badge, the peek label. */
+export const OFFER_GRANT_FONT = '600 18px system-ui, -apple-system, sans-serif'
+
+/** The inset every modal run keeps from its own rect's edges, CSS px — this is what `maxWidth` is derived from. */
+export const OFFER_TEXT_INSET_CSS = 16
+
+/**
+ * Where the three lines sit inside a card, as fractions of the card's height.
+ *
+ * Fractions rather than CSS px because the card's height is a function of the
+ * viewport (`offerRects`), so a fixed stride would bunch the lines at the top of
+ * a tall card and overflow a short one. The item badge is last and lowest
+ * because it is the only line that is sometimes absent.
+ */
+export const OFFER_NAME_Y_FRACTION = 0.36
+export const OFFER_GRANT_Y_FRACTION = 0.62
+export const OFFER_ITEMS_Y_FRACTION = 0.82
+
+/**
  * How much thicker the killer's ring is drawn over the scrim than under it.
  *
  * Two, because the ring is competing with a 24 px bold line for attention and
@@ -414,6 +511,14 @@ export function destFootprintH(orientation: number): number {
  * pool Decision 9 requires are module-level state.
  */
 const HUD_SCRATCH: HudRects = createHudRects()
+
+/**
+ * `offerRects`'s output object, allocated once at load for the same reason
+ * `HUD_SCRATCH` is. The modal is laid out on every frame it is up, and
+ * `game/pointer.ts` holds its own separate scratch for the hit test — two
+ * callers, two objects, one function, so the faces and the targets cannot drift.
+ */
+const OFFER_SCRATCH: OfferRects = createOfferRects()
 
 /**
  * The HUD's formatted numbers, memoised on the values that produced them.
@@ -472,6 +577,76 @@ function tilesText(tilesLeft: number): string {
     cachedTilesText = `${tilesLeft} TILES`
   }
   return cachedTilesText
+}
+
+/**
+ * The modal's two formatted numbers, memoised on the values that produced them —
+ * the fifth and sixth instances of this file's single-slot cache, in
+ * `scoreText`'s idiom and for its reason (M1f Task 8).
+ *
+ * **Two SEPARATE slots for A and B, and that is a correctness requirement here
+ * rather than a size choice.** The modal draws two grants in the same frame with
+ * different values (30 and 20 on the shipped pair), so one shared slot would
+ * miss on every single call and re-format both strings on every frame — the
+ * cache would be strictly worse than no cache, while reading as one. Two slots
+ * make both calls hits from the second frame of the modal onward, and the modal
+ * is up for as long as a person takes to read it.
+ *
+ * `tilesText` is deliberately not reused even though it formats the same
+ * `${n} TILES` shape: it is keyed on `frame.tilesLeft`, which is a different
+ * number changing on a different schedule, and sharing the slot would make the
+ * HUD and the modal evict each other every frame.
+ */
+let cachedGrantA = -1
+let cachedGrantTextA = ''
+let cachedGrantB = -1
+let cachedGrantTextB = ''
+let cachedItems = -1
+let cachedItemsText = ''
+
+function grantTextA(tiles: number): string {
+  if (tiles !== cachedGrantA) {
+    cachedGrantA = tiles
+    cachedGrantTextA = `${tiles} TILES`
+  }
+  return cachedGrantTextA
+}
+
+function grantTextB(tiles: number): string {
+  if (tiles !== cachedGrantB) {
+    cachedGrantB = tiles
+    cachedGrantTextB = `${tiles} TILES`
+  }
+  return cachedGrantTextB
+}
+
+/**
+ * `x${items}`, memoised on one slot rather than two: the item counts are drawn
+ * only when POSITIVE, and the shipped pair offers items on at most one card
+ * (`cardItemGrant` returns 0 for the road-tiles card and
+ * `UPGRADES_PER_CARD` for the junction upgrade), so one slot is one hit. If a
+ * later pool offers two item cards at once this becomes a per-frame miss on one
+ * of them — a re-formatted short string, not a correctness change — and the
+ * repair is the second slot above.
+ */
+function itemsText(items: number): string {
+  if (items !== cachedItems) {
+    cachedItems = items
+    cachedItemsText = `x${items}`
+  }
+  return cachedItemsText
+}
+
+/**
+ * A card's name, with a fallback that draws an EMPTY card rather than the word
+ * `undefined`.
+ *
+ * `CARD_LABELS` is id-indexed and `game` pins its length against `CARD_COUNT`,
+ * so an out-of-range id means the two packages have already disagreed. `render`
+ * cannot detect that itself; what it can do is not print the JavaScript for it.
+ */
+function cardLabel(cardId: number): string {
+  return CARD_LABELS[cardId] ?? ''
 }
 
 /**
@@ -610,7 +785,7 @@ function destinationIsUnreachable(frame: RenderFrame, d: number): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Draws one frame. Eleven phases, in this order, and the order is load-bearing:
+ * Draws one frame. Twelve phases, in this order, and the order is load-bearing:
  *
  * ```
  * 1 top band + letterbox fills    2 playfield fill    3 non-land terrain
@@ -619,13 +794,31 @@ function destinationIsUnreachable(frame: RenderFrame, d: number): boolean {
  * 7 houses                        8 cars              9 bottom band fill
  * 10 HUD content                  11 the shutdown screen — ONLY when
  *                                    `frame.gameOver`, see `drawShutdown`
+ *                                 12 the offer modal — ONLY when
+ *                                    `frame.offerPending`, see `drawOffer`
  * ```
  *
- * **Phase 11 is the only conditional phase, and that is worth a warning rather
- * than a note.** A new gated phase is unconstrained by every fixture that does
- * not set its gate: a trial version of this scrim left the whole render suite
- * green because the two base fixtures never set `gameOver` and `undefined` is
- * falsy. Anything added under a flag needs a fixture on both sides of it.
+ * **These twelve are THIS FILE'S LAYER COUNT and have nothing to do with
+ * `sim`'s eleven tick phases.** The two numbering schemes were equal at eleven
+ * for exactly one milestone and diverged at M1f Task 8; a reader who conflates
+ * them goes looking for a tick phase 12 that does not exist, or reads "phase 4"
+ * in a `sim` comment as the ghost layer. There is no correspondence between the
+ * two lists at any index and there never was.
+ *
+ * **Phases 11 and 12 are the conditional ones, and that is worth a warning
+ * rather than a note.** A new gated phase is unconstrained by every fixture that
+ * does not set its gate: a trial version of the shutdown scrim left the whole
+ * render suite green because the two base fixtures never set `gameOver` and
+ * `undefined` is falsy. Anything added under a flag needs a fixture on both
+ * sides of it — which is why `frameA` and `frameB` set every offer field
+ * explicitly rather than leaving them absent.
+ *
+ * **12 after 11, and the pair is unreachable in production.** `step` is a
+ * byte-identical no-op past the failure, so no week boundary can be crossed on a
+ * dead board and no offer can be raised behind a shutdown screen. The order is
+ * fixed anyway, because a scrim over a modal over a scrim is the one composition
+ * nobody can debug from a screenshot — and because the modal is the screen that
+ * is asking a question, so it must be the one on top.
  *
  * **Phases 4 and 5 cannot paint the same cell, and the order between them is
  * fixed anyway.** `sim` only ghosts a cell whose live mask reached 0, and
@@ -772,6 +965,13 @@ export function drawFrame(
   // 11. The shutdown screen, and NOTHING when the run is live. Last, after the
   //     HUD, because the HUD's own labels must not be able to paint over it.
   if (frame.gameOver) drawShutdown(ctx, frame, palette, right, gridTop, gridBottom)
+
+  // 12. §5.10's offer modal, and NOTHING when no offer is pending. AFTER the
+  //     shutdown for the reason `drawOffer` gives: the two are unreachable
+  //     together in production and a scrim over a modal over a scrim is the one
+  //     composition nobody can debug from a screenshot, so the order is fixed
+  //     rather than left to which flag happens to be set.
+  if (frame.offerPending) drawOffer(ctx, frame, palette, right, bottom)
 }
 
 /**
@@ -855,6 +1055,159 @@ function drawShutdown(
   ctx.fillText(ADVICE_TEXT, cx, top + SHUTDOWN_LINE_STRIDE_CSS, maxWidth)
   ctx.fillText(scoreText(frame.score), cx, top + 2 * SHUTDOWN_LINE_STRIDE_CSS, maxWidth)
   ctx.fillText(RESTART_TEXT, cx, top + 3 * SHUTDOWN_LINE_STRIDE_CSS, maxWidth)
+}
+
+/**
+ * Phase 12 — §5.10's weekly card offer, and the second of this file's two
+ * conditional phases (M1f Task 8).
+ *
+ * **What a person sees.** At the first week boundary the board stops and this
+ * draws over it: the whole canvas dims, one line says CHOOSE A CARD, and two
+ * large cards stack down the middle of the screen with a name and what they pay
+ * — `ROAD TILES / 30 TILES` and `JUNCTION UPGRADE / 20 TILES / x2`. Under them
+ * sits SEE THE BOARD. Tapping a card takes it and the board runs on with the
+ * tile counter jumped; tapping SEE THE BOARD hides all of this and shows the
+ * frozen board, with TAP TO RETURN left standing so the way back is visible.
+ *
+ * ---------------------------------------------------------------------------
+ * THE SCRIM COVERS THE **WHOLE CANVAS**, AND `drawShutdown`'s STOPS AT THE BOARD
+ * ---------------------------------------------------------------------------
+ *
+ * That difference is deliberate and it is the opposite choice from the one 40
+ * lines above, so it is worth saying which reason belongs to which screen.
+ *
+ * The shutdown screen leaves the HUD band undimmed because the score is part of
+ * what it is telling the player, and the clock is inert there (`drawHud` takes
+ * the pause bars down on a game-over frame for the same reason).
+ *
+ * **This screen must dim the HUD, because the HUD clock is a pause TOGGLE.**
+ * §5.10 gives this modal no skip and no timer; a bright, legible pause control
+ * sitting under it is an invitation to press the one thing that looks like a way
+ * out and is not. `game/pointer.ts` refuses that tap — `REFUSED_OFFER_MODAL` —
+ * and a refusal the player cannot see coming is a control that does nothing.
+ * Dimming it is the visible half of the same decision.
+ *
+ * ---------------------------------------------------------------------------
+ * PEEK HIDES THE CHROME. IT DOES NOT RESUME THE SIM, AND IT KEEPS THE WAY BACK
+ * ---------------------------------------------------------------------------
+ *
+ * Plan Decision 16. While `frame.offerPeek` holds there is **no scrim at all**,
+ * so the frozen board is at full contrast — that is the entire point of the
+ * control, and a dimmed peek would be a peek at nothing. The loop stays paused
+ * (`pointer.ts` never calls `setPaused` on this path) and board input stays
+ * refused, so peek is not a free unpause, which is the one thing a modal with no
+ * timer must not offer.
+ *
+ * The peek pill stays drawn in both states, in the same place and the same
+ * colours, with only its label changing. A control that vanishes when you use it
+ * is a control that has to be rediscovered.
+ *
+ * **Nothing here allocates.** The rects are a module-level scratch, every string
+ * is either a preallocated constant or one of the three memoised
+ * number->string caches above, and the two fonts are preallocated exactly as
+ * `HUD_FONT` and `SHUTDOWN_FONT` are.
+ */
+function drawOffer(
+  ctx: DrawContext,
+  frame: RenderFrame,
+  palette: Palette,
+  right: number,
+  bottom: number,
+): void {
+  const rects = offerRects(frame.camera, OFFER_SCRATCH)
+
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+
+  if (frame.offerPeek) {
+    drawPeekPill(ctx, palette, rects, PEEK_RETURN_TEXT)
+    return
+  }
+
+  // The scrim, edge to edge — see above for why this one does not stop at the
+  // board. `right`/`bottom` are the canvas's own device-snapped extent, the
+  // same pair the five opaque fills are cut against, so the dim lands on
+  // exactly the pixels that were painted this frame.
+  ctx.fillStyle = palette.scrim
+  ctx.fillRect(0, 0, right, bottom)
+
+  // The instruction, one gap above the first card. Positioned off `cardA`
+  // rather than off a second copy of `offerRects`' own clamped `top`, so there
+  // is one derivation of where the modal starts and not two.
+  ctx.font = OFFER_TITLE_FONT
+  ctx.fillStyle = palette.land
+  ctx.fillText(
+    OFFER_TITLE_TEXT,
+    right / 2,
+    rects.cardA.y - OFFER_GAP_CSS - OFFER_TITLE_H_CSS / 2,
+    right - 2 * OFFER_TEXT_INSET_CSS,
+  )
+
+  drawCard(ctx, palette, rects.cardA, frame.offerA, grantTextA(frame.offerGrantA), frame.offerItemsA)
+  drawCard(ctx, palette, rects.cardB, frame.offerB, grantTextB(frame.offerGrantB), frame.offerItemsB)
+
+  drawPeekPill(ctx, palette, rects, PEEK_TEXT)
+}
+
+/**
+ * One card face and its three lines. The grant string is passed IN rather than
+ * formatted here, because the two cards have their own memo slots — see
+ * `grantTextA`.
+ *
+ * `maxWidth` on every run, so a long card name condenses instead of leaving the
+ * face: the same construction guarantee `fillCentred` gives the HUD, and it
+ * matters more here because `CARD_LABELS`' longest entry is `JUNCTION UPGRADE`
+ * at 16 characters against a card that is `cssW - 32` CSS px wide, which is 288
+ * at the 320 px viewport `fitCamera` accepts.
+ */
+function drawCard(
+  ctx: DrawContext,
+  palette: Palette,
+  rect: Rect,
+  cardId: number,
+  grant: string,
+  items: number,
+): void {
+  ctx.fillStyle = palette.cardFace
+  ctx.fillRect(rect.x, rect.y, rect.w, rect.h)
+
+  const cx = rect.x + rect.w / 2
+  const maxWidth = rect.w - 2 * OFFER_TEXT_INSET_CSS
+
+  ctx.font = OFFER_TITLE_FONT
+  ctx.fillStyle = palette.cardText
+  ctx.fillText(cardLabel(cardId), cx, rect.y + rect.h * OFFER_NAME_Y_FRACTION, maxWidth)
+
+  ctx.font = OFFER_GRANT_FONT
+  ctx.fillStyle = palette.cardAccent
+  ctx.fillText(grant, cx, rect.y + rect.h * OFFER_GRANT_Y_FRACTION, maxWidth)
+  // **Only when positive**, so the road-tiles card shows no count rather than
+  // an `x0`. `cardItemGrant` returns 0 for it by design — that zero is what
+  // lets `applyChooseCard` pay both grants unconditionally with no `if` to get
+  // wrong — and this is the one place the zero has to be re-read as "no badge".
+  if (items > 0) {
+    ctx.fillText(itemsText(items), cx, rect.y + rect.h * OFFER_ITEMS_Y_FRACTION, maxWidth)
+  }
+}
+
+/** The peek control, identical in both states except for its label. */
+function drawPeekPill(
+  ctx: DrawContext,
+  palette: Palette,
+  rects: OfferRects,
+  label: string,
+): void {
+  const rect = rects.peek
+  ctx.fillStyle = palette.cardAccent
+  ctx.fillRect(rect.x, rect.y, rect.w, rect.h)
+  ctx.font = OFFER_GRANT_FONT
+  ctx.fillStyle = palette.cardFace
+  ctx.fillText(
+    label,
+    rect.x + rect.w / 2,
+    rect.y + rect.h / 2,
+    rect.w - 2 * OFFER_TEXT_INSET_CSS,
+  )
 }
 
 /**

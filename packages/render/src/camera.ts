@@ -3,6 +3,7 @@ import type {
   Camera,
   GridHit,
   HudRects,
+  OfferRects,
   PerformanceClass,
   Point,
   Rect,
@@ -316,4 +317,103 @@ function setRect(rect: Rect, x: number, y: number, w: number, h: number): void {
   rect.y = y
   rect.w = w
   rect.h = h
+}
+
+// ---------------------------------------------------------------------------
+// §5.10's offer modal — M1f Task 8
+// ---------------------------------------------------------------------------
+
+/** The modal's inset from the left and right canvas edges, CSS px. */
+export const OFFER_MARGIN_CSS = 16
+
+/** Vertical gap between the modal's stacked pieces, CSS px. */
+export const OFFER_GAP_CSS = 12
+
+/**
+ * The strip reserved above the two cards for the modal's one instruction line,
+ * CSS px. It is not a `Rect` because nothing taps it — `offerRects` reserves the
+ * space and `canvas.ts` draws the line one gap above `cardA`.
+ */
+export const OFFER_TITLE_H_CSS = 28
+
+/**
+ * The peek control's size, CSS px. **44 is a touch target and not a look** — the
+ * same figure `eraseControl.ts`'s fallback pill is built to, and the reason a
+ * DOM strip below the canvas was rejected there (`fitCamera` leaves 40-49 px of
+ * free strip, which is not a location on a phone).
+ */
+export const OFFER_PEEK_W_CSS = 132
+export const OFFER_PEEK_H_CSS = 44
+
+/** An `OfferRects` for `offerRects` to write into. Allocate once, outside the loop. */
+export function createOfferRects(): OfferRects {
+  return {
+    cardA: { x: 0, y: 0, w: 0, h: 0 },
+    cardB: { x: 0, y: 0, w: 0, h: 0 },
+    peek: { x: 0, y: 0, w: 0, h: 0 },
+  }
+}
+
+function clampTo(value: number, low: number, high: number): number {
+  return value < low ? low : value > high ? high : value
+}
+
+/**
+ * Lays §5.10's offer modal out: **two full-width cards stacked vertically with
+ * the peek control under them**, written into `out`'s existing rects — the
+ * nested `Rect`s are reused, never replaced, so this allocates nothing.
+ *
+ * **The modal occupies the BOARD's band, `[originY, hudTop)`, and not the whole
+ * canvas — while the scrim behind it covers the whole canvas.** The two are
+ * deliberately different, and the difference is the point:
+ *
+ * - The **scrim** runs edge to edge because the HUD clock is a pause TOGGLE, and
+ *   a legible pause control under a modal that forbids skipping is an invitation
+ *   to press something that does nothing. (`drawShutdown` makes the opposite
+ *   choice for the opposite reason: its screen wants the HUD readable, because
+ *   the score is part of what it is telling you.)
+ * - The **rects** stay off the HUD band and off the top safe-area inset, because
+ *   a tappable card under the notch or overlapping the clock is a target the
+ *   player cannot reliably hit. `originY` already carries the top inset and
+ *   `hudTop` already carries the bottom one, so no inset arithmetic is repeated
+ *   here.
+ *
+ * **Every edge is clamped into `[0, cssW] x [0, cssH]` and the vertical run is
+ * kept monotone**, for the same reason `canvas.ts` clamps its band fills: on the
+ * degenerate viewports `fitCamera` deliberately survives (a hidden webview, a
+ * measurement mid-rotation) the plain formula puts `originY` at -47 and `hudTop`
+ * at -25, both off the canvas. Clamped, every rect collapses to zero area at the
+ * origin — no negative-height fill, no off-canvas touch target, and the modal
+ * simply has nowhere to be, which is the honest answer for a viewport with no
+ * pixels. `camera.test.ts` asserts that outcome explicitly rather than letting
+ * it pass as a vacuous "nothing overlaps".
+ *
+ * The peek control keeps the whole strip when the space runs out before the
+ * cards do: the way OUT of a modal is the last thing to be given up.
+ */
+export function offerRects(camera: Camera, out: OfferRects): OfferRects {
+  const top = clampTo(camera.originY, 0, camera.cssH)
+  const bottom = clampTo(camera.hudTop, top, camera.cssH)
+  const innerH = bottom - top
+
+  const left = clampTo(OFFER_MARGIN_CSS, 0, camera.cssW / 2)
+  const innerW = camera.cssW - 2 * left
+
+  const titleH = OFFER_TITLE_H_CSS < innerH ? OFFER_TITLE_H_CSS : innerH
+  const peekH = OFFER_PEEK_H_CSS < innerH ? OFFER_PEEK_H_CSS : innerH
+  const peekW = OFFER_PEEK_W_CSS < innerW ? OFFER_PEEK_W_CSS : innerW
+  // Three gaps: title-to-A, A-to-B, B-to-peek. `Math.max` rather than a clamp
+  // because a viewport too short for the chrome gives a negative numerator, and
+  // `floor(-32 / 2)` is -16 — a negative height, which is the one thing a rect
+  // in this file must never carry.
+  const cardH = Math.floor(Math.max(0, innerH - titleH - peekH - 3 * OFFER_GAP_CSS) / 2)
+
+  const aY = clampTo(top + titleH + OFFER_GAP_CSS, top, bottom)
+  const bY = clampTo(aY + cardH + OFFER_GAP_CSS, top, bottom)
+  const pY = clampTo(bottom - peekH, top, bottom)
+
+  setRect(out.cardA, left, aY, innerW, clampTo(cardH, 0, bottom - aY))
+  setRect(out.cardB, left, bY, innerW, clampTo(cardH, 0, bottom - bY))
+  setRect(out.peek, left + Math.floor((innerW - peekW) / 2), pY, peekW, clampTo(peekH, 0, bottom - pY))
+  return out
 }

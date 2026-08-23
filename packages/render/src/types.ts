@@ -260,6 +260,30 @@ export interface Palette {
    * that killed it. `interface.test.ts` pins that it is the only one.
    */
   readonly scrim: string
+  /**
+   * §5.10's card face — the two rectangles the offer modal draws over the
+   * scrim, and the only opaque surface in this palette that is not a piece of
+   * the board (M1f Task 8).
+   *
+   * Its own entry rather than `land` reused, because the two are answering
+   * different questions: `land` is what the ground is, and a card is a thing
+   * held in front of the ground. Reusing `land` would make the two impossible
+   * to retheme apart, and the modal's contrast requirement is against the
+   * SCRIM rather than against the sky.
+   *
+   * It doubles as the peek pill's LABEL colour, which is the same relationship
+   * inverted — the pill is a small card turned inside out.
+   */
+  readonly cardFace: string
+  /** The card's name, drawn on `cardFace`. Near-black; ~15:1 against the face. */
+  readonly cardText: string
+  /**
+   * The grant lines (`30 TILES`, `x2`) on a card face, and the peek pill's
+   * FILL. One entry with two users, and they are the same idea: the part of the
+   * modal that is not the name is what the card is worth and how to get out of
+   * it, and both are the accent against the face.
+   */
+  readonly cardAccent: string
   /** Per colour group. Length 6 — spec §4.2 allows 5 or 6 per map. */
   readonly groups: readonly string[]
 }
@@ -454,6 +478,72 @@ export interface RenderFrame {
   readonly offerA: number
   /** The card id in slot B. Always a different card from `offerA` while pending. */
   readonly offerB: number
+  /**
+   * The tile bonus slot A's card pays, as a NUMBER — M1f Task 8.
+   *
+   * **The whole reason this is a frame field rather than a literal in
+   * `canvas.ts`** (plan Decision 17, review finding I6): the modal shows the
+   * player "30 TILES", and 30 is `CARD_GRANT_ROAD_TILES` in `shared`. A string
+   * literal in the renderer keeps saying 30 after the constant becomes 40, with
+   * every test in both packages still green — a UI lying about a rule, with no
+   * observer anywhere. `game` folds `cardTileGrant(offerA)` in here and
+   * `canvas.ts` formats it.
+   *
+   * `0` when nothing is pending, which is unreachable as a real grant: both
+   * offerable cards pay a positive number of tiles.
+   */
+  readonly offerGrantA: number
+  /** Slot B's tile bonus. See `offerGrantA`. */
+  readonly offerGrantB: number
+  /**
+   * How many ITEMS slot A's card grants — `0` for the road-tiles card, and
+   * `UPGRADES_PER_CARD` for the junction upgrade. Drawn only when positive, so
+   * a tiles card shows no count rather than an `x0`.
+   *
+   * Same reasoning as `offerGrantA`: `UPGRADES_PER_CARD`'s own doc comment in
+   * `shared` names this field as its reader, and until M1f Task 8 that sentence
+   * named a field that did not exist.
+   */
+  readonly offerItemsA: number
+  /** Slot B's item count. See `offerItemsA`. */
+  readonly offerItemsB: number
+  /**
+   * True while the player is holding the modal out of the way to look at the
+   * frozen board underneath (spec §5.10's peek, plan Decision 16).
+   *
+   * **Peek is UI and not simulation**, so it is owned by `pointer.ts` beside
+   * `eraseMode` and reaches the renderer through this field. Putting it in the
+   * state buffer would make a cosmetic toggle a replay input.
+   *
+   * **It hides the modal; it does not resume the sim.** The loop stays paused
+   * and board input stays refused, so peeking is not a free unpause — the one
+   * thing a modal with no timer and no skip must not offer. It only ever
+   * matters while `offerPending`; `canvas.ts` reads it inside that gate.
+   */
+  readonly offerPeek: boolean
+}
+
+/**
+ * The three tappable rectangles §5.10's offer modal puts on screen, in CSS px.
+ * Laid out by `offerRects` (camera.ts) and hit-tested by `game/pointer.ts`
+ * against **the same function the renderer draws from**, which is what stops the
+ * faces and the hit test drifting apart.
+ *
+ * Mutable rects, reused across frames, exactly like `HudRects` — a modal is
+ * drawn every frame it is up, and a fresh object per frame is an allocation in
+ * the frame loop.
+ */
+export interface OfferRects {
+  /** The card in slot A, drawn above slot B. */
+  readonly cardA: Rect
+  /** The card in slot B. */
+  readonly cardB: Rect
+  /**
+   * The peek control. Below both cards, so a thumb reaching for it cannot
+   * clip a card face — and outside both, which `camera.test.ts` asserts at
+   * every viewport rather than at the one this was laid out on.
+   */
+  readonly peek: Rect
 }
 
 /**

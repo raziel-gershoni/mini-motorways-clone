@@ -181,6 +181,20 @@ describe('render imports nothing from sim or shared', () => {
     // one level too high, or too low. This is `determinism.test.ts`'s own
     // "scans the sim and shared sources, not some other directory" idiom:
     // the list must be updated deliberately when a later task adds a file.
+    //
+    // **M1f Task 8 added no file, and that was a choice this list is the
+    // reason for.** §5.10's modal needed a table of card NAMES; putting it in
+    // its own `cards.ts` under `render/src` would have been tidier and would
+    // have needed a line here, so the temptation to skip the line and let a
+    // new module sit outside the scan is real. It went into `canvas.ts`
+    // instead, beside `RESTART_TEXT` and `ADVICE_TEXT` — the other strings this
+    // package draws — which is where a reader looking for "what does the
+    // renderer print" already goes.
+    //
+    // `SCAN_ROOT` stays `render/src` rather than widening to the tests, and
+    // that is deliberate too: the scan's one catch that nothing else makes —
+    // a raw relative path like `from '../../sim/src/hash'`, which `tsc`
+    // accepts — only matters in code that SHIPS, and a test file does not.
     expect(files.map(label).sort()).toEqual([
       'render/src/atlas.ts', // M2 Task 4
       'render/src/camera.ts',

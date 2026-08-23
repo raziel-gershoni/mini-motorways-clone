@@ -67,6 +67,29 @@ export const PALETTE: Palette = Object.freeze({
    */
   scrim: '#2e2b28d8',
   /**
+   * §5.10's card face (M1f Task 8). Warmer and lighter than `land`, and
+   * DISTINCT from it deliberately: a card is held in front of the board, not
+   * cut out of it, and two entries that happen to be equal today cannot be
+   * rethemed apart tomorrow. `interface.test.ts` checks every entry is distinct
+   * from every other, which is what keeps that a rule rather than a preference.
+   *
+   * Contrast, computed rather than eyeballed (WCAG relative luminance, the same
+   * ladder `groups` is separated on): the face is Y = 0.932, so `cardText`
+   * below lands at **15.2:1** on it and `cardAccent` at **5.6:1**. Both clear
+   * §7.4's AA bar for the sizes this modal draws at, on the one screen in the
+   * game that asks the player a question.
+   */
+  cardFace: '#fbf7ef',
+  /** The card's NAME. Near-black, 15.2:1 on `cardFace`. See `cardFace`. */
+  cardText: '#1f1c1a',
+  /**
+   * The grant lines on a card, and the peek pill's fill. A deep teal, which is
+   * in no colour group and is not `overcrowd`: the modal is not an alarm and
+   * must not borrow the one colour that is. 5.6:1 on `cardFace` in both
+   * directions — as ink on a card, and as a fill under `cardFace` text.
+   */
+  cardAccent: '#1f6f6b',
+  /**
    * Six, because spec §4.2's enumeration makes the group count per-map and
    * either 5 or 6 (`MAX_GROUP_COUNT` in `shared`). A palette of five hands
    * `undefined` to `fillStyle` on a six-group map, which paints black.

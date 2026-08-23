@@ -149,6 +149,14 @@ function handBuiltFrame(): RenderFrame {
     offerPending: false,
     offerA: 0,
     offerB: 0,
+    // The five M1f Task 8 fields, explicit for the same reason. `offerPeek` in
+    // particular gates a phase inside a phase: a fixture that left it absent
+    // would make the peek arm unreachable while every assertion still passed.
+    offerGrantA: 0,
+    offerGrantB: 0,
+    offerItemsA: 0,
+    offerItemsB: 0,
+    offerPeek: false,
   }
 }
 
@@ -361,11 +369,15 @@ describe('the palette — spec 7.1\'s theme object, plus tree, minus shadow', ()
     // invitation to reintroduce a full-canvas layer that costs twice what the
     // road bake M0 deleted did.
     //
-    // **Eleven since M1e Task 9**: `overcrowd` (the ring) and `scrim` (the
-    // shutdown dim). Both are `render`-side entries with no spec §7.1 row,
-    // exactly as `tree` is.
+    // **Fourteen since M1f Task 8**: `overcrowd` (the ring) and `scrim` (the
+    // shutdown dim) arrived at M1e Task 9, and `cardFace`/`cardText`/
+    // `cardAccent` are §5.10's offer modal. All five are `render`-side entries
+    // with no spec §7.1 row, exactly as `tree` is.
     expect(Object.keys(PALETTE).sort()).toEqual([
       'background',
+      'cardAccent',
+      'cardFace',
+      'cardText',
       'groups',
       'land',
       'mountain',
@@ -426,13 +438,20 @@ describe('the palette — spec 7.1\'s theme object, plus tree, minus shadow', ()
       .filter(([name]) => name !== 'groups')
       .map(([, value]) => value as string)
       .concat(PALETTE.groups)
-    expect(all.length, 'ten scalar entries plus six groups').toBe(16)
+    expect(all.length, 'thirteen scalar entries plus six groups').toBe(19)
     expect(new Set(all).size).toBe(all.length)
-    // Non-vacuous on the two new entries specifically, since `overcrowd` is an
-    // alarm red and the six groups include a deep red.
+    // Non-vacuous on the entries most likely to collide, since `overcrowd` is
+    // an alarm red and the six groups include a deep red — and since the three
+    // card colours are exactly the shape of thing somebody would "simplify"
+    // into `land`, `uiText` and a group.
     expect(PALETTE.groups).not.toContain(PALETTE.overcrowd)
     expect(all).toContain(PALETTE.overcrowd)
     expect(all).toContain(PALETTE.scrim)
+    expect(PALETTE.cardFace, 'a card is held in front of the board, not cut out of it').not.toBe(
+      PALETTE.land,
+    )
+    expect(PALETTE.cardText).not.toBe(PALETTE.uiText)
+    expect(PALETTE.groups).not.toContain(PALETTE.cardAccent)
   })
 
   it('separates the group colours on LIGHTNESS as well as hue', () => {
