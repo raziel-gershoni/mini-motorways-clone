@@ -5,9 +5,16 @@ import {
   OVERCROWD_FULL_MILLITICKS,
   REVEALED_X0,
   REVEALED_Y0,
+  TICKS_PER_WEEK,
 } from '@laneways/shared'
-import { H_TICK, isGameOver } from '@laneways/sim'
-import { PALETTE, type AtlasContext, type AtlasSurface } from '@laneways/render'
+import { H_TICK, isGameOver, offerPending } from '@laneways/sim'
+import {
+  PALETTE,
+  createOfferRects,
+  offerRects,
+  type AtlasContext,
+  type AtlasSurface,
+} from '@laneways/render'
 import { createGame, type GameContext } from '../src/main'
 import { CITY_LAYOUT_ID } from '../src/layouts'
 import { CITY_DEATH_TICK } from './deathTicks'
@@ -262,6 +269,21 @@ interface DrawCounts {
    * stopped running looks identical from the outside.
    */
   scrimFills: number
+  /**
+   * §5.10's card faces — M1f Task 8, and a counter for the same reason
+   * `scrimFills` is one. Phase 12 is the file's second conditional phase, so a
+   * window that never raised an offer measures nothing about it and looks
+   * identical to one that did. Classified by `fillStyle` identity, one pointer
+   * comparison per `fillRect`, exactly as the scrim is.
+   */
+  cardFaceFills: number
+  /**
+   * §5.10's peek pill, which is the ONE thing phase 12 draws in both of its
+   * arms — so it is the anchor for the peek window, where there is no card face
+   * and no scrim to count and the board underneath is the city's, which seeds
+   * no roads and therefore blits nothing.
+   */
+  peekPillFills: number
 }
 
 /**
@@ -310,6 +332,8 @@ function countingContext(counts: DrawCounts, surfaces: { ghost: unknown }): Game
     setTransform: () => undefined,
     fillRect: () => {
       if (ctx.fillStyle === PALETTE.scrim) counts.scrimFills++
+      else if (ctx.fillStyle === PALETTE.cardFace) counts.cardFaceFills++
+      else if (ctx.fillStyle === PALETTE.cardAccent) counts.peekPillFills++
     },
     fillText: () => undefined,
     drawImage: (image) => {
@@ -321,7 +345,7 @@ function countingContext(counts: DrawCounts, surfaces: { ghost: unknown }): Game
 }
 
 function zeroCounts(): DrawCounts {
-  return { blits: 0, ghostBlits: 0, rings: 0, scrimFills: 0 }
+  return { blits: 0, ghostBlits: 0, rings: 0, scrimFills: 0, cardFaceFills: 0, peekPillFills: 0 }
 }
 
 function stubSurface(widthPx: number, heightPx: number): AtlasSurface {
@@ -455,6 +479,98 @@ function deadGame(): Driven {
   // false on every call — its own `over` guard — and enqueue nothing. See
   // `cardPolicy.ts` for why that guard exists rather than being left to this
   // call site.
+  return { game, drive, counts, cardsTaken: 0 }
+}
+
+/**
+ * **A board stopped at §5.10's modal, drawing phase 12 on EVERY profiled
+ * frame — M1f Task 8.**
+ *
+ * Without this rig the modal's per-frame allocation is covered only NOMINALLY,
+ * and the distinction is the whole reason the rig exists. `drivenGame` above
+ * crosses the week-1 boundary inside its last window, so `drawOffer` runs on
+ * roughly **two frames of three thousand** — far below a 512-byte sampling
+ * profiler's floor, by construction, exactly as Task 7 measured for
+ * `applyChooseCard`. A window that green-lights a phase it sampled twice is
+ * this catalogue's *"instrument that reports clean while measuring nothing"*,
+ * and it is worse than no instrument because it reads as coverage.
+ *
+ * Here the offer is up before the first frame, so the modal draws 3,000 times
+ * per window: the card faces, the four memoised number->string caches
+ * (`grantTextA`/`grantTextB`/`itemsText` and the title's own constants), the
+ * peek pill, and `offerRects` writing into `canvas.ts`'s module scratch.
+ *
+ * **How it gets there without poking a header.** `warmStartTicks =
+ * TICKS_PER_WEEK` drives `step` directly 4,500 times, which is what
+ * `createGame` already does at boot — so phase 1 advances `H_WEEK` to 1 and
+ * phase 4 raises a real pair from the real seed. `sim` has no notion of pause,
+ * so the warm start crosses the boundary without stopping; the FIRST frame then
+ * drains one tick, `onOfferRaised` fires, and the loop is paused for every
+ * frame after it. 4,500 is comfortably inside `CITY_DEATH_TICK` (5,580), so the
+ * board is alive and the shutdown phase never runs — asserted below, because a
+ * dead board would draw a scrim instead and the counter would not say which.
+ *
+ * `peek` drives the peek arm instead, which draws strictly less: the pill and
+ * its label, no scrim and no faces.
+ */
+function modalGame(options: { peek?: boolean } = {}): Driven {
+  const counts = zeroCounts()
+  const surfaces: { ghost: unknown } = { ghost: null }
+  const game = createGame({
+    restart: () => {
+      throw new Error('the modal draw rig tapped a dead board — it must be paused at an OFFER')
+    },
+    layoutId: CITY_LAYOUT_ID,
+    // Exactly the boundary: `step` raises the offer on this tick and `sim` has
+    // no pause, so the warm start walks straight through it.
+    warmStartTicks: TICKS_PER_WEEK,
+    canvas: {
+      width: 0,
+      height: 0,
+      style: { width: '', height: '' },
+      getBoundingClientRect: () => ({ left: 11, top: 7 }),
+    },
+    context: countingContext(counts, surfaces),
+    createSurface: stubSurface,
+    createFallback: () => null,
+    measure: () => M0_VIEW,
+    settle: (run) => {
+      run()
+    },
+  })
+  surfaces.ghost = game.atlases.ghost.surface
+  seedGhosts(game)
+
+  let now = 1000
+  const drive = (count: number): void => {
+    for (let i = 0; i < count; i++) {
+      now += 16.7
+      game.frame(now)
+    }
+  }
+
+  // **Driven until the pause arms, rather than a frame count, because the
+  // count is three and the reason is two separate facts about `loop.ts`.** The
+  // first `frame(now)` assigns the clock reference and drains ZERO ticks
+  // whatever its length, so `advance` never runs and nothing can arm the pause;
+  // and these frames are 16.7 ms against a 33.3 ms tick, so the second one only
+  // fills half the accumulator. The third drains the tick that fires
+  // `onOfferRaised`. A literal `drive(3)` would be right today and silently
+  // wrong the day either number moves. **No card policy here, and that is the
+  // point of the rig**: the offer must stay up.
+  for (let i = 0; i < 20 && !game.loop.paused; i++) drive(1)
+  if (!game.loop.paused || !offerPending(game.state)) {
+    throw new Error(
+      `the modal rig did not stop at an offer: paused=${String(game.loop.paused)} ` +
+        `pending=${String(offerPending(game.state))} tick=${String(game.state.header[H_TICK])}`,
+    )
+  }
+  if (options.peek === true) {
+    const camera = game.shell.camera
+    const rects = offerRects(camera, createOfferRects())
+    game.pointer.down(1, 11 + rects.peek.x + rects.peek.w / 2, 7 + rects.peek.y + rects.peek.h / 2)
+  }
+
   return { game, drive, counts, cardsTaken: 0 }
 }
 
@@ -797,6 +913,124 @@ describe('the real draw path allocates nothing, measured', () => {
       if (min > NOISE_FLOOR_BYTES_PER_FRAME) offenders.push(`${file} at ${min.toFixed(2)} B/frame`)
     }
     expect(offenders.sort()).toEqual([])
+  })
+
+  it('charges no packages/render/src file beyond its budget with §5.10\'s MODAL up', () => {
+    // **Phase 12's own budget, and the only place it is measured on real
+    // frames.** `drivenGame` above crosses the week boundary inside its last
+    // window and therefore samples `drawOffer` on about TWO frames of three
+    // thousand — nominal coverage, below a 512-byte profiler's floor by
+    // construction. Here it runs on every one of them.
+    const { drive, counts } = modalGame()
+    drive(WARMUP_FRAMES)
+    const before = counts.cardFaceFills
+    const windows: Map<string, number>[] = []
+    for (let w = 0; w < WINDOW_COUNT; w++) {
+      windows.push(
+        profileBytesByFile(() => {
+          drive(PROFILED_FRAMES)
+        }),
+      )
+    }
+
+    // The anchor, in the dead rig's idiom and for its reason: a frozen board is
+    // allocation-free, so "something from `render` appeared in the profile"
+    // flakes green exactly when there is nothing to complain about. The DRAW
+    // COUNTER cannot be absent. Two faces per frame.
+    expect(
+      counts.cardFaceFills - before,
+      'the profiled windows drew no modal at all — this budget measures nothing',
+    ).toBe(2 * WINDOW_COUNT * PROFILED_FRAMES)
+
+    const resolved = [...new Set(windows.flatMap((w) => [...w.keys()]))]
+    const offenders: string[] = []
+    for (const file of resolved) {
+      if (!file.startsWith(RENDER_SRC)) continue
+      let min = Infinity
+      for (const window of windows) min = Math.min(min, (window.get(file) ?? 0) / PROFILED_FRAMES)
+      if (min > NOISE_FLOOR_BYTES_PER_FRAME) offenders.push(`${file} at ${min.toFixed(2)} B/frame`)
+    }
+    expect(offenders.sort()).toEqual([])
+  })
+
+  it('charges nothing while PEEKING either, which draws a different subset', () => {
+    // Peek suppresses the scrim and both faces and keeps the pill, so it is a
+    // different set of calls rather than fewer of the same ones — and it is the
+    // arm a player holds for as long as they like.
+    const { drive, counts } = modalGame({ peek: true })
+    drive(WARMUP_FRAMES)
+    const facesBefore = counts.cardFaceFills
+    const scrimsBefore = counts.scrimFills
+    const pillsBefore = counts.peekPillFills
+    const windows: Map<string, number>[] = []
+    for (let w = 0; w < WINDOW_COUNT; w++) {
+      windows.push(
+        profileBytesByFile(() => {
+          drive(PROFILED_FRAMES)
+        }),
+      )
+    }
+    expect(counts.cardFaceFills - facesBefore, 'peek drew a card face').toBe(0)
+    expect(counts.scrimFills - scrimsBefore, 'peek dimmed the board').toBe(0)
+    // **The pill is the anchor**, because it is the one thing phase 12 draws in
+    // both arms — and because the board underneath cannot be one here: this is
+    // the starting city, which seeds no roads, so the road layer blits nothing
+    // and a `blits > 0` anchor would be a 0-detector that reads as coverage.
+    // The ghost layer is what `seedGhosts` put there and it says the board ran.
+    expect(counts.peekPillFills - pillsBefore, 'phase 12 never ran at all').toBe(
+      WINDOW_COUNT * PROFILED_FRAMES,
+    )
+    expect(counts.ghostBlits, 'and the board under it was drawn').toBeGreaterThan(0)
+
+    const resolved = [...new Set(windows.flatMap((w) => [...w.keys()]))]
+    const offenders: string[] = []
+    for (const file of resolved) {
+      if (!file.startsWith(RENDER_SRC)) continue
+      let min = Infinity
+      for (const window of windows) min = Math.min(min, (window.get(file) ?? 0) / PROFILED_FRAMES)
+      if (min > NOISE_FLOOR_BYTES_PER_FRAME) offenders.push(`${file} at ${min.toFixed(2)} B/frame`)
+    }
+    expect(offenders.sort()).toEqual([])
+  })
+
+  it('is not vacuous: the modal rig really is stopped at an offer, on a LIVE board', () => {
+    // A green budget on a rig that stopped drawing is the catalogue's
+    // "instrument that reports clean while measuring nothing"; a rig that
+    // quietly died would draw a shutdown screen instead and the file's other
+    // counter would not say which phase ran.
+    const { game, drive, counts } = modalGame()
+    expect(game.state.header[H_TICK], 'one tick past the boundary').toBe(TICKS_PER_WEEK + 1)
+    // Non-vacuous on the drive loop above: it really did take more than one
+    // frame, and the reason is `loop.ts`'s clock reference plus a 16.7 ms frame
+    // against a 33.3 ms tick.
+    expect(offerPending(game.state), 'the offer is up').toBe(true)
+    expect(game.loop.paused, 'and the loop stopped for it').toBe(true)
+    expect(isGameOver(game.state), 'on a board that is ALIVE').toBe(false)
+    expect(TICKS_PER_WEEK).toBeLessThan(CITY_DEATH_TICK)
+
+    const frames = 200
+    const before = {
+      faces: counts.cardFaceFills,
+      scrims: counts.scrimFills,
+      pills: counts.peekPillFills,
+      ghosts: counts.ghostBlits,
+    }
+    drive(frames)
+    expect(counts.cardFaceFills - before.faces, 'two card faces every frame').toBe(2 * frames)
+    expect(counts.scrimFills - before.scrims, 'and one scrim').toBe(frames)
+    expect(counts.peekPillFills - before.pills, 'and one peek pill').toBe(frames)
+    expect(
+      counts.ghostBlits - before.ghosts,
+      'over a board that is still drawn under it',
+    ).toBeGreaterThan(0)
+    // Frozen: the modal pause holds for every one of those frames.
+    expect(game.state.header[H_TICK]).toBe(TICKS_PER_WEEK + 1)
+    expect(game.loop.ticksLastFrame).toBe(0)
+    // And the two cards are real, so the memoised grant caches were exercised
+    // with two DIFFERENT numbers rather than one value twice.
+    const frame = game.builder.frame
+    expect(new Set([frame.offerA, frame.offerB]).size).toBe(2)
+    expect(frame.offerGrantA).not.toBe(frame.offerGrantB)
   })
 
   it('is not vacuous: the dead rig really is frozen, and really does draw the shutdown', () => {
