@@ -461,6 +461,24 @@ export interface RenderFrame {
    * week is resolved even though the two card ids below are still sitting in the
    * header — see `offerA`.
    */
+  /**
+   * ---------------------------------------------------------------------------
+   * **IT IS TRUE AT THE SAME TIME AS `gameOver`, PERMANENTLY, AND A DRAW PATH
+   * THAT ASSUMES OTHERWISE PAINTS TWO THINGS AT ONCE.**
+   * ---------------------------------------------------------------------------
+   *
+   * `step` is a byte-identical no-op past a shutdown, so `H_OFFER_WEEK` can never
+   * catch up to `H_WEEK` and this field stays TRUE for the rest of the process on
+   * any board that died after its first week boundary. Measured on the demo board
+   * warm-started to `DEMO_DEATH_TICK`: `gameOver` true, `offerPending` true,
+   * `offerA` 1, `offerB` 7, on that frame and on every frame after it.
+   *
+   * **So the two are NOT mutually exclusive and the exclusion has to be drawn
+   * rather than assumed.** `canvas.ts` gates the shutdown scrim and the offer
+   * modal against each other for exactly this reason; the reachability argument
+   * in the other direction — *"a dead board cannot have an offer up"* — is false,
+   * and M1f Task 8 shipped two scrims a frame before an existing rig caught it.
+   */
   readonly offerPending: boolean
   /**
    * The card id in slot A, or `0` (no card) when nothing is pending.

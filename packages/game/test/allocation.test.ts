@@ -2823,8 +2823,21 @@ function buildSpawnRig(): SpawnRig {
  * `H_OFFER_WEEK` never catches up, `offerPending` is true on every profiled
  * tick, and phase 4 runs `runOffer`'s **full draw** 13,800 times. That is what
  * caught M1f Task 5's HeapNumber box in `offerSeedFor` — reverting its `| 0`
- * charges `cards.ts` at 16.84 / 15.93 / 9.69 B/tick against a 4 B budget, in all
- * three windows. A card policy here would make every profiled tick take
+ * puts `cards.ts` over budget **in all three windows, on 3 of 3 independent
+ * draws**, which is the verdict and the part that is worth anything.
+ *
+ * **The per-window bytes are quoted as a RANGE over stated draws and never as a
+ * point, because the instrument is a sampling profiler.** Three draws of the
+ * same reversion, each of three windows, span **9.40-17.33 B/tick against a 4 B
+ * budget** — a 1.8x spread on the same code, while the RED/GREEN verdict never
+ * wavered. An earlier version of this comment carried one draw's `16.84 / 15.93
+ * / 9.69` as if it were the quantity; the next reader would have taken it for a
+ * baseline. Report a bimodal instrument as a verdict or as a range, never as a
+ * point. **M1f Task 5's own three figures for this reversion — 15.8 / 17.8 /
+ * 10.1, quoted in `cards.ts`'s `offerSeedFor` — sit inside that band**, which is
+ * the inherited number reproducing rather than being contradicted.
+ *
+ * A card policy here would make every profiled tick take
  * `runOffer`'s early return instead, `cards.ts` would leave the profile
  * entirely, and **nothing would go red** — the catalogue's *"a coverage
  * instrument's scope does not follow the code"*, which this project has now hit

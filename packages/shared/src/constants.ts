@@ -613,12 +613,26 @@ export const CARD_GRANT_ROAD_TILES = 30
  * **And Task 7 measured what the bonus does to the slack, which is the number
  * this lever is for.** On the greedy arm that ships — five weeks, death at
  * 21,783 — the tile ledger is granted 30 at boot plus 4 x 30 weekly = **150**
- * and ends holding 94, i.e. **56 spent, 2.7x slack**. With the card policy the
- * same arm is granted 150 + 90 = **240** for the same 56 spent, i.e. **4.3x**,
+ * and ends holding 94, i.e. **56 spent, 2.68x slack**. With the card policy the
+ * same arm is granted 150 + 90 = **240** for the same 56 spent, i.e. **4.29x**,
  * and not one road it lays moves: `armGreedyActions` reads the budget in exactly
- * one place and `unaffordable` is 0 across the whole run. So the modal's 30-vs-20
- * choice costs the player nothing on the board that ships today, which is the
- * strongest available argument for the lever above.
+ * one place and `unaffordable` is 0 across the whole run.
+ *
+ * **So on the tree as it stands the modal is not a trade-off at all, and both
+ * halves of that are worse than "the tiles are slack".** `H_INV_UPGRADES` has
+ * exactly one writer (`applyChooseCard`) and **zero readers** — `applyPlaceUpgrade`
+ * is Task 9 and has not landed — so the choice a player is offered is *30
+ * unspendable tiles* against *20 unspendable tiles plus two items nothing can
+ * place*. Task 9 closes the second half by making the items placeable. **The
+ * first half — 4.29x slack on tiles — is untouched by any planned task**, and
+ * the lever above is the only thing that would close it.
+ *
+ * **The caveat, because the measurement is one arm's.** The greedy connector
+ * lays MINIMAL road: a 0-1 BFS to the nearest same-colour house and nothing
+ * else. "Costs nothing" is proven for that arm and not for a human who paves
+ * generously, who could plausibly spend at a multiple of it. The DIRECTION is
+ * not in doubt at 4.29x, and the honest form of the claim is that the arm which
+ * defines this milestone's difficulty cannot spend its income.
  */
 export const CARD_GRANT_ITEM = 20
 /**
