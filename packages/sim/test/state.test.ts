@@ -424,6 +424,115 @@ describe('the new M1c header slots exist and start at 0', () => {
   })
 })
 
+describe('every declared region survives snapshot -> restore into a COLD world', () => {
+  // **Parameterised off the real region table, so it cannot go stale as regions
+  // are added** — the construction `regions.test.ts`'s FIELD_INPUT staleness
+  // sweep already uses, pointed at durability instead of classification.
+  //
+  // The non-negotiable it discharges: `hashState` is FNV over the whole buffer
+  // and `snapshot`/`restore` copy the whole buffer, so a new region is covered
+  // STRUCTURALLY the moment it is declared. That is an argument, not a test, and
+  // "a region `hashState` does not fold is a silent determinism hole" is the
+  // kind of claim this project does not accept unexecuted. M1f Task 4 declares
+  // `upgradeAt` and five header slots; this is what says they round-trip.
+  //
+  // `restore` is handed a world built FRESH rather than the one the state was
+  // created against, because a Worker replay has no access to the original — a
+  // restore that only works against the same `WorldData` object would pass a
+  // same-process test and fail the thing the product exists to do.
+  const layout = computeLayout(regionsFor(MAP))
+
+  /**
+   * **`mapIdentity` is excluded, and the exclusion is proved rather than
+   * assumed.** It is the one region `restore` VALIDATES rather than merely
+   * copies: `assertWorldMatches` compares `MI_MAP`/`MI_MAP_W`/`MI_MAP_H` against
+   * the world and throws, which is the check that catches a 24x40-vs-40x24 board
+   * swap the byte-length check cannot. Poking it therefore produces a named
+   * throw, which is the CORRECT behaviour and not a round-trip failure. The test
+   * below asserts that throw, so the exclusion cannot become a hiding place.
+   */
+  const EXCLUDED = 'mapIdentity'
+
+  it(`excludes exactly ${EXCLUDED}, and only because restore VALIDATES it`, () => {
+    const all = layout.entries.map((e) => e.name)
+    expect(all.filter((n) => n === EXCLUDED).length, 'the excluded region is a real one').toBe(1)
+    const s = createState('roundtrip-excluded', MAP)
+    const e = layout.entries.find((x) => x.name === EXCLUDED)!
+    s.bytes[e.offset] = (s.bytes[e.offset] as number) ^ 0xff
+    // Non-vacuous in both directions: the poke moves the digest (so the region
+    // IS folded), and restoring it is a named refusal rather than a silent pass.
+    expect(hashState(s)).not.toBe(hashState(createState('roundtrip-excluded', MAP)))
+    expect(() => restore(snapshot(s), createWorld(MAP))).toThrow(/MI_MAP mismatch/)
+  })
+
+  for (const e of layout.entries.filter((x) => x.name !== EXCLUDED)) {
+    const bytes = e.len * e.ctor.BYTES_PER_ELEMENT
+    it(`${e.name} (${bytes} B at ${e.offset}) round-trips, and a change to it moves hashState`, () => {
+      const s = createState('roundtrip', MAP)
+      // Poke the first, middle and last byte of THIS region with values no
+      // initialisation produces, so the check is not satisfied by a region that
+      // was already zero everywhere.
+      const offsets = [e.offset, e.offset + ((bytes / 2) | 0), e.offset + bytes - 1]
+      const before = hashState(s)
+      for (const o of offsets) s.bytes[o] = 0xa5
+      const poked = hashState(s)
+      // Vacuity, and it is the load-bearing half: if the poke did not move the
+      // whole-buffer digest, this region is NOT folded by `hashState` and the
+      // round-trip below would be proving nothing.
+      expect(poked, `${e.name} is not folded by hashState`).not.toBe(before)
+
+      const snap = snapshot(s)
+      // Mutate the ORIGINAL after snapshotting, so a restore that aliased the
+      // live buffer would come back with the wrong bytes rather than the right
+      // ones by luck.
+      for (const o of offsets) s.bytes[o] = 0x3c
+      expect(hashState(s)).not.toBe(poked)
+
+      const cold = restore(snap, createWorld(MAP))
+      expect(hashState(cold), `${e.name} did not survive the round trip`).toBe(poked)
+      for (const o of offsets) {
+        expect(cold.bytes[o], `${e.name} byte ${o}`).toBe(0xa5)
+      }
+    })
+  }
+
+  it('covers every declared region, by count — so a new region cannot skip this sweep', () => {
+    // The catalogue's "a hand-maintained registry only checks what somebody
+    // remembered to add", closed by driving the loop off the table itself. This
+    // line is what makes the coverage claim checkable rather than implied.
+    expect(layout.entries.length, '30 regions as of M1f Task 4').toBe(30)
+    expect(
+      layout.entries.filter((e) => e.name !== EXCLUDED).length,
+      'and 29 of them go through the round-trip sweep',
+    ).toBe(29)
+    expect(layout.entries.map((e) => e.name)).toContain('upgradeAt')
+    expect(layout.entries.map((e) => e.name)).toContain('header')
+  })
+
+  it('carries the five M1f header slots specifically, which the header sweep above cannot separate', () => {
+    // `header` is ONE region, so the sweep above pokes three of its 72 bytes and
+    // says nothing about which slot. These five are the ones this task added, and
+    // a restore that dropped them would look exactly like a restore that dropped
+    // `H_TICK`. Named individually so the failure says which.
+    const s = createState('roundtrip-slots', MAP)
+    const slots: readonly [number, string, number][] = [
+      [H_OFFER_A, 'H_OFFER_A', 3],
+      [H_OFFER_B, 'H_OFFER_B', 7],
+      [H_OFFER_WEEK, 'H_OFFER_WEEK', 11],
+      [H_INV_UPGRADES, 'H_INV_UPGRADES', 13],
+      [H_UPGRADE_COUNT, 'H_UPGRADE_COUNT', 17],
+    ]
+    for (const [slot, , v] of slots) s.header[slot] = v
+    const cold = restore(snapshot(s), createWorld(MAP))
+    for (const [slot, name, v] of slots) {
+      expect(cold.header[slot], name).toBe(v)
+    }
+    // And the values are distinct, so a restore that wrote one slot's value into
+    // all five would fail rather than pass.
+    expect(new Set(slots.map(([, , v]) => v)).size).toBe(slots.length)
+  })
+})
+
 describe('assertRegionNamesMatchLayout checks BOTH directions', () => {
   // Fed synthetic name lists, because on the real region table both directions
   // are satisfied by construction — deleting either loop scores zero detectors
