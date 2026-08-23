@@ -1250,6 +1250,35 @@ M1e's restart is `location.reload()`: correct by construction, preserves
 
 # 16. THE GOLDEN LEDGER — nine digests, where each lives, and what moves it
 
+> **SUPERSEDED IN PART — 2026-08-23, M1f Task 5.** This section is the handoff
+> INTO M1f and its digests are M1f's OPENING values; two of the nine have moved
+> since, and one line below is now wrong rather than merely dated. Read this
+> section as history and `sim/test/determinism.test.ts` and
+> `sim/test/loop.test.ts` as the authority.
+>
+> **Moved by Task 5, behaviourally, for `step`'s new phase 4 (the card offer):**
+>
+> | golden | prior (this table) | Task 4 | Task 5 |
+> |---|---|---|---|
+> | state | `1058753394` | `4189191826` | **`2986084740`** |
+> | demand-pin | `894844668` | `2425471180` | **`884326142`** |
+>
+> Those are the only two of the nine that cross a week boundary — verified by
+> running the other seven rather than by reading this table's descriptions: the
+> road-network, field, seed, demo and rejected-circle fixtures take **no tick at
+> all**, and the loop (130 ticks), queue (25) and multipliers (110) runs sit
+> inside week 0.
+>
+> **And one sentence below is now FALSE, not just dated.** *"No golden sees phase
+> 10"* is still true of the overcrowd meter (which is phase **11** from Task 5
+> on — the phase count went 10 -> 11 by inserting at position 4). But the
+> ledger's implicit claim that the goldens are blind to the CARD path has ended:
+> the two above now fold `H_OFFER_A`/`H_OFFER_B`. What they still cannot see is
+> `drawOfferPair`'s internal re-mix, because `poolFor` returns two cards and at
+> `n = 2` slot B has one candidate — measured, 0 of 20,000 seeds differ at n = 2
+> against 13,320 of 20,000 at n = 4. A three-card pin in `cards.test.ts` covers
+> that line instead. **Do not diagnose a moved golden as the re-mix.**
+
 M1e opened with seven goldens and closes with **nine**. Two were minted in the
 milestone (Task 1's re-bless produced no new digest; Task 6's demand-pin golden
 and Task 10's inheritance of the demo golden are the arithmetic). All nine are
@@ -1398,6 +1427,36 @@ shape, and both sweeps assert that.
 ---
 
 # 17. THE TICK ORDER, RE-MEASURED AT THE FINAL PHASE COUNT
+
+> **SUPERSEDED — 2026-08-23, M1f Task 5. "THE FINAL PHASE COUNT" IN THIS
+> SECTION'S TITLE MEANS M1e'S TEN, AND IT IS ELEVEN NOW.** Task 5 inserted the
+> card offer at position 4, re-ran the complete set at **C(11,2) = 55** over
+> 2,044 tests with six interleaved baselines, and `step.ts` carries that table.
+> Every index of 4 or above below moves by one: this section's `4 <-> 5` is
+> today's **`5 <-> 6`** and its `3 <-> 5` is today's `3 <-> 6`.
+>
+> **The one 0-detector row survives its fourth independent measurement.**
+> `5 <-> 6` scored 0 in 4 of 4 re-runs against 4 fresh baselines. It stays on the
+> equivalent-mutant register (§7) with both commutation reasons and both
+> tripwires, under the new label, and `step.ts` keeps the old label in the same
+> paragraph so a later grep for `4 <-> 5` lands on the note.
+>
+> **Eighteen short-suite rows now, not sixteen** — 1,949 rather than 2,044,
+> `carSmoothing.test.ts` (27) and `integration.test.ts` (68) failing to COLLECT,
+> `packages/game` 652 -> 557. The two new ones are the offer's, `4 <-> 7` and
+> `4 <-> 8`; all eighteen still involve the sync or the dispatch.
+>
+> **AND THIS SECTION'S SCREENING ADVICE IS INCOMPLETE, which matters more than
+> the renumbering.** Its two rules — screen on non-vitest-result lines, run the
+> complement check — are both right and **neither can see a per-case TIMEOUT**: a
+> timeout raises no error class and does not change the collection count, so it
+> is indistinguishable from an assertion kill in both instruments. Several
+> `packages/game` cases run at roughly half vitest's 5,000 ms default, and under
+> concurrent load **the UNMUTATED tree fails them**: 3 of Task 5's 14 baseline
+> runs scored non-zero, a **21 %** flake rate, and two of the six baselines in
+> the main sweep failed at 4 and at 1. Add `Test timed out` to the screen as a
+> first-class class, and discard by REACHABILITY — ask whether the killing test
+> can reach the mutated code — because counting cannot separate them.
 
 `step.ts` carries the full table and every attribution. This section exists so
 that M1f knows the table is there, knows what it says, and knows the two things

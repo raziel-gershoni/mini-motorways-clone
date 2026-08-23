@@ -591,14 +591,15 @@ describe('the spawn phase inside step', () => {
     expect(r.state.destSpawnTick[d]).toBe(tickBefore + 1)
   })
 
-  it('a destination is INELIGIBLE on its own spawn tick, which is why 4 <-> 5 is inert', () => {
+  it('a destination is INELIGIBLE on its own spawn tick, which is why 5 <-> 6 is inert', () => {
     // **This test was written as "the detector for transposing phases 4 and 5"
-    // — M1e's numbering, today's `5 <-> 6`
-    // and it is not one — the transposition scores 0 detectors, measured three
-    // times at three suite sizes: 1,693 when Task 5 first ran it, 1,843 in Task
-    // 12's complete pairwise sweep, and 1,843 again in M1e's closing sweep,
-    // which re-applied it alone over the canonical invocation.** Rather than
-    // rename it and move on, it now
+    // — M1e's numbering; the pair is `5 <-> 6` from M1f Task 5's insertion at
+    // position 4 onward, and it is the same pair —
+    // and it is not one: the transposition scores 0 detectors, measured FOUR
+    // times at four suite sizes: 1,693 when M1e Task 5 first ran it, 1,843 in
+    // M1e Task 12's complete pairwise sweep, 1,843 again in M1e's closing sweep,
+    // and 2,044/2,045 in M1f Task 5's 55-pair sweep and its four paired
+    // re-runs.** Rather than rename it and move on, it now
     // pins the property that MAKES the pair commute, so the day that property
     // stops holding this is the test that says so.
     //
