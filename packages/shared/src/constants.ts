@@ -605,8 +605,20 @@ export const CARD_GRANT_ROAD_TILES = 30
  * has no other body, so deleting the grant deletes a phase and forces a second
  * renumbering in a milestone that has already paid for one. **M1f Task 12
  * measures the new slack and hands the lever to M1g with the number** — and notes
- * that M1f has already paid its expensive half, because every headless rig
- * acquires a card policy at Task 7.
+ * that M1f has already paid its expensive half, because every FRAME-DRIVEN
+ * headless rig acquires a card policy at Task 7. (Not *every* headless rig: the
+ * `step`-driven ones take no card and must not, because `sim` has no notion of
+ * pause and one of them is the only allocation instrument covering `cards.ts`.)
+ *
+ * **And Task 7 measured what the bonus does to the slack, which is the number
+ * this lever is for.** On the greedy arm that ships — five weeks, death at
+ * 21,783 — the tile ledger is granted 30 at boot plus 4 x 30 weekly = **150**
+ * and ends holding 94, i.e. **56 spent, 2.7x slack**. With the card policy the
+ * same arm is granted 150 + 90 = **240** for the same 56 spent, i.e. **4.3x**,
+ * and not one road it lays moves: `armGreedyActions` reads the budget in exactly
+ * one place and `unaffordable` is 0 across the whole run. So the modal's 30-vs-20
+ * choice costs the player nothing on the board that ships today, which is the
+ * strongest available argument for the lever above.
  */
 export const CARD_GRANT_ITEM = 20
 /**

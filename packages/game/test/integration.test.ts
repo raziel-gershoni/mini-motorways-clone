@@ -3977,6 +3977,32 @@ describe('the weekly card offer stops the board', () => {
     expect(rig.game.builder.frame.offerPending).toBe(false)
   })
 
+  it('declines a DEAD board, so a rig that keeps drawing does not fill a queue nothing drains', () => {
+    // **The `over` guard in `takeCardPolicy`, which scored 0 detectors until
+    // this case existed.** `step` is a byte-identical no-op past a game over, so
+    // `H_OFFER_WEEK` can never catch up and `offerPending` stays TRUE for the
+    // rest of the process; `end()` leaves `paused` true and refuses every
+    // `setPaused`. A policy guarded only on "a modal would be up" therefore
+    // fires on EVERY frame of every dead-board case in this file — and this file
+    // has several, deliberately, because the draw path must keep running behind
+    // the scrim — enqueueing one `choose-card` per frame into a queue no tick
+    // will ever drain and growing the action pool without bound inside the
+    // allocation windows.
+    const rig = buildRig({ layoutId: DEMO_LAYOUT_ID, warmStartTicks: DEMO_DEATH_TICK })
+    expect(isGameOver(rig.game.state), 'dead at boot').toBe(true)
+    expect(rig.game.loop.over, 'and the loop knows').toBe(true)
+    expect(
+      offerPending(rig.game.state),
+      'while the offer raised at 4,500 is pending forever — the sim is frozen, so nothing resolves it',
+    ).toBe(true)
+
+    const poolBefore = rig.game.queue.poolSize
+    for (let f = 0; f < 40; f++) rig.advance(16.7)
+    expect(rig.cardsTaken, 'the policy declined every one of the forty').toBe(0)
+    expect(rig.game.queue.length, 'and enqueued nothing').toBe(0)
+    expect(rig.game.queue.poolSize, 'so the action pool did not grow').toBe(poolBefore)
+  })
+
   it('freezes the demo board mid-traffic, with the cars a measured 0.09-0.22 cells short of the sim', () => {
     // **The city is the wrong board for this claim and the demo is the right
     // one.** With no input the starting city has no road, so no car ever
@@ -4698,11 +4724,16 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     // nine digest sites, which says no pre-existing byte changed VALUE, and
     // `assertM1fShapeIsPureLayout`, which says every inserted byte is still zero.
     //
-    // **These three are re-based again at M1f Task 7**, when frame-driven arms
-    // acquire a card policy and start receiving `CARD_GRANT_*` on top of
-    // `WEEKLY_TILE_GRANT`. That is expected and named in Task 7 Step 6. They are
-    // not permanent; what is permanent is that a shape task must point at
-    // something behavioural that did NOT move.
+    // **This comment predicted that these three would be re-based at M1f Task 7,
+    // when frame-driven arms acquire a card policy. THEY WERE NOT, and Task 7
+    // measured it rather than assuming either way.** The card pays 20 or 30 tiles
+    // on top of `WEEKLY_TILE_GRANT`, so the arm's tile LEDGER moved — see the
+    // block below — but `armGreedyActions` reads the budget in exactly one place
+    // and `r.unaffordable` is 0 across all 21,783 ticks, so tiles it never needed
+    // change nothing it does. The death tick, the trips and the refusals are
+    // unmoved, so **Task 4's warrant still holds and does not need re-issuing.**
+    // What is permanent is that a shape task must point at something behavioural
+    // that did NOT move.
     expect(r.deathTick, 'the anchor M1f Task 4 re-blessed eight goldens against').toBe(21783)
     expect(r.trips, 'unchanged from Task 3').toBe(368)
     expect(

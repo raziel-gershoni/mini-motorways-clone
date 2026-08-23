@@ -10,14 +10,30 @@ import type { Loop } from '../src/loop'
  * holds (`frame.ts`'s `onOfferRaised` -> `main.ts`'s `loop.setPaused(true)`),
  * and `loop.ts` gates its whole drain on `if (!paused)`. So a headless rig that
  * drives `game.frame` past tick 4,500 and never resolves the offer **stops
- * dead**. Measured on this tree before the policy existed: **11 genuine reds
- * across two files** — `integration.test.ts`'s six death loops and its three
- * memoised arms (whose `beforeAll` failure then skipped four more cases), and
- * `demoAllocation.test.ts`, which would otherwise have profiled a FROZEN board
- * for the last of its three windows while its allocation numbers still looked
- * fine. That is the catalogue's *"an instrument that reports clean while
- * measuring nothing"*, and the only reason it went red instead is that the file
- * already carries a liveness guard on `H_TICK`.
+ * dead**. Measured on this tree before the policy existed, and the breakdown is
+ * exact because two of the reds were not the pause at all:
+ *
+ * ```
+ *   10 failing CASES + 1 failing beforeAll, across TWO files
+ *      9  integration.test.ts   the six death loops' cases and the red-bay case
+ *      1  demoAllocation.test.ts
+ *      1  the arm block's beforeAll, which then SKIPPED 4 more cases
+ *    4 further reds in step-driven files, which the pause cannot reach
+ *      1  demoLayout.test.ts    2  placementAllocation.test.ts
+ *      1  integration.test.ts's 25,200-tick jam run (jamFixture drives `step`)
+ * ```
+ *
+ * **Those four are load artefacts and were discarded by reachability and by
+ * re-running** — all four pass in isolation and in the final green suite, and
+ * none of them builds a loop at all. They are recorded because a broken tree
+ * runs slower and a slower tree fails cases that have nothing to do with the
+ * break: this project's per-case timeout hazard, arriving as collateral.
+ *
+ * `demoAllocation.test.ts` is the one that matters most: without the policy it
+ * profiles a FROZEN board for the last of its three windows while its allocation
+ * numbers still look fine. That is the catalogue's *"an instrument that reports
+ * clean while measuring nothing"*, and the only reason it went red instead is
+ * that the file already carries a liveness guard on `H_TICK`.
  *
  * **A rig that drives `step` directly needs NONE of this**, because `sim` has no
  * notion of pause and never will (plan Decision 11). That is why `deathTicks.ts`'s

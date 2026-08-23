@@ -471,9 +471,16 @@ export function runOfferFromPool(state: GameState, pool: number, scratch: Scratc
  * enqueueing one needs a caller and the first is Task 8's pointer, so every
  * profiled tick is still an unresolved week. (The sentence here used to read
  * "no week resolves until Task 6 wires `choose-card`", which stops being true
- * the moment a rig takes a card; Task 7 gives the headless rigs a card policy
- * and this window then profiles the RESOLVED body instead, which is an early
- * return. Task 12 owns re-deriving what the window still covers.) So from tick
+ * the moment a rig takes a card. It then predicted: *"Task 7 gives the headless
+ * rigs a card policy and this window then profiles the RESOLVED body instead,
+ * which is an early return."* **That did not happen, and it must not.** Task 7's
+ * policy is for FRAME-driven rigs only; this window's rig — `buildSpawnRig` and
+ * `recordGreedyLog` — drives `step` directly, takes no card, and still runs this
+ * function's full body on all 13,800 profiled ticks. Task 7 verified that rather
+ * than asserting it, by reverting `offerSeedFor`'s `| 0` on the shipped tree and
+ * watching the window go red again naming this file. Giving that rig a policy
+ * would delete `cards.ts`'s only allocation coverage and turn nothing red;
+ * `allocation.test.ts` says so above `recordGreedyLog`.) So from tick
  * 4,500 onward this is a per-tick path, `allocation.test.ts`'s Task 12 window (three 4,600-tick windows
  * from tick 6,000) profiles 13,800 ticks of it under a 4 B/tick budget over the
  * whole `packages/sim/src` scope, and an escaping object here turns that window
