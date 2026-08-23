@@ -392,6 +392,44 @@ const REGION_FIELD_NAMES = Object.freeze([
   'upgradeAt',
 ] as const)
 
+/**
+ * Both directions of the region-name check, split out of `viewsOver` so a
+ * SYNTHETIC layout can reach them.
+ *
+ * @internal Exported for testing only; `viewsOver` is the sole production caller.
+ *
+ * **The second loop is new at M1f Task 4 and the split is what gives it a
+ * detector.** On the real region table both directions are satisfied by
+ * construction, so deleting either scores zero and reads exactly like a guard
+ * nobody needed — the same problem `m1eSplice.ts` solved by splitting
+ * `m1eRangesFromLayout` out of `m1eInsertedRanges`.
+ *
+ * Why the second direction exists at all: the first loop throws for a NAME with
+ * no layout entry, and never for a LAYOUT ENTRY with no name. So a region
+ * declared in `regions.ts` alone is laid out, folded into `hashState`, copied by
+ * `snapshot`/`restore` — and its `GameState` field is `undefined` until `tsc`
+ * happens to notice. This task declares a region and five header slots at once,
+ * and a typo in a name would otherwise surface as a hash change with no failing
+ * assertion.
+ */
+export function assertRegionNamesMatchLayout(
+  layoutNames: readonly string[],
+  declared: readonly string[] = REGION_FIELD_NAMES,
+): void {
+  for (let i = 0; i < declared.length; i++) {
+    const name = declared[i] as string
+    if (!layoutNames.includes(name)) {
+      throw new Error(`state layout: no view constructed for region "${name}"`)
+    }
+  }
+  for (let i = 0; i < layoutNames.length; i++) {
+    const name = layoutNames[i] as string
+    if (!declared.includes(name)) {
+      throw new Error(`state layout: region "${name}" is laid out but is not in REGION_FIELD_NAMES`)
+    }
+  }
+}
+
 function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
   // Built by iterating the layout table, not by re-deriving offsets: every
   // view's byteOffset and length come from the entry `computeLayout` already
@@ -402,27 +440,12 @@ function viewsOver(buffer: ArrayBuffer, map: MapData): GameState {
     const e = entries[i]!
     views.set(e.name, new e.ctor(buffer, e.offset, e.len))
   }
-  for (let i = 0; i < REGION_FIELD_NAMES.length; i++) {
-    const name = REGION_FIELD_NAMES[i] as string
-    if (!views.has(name)) {
-      throw new Error(`state layout: no view constructed for region "${name}"`)
-    }
-  }
-  // The converse of the check above, added at M1f Task 4 because this task
-  // declares a region and five header slots at once and a typo in a name would
-  // otherwise surface as a hash change with no failing assertion: the loop above
-  // throws for a NAME with no layout entry and never for a LAYOUT ENTRY with no
-  // name, so a region declared in `regions.ts` alone is laid out, hashed by
-  // `hashState`, copied by `snapshot`/`restore` — and its `GameState` field is
-  // `undefined` until `tsc` happens to notice.
-  for (let i = 0; i < entries.length; i++) {
-    const e = entries[i] as { name: string }
-    if (!REGION_FIELD_NAMES.includes(e.name as (typeof REGION_FIELD_NAMES)[number])) {
-      throw new Error(
-        `state layout: region "${e.name}" is laid out but is not in REGION_FIELD_NAMES`,
-      )
-    }
-  }
+  // Both directions, in one place, reachable from a synthetic layout — see
+  // `assertRegionNamesMatchLayout` above for why the converse matters and why
+  // it is split out rather than inlined here.
+  const layoutNames: string[] = []
+  for (let i = 0; i < entries.length; i++) layoutNames.push((entries[i] as { name: string }).name)
+  assertRegionNamesMatchLayout(layoutNames)
   const rng = views.get('rng')
   const mapIdentity = views.get('mapIdentity')
   const header = views.get('header')

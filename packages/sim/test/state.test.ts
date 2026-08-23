@@ -33,6 +33,7 @@ import {
   H_UPGRADE_COUNT,
   offerPending,
   offerSlot,
+  assertRegionNamesMatchLayout,
   HEADER_LENGTH,
   isGameOver,
   failedDestination,
@@ -420,6 +421,46 @@ describe('the new M1c header slots exist and start at 0', () => {
       H_SPAWN_COLOUR_CURSOR, H_OFFER_A, H_OFFER_B, H_OFFER_WEEK, H_INV_UPGRADES,
       H_UPGRADE_COUNT,
     ]).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
+  })
+})
+
+describe('assertRegionNamesMatchLayout checks BOTH directions', () => {
+  // Fed synthetic name lists, because on the real region table both directions
+  // are satisfied by construction — deleting either loop scores zero detectors
+  // and reads exactly like a guard nobody needed. Same construction
+  // `m1eSplice.test.ts` uses for its splice guards.
+  const DECLARED = ['rng', 'header', 'roads'] as const
+
+  it('accepts a layout whose names are exactly the declared set', () => {
+    // Vacuity for this block: if the well-formed case threw, both "it throws"
+    // tests below would pass for the wrong reason.
+    expect(() => assertRegionNamesMatchLayout(['rng', 'header', 'roads'], DECLARED)).not.toThrow()
+    // Order is irrelevant — this is a set check, and a reorder is not a defect.
+    expect(() => assertRegionNamesMatchLayout(['roads', 'rng', 'header'], DECLARED)).not.toThrow()
+  })
+
+  it('throws for a DECLARED name with no layout entry — the original direction', () => {
+    expect(() => assertRegionNamesMatchLayout(['rng', 'header'], DECLARED)).toThrow(
+      /no view constructed for region "roads"/,
+    )
+  })
+
+  it('throws for a LAYOUT entry with no declared name — the direction M1f Task 4 added', () => {
+    // The failure this closes: a region declared in `regions.ts` alone is laid
+    // out, folded into `hashState` and copied by `snapshot`/`restore`, while its
+    // `GameState` field is `undefined`. Before this loop it surfaced as a moved
+    // digest with no failing assertion.
+    expect(() =>
+      assertRegionNamesMatchLayout(['rng', 'header', 'roads', 'upgradeAtt'], DECLARED),
+    ).toThrow(/region "upgradeAtt" is laid out but is not in REGION_FIELD_NAMES/)
+  })
+
+  it('runs against the REAL table with the real declared list, and passes', () => {
+    // Non-vacuity for production: the two loops above are exercised on synthetic
+    // input, and this is the line that says the shipped table satisfies them.
+    const names = computeLayout(regionsFor(MAP)).entries.map((e) => e.name)
+    expect(names).toContain('upgradeAt')
+    expect(() => assertRegionNamesMatchLayout(names)).not.toThrow()
   })
 })
 
