@@ -967,3 +967,52 @@ repeated. And **schedule the re-check rather than trusting the snapshot**: both 
 to confirm at the real commit — the RNG ban re-verifies itself the moment the suite runs, and the
 interlock is one grep — so the correct response to a hedged snapshot is a queued verification, not a
 confident restatement.
+
+## A timeout is invisible to both mutation screens, and it banks as a kill
+
+This project screens mutation results two ways: a **crash screen** matching error classes
+(`ReferenceError`, `TypeError`, module-load failures), and a **collection-count complement check**
+catching mutants that stop tests being collected at all. Between them they have caught genuinely
+invalid mutants several times.
+
+**Neither can see a timeout.** `Test timed out in 5000ms` raises no error class, and a timed-out case
+was collected — so the count is unchanged. A timeout is indistinguishable from an assertion kill in
+both instruments.
+
+Measured at M1f Task 4: `packages/game` cases run at 2,124–2,717 ms against vitest's 5,000 ms default,
+so under the concurrent load a battery creates, the **unmutated** tree failed 3 tests and the **base**
+tree failed 4. In one reviewer's battery this produced **4–5 phantom reds per run, on mutants that
+cannot reach `packages/game` at all** — every one of which would have been banked as a detector.
+
+Three repairs, in order of value. **Add `Test timed out` to the crash screen** — it is one line and it
+converts the whole class from invisible to named. **Discard by reachability, not by count**: ask
+whether the killing test can reach the mutated code, which is the only screen that works when the
+failure mode carries no signature. And **keep per-case durations away from the timeout**: a suite
+sitting at half its budget on a quiet machine is over it on a busy one, and a battery is the busiest
+that machine ever gets.
+
+The general shape is worth more than the instance: **a screen matches a signature, and the failure
+mode you have not met yet has a different one.** Two independent screens that both key on signatures
+are not two screens.
+
+## The set of reachable outputs is unchanged, and every output is different
+
+M1f Task 4 dropped a re-mix step from a two-slot random draw and labelled the mutant **provably
+equivalent**, with a CRT argument — and wrote into the source that *"no test can distinguish the two,
+and the axes were enumerated before that sentence was written."*
+
+The CRT argument is correct and proves the wrong thing. It establishes that the **set** of reachable
+ordered pairs is unchanged — verified, 2/2, 12/12, 20/20, 42/42. It says nothing about **which pair a
+given seed produces**, and measured, the mutant returns a *different* pair for **13,320 of 20,000
+seeds** on a four-card pool.
+
+It is genuinely equivalent on the pool that ships today, which has **two** cards — slot B then has one
+candidate and the re-mix cannot matter. That is the honest claim, and it has an expiry date: the
+moment a third card exists, or the moment the drawn pair is written into hashed state, the line
+acquires detectors and a reader trusting the comment mis-diagnoses the moved golden as a regression.
+
+**"Equivalent" is a claim about a configuration, not about a function.** State the configuration it
+holds in and the condition that ends it — here, *"identical for |pool| ≤ 2; they differ for |pool| ≥ 3"*.
+
+Note the shape of the failure: the comment **cites this document's own rule about enumerating the axes
+before writing the sentence**, and then enumerates the wrong axis. Citing a rule is not applying it.
