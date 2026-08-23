@@ -491,6 +491,35 @@ describe('the M1f Task 4 header slots and the two guarded offer readers', () => 
     expect(offerPending(s), 'week 2, only week 1 resolved').toBe(true)
   })
 
+  it('refuses a week-0 offer even when H_OFFER_WEEK disagrees — the clause a fresh state cannot exercise', () => {
+    // **Added from a mutation result.** Dropping `week > 0` scored 0 detectors
+    // over the whole suite, and the reason is that the test above cannot see it:
+    // on a fresh state `H_WEEK` and `H_OFFER_WEEK` are BOTH 0, so
+    // `week > 0 && 0 !== 0` and the bare `0 !== 0` agree at false. The clause
+    // only does work where the two slots DISAGREE at week 0, and no fixture put
+    // them there.
+    //
+    // The catalogue's rule about a negative assertion satisfied by the wrong
+    // mechanism, in its most literal form: "week 0 has no offer" was passing
+    // because the two slots happened to be equal, not because the guard ran.
+    //
+    // Unreachable in production today — `runOffer` (M1f Task 5) writes
+    // `H_OFFER_WEEK` from `H_WEEK`, so they cannot disagree at 0 — and pinned
+    // anyway, because the guard's whole job is to hold when a later writer makes
+    // it reachable, and its failure mode is raising the modal before the run has
+    // begun.
+    const s = createState('m1f-shape', MAP)
+    s.header[H_WEEK] = 0
+    s.header[H_OFFER_WEEK] = 3
+    expect(offerPending(s), 'week 0 has no offer, whatever H_OFFER_WEEK says').toBe(false)
+    // Vacuity: without the `week > 0` clause this state reads as pending, so the
+    // fixture really does separate the two implementations.
+    expect((s.header[H_OFFER_WEEK] as number) !== (s.header[H_WEEK] as number)).toBe(true)
+    // And `offerSlot` inherits the refusal rather than reading a slot.
+    s.header[H_OFFER_A] = 4
+    expect(offerSlot(s, 0), 'and no card leaks out through the reader').toBe(0)
+  })
+
   it('offerSlot refuses to hand back a stale card off a RESOLVED week', () => {
     // `applyChooseCard` (M1f Task 6) deliberately does not clear the two card
     // slots, so this guard is the only thing standing between a resolved week
