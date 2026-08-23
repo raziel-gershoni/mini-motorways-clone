@@ -46,7 +46,7 @@ describe('seedFromString', () => {
  * and is computed before the transform runs, so breaking the transform moves no
  * digest in the repo.
  *
- * So these literals were captured from the tree at commit `41051cb`, BEFORE the
+ * So these literals were captured from the tree at commit `2f23647`, BEFORE the
  * extraction, and they are what makes "the extraction is output-preserving" a
  * measurement rather than a claim. `randomBelow`'s row is here for the same
  * reason one layer up: it consumes `nextRandom` and its rejection loop would

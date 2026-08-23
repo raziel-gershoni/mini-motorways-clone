@@ -61,7 +61,7 @@ function assertStreamIndex(store: Uint32Array, i: number): void {
  * and stays green under any consistently-applied change to these three lines;
  * no whole-buffer golden covers them either, because the digests fold the
  * ADVANCED WORD, which is computed before this function runs. The literals were
- * captured at commit `41051cb`, one commit before this one.
+ * captured at commit `2f23647`, one commit before this one.
  */
 export function mixWord(t0: number): number {
   let t = t0 >>> 0
