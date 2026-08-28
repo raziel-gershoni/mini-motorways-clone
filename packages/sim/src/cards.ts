@@ -1,4 +1,4 @@
-import { CARD_GRANT_ITEM, CARD_GRANT_ROAD_TILES, UPGRADES_PER_CARD } from '@laneways/shared'
+import { CARD_GRANT_ITEM, CARD_GRANT_ROAD_TILES, TERRAIN, UPGRADES_PER_CARD } from '@laneways/shared'
 import { mixWord } from './rng'
 import type { GameState } from './state'
 import {
@@ -20,8 +20,10 @@ import type { Scratch } from './scratch'
  * Card ids are the SIX in §5.10's table plus **one M1f adds**, declared in full
  * rather than only the two M1f can offer, because they are an enumeration of a
  * documented domain rather than speculative configuration. What keeps the five
- * unimplemented ones out of play is `CARD_IMPLEMENTED_MASK` (M1f Task 11) — a
- * scope gate with a named owner — and not their absence.
+ * unimplemented ones out of play is `CARD_IMPLEMENTED_MASK` — a scope gate with
+ * a named owner, M1g — and not their absence. Since M1f Task 11 that mask is
+ * ANDed with `capabilityMask(world)`, which asks the other question: not whether
+ * this BUILD implemented the card but whether this MAP could ever seat it.
  *
  * **`CARD_ROUNDABOUT` is one of the five, and it is declared for a specific
  * reason.** M1f measured that on the shipped board five of the six cells that
@@ -96,11 +98,13 @@ export const CARD_COUNT = 8
 /**
  * The set of cards this map and this build can offer, as a bitmask.
  *
- * **Two filters with two reasons, and M1f Task 11 lands the first one.** Until
- * then this is the second filter alone: `CARD_IMPLEMENTED_MASK`, M1f's scope
+ * **The second of the two filters `poolFor` ANDs together; `capabilityMask` is
+ * the first, landed beside it in M1f Task 11.** This one is M1f's scope
  * boundary. An offerable card with no placement mechanism is dead configuration
  * that reads as support; this constant is the interlock that stops one shipping,
- * and M1g deletes bits from it.
+ * and M1g deletes bits from it. **Deleting a bit here is M1g's whole change** —
+ * `capabilityMask` already grants every one of these cards on every map that can
+ * seat it, so nothing below has to be re-derived.
  *
  * **Declared HERE, twelve lines under the ids it is built from, and that
  * position is the point.** M1f Task 1 shipped a module-scope mask computed from
@@ -112,6 +116,33 @@ export const CARD_COUNT = 8
  * because "it cannot happen here" is what the other one's author would have said.
  */
 export const CARD_IMPLEMENTED_MASK = (1 << CARD_ROAD_TILES) | (1 << CARD_JUNCTION_UPGRADE)
+
+/**
+ * The two cards whose capability is a question about the MAP, and the set of
+ * every other card, **derived as the complement rather than listed**.
+ *
+ * §5.10 filters the pool by map capability; dossier line 227 says what that
+ * means in one sentence — *"tunnels only on mountain maps, bridges absent on
+ * Mexico City, roundabouts/lights/motorways everywhere"*. So "everywhere" is
+ * the DEFAULT and the two terrain-named cards are the exceptions, and writing
+ * it that way round is what keeps the set from going stale: M1f Task 6's brief
+ * hand-listed five of six unofferable ids and dropped `CARD_TRAFFIC_LIGHTS`,
+ * and the repair was to take a complement. The same repair, applied before the
+ * mistake.
+ *
+ * **It also fails in the safe direction.** A card id added by M1g and forgotten
+ * here is capable everywhere — the pool grows. Under a hand-listed set the same
+ * omission makes it capable NOWHERE, and a shrinking pool is the failure this
+ * whole area exists to prevent: below two cards `runOffer` degrades, and the
+ * previous design threw inside `step` after `H_EPOCH` was written.
+ *
+ * `CARD_NONE` is excluded because bit 0 is not a card; `nthSetBit` and
+ * `drawOfferPair` would both return it as one.
+ */
+const CARD_NEEDS_WATER = 1 << CARD_BRIDGE
+const CARD_NEEDS_MOUNTAIN = 1 << CARD_TUNNEL
+const CARDS_CAPABLE_ANYWHERE =
+  ((1 << CARD_COUNT) - 1) & ~(1 << CARD_NONE) & ~(CARD_NEEDS_WATER | CARD_NEEDS_MOUNTAIN)
 
 export const OFFER_SLOT_A = 0
 export const OFFER_SLOT_B = 1
@@ -297,8 +328,11 @@ export function nthSetBit(mask: number, k: number): number {
  *
  * **What that changes for a reader of a moved golden.** The whole-buffer goldens
  * now fold `H_OFFER_A`/`H_OFFER_B` (M1f Task 5), so they DO see this function's
- * output — but only through `poolFor`, which is two cards, so deleting the
- * re-mix still moves no golden. `cards.test.ts` pins one `(pool, seed) -> pair`
+ * output — but only through `poolFor`, which is two cards on every map, so
+ * deleting the re-mix still moves no golden. **M1f Task 11 did not change that
+ * and could not**: its filter can only REMOVE cards, and the label expires when
+ * the pool reaches THREE — which is M1g deleting a bit from
+ * `CARD_IMPLEMENTED_MASK`, not anything `capabilityMask` does. `cards.test.ts` pins one `(pool, seed) -> pair`
  * on a THREE-card pool instead, which is the smallest fixture that can see the
  * line at all. Do not diagnose a moved golden as this line: on the shipped pool
  * it cannot be.
@@ -354,28 +388,95 @@ export function pickFromPool(pool: number, n: number, word: number): number {
 }
 
 /**
+ * The cards this MAP could ever offer — spec §5.10's *"pool is filtered by map
+ * capability (no tunnels without mountains, no bridges without water)"*, and
+ * dossier line 227's *"roundabouts/lights/motorways everywhere"*.
+ *
+ * **A pure function of IMMUTABLE TERRAIN, and that word is the whole
+ * correction.** The first design of this function asked whether the CURRENT
+ * BOARD had room for a 3x3 roundabout — a state-dependent capability — and on
+ * `determinism.test.ts`'s 4x4 golden fixture the answer was no, the pool fell to
+ * one card, and `drawOfferPair` threw inside `step` at tick 4,500 of 13,499
+ * AFTER `H_EPOCH` had been written, poisoning the buffer for the remaining
+ * 9,000 ticks and making `restore` refuse it. **Capability answers what the MAP
+ * permits; `canPlaceUpgrade` answers what the BOARD permits, and it refuses with
+ * a reason.** The two questions are asked in different places on purpose.
+ *
+ * The signature is what enforces it. `WorldData` is built once by `createWorld`
+ * and nothing in `sim/src` writes it — roads land in `state.roads` and cleared
+ * trees in `state.cleared` — so there is no board state in scope to read.
+ * `cards.test.ts` says the same thing behaviourally and labels that test inert,
+ * because the type is the real guard.
+ *
+ * **Not cached, deliberately.** A cached mask is a second copy of a derived
+ * value with a staleness question attached, and it would have to live either in
+ * `WorldData` (widening a shared shape for one consumer) or at module scope
+ * (which `no-module-mutable-state` forbids, correctly).
+ *
+ * **Cost, MEASURED rather than argued, and the brief's version of this
+ * paragraph was wrong.** It said `runOffer` calls this *"on every tick of an
+ * unresolved week"*. It calls it on **every tick, full stop**: `runOffer` is
+ * `runOfferFromPool(state, poolFor(world), scratch)`, and the argument is
+ * evaluated before the callee's `offerPending` early return. So the scan is a
+ * per-tick cost on every board, including week 0 and every resolved week. The
+ * early exit is what keeps that cheap where it can: on `firstCity` water is at
+ * cell 12 and mountain at cell 123, so the loop stops after 124 of 960 cells;
+ * on `demoCity` neither code exists and it reads all 960. **MEASURED, because
+ * the worst case is a real fixture and not a hypothetical:** `demoLayout.test.ts`
+ * drives seven 3,000-tick runs on `demoCity` — 21,000 ticks x 960 cells — and
+ * that case runs at 3.34 s in isolation against vitest's 5,000 ms per-case
+ * default (the delta this scan adds is measured in this task's report). It allocates nothing, so `allocation.test.ts`'s
+ * 4 B/tick window over `packages/sim/src` is unmoved. See this task's report for
+ * why the margin, not the mean, is the number that matters here.
+ */
+export function capabilityMask(world: WorldData): number {
+  let mask = CARDS_CAPABLE_ANYWHERE
+  let water = 0
+  let mountain = 0
+  for (let c = 0; c < world.cells; c++) {
+    const t = world.terrain[c] as number
+    if (t === TERRAIN.WATER) water = 1
+    else if (t === TERRAIN.MOUNTAIN) mountain = 1
+    if (water === 1 && mountain === 1) break
+  }
+  if (water === 1) mask |= CARD_NEEDS_WATER
+  if (mountain === 1) mask |= CARD_NEEDS_MOUNTAIN
+  return mask
+}
+
+/**
  * The pool this map and this build can offer from, as a `CARD_COUNT`-bit mask.
  *
- * **Two filters with two reasons, and only the second exists today.** M1f Task 11
- * ANDs in `capabilityMask(world)` — the map half, "can this board seat this item
- * at all" — and the signature already takes `world` so that landing it is a body
- * change and not a call-site sweep. Until then this returns
- * `CARD_IMPLEMENTED_MASK` alone, which is M1f's scope boundary rather than a
- * property of any board.
+ * **Two filters with two reasons, and both exist as of M1f Task 11.**
+ * `capabilityMask(world)` is the map half — what this terrain could ever seat.
+ * `CARD_IMPLEMENTED_MASK` is the build half — M1f's scope boundary, an interlock
+ * that stops a card with no placement mechanism shipping as dead configuration
+ * that reads as support.
  *
- * `world` is therefore read by nothing yet, and `void world` says so in code
- * rather than in a comment a linter cannot see. Do not delete the parameter to
- * silence it: a later widening of the signature is a change every caller has to
- * be re-read for, and the callers are the tick.
+ * **Today the map half narrows NOTHING, and saying so is part of landing it.**
+ * Both cards `CARD_IMPLEMENTED_MASK` admits — road tiles and the junction
+ * upgrade — are capable everywhere, so this returns `CARD_IMPLEMENTED_MASK` on
+ * every map in the repo and no offer, no golden and nothing a player sees moved
+ * when it landed. What it buys is that a map with no water can never offer a
+ * bridge, and that **M1g's change is a bit DELETED from `CARD_IMPLEMENTED_MASK`
+ * rather than a re-derivation of anything here.** `cards.test.ts` pins the
+ * no-narrowing fact directly, so the day M1g deletes a bit that test is the
+ * notice that the goldens built on all-land fixtures are about to move.
  *
- * **The contract, which Task 11 must preserve and `cards.test.ts` pins on both
- * shipped maps: the result is inside `[0, 1 << CARD_COUNT)` and holds at least
- * two cards.** The first makes `nthSetBit` total on it; the second is what keeps
- * `runOfferFromPool`'s degenerate branch unreachable on a board that ships.
+ * `CARD_ROUNDABOUT` is the clearest case of the division: the map can seat one
+ * anywhere, and M1f has no mechanism to place one, so it is capable and
+ * unimplemented. M1g gives it a mechanism and deletes a bit; it does not touch
+ * `capabilityMask`.
+ *
+ * **The contract `cards.test.ts` pins on every map any test drives past a week
+ * boundary: the result is inside `[0, 1 << CARD_COUNT)`, bit 0 is clear, and it
+ * holds at least two cards.** The first two make `nthSetBit` total on it; the
+ * third is what keeps `runOfferFromPool`'s degenerate branch unreachable on a
+ * board that ships — and the guard enumerates FIXTURES, because the map that
+ * broke was a 4x4 golden and not either shipped city.
  */
 export function poolFor(world: WorldData): number {
-  void world
-  return CARD_IMPLEMENTED_MASK
+  return capabilityMask(world) & CARD_IMPLEMENTED_MASK
 }
 
 /**
@@ -386,14 +487,17 @@ export function poolFor(world: WorldData): number {
  * `assertPushWithinBucketWindow` (scratch.ts), `assertSingleCrossing` (cars.ts),
  * `assertDispatchProgress` (dispatch.ts) — each parameterised so the branch that
  * must never be reached in production can be reached by a test without editing a
- * constant and rebuilding. Here the branch is the short pool: `poolFor` ignores
- * its `world` until Task 11, so no fixture WORLD can produce one, and the
- * alternatives were a skipped test (which is a 0-detector for the two mutants
- * that matter) or a committed-then-reverted probe (which is a measurement, not
- * coverage). This is neither: `cards.test.ts` sweeps **all nine** masks that
- * cannot offer a pair, which is a stronger statement than one stubbed world
- * because it also covers the pools Task 11's capability filter has not been
- * written yet to produce.
+ * constant and rebuilding. Here the branch is the short pool, and **no fixture
+ * WORLD can produce one — which was true before M1f Task 11 because `poolFor`
+ * ignored its `world`, and is true after it for a stronger reason: both cards
+ * `CARD_IMPLEMENTED_MASK` admits are capable on every map, so the capability
+ * filter cannot remove either.** `cards.test.ts` pins that on every map any test
+ * drives past a week boundary. The alternatives were a skipped test (a
+ * 0-detector for the two mutants that matter) or a committed-then-reverted probe
+ * (a measurement, not coverage). This is neither: `cards.test.ts` sweeps **all
+ * nine** masks that cannot offer a pair, which is stronger than one stubbed
+ * world because it also covers pools no map can produce today and M1g's
+ * narrowing might.
  *
  * **This is NOT a pool parameter on `runOffer`.** `runOffer` below keeps the
  * specified `(state, world, scratch)` shape and is the only thing `step` calls.

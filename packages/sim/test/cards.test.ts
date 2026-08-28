@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   CARD_GRANT_ITEM,
   CARD_GRANT_ROAD_TILES,
@@ -7,8 +9,10 @@ import {
   TICKS_PER_WEEK,
   UPGRADES_PER_CARD,
   WEEKLY_TILE_GRANT,
+  demoCity,
   firstCity,
   parseMap,
+  type MapData,
 } from '@laneways/shared'
 import {
   CARD_BRIDGE,
@@ -25,6 +29,7 @@ import {
   OFFER_SLOT_B,
   applyChooseCard,
   canDrawOfferPair,
+  capabilityMask,
   cardItemGrant,
   cardTileGrant,
   drawOfferPair,
@@ -58,9 +63,20 @@ import { createWorld, type WorldData } from '../src/world'
 import { createFlowFields, createScratch, type FlowField, type Scratch } from '../src/scratch'
 import { createFieldInputRanges } from '../src/regions'
 import { step, type TickInputs } from '../src/step'
-import { placeDestination, DEST_KIND_SQUARE, ORIENTATION_S } from '../src/buildings'
+import { placeDestination, placeHouse, DEST_KIND_SQUARE, ORIENTATION_S } from '../src/buildings'
+import { placeRoad, roadMask } from '../src/roads'
+import { DEMAND_PIN_MAP, GOLDEN_MAP, allLandRows } from './mapFixtures'
 
 const NO_INPUT: TickInputs = { actions: [] }
+
+/**
+ * A CALL to `drawOfferPair`, as opposed to a mention of the name. The lookbehind
+ * is what makes it miss `tryDrawOfferPair(`; the `\\s*` is what makes it see a
+ * call written with a space before the paren. Non-global on purpose — a `/g`
+ * regex carries `lastIndex` between `.test()` calls and would alternate
+ * true/false across the file loop below.
+ */
+const CALLS_DRAW = /(?<![A-Za-z])drawOfferPair\s*\(/
 
 /**
  * One `choose-card` action for a tick. `b` is the card id the CLIENT believes
@@ -510,7 +526,7 @@ describe('drawOfferPair', () => {
     // is a programming error and a plausible fallback would hide it. What must
     // never happen is `step` reaching it: see `canDrawOfferPair` above, which is
     // the guard `runOffer` (M1f Task 5) is required to call, and
-    // `capabilityMask`'s map-only inputs (M1f Task 11). The previous draft had
+    // `capabilityMask`'s map-only inputs (M1f Task 11, landed). The previous draft had
     // this throw with no guard in front of it, and on the state golden's 4x4 map
     // it fired at tick 4,500 of a 13,499-tick fixture, AFTER `step` had written
     // `H_EPOCH` — poisoning the buffer permanently.
@@ -627,17 +643,333 @@ describe('CARD_IMPLEMENTED_MASK and poolFor', () => {
   })
 
   it('poolFor stays inside the card domain and can always be drawn from, on every shipped map', () => {
-    // Task 11 gives `poolFor` its capability half and the signature does not
-    // change. What must hold in BOTH versions is asserted here rather than in
-    // Task 11: the result is a `CARD_COUNT`-bit mask (so `nthSetBit` is total on
+    // Task 11 gave `poolFor` its capability half and the signature did NOT
+    // change — the one place a redefinition could go unnoticed — so what must
+    // hold in both versions stays asserted here, away from the Task 11 block
+    // below: the result is a `CARD_COUNT`-bit mask (so `nthSetBit` is total on
     // it) and it holds at least two cards (so `runOffer` never degrades on a
     // shipped board). Both are properties of the contract, not of today's body.
+    // The wider guard, over every FIXTURE map rather than the two shipped ones,
+    // is in the Task 11 block.
     for (const map of [firstCity(), CARDS_MAP]) {
       const pool = poolFor(createWorld(map))
       expect(pool, `pool ${pool} is inside the CARD_COUNT-bit domain`).toBeGreaterThanOrEqual(0)
       expect(pool).toBeLessThan(1 << CARD_COUNT)
       expect(canDrawOfferPair(pool), `${map.id} can offer a pair`).toBe(true)
       expect((pool & 1) === 0, 'bit 0 is CARD_NONE and must never be set').toBe(true)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M1f Task 11 — the pool's OTHER filter: what the MAP can seat
+// ---------------------------------------------------------------------------
+
+/**
+ * **The four terrain configurations the filter can distinguish, as maps.**
+ *
+ * `capabilityMask` reads two terrain codes and nothing else, so these four
+ * boards are its whole input domain: neither code, water only, mountain only,
+ * both. `firstCity` and `demoCity` supply two of the four for free — which is
+ * the catalogue's *"measure which cases the shipped configuration can actually
+ * produce"* satisfied by the game rather than by a fixture — and the other two
+ * exist because **a fixture carrying both codes cannot tell the water arm from
+ * the mountain arm**, exactly as a square map cannot tell `w` from `h`.
+ */
+const BARREN_ROWS = allLandRows(6, 5)
+/** All land, no water, no mountain, no tree: both conditional bits false at once. */
+function barren(): MapData {
+  return parseMap('barren', BARREN_ROWS, 30, 8, 4, 2)
+}
+/** Water and no mountain: the bridge arm alone. Rows 1 and 3 are river. */
+const STRIPED_ROWS = Object.freeze(['......', '~~~~~~', '......', '~~~~~~', '......'] as const)
+/** Mountain and no water: the tunnel arm alone. The mirror of `striped`. */
+const RIDGED_ROWS = Object.freeze(['......', '^^^^^^', '......', '^^^^^^', '......'] as const)
+/** Trees and land only. `TERRAIN.TREE` is code 3 and `MOUNTAIN` is 2 — adjacent, and a `>=` reads both. */
+const WOODED_ROWS = Object.freeze(['TTTTTT', 'TTTTTT', 'TTTTTT'] as const)
+/**
+ * The **last cell** of the board is the only water on it, and the only mountain
+ * on its sibling. Nothing else here reaches `c === world.cells - 1`: every other
+ * fixture's terrain sits early, so a scan that stopped one cell short would be
+ * invisible to all of them.
+ */
+const LAST_CELL_WATER_ROWS = Object.freeze(['......', '......', '.....~'] as const)
+const LAST_CELL_MOUNTAIN_ROWS = Object.freeze(['......', '......', '.....^'] as const)
+
+function fixtureMap(id: string, rows: readonly string[]): MapData {
+  return parseMap(id, rows, 30, 8, 4, 2)
+}
+
+/** Every bit `capabilityMask` can set, and the two it sets conditionally. */
+const EVERY_CARD = ((1 << CARD_COUNT) - 1) & ~(1 << CARD_NONE)
+const BRIDGE_BIT = 1 << CARD_BRIDGE
+const TUNNEL_BIT = 1 << CARD_TUNNEL
+
+
+/**
+ * **Every map any test in this repo drives `step` past a week boundary on, plus
+ * every board this file uses to separate the filter's arms.**
+ *
+ * The previous draft's non-emptiness guard iterated the two SHIPPED maps —
+ * neither of which any test drives past tick 4,500 — while the board that
+ * actually broke was `determinism.test.ts`'s 4x4 `GOLDEN_MAP`. **Enumerate the
+ * fixtures, not the products.**
+ *
+ * Two entries are terrain-identical and both are kept deliberately:
+ * `DEMAND_PIN_MAP` IS `allLandRows(20, 9)` under `makeRig`'s parameters, so the
+ * pair cannot distinguish anything `capabilityMask` computes. The first names
+ * the golden; the second names the shape eight other test files build by hand.
+ * If they ever disagree, `loop.test.ts` has been re-pointed at a different board.
+ *
+ * `CARDS_MAP` is in the list because THIS file drives it to week 6.
+ */
+const ALL_FIXTURE_MAPS: readonly [string, MapData][] = [
+  ['firstCity', firstCity()],
+  ['demoCity', demoCity()],
+  ['GOLDEN_MAP (determinism.test.ts, 13,499 ticks)', GOLDEN_MAP],
+  ['DEMAND_PIN_MAP (loop.test.ts, 5,250 ticks)', DEMAND_PIN_MAP],
+  ['allLandRows(20, 9)', parseMap('all-land-20x9', allLandRows(20, 9), 30, 8, 4, 2)],
+  ['CARDS_MAP (this file, week 6)', CARDS_MAP],
+  ['striped', fixtureMap('striped', STRIPED_ROWS)],
+  ['ridged', fixtureMap('ridged', RIDGED_ROWS)],
+  ['wooded', fixtureMap('wooded', WOODED_ROWS)],
+  ['last-cell-water', fixtureMap('last-cell-water', LAST_CELL_WATER_ROWS)],
+  ['last-cell-mountain', fixtureMap('last-cell-mountain', LAST_CELL_MOUNTAIN_ROWS)],
+  ['barren', barren()],
+]
+
+describe('capabilityMask — spec §5.10, "the pool is filtered by map capability"', () => {
+  it('firstCity has water and mountain, so bridge and tunnel are capable there', () => {
+    const m = capabilityMask(createWorld(firstCity()))
+    expect((m & BRIDGE_BIT) !== 0, 'the river at column 12').toBe(true)
+    expect((m & TUNNEL_BIT) !== 0, 'the mountain at rows 5-7').toBe(true)
+    // The exact value, not only the two bits: on a board carrying both codes
+    // every card in the domain is capable, so the mask is the whole domain.
+    expect(m, 'every card id except CARD_NONE').toBe(EVERY_CARD)
+  })
+
+  it('demoCity has NEITHER, so both are excluded there', () => {
+    // **Both arms of this filter are reachable on the two boards that ship.**
+    // `demoCity` is 24x40 of land and trees with no `~` and no `^` anywhere —
+    // grep it — so it is a real map, not a fixture, on which the capability
+    // half of the pool actually removes something.
+    const m = capabilityMask(createWorld(demoCity()))
+    expect((m & BRIDGE_BIT) !== 0).toBe(false)
+    expect((m & TUNNEL_BIT) !== 0).toBe(false)
+    expect(m, 'the whole domain less the two conditional cards').toBe(
+      EVERY_CARD & ~(BRIDGE_BIT | TUNNEL_BIT),
+    )
+  })
+
+  it('the two arms are INDEPENDENT: water alone grants only the bridge, mountain alone only the tunnel', () => {
+    // **The fixture pair that separates the arms, and the reason it exists is in
+    // Step 5's own table**: on a board carrying both codes, swapping the water
+    // and mountain tests is invisible. `firstCity` cannot see that mutation and
+    // `demoCity` cannot see it; these two are the only fixtures here that can.
+    // Same shape as the square map that hid a `w`/`h` swap.
+    const water = capabilityMask(createWorld(fixtureMap('striped', STRIPED_ROWS)))
+    expect((water & BRIDGE_BIT) !== 0, 'a river is bridgeable').toBe(true)
+    expect((water & TUNNEL_BIT) !== 0, 'no mountain, so no tunnel').toBe(false)
+
+    const mountain = capabilityMask(createWorld(fixtureMap('ridged', RIDGED_ROWS)))
+    expect((mountain & TUNNEL_BIT) !== 0, 'a ridge is tunnellable').toBe(true)
+    expect((mountain & BRIDGE_BIT) !== 0, 'no water, so no bridge').toBe(false)
+  })
+
+  it('a tree is neither water nor mountain, though its code sits next to one', () => {
+    // `TERRAIN` is `{ LAND: 0, WATER: 1, MOUNTAIN: 2, TREE: 3 }`. A `>=` where an
+    // `===` belongs reads TREE as MOUNTAIN and this is the only fixture that
+    // says so — `demoCity` has trees but is 24x40, so it is the slow way to ask.
+    const m = capabilityMask(createWorld(fixtureMap('wooded', WOODED_ROWS)))
+    expect((m & BRIDGE_BIT) !== 0).toBe(false)
+    expect((m & TUNNEL_BIT) !== 0).toBe(false)
+  })
+
+  it('sees terrain in the LAST cell of the board, so the scan is not one cell short', () => {
+    // **Nothing else in this file could catch an off-by-one on the loop bound or
+    // a break placed one line too high**: `firstCity`'s water is at cell 12 of
+    // 960 and its mountain at 123, `GOLDEN_MAP`'s are at cells 5 and 6 of 16, and
+    // every fixture above puts its terrain in the first rows. Here the ONLY
+    // non-land cell is `world.cells - 1`.
+    const w = createWorld(fixtureMap('last-cell-water', LAST_CELL_WATER_ROWS))
+    expect(w.terrain[w.cells - 1], 'vacuity: the fixture really is water in its final cell').toBe(1)
+    expect(w.terrain.indexOf(1), 'and nowhere else').toBe(w.cells - 1)
+    expect((capabilityMask(w) & BRIDGE_BIT) !== 0).toBe(true)
+
+    const m = createWorld(fixtureMap('last-cell-mountain', LAST_CELL_MOUNTAIN_ROWS))
+    expect(m.terrain[m.cells - 1], 'vacuity: mountain in its final cell').toBe(2)
+    expect(m.terrain.indexOf(2), 'and nowhere else').toBe(m.cells - 1)
+    expect((capabilityMask(m) & TUNNEL_BIT) !== 0).toBe(true)
+  })
+
+  it('road tiles, lights, motorways, roundabouts and the JUNCTION UPGRADE are capable EVERYWHERE', () => {
+    // Dossier line 227: "roundabouts/lights/motorways everywhere". This is the
+    // row the previous design got wrong by making an item's capability depend on
+    // the BOARD rather than on the MAP — it asked whether the current board had
+    // room for a 3x3 roundabout, and on the 4x4 golden fixture the answer was no,
+    // the pool fell to one card, and `drawOfferPair` threw inside `step` after
+    // `H_EPOCH` had been written. `CARD_JUNCTION_UPGRADE` joins that row: it
+    // needs nothing from the terrain, and it is the card that keeps the shipped
+    // pool at two.
+    const everywhere = [
+      CARD_ROAD_TILES,
+      CARD_TRAFFIC_LIGHTS,
+      CARD_MOTORWAY,
+      CARD_ROUNDABOUT,
+      CARD_JUNCTION_UPGRADE,
+    ]
+    const boards: readonly [string, MapData][] = [
+      ['firstCity', firstCity()],
+      ['demoCity', demoCity()],
+      ['barren', barren()],
+      ['striped', fixtureMap('striped', STRIPED_ROWS)],
+      ['ridged', fixtureMap('ridged', RIDGED_ROWS)],
+      ['GOLDEN_MAP', GOLDEN_MAP],
+      ['DEMAND_PIN_MAP', DEMAND_PIN_MAP],
+    ]
+    for (const [name, map] of boards) {
+      const m = capabilityMask(createWorld(map))
+      for (const id of everywhere) {
+        expect((m & (1 << id)) !== 0, `${name}: card ${id}`).toBe(true)
+      }
+    }
+    // And the set is DERIVED, not re-listed: the unconditional cards are the
+    // whole domain less the two that name a terrain code. M1f Task 6's brief
+    // enumerated five of six unofferable ids and dropped one; the repair there
+    // was to take the complement, and this is the same repair applied before the
+    // mistake. If M1g adds a card id, it lands in `everywhere` automatically and
+    // this assertion is what says so.
+    expect(new Set(everywhere)).toEqual(
+      new Set(
+        Array.from({ length: CARD_COUNT }, (_, id) => id).filter(
+          (id) => id !== CARD_NONE && id !== CARD_BRIDGE && id !== CARD_TUNNEL,
+        ),
+      ),
+    )
+  })
+
+  it('covering the board in roads and a house changes nothing — and that is the SIGNATURE, not luck', () => {
+    // **Labelled inert, deliberately, because it cannot fail today and a reader
+    // must not count it as coverage.** `capabilityMask` takes `WorldData`, which
+    // `createWorld` fills once from `map.terrain` and which nothing in `sim/src`
+    // ever writes — roads live in `state.roads`, cleared trees in `state.cleared`.
+    // So state-independence here is a property of the TYPE, and the day someone
+    // widens this signature to take `GameState` the compiler, not this test, is
+    // what stops them.
+    //
+    // It is kept because it is the executable form of the correction this task
+    // exists to carry: the first design asked what the CURRENT BOARD had room
+    // for. Its vacuity guard is the assertion that the board really did change.
+    const rig = bootCity('capability-state-blind')
+    const at0 = capabilityMask(rig.world)
+    expect(placeHouse(rig.s, rig.world, 15, 0), 'a building on the board').toBe(true)
+    // A row-major chain over cells 0..14: 14 edges, 15 newly-occupied cells,
+    // inside `CARDS_MAP`'s 20 starting tiles.
+    const chain = [
+      [0, 1], [1, 2], [2, 3], [3, 7], [7, 6], [6, 5], [5, 4],
+      [4, 8], [8, 9], [9, 10], [10, 11], [11, 12], [12, 13], [13, 14],
+    ] as const
+    let laid = 0
+    for (const [a, b] of chain) if (placeRoad(rig.s, rig.world, a, b)) laid++
+    expect(laid, 'vacuity: the state really moved under the assertion').toBeGreaterThan(10)
+    expect(roadMask(rig.s, 0), 'and cell 0 really carries road').not.toBe(0)
+    expect(capabilityMask(rig.world), 'capability is a property of the map').toBe(at0)
+  })
+
+  it('every card the sim OFFERS across six weeks is one M1f can place', () => {
+    // **The behavioural half, and the one with teeth.** The two tests above are
+    // structurally guaranteed; this one drives `step` across six week boundaries,
+    // takes the offered card each time, and checks the pair against
+    // `CARD_IMPLEMENTED_MASK` — a constant, not against `poolFor`, so it is not
+    // the formula checking itself. A `poolFor` that forgot to AND in the
+    // implemented mask offers a bridge here.
+    const rig = bootCity('capability-six-weeks')
+    const at0 = capabilityMask(rig.world)
+    let offers = 0
+    for (let w = 1; w <= 6; w++) {
+      driveTo(rig, TICKS_PER_WEEK * w)
+      expect(offerPending(rig.s), `week ${w}: an offer was raised`).toBe(true)
+      const a = rig.s.header[H_OFFER_A] as number
+      const b = rig.s.header[H_OFFER_B] as number
+      for (const card of [a, b]) {
+        expect((CARD_IMPLEMENTED_MASK & (1 << card)) !== 0, `week ${w}: card ${card}`).toBe(true)
+      }
+      offers += 2
+      // Take one, so the run crosses the boundaries with weeks RESOLVED rather
+      // than with six unresolved offers stacked behind one another.
+      step(rig.s, rig.world, rig.fields, rig.scratch, chooseCard(OFFER_SLOT_A, a))
+      expect(offerPending(rig.s), `week ${w}: and the choice landed`).toBe(false)
+      expect(capabilityMask(rig.world), `week ${w}`).toBe(at0)
+    }
+    expect(offers, 'six weeks, two slots each').toBe(12)
+  })
+})
+
+describe('poolFor is the two filters, with two reasons', () => {
+  it('is the capability mask AND the implemented mask, on every map here', () => {
+    for (const [name, map] of ALL_FIXTURE_MAPS) {
+      const w = createWorld(map)
+      expect(poolFor(w), name).toBe(capabilityMask(w) & CARD_IMPLEMENTED_MASK)
+    }
+  })
+
+  it('excludes the five cards with no placement mechanism even where the map is capable', () => {
+    const m = poolFor(createWorld(firstCity()))
+    // firstCity is capable of all seven — asserted above — so every exclusion
+    // below is the IMPLEMENTED half doing the work and not the map's.
+    expect(capabilityMask(createWorld(firstCity())), 'vacuity: the map permits all seven').toBe(
+      EVERY_CARD,
+    )
+    for (const id of [CARD_BRIDGE, CARD_TUNNEL, CARD_ROUNDABOUT, CARD_MOTORWAY, CARD_TRAFFIC_LIGHTS]) {
+      expect((m & (1 << id)) !== 0, `card ${id} is offerable with nothing to place`).toBe(false)
+    }
+  })
+
+  it('ALWAYS leaves at least two cards on EVERY map any test drives past a week boundary', () => {
+    // **The guard the previous draft got wrong, and the one that would have
+    // caught its Critical.** Its version iterated the two SHIPPED maps — neither
+    // of which is a fixture that drives `step` past tick 4,500 — while the map
+    // that actually broke is `determinism.test.ts`'s 4x4 `GOLDEN_MAP`, at tick
+    // 4,500 of a 13,499-tick run, after `H_EPOCH` was written. Enumerate the
+    // fixtures, not the products. `GOLDEN_MAP` and `DEMAND_PIN_MAP` are
+    // importable from `./mapFixtures` for exactly this list.
+    for (const [name, map] of ALL_FIXTURE_MAPS) {
+      const pool = poolFor(createWorld(map))
+      expect(popCountCards(pool), `${name} cannot offer a pair`).toBeGreaterThanOrEqual(2)
+      expect(canDrawOfferPair(pool), `${name}`).toBe(true)
+      expect(pool, `${name}: bit 0 is CARD_NONE`).toBe(pool & ~1)
+      expect(pool, `${name} is inside the CARD_COUNT-bit domain`).toBeLessThan(1 << CARD_COUNT)
+    }
+  })
+
+  it('and every card it admits has a tile grant and an item grant', () => {
+    const m = poolFor(createWorld(firstCity()))
+    let admitted = 0
+    for (let id = 0; id < CARD_COUNT; id++) {
+      if ((m & (1 << id)) !== 0) {
+        admitted++
+        expect(() => cardTileGrant(id)).not.toThrow()
+        expect(() => cardItemGrant(id)).not.toThrow()
+      }
+    }
+    expect(admitted, 'vacuity: the loop body ran').toBe(2)
+  })
+
+  it('TODAY the capability half narrows NOTHING, and this is the tripwire for the day it does', () => {
+    // **The honest statement of what this task buys, in an assertion rather than
+    // in prose.** Both cards `CARD_IMPLEMENTED_MASK` admits are capable on every
+    // map, so `capabilityMask(w) & CARD_IMPLEMENTED_MASK === CARD_IMPLEMENTED_MASK`
+    // everywhere and no golden, no offer and nothing a player sees moves. The
+    // capability half's only shipped detectors are the bridge and tunnel arms on
+    // `demoCity`, which are about cards M1f cannot offer at all.
+    //
+    // What it buys instead: a map with no water can never offer a bridge, and
+    // M1g's change is a bit DELETED from `CARD_IMPLEMENTED_MASK` rather than a
+    // re-derivation. **The day M1g deletes the bridge bit, this test is what goes
+    // red first**, on `demoCity` and on every all-land fixture below — and it is
+    // the notice that the goldens built on those maps are about to move.
+    for (const [name, map] of ALL_FIXTURE_MAPS) {
+      expect(poolFor(createWorld(map)), `${name}`).toBe(CARD_IMPLEMENTED_MASK)
     }
   })
 })
@@ -703,8 +1035,8 @@ describe('runOfferFromPool degrades on EVERY short pool, not on one stubbed exam
     // `runOffer` is `runOfferFromPool(state, poolFor(world), scratch)`, so
     // sweeping every mask `poolFor` could ever return is a stronger statement
     // than a single short-pool world: it says the throw is unreachable for ANY
-    // pool, including the ones Task 11's capability filter has not been written
-    // yet to produce.
+    // pool, including the ones no map's capability mask produces today and M1g's
+    // narrowing of `CARD_IMPLEMENTED_MASK` might.
     //
     // ONE rig, driven once and reset between pools: `runOfferFromPool` writes
     // only the three offer slots, so restoring those three restores everything
@@ -738,25 +1070,88 @@ describe('runOfferFromPool degrades on EVERY short pool, not on one stubbed exam
     expect(short, 'the empty mask and the eight singletons').toBe(9)
   })
 
-  it('runOffer cannot reach drawOfferPair except through the welded guard', () => {
+  it('NOTHING in cards.ts reaches drawOfferPair except tryDrawOfferPair itself', () => {
     // A source scan, on the precedent of `step.test.ts`'s tick-order tripwire
     // and `loop.test.ts`'s cross-file golden scan: the property is "this call
     // site cannot be written a second way", which has nothing to observe at run
     // time. The lookbehind is what makes it see `drawOfferPair(` and not the
     // `drawOfferPair(` inside `tryDrawOfferPair(`.
+    //
+    // **This scan's RANGE was narrower than its name, and M1f Task 11 is what
+    // made that matter.** It sliced from `export function runOfferFromPool` to
+    // EOF, so a call written ABOVE that point was invisible — including inside
+    // `poolFor`, which is one line above it and which Task 11 rewrote. The
+    // catalogue's shape: a guard whose coverage is a strict subset of what its
+    // name claims, whose blind spot is exactly where the next edit lands.
+    //
+    // The range is now the WHOLE FILE with `tryDrawOfferPair`'s own declaration
+    // cut out, plus `drawOfferPair`'s declaration line renamed — so the two
+    // legitimate occurrences are removed by construction and everything else,
+    // in any order the file is ever reorganised into, is scanned.
     const src = readFileSync(new URL('../src/cards.ts', import.meta.url), 'utf8')
     expect(src.length, 'cards.ts read back empty').toBeGreaterThan(4000)
-    const body = src.slice(src.indexOf('export function runOfferFromPool'))
-    expect(body.length, 'runOfferFromPool is no longer the last declaration in cards.ts').toBeGreaterThan(200)
+    const start = src.indexOf('export function tryDrawOfferPair')
+    expect(start, 'tryDrawOfferPair is no longer declared in cards.ts').toBeGreaterThan(0)
+    const end = src.indexOf('\n}\n', start)
+    expect(end, 'tryDrawOfferPair has no column-0 closing brace').toBeGreaterThan(start)
+    const sanctioned = src.slice(start, end + 3)
+    const rest =
+      src.slice(0, start) +
+      src.slice(end + 3).replace('export function drawOfferPair(', 'export function THE_DECLARATION(')
+    // Vacuity, both halves: the one sanctioned call really is inside the slice
+    // that was cut out, and the cut really removed it from what is scanned.
+    expect(sanctioned, 'the welded call is not where this scan thinks it is').toMatch(CALLS_DRAW)
+    expect(rest.length + sanctioned.length, 'the two halves partition the file').toBe(
+      src.length + 'THE_DECLARATION'.length - 'drawOfferPair'.length,
+    )
     expect(
-      body,
-      'runOffer now calls drawOfferPair directly — that throw is unguarded inside step, after ' +
-        'H_EPOCH is written, and poisons the buffer permanently. Call tryDrawOfferPair.',
-    ).not.toMatch(/(?<![A-Za-z])drawOfferPair\(/)
-    // Self-check: the pattern must actually match the thing it is banning, or
-    // the guard is a regex that can never fire.
-    expect('  drawOfferPair(pool, seed, out)').toMatch(/(?<![A-Za-z])drawOfferPair\(/)
-    expect('  tryDrawOfferPair(pool, seed, out)').not.toMatch(/(?<![A-Za-z])drawOfferPair\(/)
+      rest,
+      'something in cards.ts now calls drawOfferPair directly — that throw is unguarded inside ' +
+        'step, after H_EPOCH is written, and poisons the buffer permanently. Call tryDrawOfferPair.',
+    ).not.toMatch(CALLS_DRAW)
+  })
+
+  it('and NOTHING in the rest of sim/src reaches it at all — the scan the old one could not do', () => {
+    // **`cards.ts` was the only file the weld was ever checked in, and it is not
+    // the only file that can import `drawOfferPair`.** `step.ts` calls `runOffer`
+    // on every tick; any module in this package could import the raw draw and
+    // reach the throw from inside `step` by a route the in-file scan cannot see.
+    // Verified satisfiable on the shipped tree before being written.
+    //
+    // The exclusion is proved non-vacuous rather than assumed, on
+    // `determinism.test.ts`'s `fields[` precedent: the excluded set is asserted
+    // to be exactly `cards.ts`, and `cards.ts` is asserted to CONTAIN a hit.
+    const dir = fileURLToPath(new URL('../src', import.meta.url))
+    const files = readdirSync(dir)
+      .filter((n) => n.endsWith('.ts'))
+      .sort()
+    expect(files.length, 'the src listing came back empty').toBeGreaterThan(15)
+    expect(files.includes('cards.ts')).toBe(true)
+    const others = files.filter((n) => n !== 'cards.ts')
+    expect(files.length - others.length, 'exactly one file is excluded').toBe(1)
+    // Non-vacuity: the pattern does fire on the one file that legitimately holds it.
+    expect(readFileSync(join(dir, 'cards.ts'), 'utf8')).toMatch(CALLS_DRAW)
+    const hits = others.filter((n) => CALLS_DRAW.test(readFileSync(join(dir, n), 'utf8')))
+    expect(hits, `these files call drawOfferPair directly: ${hits.join(', ')}`).toEqual([])
+  })
+
+  it('the drawOfferPair scan fires on a real call and leaves its counter-examples alone', () => {
+    // A scan matches comments, not just code, and this one is checked against the
+    // prose forms `cards.ts` and `scratch.ts` actually use rather than assumed
+    // immune. The module backticks the name everywhere, which is what keeps it
+    // clear; a future author writing `drawOfferPair (cards.ts)` without them
+    // WOULD trip this, and the fix is the backticks.
+    for (const hit of ['  drawOfferPair(pool, seed, out)', 'export function drawOfferPair(p', 'x = drawOfferPair  (a)']) {
+      expect(hit, `not caught: ${hit}`).toMatch(CALLS_DRAW)
+    }
+    for (const miss of [
+      '  tryDrawOfferPair(pool, seed, out)',
+      '// Caller-owned output for `drawOfferPair` (cards.ts), length 2.',
+      " * Allocates nothing: `out` is caller-owned, exactly as `drawOfferPair`'s is.",
+      ' * the whole draw with a Smi seed — `tryDrawOfferPair`, `drawOfferPair`,',
+    ]) {
+      expect(miss, `false positive: ${miss}`).not.toMatch(CALLS_DRAW)
+    }
   })
 })
 
