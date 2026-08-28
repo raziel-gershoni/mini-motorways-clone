@@ -365,16 +365,31 @@ satisfies A and not B is diminished; a milestone that satisfies neither is M1d a
 
 > *On the board a plain link opens, with nobody told where to look: at **2 min 21 s** — tick 4,500,
 > `(TICKS_PER_WEEK − WARM_START_TICKS) / TICKS_PER_SECOND` = `(4500 − 258) / 30` = 141.4 s — the
-> board stops and dims, and one line reading **CHOOSE A CARD** appears over two large cards:
-> **ROAD TILES · 30 TILES** and **JUNCTION UPGRADE · 20 TILES · x2**. The player taps one. The modal
-> goes, the cars move again, and the tile counter in the HUD is **20 or 30 higher** than it was. The
-> ERASE ROADS button is off the screen for as long as the modal is up and back afterwards. Under
-> **SEE THE BOARD** the modal disappears and the frozen city is visible at full contrast with
-> **TAP TO RETURN** over it; the clock does not advance while it is held.*
+> board stops and dims, and one line reading **CHOOSE A CARD** appears over two large cards. On the
+> shipped seed the **top** card is **JUNCTION UPGRADE · 20 TILES · x2** and the bottom one is
+> **ROAD TILES · 30 TILES**. The player taps one. The modal goes, the **clock starts again**, and
+> the tile counter in the HUD is **20 or 30 higher** than it was. The ERASE ROADS button is off the
+> screen for as long as the modal is up and back afterwards. Under **SEE THE BOARD** the modal
+> disappears and the frozen city is visible at full contrast with **TAP TO RETURN** over it; the
+> clock does not advance while it is held.*
+>
+> **Two clauses a device tester must read literally, because both were wrong in this criterion's
+> first draft:**
+>
+> - **The order is measured, not assumed.** `offerSlot(state, 0)` is `CARD_JUNCTION_UPGRADE` and
+>   slot 1 is `CARD_ROAD_TILES` at tick 4,500 on `laneways-m2`, and slot A is drawn on top. Someone
+>   looking for ROAD TILES first is looking at the wrong card. It is a property of the seed and the
+>   draw, so **re-measure it if the seed moves** rather than quoting this line.
+> - **"The cars move again" is NOT part of this criterion, and reading it in would fail a passing
+>   build.** On a plain link with no road drawn there is nothing in motion at 2:21 — the score reads
+>   `0 TRIPS` and the city's no-input arm has `maxInFlight` 0 — so the board resuming looks like a
+>   clock resuming and nothing else. Cars move again only for a player who had already drawn road.
+>   **Task 12 must not read a still board as a failure of A.**
 >
 > Driven end to end on the production boot in `integration.test.ts` ›
-> *"takes a card from a TAP at the drawn rect, and the board runs on with the tiles"* and
-> *"gives the modal the whole screen: the erase control leaves and comes back"*.
+> *"takes a card from a TAP at the drawn rect, and the board runs on with the tiles"*,
+> *"gives the modal the whole screen: the erase control leaves and comes back"* and
+> *"shows the frozen board under the modal without letting the clock move"*.
 > **Verified on hardware by Task 12's device session, which owns the half no test can hold: that a
 > person who was not told any of this does it anyway.**
 
@@ -4811,15 +4826,57 @@ describe('phase 12: the offer modal', () => {
     expect(texts, 'and the way back is still on screen').toContain(PEEK_RETURN_TEXT)
   })
 
-  it('draws the modal ABOVE the shutdown screen when both are somehow true', () => {
-    // Unreachable in production — `step` freezes past the failure so no boundary
-    // can be crossed — and drawn in a defined order anyway, because a scrim over a
-    // modal over a scrim is the one composition nobody can debug from a
-    // screenshot.
-    const cmds = draw(frameWith({ offerPending: true, offerA: ROAD_TILES, gameOver: true }))
-    const lastScrim = cmds.map((c) => c.fillStyle).lastIndexOf(PALETTE.scrim)
-    const lastText = cmds.map((c) => c.text).lastIndexOf('ROAD TILES')
-    expect(lastText).toBeGreaterThan(lastScrim)
+  // ---------------------------------------------------------------------------
+  // **CORRECTED AT EXECUTION, AND THIS IS THE LARGER OF THE TWO CORRECTIONS ON
+  // THIS PAGE. The test below was prescribed backwards and its argument is
+  // refuted; what shipped is its opposite.**
+  //
+  // The prescription was:
+  //
+  //   it('draws the modal ABOVE the shutdown screen when both are somehow true', () => {
+  //     // Unreachable in production — `step` freezes past the failure so no
+  //     // boundary can be crossed — and drawn in a defined order anyway, because
+  //     // a scrim over a modal over a scrim is the one composition nobody can
+  //     // debug from a screenshot.
+  //     const cmds = draw(frameWith({ offerPending: true, offerA: ROAD_TILES, gameOver: true }))
+  //     const lastScrim = cmds.map((c) => c.fillStyle).lastIndexOf(PALETTE.scrim)
+  //     const lastText = cmds.map((c) => c.text).lastIndexOf('ROAD TILES')
+  //     expect(lastText).toBeGreaterThan(lastScrim)
+  //   })
+  //
+  // **The reachability argument is true clause by clause and points the wrong
+  // way.** `step` really is a byte-identical no-op past the failure, so no week
+  // boundary can be crossed on a dead board — and the boundary is crossed
+  // BEFORE the death, with the offer unresolved, after which the freeze pins
+  // `offerPending` **true forever**, because `H_OFFER_WEEK` can never catch up
+  // on a state that does not advance. Reachable today from any rig whose warm
+  // start crosses a week, and tomorrow from M3's restore.
+  // `game/test/drawAllocation.test.ts`'s already-dead rig is exactly that board
+  // and it is what caught it, as two scrims a frame.
+  //
+  // **And the ordering it prescribes is the wrong one**, which matters more
+  // than the argument: `game/pointer.ts` puts its game-over branch ABOVE its
+  // modal branch, so a tap on that screen restarts the run. A modal drawn on
+  // top would be asking a question the next tap does not answer. Draw order and
+  // tap order have to agree. Phase 11 therefore EXCLUDES phase 12 — an `else`,
+  // not a second `if` — and the shipped tests are the two below.
+  // ---------------------------------------------------------------------------
+
+  it('is not drawn at all on a DEAD board, because the tap there restarts the run', () => {
+    const log = drawWith(offerFrame({ gameOver: true }))
+    const texts = textsOf(log)
+    expect(fillsIn(log, PALETTE.scrim).length, 'one scrim, the shutdown’s').toBe(1)
+    expect(fillsIn(log, PALETTE.cardFace), 'and no card').toEqual([])
+    expect(texts).not.toContain('ROAD TILES')
+    expect(texts, 'the screen the player actually gets').toContain(RESTART_TEXT)
+    expect(textsOf(drawWith(offerFrame({ gameOver: false }))), 'non-vacuous').toContain('ROAD TILES')
+  })
+
+  it('is not drawn while peeking on a dead board either, so peek cannot outlive the run', () => {
+    const log = drawWith(offerFrame({ gameOver: true, offerPeek: true }))
+    expect(textsOf(log)).not.toContain(PEEK_RETURN_TEXT)
+    expect(fillsIn(log, PALETTE.cardAccent)).toEqual([])
+    expect(textsOf(log)).toContain(RESTART_TEXT)
   })
 
   it('has one label per card id, so an eighth card fails here rather than drawing undefined', () => {

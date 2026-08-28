@@ -73,11 +73,21 @@ export const PALETTE: Palette = Object.freeze({
    * rethemed apart tomorrow. `interface.test.ts` checks every entry is distinct
    * from every other, which is what keeps that a rule rather than a preference.
    *
-   * Contrast, computed rather than eyeballed (WCAG relative luminance, the same
-   * ladder `groups` is separated on): the face is Y = 0.932, so `cardText`
-   * below lands at **15.2:1** on it and `cardAccent` at **5.6:1**. Both clear
-   * §7.4's AA bar for the sizes this modal draws at, on the one screen in the
-   * game that asks the player a question.
+   * Contrast, computed rather than eyeballed — WCAG relative luminance, the same
+   * ladder `groups` is separated on, `(Yl + 0.05) / (Yd + 0.05)` over
+   * sRGB-linearised channels:
+   *
+   * ```
+   *   cardFace   #fbf7ef   Y = 0.93264
+   *   cardText   #1f1c1a   Y = 0.01197   ->  15.86 : 1  on the face
+   *   cardAccent #1f6f6b   Y = 0.12722   ->   5.54 : 1  on the face
+   * ```
+   *
+   * Both clear §7.4's AA bar (4.5:1 for body text) at the sizes this modal draws
+   * at, on the one screen in the game that asks the player a question. **The
+   * figures read 15.2 and 5.6 until the Task 8 fix round measured them**, which
+   * is the wrong direction for the accent by 0.06 — "computed rather than
+   * eyeballed" is a claim that has to survive someone recomputing it.
    */
   cardFace: '#fbf7ef',
   /** The card's NAME. Near-black, 15.2:1 on `cardFace`. See `cardFace`. */

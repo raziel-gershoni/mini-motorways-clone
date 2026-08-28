@@ -77,12 +77,19 @@ The criterion is two sentences, three tasks apart, and each has an owner.
 
 > On the board a plain link opens, with nobody told where to look: at **2 min
 > 21 s** — tick 4,500, `(4500 − 258) / 30` = 141.4 s — the board stops and dims,
-> and **CHOOSE A CARD** appears over two large cards, **ROAD TILES · 30 TILES**
-> and **JUNCTION UPGRADE · 20 TILES · x2**. The player taps one. The modal goes,
-> the cars move again, and the HUD's tile counter is **20 or 30 higher**. The
+> and **CHOOSE A CARD** appears over two large cards. On the shipped seed the
+> **top** one is **JUNCTION UPGRADE · 20 TILES · x2** and the bottom one is
+> **ROAD TILES · 30 TILES** — measured (`offerSlot(state, 0)` is the upgrade),
+> so **re-measure if the seed moves**. The player taps one. The modal goes, the
+> **clock starts again**, and the HUD's tile counter is **20 or 30 higher**. The
 > ERASE ROADS button is off the screen while the modal is up and back afterwards.
 > Under **SEE THE BOARD** the modal disappears and the frozen city is visible at
 > full contrast with **TAP TO RETURN** over it; the clock does not advance.
+>
+> **"The cars move again" is deliberately NOT in this criterion.** On a plain
+> link with no road drawn there is nothing in motion at 2:21 — `0 TRIPS`, and
+> the city's no-input arm has `maxInFlight` 0 — so what resumes is the clock.
+> **A still board is not a failure of A.**
 
 **B — THE JAM, AND WHETHER THE CHOICE MATTERED. Owner: M1f Task 10.**
 
@@ -197,8 +204,12 @@ carries its own `retired || suspended` guard.
 **It was ADDED to `press`, not MOVED out of `render`, and the difference is a
 deleted guard.** `render()` is also called from `sync()`, so moving its check
 down would have removed the terminal guard from a live path — which is how a
-retired control gets re-shown. The M1f Task 8 brief's own step said "move" where
-it meant "add".
+retired control gets re-shown. **Credit where it is due: the M1f Task 8 brief
+said ADD and explicitly warned against moving.** It was an EARLIER DRAFT of that
+step that said "move" where it meant "add", and the brief carried the warning
+forward precisely so nobody repeated it. This paragraph reversed that until the
+Task 8 fix round; §4's own subject is a comment that was wrong for a milestone,
+so getting the attribution backwards here was worse than in most places.
 
 **The other fix was refused and this records which.** Unsubscribing properly
 means holding the handler reference and widening `mainButton()`'s shape re-check

@@ -341,22 +341,49 @@ export const OFFER_TITLE_H_CSS = 28
  *
  * **Without a cap the two cards fill the whole board band** — 267 CSS px each on
  * a 390x844 phone — and the modal stops reading as something held in front of
- * the board and starts reading as a different screen. Two consequences, and the
- * second is the one that decided it:
+ * the board and starts reading as a different screen.
  *
- *  - The player has just had the game stop for the first time in the run. A
- *    strip of the frozen city visible above and below the cards is what says
- *    *this is a pause*, not *the game ended*. The board is the only thing on
- *    screen that carries that.
- *  - Every pixel of the board would be under a tappable card, so "a tap that
- *    misses both cards" would be unreachable on any real viewport and
- *    `REFUSED_OFFER_MODAL` would be a branch no fixture could enter without a
- *    contrived camera. A guard with no reachable fixture is a guard with no
- *    detector.
+ * **The reason, and there is exactly one.** The player has just had the game
+ * stop for the first time in the run. A strip of the frozen city visible above
+ * and below the cards is what says *this is a pause*, not *the game ended*. The
+ * board is the only thing on screen that carries that distinction, and a
+ * full-bleed modal removes it.
  *
- * 200 leaves ~67 CSS px of board above the title and ~68 below the peek control
- * on that phone, and the cap is inert on a viewport short enough that the
- * derived height is already smaller (SHORT_WIDE gets 191).
+ * 200 leaves 67 CSS px of board above the title and 68 below the peek control
+ * on that phone (85 and 85 on the M0 device), and the cap is inert on a viewport
+ * short enough that the derived height is already smaller — SHORT_WIDE gets 191,
+ * which is why it is in `camera.test.ts`'s fixture list.
+ *
+ * ---------------------------------------------------------------------------
+ * **A SECOND REASON WAS CLAIMED HERE AND IT WAS FALSE. It is quoted and
+ * refuted rather than deleted, because it was cited as the DECIDING one.**
+ * ---------------------------------------------------------------------------
+ *
+ * It read: *"Every pixel of the board would be under a tappable card, so 'a tap
+ * that misses both cards' would be unreachable on any real viewport and
+ * `REFUSED_OFFER_MODAL` would be a branch no fixture could enter."* **The
+ * uncapped layout never did that.** Board pixels sit outside every offer rect
+ * for three reasons, none of which is this constant:
+ *
+ *  - `OFFER_MARGIN_CSS` leaves 16 CSS px of canvas — **10 px of actual board**
+ *    at PHONE_390, whose grid rect is `[6, 384)` against cards at `[16, 374)` —
+ *    down each side, capped or not.
+ *  - `OFFER_GAP_CSS` leaves 12 px between the two cards, and **that is the strip
+ *    `pointer.test.ts`'s "misses both cards" fixture actually probes.**
+ *  - `OFFER_TITLE_H_CSS + OFFER_GAP_CSS` reserves 40 px above card A for the
+ *    instruction line, which is board wherever the block is not centred into it.
+ *
+ * Measured, rather than argued: set this constant to 400 so the cards fill the
+ * band, and **`packages/game` stays 709/709 green** — including *"refuses a tap
+ * that misses both cards"* and *"refuses a GRID tap while the modal is up"* —
+ * while **three `camera.test.ts` cases go red**, naming the two hand-computed
+ * layouts and the visible-strip measurement.
+ *
+ * So the failure mode that claim warned about is the opposite of the truth:
+ * growing the cards is caught **loudly**, by hand-computed literals, and never
+ * silently. `REFUSED_OFFER_MODAL`'s reachability rests on the margin and the
+ * gap. **Do not restate the deleted reason, and do not weaken the margin or the
+ * gap on the strength of this cap existing.**
  */
 export const OFFER_CARD_MAX_H_CSS = 200
 

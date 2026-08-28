@@ -4018,7 +4018,17 @@ describe('the weekly card offer stops the board', () => {
 
     // **The stopwatch reading a person would take**, in §14's units: the frame
     // count is the wall clock, because every one of them was 16.7 ms.
-    expect((frames * 16.7) / 1000, 'a shade over 2:21 of real time').toBeCloseTo(141.7, 0)
+    // **The measured figure, to the digit, and the derived one it must match.**
+    // This read `toBeCloseTo(141.7, 0)` until the Task 8 fix round: it passed on
+    // a tolerance of half a second while sitting 0.27 s away from the truth,
+    // and away from the criterion's own 141.4 rather than towards it. A
+    // stopwatch reading quoted in an acceptance criterion is the last place a
+    // loose tolerance belongs.
+    expect((frames * 16.7) / 1000, '2 min 21 s of real time at 60 Hz').toBeCloseTo(141.43, 2)
+    expect(
+      (TICKS_PER_WEEK - WARM_START_TICKS) / TICKS_PER_SECOND,
+      'and it is one frame past the derived figure, because a frame is 16.7 ms',
+    ).toBeCloseTo(141.4, 1)
 
     const frame = rig.game.builder.frame
     expect(frame.offerPending, 'and the modal has something to draw').toBe(true)
