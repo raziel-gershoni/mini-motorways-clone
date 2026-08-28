@@ -3612,11 +3612,32 @@ describe('a junction cell admits one AXIS at a time (spec 5.5, M1f Tasks 2 and 3
    * Task 3's rule asks that occupant which AXIS it entered on, and a car with
    * no route answers `NO_PREVIOUS_DIR`, which `crossesDirections` fail-closes
    * on. Under the narrowed rule a bare `claimCell` occupant therefore refuses
-   * EVERY entrant — including the ones this block exists to prove are
-   * admitted — and the cases below would have stayed green through the
-   * fail-closed branch instead of through the rule they are named for. Each
-   * refusal case now asserts `crossesAt` on its own occupant, so the branch
-   * that produced the answer is part of the test.
+   * EVERY entrant — including the ones this block exists to prove are admitted.
+   *
+   * **FOUR of Task 2's nine cases, not all nine, and the count matters.** The
+   * exact list, because "the cases below" is the kind of sentence that gets
+   * quoted onward as "the whole block was vacuous":
+   *
+   *   - *refuses a crossing entrant while the other lane is held* — decided by
+   *     the sentinel, so green for the wrong reason;
+   *   - *releases a junction refusal through the valve* — same;
+   *   - *reads the OTHER lane and not a second copy of the own lane* — same;
+   *   - *breaks the 2-cycle…* — same, **and its stated behaviour INVERTS**: it
+   *     asserted `REFUSED_OCCUPIED` twice, and under this rule a straight
+   *     head-on swap is `ENTER_FREE` twice. It would have stayed green while
+   *     asserting the opposite of the truth, which is the one of the four that
+   *     is worse than vacuous.
+   *
+   * The other five are decided by something arm B does not touch — the degree
+   * check (*corridor*, *corner*), an empty other lane (*EMPTY junction*), the
+   * own-lane clause (*OWN lane*), or the ghost early return (*valve … ghost*) —
+   * and they were and are exercising what they name.
+   *
+   * **Every case whose refusal the AXIS rule decides now asserts `crossesAt` on
+   * its own occupant**, so the branch that produced the answer is part of the
+   * test. The ghost case deliberately does not: its refusal is settled by an
+   * early return in front of the occupancy read, so asserting an axis there
+   * would describe a branch the test never reaches.
    */
   /**
    * **The brief's fixture used (E, S) as its crossing pair and those are the
@@ -3675,7 +3696,8 @@ describe('a junction cell admits one AXIS at a time (spec 5.5, M1f Tasks 2 and 3
     // than the step `canEnter` is handed; comparing both cars' full paths is
     // Task 2's wide rule at every junction where either car turns. The exposure
     // is bounded by measurement rather than by argument: the whole narrowing is
-    // 43 admitted crossings over the shipped arm's 21,525 ticks, turning
+    // 43 admitted crossings over the city's 21,525-tick greedy arm and 163 over
+    // the demo board's 6,660 — an upper bound on the deviation, turning
     // occupants included.
     const rig = plusJunction('xing-turning')
     handOccupant(rig.s, 0, rig.centre, DIR_E, DIR_N)
@@ -3878,6 +3900,12 @@ describe('a junction cell admits one AXIS at a time (spec 5.5, M1f Tasks 2 and 3
     handOccupant(rig.s, 0, rig.centre, DIR_E)
     expect(slotsOf(rig.s, rig.centre), 'lane 0 held, lane 1 free').toEqual([0, FREE])
     expect(otherLane(LANE_OF_DIR[DIR_N] as number)).toBe(LANE_OF_DIR[DIR_E])
+    // The occupant's axis, asserted here as it is in every other case the axis
+    // rule decides. Without it this refusal is indistinguishable from the
+    // fail-closed one, and the whole point of the block is that those two are
+    // different branches.
+    expect(crossesAt(rig.s, 0), 'a real crossing axis, not the sentinel').toBe(DIR_E)
+    expect(crossesDirections(DIR_N, DIR_E), 'and north crosses east').toBe(true)
     expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.REFUSED_OCCUPIED)
   })
 

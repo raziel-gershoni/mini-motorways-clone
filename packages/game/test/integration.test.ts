@@ -4838,7 +4838,9 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     //   H_ROUTES_REFUSED              0           0           0   unmoved
     // ```
     //
-    // **The whole narrowing is 43 admitted crossings over 21,525 ticks** —
+    // **The whole narrowing is 43 admitted crossings over this arm's 21,525
+    // ticks — and 163 over the demo board's 6,660, which is the board a person
+    // opens** —
     // entries into a junction whose other lane was occupied on a non-crossing
     // axis, which the wide rule refused — and they are worth 16,719 blocked
     // car-ticks and 24 trips, because each one is a queue that did not form.
@@ -4940,7 +4942,46 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     // that this rule changes nothing early — three whole weeks of six series
     // reproduce with no re-blessing at all, and they reproduce under BOTH M1f
     // rules, because both leave the first 12,780 ticks alone.
+    // ---------------------------------------------------------------------
+    // **THE TWO TICK CONVENTIONS IN THIS BLOCK, RECONCILED RATHER THAN
+    // HARMONISED — AND THE DENOMINATOR IS THE DRIVEN-TICK COUNT, NOT THE DEATH
+    // TICK.**
+    // ---------------------------------------------------------------------
+    //
+    // The table above quotes 29,267 blocked car-ticks and 22.3 % of ticks
+    // carrying a blocked car. The row below sums to 4,797. Those are the same
+    // measurement over windows that differ by ONE TICK, and the difference is
+    // the cars still standing when §5.8 fires:
+    //
+    // ```
+    //   convention                      ticks w/ block   blocked car-ticks  over
+    //   probe, INCLUDING the death tick          4,798              29,267  21,525
+    //   this row, EXCLUDING it                   4,797              29,259  21,524
+    // ```
+    //
+    // `driveArm` (`game/test/junctionArms.ts`) samples the tick the run ends on;
+    // this file's driver and `startingCity.test.ts`'s both break on `isGameOver`
+    // before they count. **Eight cars are blocked on the tick the run ends** —
+    // measured, `finalTickRefusals`, not inferred — so 29,267 − 8 = 29,259 and
+    // 4,798 − 1 = 4,797. Two independent drivers agree on 4,797 and the probe
+    // agrees with itself on 4,798; **the row below is right and must not be
+    // re-blessed**, which is the natural wrong repair here.
+    //
+    // **The denominator is the DRIVEN-tick count, 21,525, and not the death
+    // tick 21,783.** The arm boots at tick 258 after the warm start, so the run
+    // is 21,525 ticks long. 4,798 / 21,525 = 22.29 % and 4,797 / 21,524 =
+    // 22.29 %; both round to the 22.3 % above, which is why neither convention
+    // ever looked wrong. Dividing by 21,783 gives 22.0 % and is the arithmetic
+    // slip this paragraph exists to stop.
+    //
+    // **On the pre-M1f control the two conventions coincide at 2,120 and 1,920**,
+    // because nothing at all is blocked on that arm's death tick — which is what
+    // says the eight is a property of the jam rather than of the sampler.
     expect(r.weeks.map((w) => w.blockedTicks)).toEqual([0, 0, 99, 1647, 3051])
+    expect(
+      r.weeks.reduce((n, w) => n + w.blockedTicks, 0),
+      'the row sums to 4,797 — one tick fewer than the probe, and that is the death tick',
+    ).toBe(4797)
     // **A POST-REPAIR figure, and the repair has now happened twice.**
     // `carAheadOf` read one lane until Task 2 and would have reported "nothing
     // ahead" for a car `canEnter` was refusing across a junction; Task 3

@@ -221,9 +221,15 @@ export const INTERSECTION_DEGREE = 3
  *
  * **The refusal counts INCLUDE the death tick.** The probe samples the tick the
  * run ends on; `integration.test.ts`'s per-week `blockedTicks` row does not,
- * because its driver breaks on `isGameOver` first. On the greedy arm that is
- * 45,986 against 45,976 — the ten cars blocked as the run ends — and on the
- * pre-M1f control it is 2,120 either way, because nothing was blocked there.
+ * because its driver breaks on `isGameOver` first. **On the SHIPPED rule's
+ * greedy arm that is 29,267 against 29,259 — the eight cars blocked as the run
+ * ends — and 4,798 ticks against 4,797.** (Under Task 2's wide rule, which this
+ * table now carries only as history, it was 45,986 against 45,976 and ten cars.)
+ * On the pre-M1f control it is 2,120 either way, because nothing at all is
+ * blocked on that arm's death tick — which is what says the eight is a property
+ * of the jam and not of the sampler. `integration.test.ts` carries the full
+ * reconciliation beside the per-week row it is about, and `finalTickRefusals`
+ * (`game/test/junctionArms.ts`) is the measurement underneath it.
  *
  * **Both refusal conventions agree on this board and that is worth recording**:
  * counting a RISE in `carBlockedTicks` and counting car-ticks with the counter

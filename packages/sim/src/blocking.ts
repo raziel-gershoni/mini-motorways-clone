@@ -858,16 +858,39 @@ export function crossesDirections(a: number, b: number): boolean {
  *   H_ROUTES_REFUSED                        0             0                 0
  * ```
  *
- * **The whole of the narrowing is 43 crossings.** Over that 21,525-tick run the
- * rule admits exactly 43 entries into a junction whose other lane was occupied,
- * where the wide rule admitted none — and those 43 are worth 16,719 blocked
- * car-ticks, 10 valve firings and 24 trips, because each one is a queue that
- * did not form. A small count with a large consequence is what a spinlock looks
- * like from outside; it is not a sign the measurement is wrong.
+ * **The whole of the narrowing is 43 crossings ON THIS ARM. On the demo board
+ * it is 163, and the board has to be named.** Over the city's 21,525-tick
+ * greedy run the rule admits exactly 43 entries into a junction whose other
+ * lane was occupied, where the wide rule admitted none — and those 43 are worth
+ * 16,719 blocked car-ticks, 10 valve firings and 24 trips, because each one is a
+ * queue that did not form. A small count with a large consequence is what a
+ * spinlock looks like from outside; it is not a sign the measurement is wrong.
  *
- * **A TURNING OCCUPANT IS A KNOWINGLY ADMITTED CROSSING, and this is the
- * decision rather than an oversight.** `crossesAt` reports the direction the
- * occupant ENTERED by. An occupant that entered heading E and is about to leave
+ * The demo board's **163** over 6,660 ticks is the figure that matters for what
+ * a person sees, because that is the board a person opens
+ * (`?layout=demo` / `?startapp=demo`): 163 admissions there take it from 105
+ * trips to 410. Both counts are asserted in `game/test/junctionArms.test.ts`,
+ * because a figure nothing runs is a figure that comes back.
+ *
+ * ---------------------------------------------------------------------------
+ * KNOWN SPEC DEVIATION, CARRIED FORWARD: A TURNING OCCUPANT IS AN ADMITTED
+ * COLLISION
+ * ---------------------------------------------------------------------------
+ *
+ * **This is a deviation from §5.5 that M1f knowingly carries, not a design
+ * choice that satisfies it.** §5.5's question is *"does an inbound vehicle
+ * COLLIDE with a traversing vehicle on this chunk?"*, and a car driven straight
+ * across the path a turning occupant is about to take is that collision. The
+ * rule below admits it. Recording it as a decision would be the comfortable
+ * reading and the wrong one; what makes it acceptable is that both alternatives
+ * are worse (below) and that the exposure is measured rather than assumed.
+ *
+ * **Named recipient, because "whoever owns this" is a synonym for "no one":
+ * M1f Task 12's close-out carries this into the M1g handoff**, alongside the
+ * traffic light M1f measured and deferred. It is a rule change and not a bug
+ * fix, and it costs most of the 43/163 admissions above.
+ *
+ * `crossesAt` reports the direction the occupant ENTERED by. An occupant that entered heading E and is about to leave
  * heading N presents `E`; an entrant heading W is `OPPOSITE[E]` and is admitted,
  * across the path that occupant is about to take. Two alternatives were
  * considered and both were refused for stated reasons:
@@ -886,8 +909,11 @@ export function crossesDirections(a: number, b: number): boolean {
  * So the rule is stated in terms of entry axes only, and the admission is
  * pinned by a NAMED fixture case in `blocking.test.ts` rather than left to be
  * discovered — *"a turning occupant is admitted, deliberately"*. The exposure is
- * bounded by the 43 above: that count is every admission of any kind the
- * narrowing makes on the board that ships, turning occupants included.
+ * bounded above by the admission counts in the previous section — **43 on the
+ * city's greedy arm and 163 on the demo board** — because those are every
+ * admission of any kind the narrowing makes, turning occupants included. It is
+ * an upper bound and not a count of the deviation itself: nothing here measures
+ * how many of the 43 and 163 have a turning occupant.
  *
  * **It resolves in favour of the LOWEST CAR INDEX, and that is a decision taken
  * here rather than a consequence of a loop bound.** `runMovement` iterates
@@ -1042,7 +1068,8 @@ export function canEnter(
   // whichever axis — and Task 3 replaced it after measuring both.** *Collide*
   // and *co-occupy* are different questions, and the wide form was refusing at
   // junctions the very head-on pair `LANE_OF_DIR` exists to admit everywhere
-  // else. The narrowing is worth 43 admissions, 16,719 blocked car-ticks and 24
+  // else. The narrowing is worth 43 admissions on the city's greedy arm (163 on
+  // the demo board), 16,719 blocked car-ticks and 24
   // trips on the shipped arm; the module comment carries the table and the
   // turning-occupant decision.
   //

@@ -210,7 +210,13 @@ describe('M1f Task 3: the junction triage, applied to the arm that ships', () =>
     // occupied on a NON-crossing axis: every crossing Task 2's wide rule refused
     // and this one admits, turning occupants included.
     expect(city.ticksDriven, 'ticks driven after the warm start').toBe(21525)
-    expect(city.grantsWithOtherLaneTaken, 'the whole of the narrowing, in crossings').toBe(43)
+    // The reconciliation constant `integration.test.ts`'s per-week row rests on.
+    expect(city.ticksWithBlockedCar, 'including the death tick — the per-week row says 4,797').toBe(4798)
+    expect(city.finalTickRefusals, 'because eight cars are blocked on the tick it ends').toBe(8)
+    expect(
+      city.grantsWithOtherLaneTaken,
+      'the whole of the narrowing on THIS arm, in crossings — the demo board is 163',
+    ).toBe(43)
     expect(city.warmStartRefusals, 'the city warm start lays no road, so nothing is refused').toBe(0)
     expect(city.conflicts, 'co-presence census').toBe(42)
     expect(city.ruleEvents, 'rule-visible census').toBe(133)
@@ -226,6 +232,12 @@ describe('M1f Task 3: the junction triage, applied to the arm that ships', () =>
     // because the two tables disagree about which one they mean and that
     // ambiguity was a real defect in that table once.
     expect(demo.warmStartRefusals, 'and the demo warm start is already busy').toBe(1463)
+    // **The narrowing on the board a person opens, which is the count that
+    // bounds what a human sees.** `blocking.ts` quotes both figures and names
+    // the board for each; the city's 43 alone was quoted bare once and read as
+    // if it covered both.
+    expect(demo.grantsWithOtherLaneTaken, 'the narrowing on the demo board').toBe(163)
+    expect(demo.finalTickRefusals, 'two cars are still standing when the demo board dies').toBe(2)
     expect(
       demo.blockedCarTicks + demo.warmStartRefusals,
       'from boot, which is MAX_BLOCKED_TICKS’s evidence table’s convention',
@@ -292,6 +304,17 @@ describe('M1f Task 3: the junction triage, applied to the arm that ships', () =>
       // **(d) SITES per boundary, not only acceptance per cell**: this is the
       // number that bounds how much relief a player can seat, and the plan
       // predicted 0 / 2 / 6 / 6.
+      //
+      // **These are UPPER BOUNDS on the seatable sites, not the count.**
+      // Task 3's predicate is `isJunctionCell` plus a bounds check, which is
+      // deliberately the DEGREE half of `canPlaceUpgrade`'s five refusals; the
+      // other four — no-inventory, capacity, off-board, occupied — are
+      // inventory and bookkeeping rather than board properties and are not
+      // exercised here because neither `canPlaceUpgrade` nor an inventory
+      // exists yet. A cell counted here can still be refused by one of the four.
+      // **Task 9 Step 5 re-runs this table through the real predicate and
+      // asserts the two agree cell-for-cell**, which is where the bound becomes
+      // a count.
       const sitesPerBoundary: number[] = []
       for (const b of BOUNDARIES) {
         const sites = new Set<number>()
@@ -335,7 +358,10 @@ describe('M1f Task 3: the junction triage, applied to the arm that ships', () =>
       // count is one even before the window helps; the window is still what
       // makes the answer a board property rather than a metronome artefact, and
       // it is what turns boundary 2's answer from a coin flip into a 2.
-      expect(sitesPerBoundary, 'distinct legal sites per boundary window').toEqual([1, 2, 6, 6])
+      expect(
+        sitesPerBoundary,
+        'distinct legal sites per boundary window — an UPPER bound; see above',
+      ).toEqual([1, 2, 6, 6])
 
       // **The criterion the roundabout failed.** If a junction-eligible hot cell
       // accepts in zero windows, stop and report — an early card would have to

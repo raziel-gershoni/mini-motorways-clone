@@ -29,6 +29,32 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  * the demo golden holds (`4178976587` as of M1f Task 4's pure-layout re-bless,
  * `3152640907` before it), and the board is one token away.
  *
+ * ---------------------------------------------------------------------------
+ * **THIS BOARD IS WHERE M1f TASK 3 IS VISIBLE, AND NO HUMAN HAS OPENED IT SINCE
+ * BEFORE TASK 2. NAMED RECIPIENT: M1f TASK 12's DEVICE SESSION.**
+ * ---------------------------------------------------------------------------
+ *
+ * Task 2's wide junction rule very nearly gridlocked this board — 105 trips,
+ * queues of 17, 97,138 entry refusals, 22 cars frozen for 45 seconds each, dead
+ * at 3:12. Task 3 narrowed the rule to crossing axes and it came back: **410
+ * trips, longest queue 10, 12,364 refusals, zero valve firings, dead at 3:42**.
+ * That reversal is the only thing in M1f a person can see without being told
+ * where to look, and **it rests entirely on assertions** — `demoLayout.test.ts`
+ * has 34 of them and zero human minutes behind them.
+ *
+ * **Two things to check, and neither is satisfiable by a green suite.** That the
+ * board reads as *hesitating at the three corridor mouths* rather than as
+ * *jamming* — the whole difference between the two rules is 163 admitted
+ * crossings and nothing asserts what they look like. And that no criterion in
+ * Task 3's triage requires the junction rule to be VISIBLE here at all:
+ * criterion 3 checks the board is loaded (queue >= 4, trips >= 200) and Task 3's
+ * narrowing took demo blocking from 14.6x pre-M1f down to 1.85x, so a board on
+ * which the rule barely bites would pass every gate this milestone has.
+ *
+ * Open it with `?layout=demo` (browser) or `?startapp=demo` (Telegram). The
+ * milestone's own post-mortem for M1d is three paragraphs above this one and is
+ * the reason this note names a task rather than "whoever runs the device check".
+ *
  * **It is not survivable, and that is why it is not the default.** Seven traces
  * were driven at M1e Task 10 and `demoLayout.test.ts` §8 is the detector:
  *
