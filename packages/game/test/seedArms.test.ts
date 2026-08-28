@@ -3,6 +3,7 @@ import { MAX_UPGRADES, UPGRADES_PER_CARD, WEEKLY_TILE_GRANT } from '@laneways/sh
 import {
   formatSeedRuns,
   runSeedArm,
+  runSeedArmStep,
   seedCellName,
   RUN_SEEDS,
   SEED_ARM_WEEKS,
@@ -38,14 +39,13 @@ import {
  */
 
 /**
- * **Derived.** Measured on this tree: 48 runs of the full matrix cost 149 s, and
- * the per-seed spread is wide — `s6` 11.5 s for six runs, `s3` 35.0 s for six,
- * because `s3` survives 51,275 ticks where `s6` dies at 15,892. This file
- * commits **25** runs; at `s3`'s 5.8 s/run that is 145 s, and the value below is
- * that plus headroom for a machine under a mutation battery, which is the
- * busiest this tree ever is. **Measured after the trim: 26 runs, 75 s.**
+ * **Derived.** This file commits **four** frame-driven runs on the shipped seed
+ * (2.4-3.9 s each) and **24** step-driven ones (0.45-0.73 s each; `s3` is the
+ * slowest because it survives 51,275 ticks where `s6` dies at 15,892). That is
+ * about 12 s + 15 s; the value below is that plus generous headroom for a machine
+ * under a mutation battery, which is the busiest this tree ever is.
  */
-const SEED_MATRIX_TIMEOUT_MS = 300_000
+const SEED_MATRIX_TIMEOUT_MS = 180_000
 
 /** The shipped seed's own record, asserted before anything else is believed. */
 const SHIPPED = {
@@ -61,42 +61,114 @@ const SHIPPED = {
   unaffordable: 0,
 } as const
 
+
+/**
+ * The frame-driven cache. **Read-only in the cases**: everything is warmed in
+ * `beforeAll`, so no case pays for a drive and no case has to be `async`.
+ */
 const cache = new Map<string, SeedRun>()
 function arm(seed: string, policy: CardPolicy, placing: PlacementMode): SeedRun {
   const key = `${seed}/${policy}/${placing}`
   const hit = cache.get(key)
-  if (hit !== undefined) return hit
-  const fresh = runSeedArm(seed, policy, placing)
-  cache.set(key, fresh)
-  return fresh
+  if (hit === undefined) throw new Error(`seedArms.test: frame ${key} was not warmed — see beforeAll`)
+  return hit
+}
+async function warm(seed: string, policy: CardPolicy, placing: PlacementMode): Promise<void> {
+  const key = `${seed}/${policy}/${placing}`
+  if (!cache.has(key)) cache.set(key, await runSeedArm(seed, policy, placing))
+}
+
+/** The step-driven cache, keyed SEPARATELY so a case cannot read the wrong driver. */
+const stepCache = new Map<string, SeedRun>()
+function stepArm(seed: string, policy: CardPolicy, placing: PlacementMode): SeedRun {
+  const key = `${seed}/${policy}/${placing}`
+  const hit = stepCache.get(key)
+  if (hit === undefined) throw new Error(`seedArms.test: step ${key} was not warmed — see beforeAll`)
+  return hit
 }
 
 describe('M1f Task 12 Step 4: eight seeds, three card policies, and the MAX_UPGRADES bound', () => {
   /**
-   * Warms all 26 runs, so no CASE pays for a drive and the per-case budget is
-   * about the assertions rather than about which case asked first.
+   * Warms all 28 runs — four frame-driven on the shipped seed and 24
+   * step-driven — so no CASE pays for a drive and the per-case budget is about
+   * the assertions rather than about which case asked first.
+   *
+   * **The `await`s are not decoration.** `runSeedArm` yields inside its own tick
+   * loop and this loop yields between seeds, so no vitest worker holds its event
+   * loop long enough to make the runner's own RPC time out.
    */
   beforeAll(async () => {
-    // **`await` between runs, and it is not decoration.** Each run is ~3-6 s of
-    // uninterrupted synchronous JS; twenty-six of them back to back starve the
-    // worker's RPC channel and vitest reports `Timeout calling "onTaskUpdate"`
-    // as an UNHANDLED ERROR, which fails the file while every assertion passes.
-    // Measured: without the yield this block fails that way on every run.
-    const breathe = async (): Promise<void> => new Promise((r) => setTimeout(r, 0))
-    // `'slot-a'` is warmed for the SHIPPED seed only — it is the reproduction
-    // case's arm and nothing else reads it, and seven more of it costs 22 s.
-    arm('laneways-m2', 'slot-a', 'none')
-    await breathe()
+    await warm('laneways-m2', 'slot-a', 'none')
+    await warm('laneways-m2', 'always-tiles', 'none')
+    await warm('laneways-m2', 'always-upgrades', 'none')
+    await warm('laneways-m2', 'always-upgrades', 'eager')
     for (const seed of RUN_SEEDS) {
-      arm(seed, 'always-tiles', 'none')
-      await breathe()
-      arm(seed, 'always-upgrades', 'eager')
-      await breathe()
-      arm(seed, 'alternate', 'eager')
-      await breathe()
+      for (const [policy, placing] of [
+        ['always-tiles', 'none'],
+        ['always-upgrades', 'eager'],
+        ['alternate', 'eager'],
+      ] as const) {
+        stepCache.set(`${seed}/${policy}/${placing}`, runSeedArmStep(seed, policy, placing))
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0))
     }
-    arm('laneways-m2', 'always-upgrades', 'none')
   }, SEED_MATRIX_TIMEOUT_MS)
+
+  it('TWO DRIVERS, ONE ANSWER: the frame loop and `step` agree field for field on the shipped seed', () => {
+    // **This is what licenses measuring the other seven seeds on the cheap
+    // driver.** `runSeedArm` boots `createGame` and hands its frame loop a
+    // timestamp; `runSeedArmStep` calls `step` and enqueues `'choose-card'` one
+    // tick after the boundary raised the offer. They share the policy, the
+    // placement rule and the accounting and NOTHING ELSE — different loops,
+    // different clocks, one with a renderer and one without.
+    //
+    // Asserted on BOTH policies, because a card-taking arm and a
+    // card-taking-and-PLACING arm exercise different halves.
+    for (const [policy, placing] of [
+      ['always-tiles', 'none'],
+      ['always-upgrades', 'eager'],
+    ] as const) {
+      const f = arm('laneways-m2', policy, placing)
+      const s = stepArm('laneways-m2', policy, placing)
+      const differs: string[] = []
+      for (const k of [
+        'deathTick',
+        'endTick',
+        'trips',
+        'fires',
+        'blockedCarTicks',
+        'longestQueue',
+        'valveFirings',
+        'firstValveTick',
+        'worstWait',
+        'maxInFlight',
+        'tilesLeftRunningMin',
+        'tilesLeftWeekCloseMin',
+        'unaffordable',
+        'boundaries',
+        'upgradesGranted',
+        'upgradesPlaced',
+        'cardsTaken',
+        'junctionRefusals',
+      ] as const) {
+        if (f[k] !== s[k]) differs.push(`${k}: frame=${String(f[k])} step=${String(s[k])}`)
+      }
+      expect(differs, `${policy}/${placing}: the two drivers disagree`).toEqual([])
+      // **The per-week SERIES too**, which is what a single scalar could agree on
+      // by accident.
+      expect(
+        s.weeks.map((w) => w.tilesLeft),
+        `${policy}/${placing}: the week-close tile ledger`,
+      ).toEqual(f.weeks.map((w) => w.tilesLeft))
+      expect(
+        s.weeks.map((w) => w.trips),
+        `${policy}/${placing}: trips per week`,
+      ).toEqual(f.weeks.map((w) => w.trips))
+      expect(s.placements, `${policy}/${placing}: the cells seated, in order`).toEqual(f.placements)
+      expect(f.cardsTaken, 'non-vacuity: cards were taken on both').toBeGreaterThan(0)
+    }
+  })
+
 
   it('reproduces the shipped seed on this rig before it is believed about the other seven', () => {
     // **`'slot-a'` and not `'always-tiles'`, and the difference is one row.**
@@ -121,6 +193,15 @@ describe('M1f Task 12 Step 4: eight seeds, three card policies, and the MAX_UPGR
     )
     expect(r.unaffordable, 'the connector is never tile-bound on this seed').toBe(SHIPPED.unaffordable)
     expect(r.upgradesPlaced, 'and it places nothing').toBe(0)
+
+    // **The valve, which M1f is the first milestone to make fire on the shipped
+    // board.** Pre-M1f: 0 firings, worst wait 32. A worst wait equal to
+    // `MAX_BLOCKED_TICKS` means at least one car SATURATED and was released by
+    // the 45 s timer rather than by the road.
+    expect(r.firstValveTick, 'the tick the valve first releases a car — 9:40.0 on a stopwatch').toBe(
+      17_658,
+    )
+    expect(r.worstWait, 'and a car saturated: MAX_BLOCKED_TICKS, against 32 pre-M1f').toBe(1350)
 
     // The per-week tile ledger Task 7 re-based, quoted as a series so a reader
     // does not have to reconstruct it: 30/week automatic plus 30/week from the
@@ -175,9 +256,9 @@ describe('M1f Task 12 Step 4: eight seeds, three card policies, and the MAX_UPGR
       let alternateWins = 0
       let tilesWins = 0
       for (const seed of RUN_SEEDS) {
-        const t = arm(seed, 'always-tiles', 'none')
-        const u = arm(seed, 'always-upgrades', 'eager')
-        const a = arm(seed, 'alternate', 'eager')
+        const t = stepArm(seed, 'always-tiles', 'none')
+        const u = stepArm(seed, 'always-upgrades', 'eager')
+        const a = stepArm(seed, 'alternate', 'eager')
         // **The criterion is TRIPS**, and the death tick is reported beside it
         // rather than asserted: a policy that survives longer by delivering less
         // is not a better policy, and this project has shipped one gate a
@@ -210,8 +291,30 @@ describe('M1f Task 12 Step 4: eight seeds, three card policies, and the MAX_UPGR
     SEED_MATRIX_TIMEOUT_MS,
   )
 
+  it('the item card gives the VALVE back too, and takes the worst wait to its pre-M1f value', () => {
+    // **A fourth and a fifth quantity reproducing the pre-M1f board to the
+    // digit**, beside trips 747, death 31,456 and blocked car-ticks 2,120: the
+    // valve fires **0** times and the worst wait is **32**, which is what it was
+    // before spec 5.5's mutual exclusion existed.
+    //
+    // **The direction is the finding and it is not uniform.** Task 12's placement
+    // sweep measures three of the six legal SINGLE placements RAISING the valve
+    // count (5 -> 6), because relief moves traffic downstream rather than
+    // deleting it. Seating every junction removes all five; seating the wrong one
+    // adds a sixth.
+    const placed = arm('laneways-m2', 'always-upgrades', 'eager')
+    const control = arm('laneways-m2', 'always-tiles', 'none')
+    expect(control.valveFirings, 'the control saturates five cars').toBe(5)
+    expect(placed.valveFirings, 'and the fully-seated arm saturates none').toBe(0)
+    expect(placed.firstValveTick, 'so there is no first firing at all').toBe(-1)
+    expect(placed.worstWait, 'worst wait back to its pre-M1f value').toBe(32)
+    expect(placed.trips, 'trips, also pre-M1f to the digit').toBe(747)
+    expect(placed.deathTick, 'and the death tick').toBe(31_456)
+    expect(placed.blockedCarTicks, 'and the blocked car-ticks').toBe(2120)
+  })
+
   it('MAX_UPGRADES still bounds the grant — and the slack is 2, not a factor of three', () => {
-    const runs = RUN_SEEDS.map((s) => arm(s, 'always-upgrades', 'eager'))
+    const runs = RUN_SEEDS.map((s) => stepArm(s, 'always-upgrades', 'eager'))
     const maxBoundaries = Math.max(...runs.map((r) => r.boundaries))
     // The plan's own derivation, pinned against measured data so it cannot rot
     // into a claim.

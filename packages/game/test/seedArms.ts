@@ -1,7 +1,17 @@
 import { MAX_BLOCKED_TICKS, TICKS_PER_WEEK } from '@laneways/shared'
 import type { AtlasContext, AtlasSurface } from '@laneways/render'
 import {
+  applyChooseCard,
+  applyPlaceUpgrade,
   canPlaceUpgrade,
+  createFieldInputRanges,
+  createFlowFields,
+  createScratch,
+  createState,
+  createWorld,
+  eraseRoad,
+  placeRoad,
+  step,
   isJunctionCell,
   junctionAdmitsOne,
   occupantOf,
@@ -30,6 +40,7 @@ import {
   type WorldData,
 } from '@laneways/sim'
 import { createGame, type GameContext } from '../src/main'
+import { layoutFor } from '../src/layouts'
 import { longestQueue, travelDir, NO_CROSSING } from '../src/queueProbe'
 import {
   armGreedyActions,
@@ -106,6 +117,13 @@ export const SEED_ARM_WEEKS = 12
 
 /** How often `longestQueue` is sampled, matching `junctionArms.ts`'s city arm. */
 const QUEUE_SAMPLE = 10
+
+/**
+ * How often the driver hands the event loop back — see `runSeedArm`'s comment.
+ * 2,000 ticks is about 120 ms of work, so a 54,000-tick run yields ~27 times and
+ * pays about 27 ms for it.
+ */
+const YIELD_EVERY_TICKS = 2000
 
 // ---------------------------------------------------------------------------
 // Card policies
@@ -208,6 +226,21 @@ export interface SeedRun {
   readonly blockedCarTicks: number
   readonly longestQueue: number
   readonly valveFirings: number
+  /**
+   * The tick the anti-deadlock valve first released a car, or -1.
+   *
+   * **M1f is the first milestone on which this is not -1 on the shipped board.**
+   * Pre-M1f the greedy arm fired the valve 0 times; under the shipped junction
+   * rule it fires 5. `m1f-carry-forward.md` §10 and §5 are dated off it.
+   */
+  readonly firstValveTick: number
+  /**
+   * The largest `carBlockedTicks` any car reached — the "worst wait" of
+   * `constants.ts`'s `MAX_BLOCKED_TICKS` table. Pre-M1f it was **32**; a value
+   * equal to `MAX_BLOCKED_TICKS` means at least one car SATURATED, which is the
+   * 45 s valve doing the work rather than the road.
+   */
+  readonly worstWait: number
   readonly maxInFlight: number
   readonly weeks: readonly SeedWeek[]
   /**
@@ -351,6 +384,21 @@ function topLegalSite(
 /**
  * One seed, one card policy, twelve weeks or death.
  *
+ * **THIS FUNCTION IS ASYNC AND YIELDS INSIDE ITS OWN TICK LOOP, AND THAT IS A
+ * FIX FOR THE TEST RUNNER RATHER THAN FOR THE SIM.** A twelve-week frame-driven
+ * run is 2.4-9 s of uninterrupted synchronous JavaScript. Vitest's worker calls
+ * `onTaskUpdate` on the main process and waits for a reply; while a worker never
+ * hands its event loop back, that call cannot be answered, and vitest reports
+ * `Timeout calling "onTaskUpdate"` as an **unhandled error** — failing a file
+ * whose every assertion passed. Yielding every `YIELD_EVERY_TICKS` bounds the
+ * synchronous window at a few milliseconds.
+ *
+ * **It is necessary and it is NOT sufficient**, which is the honest shape:
+ * measured, the error still fires when one worker holds a ~95 s task while 23
+ * other files compete for eight cores. The other half of the fix is that the
+ * matrix is SPLIT across two files, so no worker holds a task that long. See
+ * `seedArmsA.test.ts`.
+ *
  * `onTick` is called after every tick with the live state and world, and it is
  * how M1f Task 12 Step 5's invariant sweep rides this rig rather than building a
  * fourth driver. It is optional so the 26 policy runs pay nothing for it.
@@ -360,12 +408,12 @@ function topLegalSite(
  * upgrades and never place them"* is the arm that isolates the tile bonus from
  * the object, and Task 7's product verdict is about exactly that configuration.
  */
-export function runSeedArm(
+export async function runSeedArm(
   seed: string,
   policy: CardPolicy,
   placing: PlacementMode,
   onTick?: SeedTickObserver,
-): SeedRun {
+): Promise<SeedRun> {
   const game = createGame({
     restart: () => undefined,
     // The property genuinely absent: the board a plain bot link opens.
@@ -409,6 +457,8 @@ export function runSeedArm(
   let blockedCarTicks = 0
   let junctionRefusals = 0
   let valveFirings = 0
+  let firstValveTick = -1
+  let worstWait = 0
   let peakQueue = 0
   let maxInFlight = 0
   let tilesLeftRunningMin = tilesLeft(state)
@@ -522,7 +572,9 @@ export function runSeedArm(
         }
       } else if (moved && (preBlocked[c] as number) >= MAX_BLOCKED_TICKS) {
         valveFirings++
+        if (firstValveTick < 0) firstValveTick = state.header[H_TICK] as number
       }
+      if (blocked > worstWait) worstWait = blocked
     }
     if (inFlight > maxInFlight) maxInFlight = inFlight
 
@@ -549,6 +601,7 @@ export function runSeedArm(
       deathTick = state.header[H_TICK] as number
       break
     }
+    if (tick % YIELD_EVERY_TICKS === 0) await new Promise((resolve) => setTimeout(resolve, 0))
   }
   closeWeek()
 
@@ -566,6 +619,8 @@ export function runSeedArm(
     blockedCarTicks,
     longestQueue: peakQueue,
     valveFirings,
+    firstValveTick,
+    worstWait,
     maxInFlight,
     weeks,
     tilesLeftRunningMin,
@@ -591,6 +646,267 @@ export function houseCount(state: GameState): number {
 /** `(x,y)`, matching `junctionArms.ts`'s `cellName`. */
 export function seedCellName(cell: number, w: number): string {
   return `(${cell % w},${Math.floor(cell / w)})`
+}
+
+// ---------------------------------------------------------------------------
+// The STEP-driven twin
+// ---------------------------------------------------------------------------
+
+/**
+ * **The same run, the same policy, the same placement rule — driven through
+ * `step` instead of through `createGame`'s frame loop.**
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS EXISTS, AND IT IS A COST DECISION WITH AN EVIDENCE DIVIDEND
+ * ---------------------------------------------------------------------------
+ *
+ * A twelve-week run costs **2.4 s** frame-driven and **0.45 s** here, and about
+ * 83 % of the difference is `buildFrame`'s per-frame board copy — measured, and
+ * measured NOT to be the drawn rect: shrinking the viewport to 120x240 at dpr 1
+ * changes the figure by nothing.
+ *
+ * **That mattered because the eight-seed matrix broke the test runner.** With 24
+ * frame-driven runs committed, `packages/game` reported `Timeout calling
+ * "onTaskUpdate"` as an **unhandled error** — 764 tests passing, the package red.
+ * Measured, in this order, and each one ruled out a hypothesis: yielding inside
+ * the tick loop did not fix it; splitting the matrix across two files did not fix
+ * it (95 s -> 52 s + 41 s); `--pool=forks` did not fix it; `--maxWorkers=6` did
+ * not fix it; and **removing the two files entirely made the package clean at
+ * 66 s.** The trigger is not one long block, it is TOTAL CPU: the seed matrix
+ * doubled the package's work (145 s -> 283 s of worker time on eight cores) and
+ * starved vitest's own parent process of the scheduling it needs to answer a
+ * worker's RPC inside 60 s.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT IS AND IS NOT THE SAME
+ * ---------------------------------------------------------------------------
+ *
+ * **`sim` has no notion of a pause** (plan Decision 11), so there is no modal to
+ * resolve here: the offer is raised by phase 4 on the boundary tick and the card
+ * is taken by enqueueing `'choose-card'` on the **next** tick, which is exactly
+ * when the frame driver's `takeCardPolicy` fires — it can only run once the loop
+ * is paused, and the loop pauses on the frame that ran the boundary tick.
+ *
+ * **The tick sequence is therefore identical, and that is asserted rather than
+ * argued**: `seedArmsA.test.ts` drives the shipped seed on BOTH and requires the
+ * death tick, the trips, the blocked car-ticks, the valve figures, the boundary
+ * count and the whole per-week ledger to agree. *Two independent drivers agreeing
+ * is evidence; one driver run twice is not* — so the matrix is cheaper AND better
+ * covered than it was.
+ *
+ * The one thing this driver cannot see is anything about `game`: no frame, no
+ * camera, no draw, no pause. Every case that is ABOUT those stays on the frame
+ * driver.
+ */
+export function runSeedArmStep(seed: string, policy: CardPolicy, placing: PlacementMode): SeedRun {
+  const layout = layoutFor(undefined)
+  const map = layout.map()
+  const world = createWorld(map)
+  const state = createState(seed, map)
+  const scratch = createScratch(world.cells, map.groupCount, map.maxDestinations, createFieldInputRanges(map))
+  const fields = createFlowFields(map.groupCount, world.cells)
+  layout.seed(state, world)
+
+  const NO_ACTIONS: readonly TickAction[] = Object.freeze([])
+  const oneTick: { actions: readonly TickAction[] } = { actions: NO_ACTIONS }
+  const drive = (actions: readonly TickAction[] | undefined): void => {
+    oneTick.actions = actions ?? NO_ACTIONS
+    step(state, world, fields, scratch, oneTick)
+    oneTick.actions = NO_ACTIONS
+  }
+  // `placeRoad`/`eraseRoad`/`applyChooseCard`/`applyPlaceUpgrade` are imported so
+  // this file's dependency on the four action kinds is explicit rather than
+  // hidden inside `step` — a future fifth kind that this rig cannot express
+  // should be a typecheck failure here, not a silent divergence from the frame
+  // driver. They are otherwise unused.
+  void placeRoad
+  void eraseRoad
+  void applyChooseCard
+  void applyPlaceUpgrade
+
+  const bootTick = state.header[H_TICK] as number
+  // The frame driver's warm start is driven by `createGame`; here it is ours.
+  for (let i = 0; i < layout.warmStartTicks; i++) drive(undefined)
+  const startTick = state.header[H_TICK] as number
+  const endHorizon = startTick + SEED_ARM_WEEKS * TICKS_PER_WEEK
+  void bootTick
+
+  const tally = { unaffordable: 0 }
+  const openingActions: TickAction[] = []
+  for (const stroke of CITY_OPENING) openingActions.push(...armPathActions(stroke))
+
+  const carSlots = state.carPhase.length
+  const preCell = new Int32Array(carSlots)
+  const preBlocked = new Int32Array(carSlots)
+  const preInFlight = new Uint8Array(carSlots)
+  const preTarget = new Int32Array(carSlots)
+  const junctionRefusalsByCell = new Int32Array(world.cells)
+
+  const weeks: SeedWeek[] = []
+  const placements: number[] = []
+  let placementsWithEvidence = 0
+  let cardsTaken = 0
+  let upgradesGranted = 0
+  let deathTick = -1
+  let blockedCarTicks = 0
+  let junctionRefusals = 0
+  let valveFirings = 0
+  let firstValveTick = -1
+  let worstWait = 0
+  let peakQueue = 0
+  let maxInFlight = 0
+  let tilesLeftRunningMin = tilesLeft(state)
+  let boundaries = 0
+
+  let week = weekOfTick(startTick)
+  let weekTrips = state.header[H_SCORE] as number
+  let weekFires = firesSoFar(state)
+  let wkQueue = 0
+  let wkBlocked = 0
+  let wkPins = 0
+
+  const closeWeek = (): void => {
+    const trips = (state.header[H_SCORE] as number) - weekTrips
+    const fires = firesSoFar(state) - weekFires
+    weeks.push({
+      week,
+      dests: state.header[H_DEST_COUNT] as number,
+      houses: state.header[H_HOUSE_COUNT] as number,
+      trips,
+      fires,
+      deliveryFraction: fires === 0 ? 1 : trips / fires,
+      peakDestPins: wkPins,
+      longestQueue: wkQueue,
+      blockedCarTicks: wkBlocked,
+      tilesLeft: tilesLeft(state),
+      cardsTaken,
+      upgradesHeld: state.header[H_INV_UPGRADES] as number,
+      upgradesPlaced: state.header[H_UPGRADE_COUNT] as number,
+    })
+    weekTrips = state.header[H_SCORE] as number
+    weekFires = firesSoFar(state)
+    wkQueue = 0
+    wkBlocked = 0
+    wkPins = 0
+  }
+
+  for (let tick = startTick + 1; tick <= endHorizon; tick++) {
+    const actions: TickAction[] = []
+    if (tick === startTick + 1) actions.push(...openingActions)
+    else if (tick % GREEDY_PERIOD_TICKS === 0) {
+      const greedy = armGreedyActions(state, world, tally)
+      if (greedy !== undefined) actions.push(...greedy)
+    }
+    // **The card, one tick after the boundary raised it.** `offerPending` is
+    // true from phase 4 of the boundary tick onward, and phase 3 of THIS tick is
+    // where `applyChooseCard` runs — which is the same tick the frame driver's
+    // policy reaches, because the loop pauses on the frame that ran the boundary.
+    if (offerPending(state)) {
+      const slot = slotFor(state, policy, cardsTaken)
+      const card = offerSlot(state, slot)
+      actions.push({ kind: 'choose-card', a: slot, b: card })
+      cardsTaken++
+      if (card === CARD_JUNCTION_UPGRADE) upgradesGranted += 2
+    }
+    if (placing !== 'none' && tick % GREEDY_PERIOD_TICKS === 0 && (state.header[H_INV_UPGRADES] as number) >= 1) {
+      const top = topLegalSite(state, world, junctionRefusalsByCell)
+      if (top.cell >= 0 && (placing === 'eager' || top.evidence)) {
+        actions.push({ kind: 'upgrade', a: top.cell, b: 0 })
+        placements.push(top.cell)
+        if (top.evidence) placementsWithEvidence++
+      }
+    }
+
+    for (let c = 0; c < carSlots; c++) {
+      preCell[c] = state.carCell[c] as number
+      preBlocked[c] = state.carBlockedTicks[c] as number
+      const phase = state.carPhase[c] as number
+      const inFlight = phase === PHASE_OUTBOUND || phase === PHASE_RETURNING
+      preInFlight[c] = inFlight ? 1 : 0
+      preTarget[c] = inFlight ? junctionBlockedTarget(state, world, c) : -1
+    }
+
+    drive(actions.length === 0 ? undefined : actions)
+
+    let inFlight = 0
+    for (let c = 0; c < carSlots; c++) {
+      const phase = state.carPhase[c] as number
+      if (phase === PHASE_OUTBOUND || phase === PHASE_RETURNING) inFlight++
+      if (preInFlight[c] === 0) continue
+      const moved = (state.carCell[c] as number) !== (preCell[c] as number)
+      const blocked = state.carBlockedTicks[c] as number
+      if (!moved && blocked === (preBlocked[c] as number) + 1) {
+        blockedCarTicks++
+        wkBlocked++
+        const target = preTarget[c] as number
+        if (target >= 0) {
+          junctionRefusals++
+          junctionRefusalsByCell[target] = (junctionRefusalsByCell[target] as number) + 1
+        }
+      } else if (moved && (preBlocked[c] as number) >= MAX_BLOCKED_TICKS) {
+        valveFirings++
+        if (firstValveTick < 0) firstValveTick = state.header[H_TICK] as number
+      }
+      if (blocked > worstWait) worstWait = blocked
+    }
+    if (inFlight > maxInFlight) maxInFlight = inFlight
+
+    const left = tilesLeft(state)
+    if (left < tilesLeftRunningMin) tilesLeftRunningMin = left
+    for (let d = 0; d < (state.header[H_DEST_COUNT] as number); d++) {
+      const pins = state.destPins[d] as number
+      if (pins > wkPins) wkPins = pins
+    }
+    if (tick % QUEUE_SAMPLE === 0) {
+      const q = longestQueue(state, world)
+      if (q > wkQueue) wkQueue = q
+      if (q > peakQueue) peakQueue = q
+    }
+
+    const nowWeek = weekOfTick(state.header[H_TICK] as number)
+    if (nowWeek !== week) {
+      closeWeek()
+      week = nowWeek
+      boundaries++
+    }
+    if (isGameOver(state)) {
+      deathTick = state.header[H_TICK] as number
+      break
+    }
+  }
+  closeWeek()
+
+  const fires = firesSoFar(state)
+  const trips = state.header[H_SCORE] as number
+  return {
+    seed,
+    policy,
+    placing,
+    deathTick,
+    endTick: state.header[H_TICK] as number,
+    trips,
+    fires,
+    deliveryFraction: fires === 0 ? 1 : trips / fires,
+    blockedCarTicks,
+    longestQueue: peakQueue,
+    valveFirings,
+    firstValveTick,
+    worstWait,
+    maxInFlight,
+    weeks,
+    tilesLeftRunningMin,
+    tilesLeftWeekCloseMin: Math.min(...weeks.map((w) => w.tilesLeft)),
+    unaffordable: tally.unaffordable,
+    boundaries,
+    upgradesGranted,
+    upgradesPlaced: state.header[H_UPGRADE_COUNT] as number,
+    cardsTaken,
+    placements,
+    placementsWithEvidence,
+    junctionRefusalsByCell,
+    junctionRefusals,
+    w: world.w,
+  }
 }
 
 /** The per-seed table, for the report. */

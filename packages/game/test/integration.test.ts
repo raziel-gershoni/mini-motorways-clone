@@ -5300,7 +5300,11 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     // before the run.** `armGreedyActions` reads the budget in exactly ONE
     // place — `if (found.cost > tilesLeft(state)) { tally.unaffordable++;
     // continue }` — and `r.unaffordable` is **0** across all 21,783 ticks, with
-    // a floor of 37 tiles in hand. The connector was never once refused for
+    // a WEEK-CLOSE minimum of 37 tiles in hand. **The qualifier is load-bearing
+    // and the word "floor" was wrong: the RUNNING minimum, sampled every tick,
+    // is 7, at about tick 2,280.** Both are asserted side by side in
+    // `seedArms.test.ts` (`tilesLeftWeekCloseMin` 37, `tilesLeftRunningMin` 7) so
+    // the pair cannot be confused again. The connector was never once refused for
     // money, so money it did not need changes nothing it does: same strokes,
     // same order, same ticks. Every behavioural figure in this case is
     // therefore UNMOVED, and the assertions above are the evidence rather than
@@ -5831,7 +5835,7 @@ describe('M1f Task 12 Step 3: an upgrade is a decision — WHERE it goes changes
 describe('M1f Task 12 Step 5: the invariants hold for every tick of the longest shipped-seed run', () => {
   it(
     'and the run is LIVE for all of it — safety properties are trivially true of a corpse',
-    () => {
+    async () => {
       // **The longest run this seed can produce**: the upgrade card taken at
       // every boundary and seated, which is 31,456 ticks against the control's
       // 21,783. Driven through `createGame` and its `InputQueue`, so every
@@ -5850,7 +5854,7 @@ describe('M1f Task 12 Step 5: the invariants hold for every tick of the longest 
       let ticksWithACarMoving = 0
       const ledgerSteps: number[] = []
 
-      const run = runSeedArm('laneways-m2', 'always-upgrades', 'eager', (state, world, tick, card) => {
+      const run = await runSeedArm('laneways-m2', 'always-upgrades', 'eager', (state, world, tick, card) => {
         ticks++
 
         // ---- M1f INVARIANT 1: the count agrees with the flags, BOTH ways ----

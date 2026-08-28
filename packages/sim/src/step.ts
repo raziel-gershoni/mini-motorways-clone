@@ -912,7 +912,15 @@ export function step(
   // one state a leaderboard cannot accept. `step.test.ts` pins both orderings.
   //
   // Nothing below this line runs again for the life of the buffer — not the
-  // clock, not the input loop, not phase 10 itself.
+  // clock, not the input loop, not phase 11 itself.
+  //
+  // **`11` and not `10`, and this line is why M1f Task 12 swept for phase
+  // numbers rather than trusting Task 5's renumbering.** The sentence names the
+  // FIRST, the middle and the LAST phase, and it read `phase 10` on the
+  // ten-phase tree (`ad1d581`), where 10 was the last. Task 5 inserted the card
+  // offer at position 4 and moved every other phase number above 3 in `sim/src`,
+  // `sim/test`, `game/src` and `game/test` — and missed this one, because it
+  // reads as a phase reference and is really a reference to *the last position*.
   if (isGameOver(s)) return
 
   const tick = (s.header[H_TICK] as number) + 1

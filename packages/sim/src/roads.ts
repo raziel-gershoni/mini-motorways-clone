@@ -163,10 +163,20 @@ export const OPPOSITE = Object.freeze([4, 5, 6, 7, 0, 1, 2, 3] as const)
  * way", but at a junction it also permits an eastbound car and a northbound car
  * to occupy the same cell simultaneously. They cross paths inside that cell and
  * nothing stops them. That is the spec's own model (§5.5 prices intersections
- * with a *speed* multiplier and a *wait*, not with mutual exclusion) and it is
- * what **M1f's** traffic lights and roundabouts are for. Repointed from M1e,
- * which shipped neither: both are §5.10 item cards and the card modal is M1f's,
- * so the gap is unchanged and still unowned by anything in the tree.
+ * with a *speed* multiplier and a *wait*, not with mutual exclusion).
+ *
+ * **M1f CLOSED HALF OF THIS AND THE OTHER HALF IS M1g's, so the paragraph above
+ * is history rather than a description of the tree.** It read *"what M1f's
+ * traffic lights and roundabouts are for ... the gap is unchanged and still
+ * unowned by anything in the tree"*, and every clause of that is now false.
+ * M1f Task 2 landed spec §5.5's mutual exclusion as `junctionAdmitsOne`
+ * (`graph.ts`), so two cars in opposite lanes are refused a shared junction
+ * cell; Task 3 narrowed it to CROSSING entries only, which gives the straight
+ * swap back; and Task 9's JUNCTION UPGRADE (`upgrades.ts`) is the §5.6 relief
+ * object that lifts it at one cell. **The traffic light and the roundabout are
+ * both deferred to M1g with full measurements** — see
+ * `docs/superpowers/m1g-carry-forward.md` §1 and §2 — and neither is what this
+ * gap is waiting on any more.
  *
  * **Also re-confirmed at the close of M1e (Task 11): `stepCell`'s `y < 0` is
  * still the verified equivalent mutant it was labelled as through either

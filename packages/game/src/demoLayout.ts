@@ -266,9 +266,12 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  *   5. **Two cars crossing inside one junction cell.** It happens at the three
  *      corridor mouths, and it is a KNOWN GAP, not a feature: `roads.ts`'s
  *      `LANE_OF_DIR` note states in source that two lanes do not model an
- *      intersection crossing and names **M1f's** traffic lights and roundabouts
- *      as the work (repointed at the close of M1e, which shipped neither —
- *      both are §5.10 item cards and the card modal is M1f's). Showing it
+ *      intersection crossing. **M1f closed half of it — Task 2's mutual
+ *      exclusion refuses the crossing pair and Task 9's JUNCTION UPGRADE lifts
+ *      it at one cell — and deferred the traffic light and the roundabout to
+ *      M1g with measurements** (`docs/superpowers/m1g-carry-forward.md` §1, §2).
+ *      This bullet named them as *"M1f's ... as the work"*, which is stale in
+ *      both halves. Showing it
  *      silently, on a board built to demonstrate that cars block each other, is
  *      the misleading option; naming it is not.
  *   6. **THE CITY SHUTS DOWN AT 3 MINUTES 43 SECONDS, on tick 6,703, with no

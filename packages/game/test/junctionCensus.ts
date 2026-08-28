@@ -66,11 +66,24 @@ import {
  *
  * **These are all PRE-M1f-Task-2 figures, and that qualifier is load-bearing
  * now that the rule ships.** A census is measured ON A RUN, and Task 2 changed
- * the run: on the same greedy arm after mutual exclusion the same two policies
- * read **11 / first at 17,658 / three cells** and **44 / first at 10,207 / five
- * cells**. Co-presence very nearly vanishes because it counts exactly the state
- * the rule forbids, and what survives it is the anti-deadlock valve, which
- * crosses regardless of the occupant. Both drivers assert the post-rule figures;
+ * the run: on the same greedy arm under Task 2's **WIDE** rule the same two
+ * policies read **11 / first at 17,658 / three cells** and **44 / first at
+ * 10,207 / five cells**. Co-presence very nearly vanishes because it counts
+ * exactly the state the rule forbids, and what survives it is the anti-deadlock
+ * valve, which crosses regardless of the occupant.
+ *
+ * **THOSE TWO TRIPLES ARE THE WIDE RULE'S AND THE WIDE RULE DID NOT SHIP.** Task
+ * 3 chose arm B — crossing entries only — and on it the same two policies read
+ * **42 / first at 15,001 / FOUR cells** (co-presence) and **133 / first at
+ * 10,207 / five cells** (rule-visible). Co-presence goes back UP, 11 -> 42,
+ * because the wide rule forbids two cars in one junction cell outright while arm
+ * B permits it when they entered on the same axis, and `firstConflictTick`
+ * returns to the pre-M1f 15,001 for the same reason. **This paragraph said
+ * "after mutual exclusion" without naming which arm and then claimed both
+ * drivers assert those figures; they assert 42 and 133** — `startingCity.test.ts`
+ * and `integration.test.ts`, whose own assertion messages label 11 and 44 as
+ * "under the wide rule". Corrected at M1f Task 12's closing sweep, which greps
+ * for exactly this class. Both drivers assert the post-rule figures;
  * the pre-rule ones above are what the milestone is DATED from and are not
  * re-measurable on any tree after `f63c40e`.
  *

@@ -1056,3 +1056,118 @@ So: **when a comment names something that does not exist, check whether it exist
 be wrong at your base and right at HEAD, and in a milestone executed as a sequence of tasks the
 distance between those is one commit. Name the owner rather than deleting the reference — that reads
 correctly on both sides, which is what a cherry-picked fix has to do.
+
+## The signal that says where to act is destroyed by acting
+
+M1f's relief object is a per-cell flag that exempts a junction from spec §5.5's
+mutual exclusion. The only data in the game that says **which** junction to put it
+on is the per-cell tally of *junction-caused refusals* — refusals where the
+entrant's own lane was free and the other lane was taken.
+
+That tally is produced by `junctionAdmitsOne`, and `junctionAdmitsOne` **returns
+false at an upgraded cell.** So an arm that seats an upgrade on every junction it
+can reach ends the run with a junction-caused refusal tally of **exactly zero**.
+Measured, on the shipped seed: the un-upgraded arm produces 6,538 such refusals
+across five cells; the fully-upgraded arm produces 0.
+
+The first version of the test asserted the ranking off the arm that placed
+upgrades and went red at `expected 0 to be greater than 2`. The repair is not a
+bigger fixture — **the ranking has to be read from a run where the intervention did
+not happen**, and the test now says so at the site.
+
+**The shape generalises past this object.** Whenever a metric is *defined by the
+condition your fix removes*, that metric cannot be used to evaluate the fix's
+targeting, and a rig that measures both on the same arm will report the
+intervention as having no target. Ask, before writing the assertion: does the
+treatment change the instrument, or only the outcome? Two arms are the answer when
+it changes the instrument — and the corollary is a product finding rather than a
+test one: **a player has the same problem.** The information that would tell them
+where to place only exists on a run where they placed nothing.
+
+## A long synchronous case starves the test runner's own RPC, and it reports that as a failure of your file
+
+`packages/game/test/seedArms.test.ts` warms 26 simulation runs in one `beforeAll`.
+Each is 3–6 s of *uninterrupted synchronous JavaScript*. Vitest reported:
+
+```
+  ⎯ Unhandled Error ⎯
+  Error: [vitest-worker]: Timeout calling "onTaskUpdate"
+  Test Files  1 failed (1)
+        Tests  5 passed (5)
+```
+
+**Every assertion passed and the file failed.** The worker never yields, so it
+cannot service the RPC the reporter uses to stream task updates, and the timeout
+surfaces as an unhandled error — which vitest counts as a failure of the run.
+
+The fix is one line per run: `await new Promise((r) => setTimeout(r, 0))`. The
+cost is nothing; the failure mode is that a run of 26 measurements looks like a
+broken test file and the obvious response is to go looking at the measurements.
+
+**Two things generalise.** A green-assertions/red-file result is a signal about the
+*harness*, not the code, and the runner's own machinery is part of the harness —
+this document's *"a claim about the toolchain deserves the same scrutiny as a claim
+about the code"* pointed at the test runner itself. And **a long case is not just a
+timeout risk; it is an availability risk for everything the runner does around
+it.** If a case must be long, make it yield.
+
+## Raising a timeout removes the only instrument watching a cost nobody owns
+
+This project has two true statements about vitest's per-case timeout and they pull
+in opposite directions.
+
+**One:** a timeout is invisible to both mutation screens — it raises no error class
+and changes no collection count — so under the load a battery creates it **banks
+phantom kills**. Measured: `packages/game` cases at 2,124–2,717 ms against a
+5,000 ms default produced 4–5 phantom reds per run on mutants that cannot reach the
+package at all. The prescription that follows is *keep per-case durations away from
+the timeout*, which usually means raising it.
+
+**Two:** the timeout is the **only** instrument this project has that watches
+per-tick cost. M1f Task 11 hoisted a 960-cell terrain walk into a function
+evaluated as an *argument*, so it ran on every tick of every run; the regression
+was **2.16×** and it was caught because a case blew the 5,000 ms default. Nothing
+in the suite measures per-tick time. A source scan over one function body is the
+only other guard.
+
+**Raising the default to 15,000 ms would have made that regression silent** — 2.16×
+on a 2.7 s case is 5.8 s. So the two prescriptions are in direct conflict, and the
+resolution is not to pick one:
+
+- **Do not raise the package default.** Give the few genuinely long cases
+  **explicit per-case timeouts** instead, so the default stays tight for the
+  hundreds of cases that are actually watching cost.
+- **Give per-tick cost a real owner and a real instrument** — a treatment/control
+  delta against a same-process reference workload, so machine speed cancels —
+  because "the timeout will catch it" is an accident, not a budget, and it only
+  fires on whichever machine happens to be slowest.
+
+**The general shape:** before relaxing a threshold that has been flaking, enumerate
+what *else* is currently keyed to it. A signal that is load-bearing for two
+unrelated properties will be relaxed for one of them by somebody who only knows
+about the other.
+
+## A predicted-non-zero count that comes back zero is neither a pass nor a failure — it means the metric is wrong
+
+M1f's closing sweep specified, in advance: *"the count of single upgrade placements
+strictly worse than the control is expected to be non-zero, and a zero is not a
+pass. If every placement beats the control, ask whether the rig is measuring
+placement at all."* Written before the run, which is what made it useful.
+
+Measured: **0 of 6.** And the prescribed diagnosis was wrong in a specific way —
+the rig *was* measuring placement, provably: one cell moved trips by +9 and another
+moved blocked car-ticks and valve firings while leaving trips unchanged, so the
+placement was applied and read. What the zero actually said is that on this seed
+relief never pushes traffic into a worse jam downstream, which is a fact about the
+board rather than about the instrument. (A sibling eight-seed measurement contains
+a −5, so the phenomenon exists; this seed does not exhibit it.)
+
+**The number that answered the real question was a different one nobody had asked
+for: three of the six legal sites are worth EXACTLY NOTHING — the control's trips,
+to the digit — and the best is 2.05×.** That is what says the modal is a decision.
+
+So: when a count predicted non-zero comes back zero, run the interrogation the
+prediction demanded, and be prepared for the answer to be *"the count was the wrong
+count"*. **A zero is information about the metric at least as often as it is
+information about the code**, and the repair is a better metric rather than a
+re-run or a weakened threshold.

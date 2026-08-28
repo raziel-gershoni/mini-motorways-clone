@@ -799,8 +799,12 @@ function survey(): { exact: Survey; smoothed: Survey } {
         const vy = (dr[i * 2 + 1] as number) - (dr[k * 2 + 1] as number)
         const sep = Math.hypot(ux, uy)
         // Two cars in the SAME cell in opposite lanes are drawn on top of each
-        // other by the sim itself — the gap `demoLayout.ts` §5 names, now M1f's
-        // (traffic lights and roundabouts are §5.10 item cards). A
+        // other by the sim itself — the gap `demoLayout.ts` §5 names. **M1f
+        // closed the sim half of it (Task 2's junction mutual exclusion) and the
+        // DRAW half is still open: the perpendicular lane offset is M1g's
+        // renderer item, `m1g-carry-forward.md` §15.** This comment said "now
+        // M1f's (traffic lights and roundabouts are §5.10 item cards)", which
+        // named two objects M1f deferred. A
         // "queue pair" is the case ordering means anything for: different
         // cells, travelling the same way.
         const sameCell = (game.state.carCell[i] as number) === (game.state.carCell[k] as number)
