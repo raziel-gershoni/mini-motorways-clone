@@ -736,6 +736,44 @@ describe('M1f Task 9: one upgrade per junction-eligible jam cell, against the sa
   )
 
   it(
+    'the two `< 0.9` delivery tripwires are green because nothing PLACES one, and here is what would turn them red',
+    () => {
+      // **Task 3 left two allowances written to FAIL when the board is restored**
+      // — `startingCity.test.ts`'s GATE B and `integration.test.ts`'s per-week
+      // block, both `trips / fires < 0.9`, both saying in as many words that the
+      // milestone still owes a restoration. Task 9 lands the MECHANISM and
+      // deliberately no observability: nothing in `game/src` enqueues an
+      // `'upgrade'`, so both arms still measure 0.891 and both lines are green.
+      //
+      // **Neither is widened and neither is deleted, and this case is why.** A
+      // tripwire authored to fire at a known moment must be removed AT that
+      // moment and not before; deleting it here would drop the only standing
+      // statement that the restoration is still owed, and widening it would be
+      // the inversion this project has caught before. What was wrong at both
+      // sites is the RECIPIENT — they name Task 9 — and that is corrected in
+      // place.
+      //
+      // This case hands the eventual owner the number. It is not an assertion
+      // about those two files; it is the measurement they will be re-derived
+      // from.
+      const arm = runJunctionArm(SHIPPED_ARM)
+      const hot = cellsCarryingAtLeast(arm.junctionRefusalsByCell, 5)
+      const control = runUpgradeArm({ upgrades: [], seatTick: SEAT_TICK })
+      expect(control.deliveryFraction, "the control is Task 3's 0.891").toBeCloseTo(0.891, 3)
+      expect(control.deliveryFraction, 'and it is BELOW the M1e gate — the allowance is honest').toBeLessThan(0.9)
+
+      const best = runUpgradeArm({ upgrades: [hot[2]!], seatTick: SEAT_TICK })
+      expect(best.deliveryFraction, 'one upgrade puts it back above the M1e gate').toBeGreaterThan(0.9)
+      console.log(
+        `delivery fraction: control ${control.deliveryFraction.toFixed(3)} / ` +
+          `one upgrade at ${cellName(hot[2]!, arm.w)} ${best.deliveryFraction.toFixed(3)} — ` +
+          'the two `< 0.9` tripwires go red the day a gesture places one',
+      )
+    },
+    UPGRADE_TIMEOUT_MS,
+  )
+
+  it(
     'WHEN it is seated decides as much as WHERE — the window is one boundary wide',
     () => {
       // **The seat tick is not a free parameter and this is the case that says

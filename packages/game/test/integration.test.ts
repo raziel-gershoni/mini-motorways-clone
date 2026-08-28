@@ -4930,12 +4930,25 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     // throughput collapse. `H_ROUTES_REFUSED` is still 0 in every week —
     // routing never refuses a car — so what changed is entirely at the
     // crossing. **0.891 clears the `< 0.9` bound by 0.009 and that is stated
-    // rather than absorbed**: the bound is what says the milestone still owes
-    // Task 9 a restoration, and one more percentage point of relief from any
-    // source turns it red. That is the correct polarity — it is an allowance
-    // for a known regression and it must fail when the regression is fixed.
+    // rather than absorbed**: the bound is what says the milestone still owes a
+    // restoration, and one more percentage point of relief from any source turns
+    // it red. That is the correct polarity — it is an allowance for a known
+    // regression and it must fail when the regression is fixed.
+    //
+    // **THE RECIPIENT WAS WRONG AND IS CORRECTED HERE: it is TASK 10, not Task
+    // 9.** Task 9 landed the upgrade and this line stayed green, correctly: that
+    // task ships the mechanism and no observability, so no production driver
+    // enqueues an `'upgrade'` and this arm still drives an un-upgraded board.
+    // **Measured:** one upgrade seated at tick 13,500 takes this same run's
+    // fraction to **0.973** (`junctionArms.test.ts`), against 0.975 pre-M1f — so
+    // the line goes red the day a gesture places one. **Delete it then, do not
+    // widen it.**
     expect(r.trips / r.fires, 'the delivery fraction still falls').toBeCloseTo(0.891, 3)
-    expect(r.trips / r.fires, 'M1f INTERIM — pre-M1f this was >= 0.9 and Task 9 must restore it').toBeLessThan(0.9)
+    expect(
+      r.trips / r.fires,
+      'M1f INTERIM — pre-M1f this was >= 0.9; TASK 10 restores it (Task 9 landed the mechanism, ' +
+        'not the gesture). DELETE this line then; do not widen it',
+    ).toBeLessThan(0.9)
     expect(r.trips / r.fires, 'but it has not collapsed').toBeGreaterThan(0.8)
     expect(r.trips / r.fires).toBeLessThan(1)
 

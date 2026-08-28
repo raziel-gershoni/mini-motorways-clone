@@ -2012,15 +2012,27 @@ describe('the survivability gate the default board is flipped behind', () => {
     // `H_ROUTES_REFUSED` is still 0 in every week, so the distributional reading
     // of WHY the run ends survives — nothing is ever refused a route — but
     // "keeps up almost perfectly" does not. Same allowance shape as GATE A: the
-    // M1e figure is kept, and the line that permits today's value fails when
-    // Task 9 restores it. **0.891 clears that line by 0.009**, which is stated
+    // M1e figure is kept, and the line that permits today's value fails when the
+    // board is restored. **0.891 clears that line by 0.009**, which is stated
     // rather than absorbed — the allowance is one percentage point of relief
     // away from going red, and that is the polarity it was written for.
+    //
+    // **THE RECIPIENT WAS WRONG AND IS CORRECTED HERE: it is TASK 10, not Task
+    // 9.** Task 9 landed the junction upgrade and this line stayed green,
+    // correctly — that task ships the MECHANISM and no observability, so nothing
+    // in `game/src` enqueues an `'upgrade'` action and this arm still drives an
+    // un-upgraded board. **Measured, so the next owner does not have to guess:**
+    // `junctionArms.test.ts`'s upgrade arm puts the same greedy run's fraction at
+    // **0.973** with ONE upgrade seated at tick 13,500 (pre-M1f was 0.975), so
+    // this line goes red the day a gesture places one. **Delete it then. Do not
+    // widen it** — an allowance authored to fire at a known moment, quietly
+    // relaxed instead, leaves a bound that permits everything.
     const M1E_DELIVERY_GATE = 0.9
     expect(cumulative, 'a further collapse below the M1f measurement').toBeGreaterThanOrEqual(0.8)
     expect(
       cumulative,
-      'M1f INTERIM: delivery is back at or above the M1e gate of 0.9 — DELETE THIS LINE and restore the >= 0.9 assertion',
+      'M1f INTERIM: delivery is back at or above the M1e gate of 0.9 — DELETE THIS LINE and restore ' +
+        'the >= 0.9 assertion. Owner: TASK 10 (Task 9 landed the mechanism, not the gesture)',
     ).toBeLessThan(M1E_DELIVERY_GATE)
     expect(cumulative, 'and not completely — some demand is always in flight').toBeLessThan(1)
     // ...and it keeps up without ever dropping a pin, which is the other half

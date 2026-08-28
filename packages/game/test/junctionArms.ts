@@ -38,7 +38,13 @@ import {
 } from '@laneways/sim'
 import { DEFAULT_LAYOUT_ID, DEMO_LAYOUT_ID, layoutFor } from '../src/layouts'
 import { longestQueue, travelDir, NO_CROSSING } from '../src/queueProbe'
-import { armGreedyActions, armPathActions, CITY_OPENING, GREEDY_PERIOD_TICKS } from './cityArms'
+import {
+  armGreedyActions,
+  armPathActions,
+  firesSoFar,
+  CITY_OPENING,
+  GREEDY_PERIOD_TICKS,
+} from './cityArms'
 import {
   censusPrev,
   countJunctionConflicts,
@@ -766,6 +772,17 @@ export interface UpgradeArmRun {
   readonly reachableDestinations: number
   /** How many destinations exist at the end, so the figure above has a denominator. */
   readonly destinations: number
+  /** Everything demand ever fired — `cityArms.ts`'s `firesSoFar`, the denominator of the delivery fraction. */
+  readonly fires: number
+  /**
+   * `trips / fires`. **The number two shipped tripwires are written against**:
+   * `startingCity.test.ts`'s GATE B and `integration.test.ts`'s per-week block
+   * both assert `< 0.9` on the arm with no upgrade, as an allowance for a known
+   * regression that must FAIL when the regression is fixed. They are green today
+   * because no production driver places an upgrade; this field is what says what
+   * the number becomes when one does.
+   */
+  readonly deliveryFraction: number
 }
 
 /**
@@ -921,6 +938,8 @@ export function runUpgradeArm(opts: UpgradeArmOptions): UpgradeArmRun {
     hash: hashState(state),
     reachableDestinations: reachableDestinations(state, world),
     destinations: state.header[H_DEST_COUNT] as number,
+    fires: firesSoFar(state),
+    deliveryFraction: (state.header[H_SCORE] as number) / firesSoFar(state),
   }
 }
 
@@ -934,6 +953,7 @@ export function formatUpgradeRows(
     `${name.padEnd(14)} trips=${String(r.trips).padStart(4)} death=${String(r.deathTick).padStart(6)} ` +
     `blocked=${String(r.blockedCarTicks).padStart(6)} valves=${String(r.valveFirings).padStart(3)} ` +
     `queue=${String(r.longestQueue).padStart(3)} reach=${r.reachableDestinations}/${r.destinations} ` +
+    `delivery=${r.deliveryFraction.toFixed(3)} ` +
     `vs control ${r.trips === control.trips ? '0.0' : (((r.trips - control.trips) * 1000) / control.trips / 10).toFixed(1)}%`
   const out = [line('control', control)]
   for (const r of rows) out.push(line(cellName(r.cell, w), r))
