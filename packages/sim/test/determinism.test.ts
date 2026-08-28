@@ -408,6 +408,13 @@ describe('sim source obeys the determinism rules', () => {
       'sim/src/state.ts',
       'sim/src/step.ts',
       'sim/src/trips.ts',
+      // M1f Task 9: the junction upgrade's placement rule and its one flag read.
+      // Named here for the same reason every other entry is — a new source file
+      // must be added deliberately, and a module that skips this scan skips
+      // every determinism rule below it. This one writes the only region M1f
+      // adds to the hashed buffer, so a non-deterministic write here is a
+      // browser-vs-Worker replay divergence rather than a local defect.
+      'sim/src/upgrades.ts',
       // M1e Task 2: the weekly tile grant, `step` phase 2 and the first phase
       // in the game to read the clock. Named here for the same reason every
       // other entry is — a new source file must be added deliberately, and a

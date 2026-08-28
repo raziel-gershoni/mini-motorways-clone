@@ -3,6 +3,7 @@ import {
   parseMap,
   CARS_PER_HOUSE,
   COST_UNIT_SCALE,
+  INTERSECTION_SPEED_MUL,
   LANE_SPEED_DEFAULT,
   MAX_BLOCKED_TICKS,
   ORTHO_COST,
@@ -15,9 +16,11 @@ import {
   hashState,
   H_DEST_COUNT,
   H_HOUSE_COUNT,
+  H_INV_UPGRADES,
   H_ROUTES_REFUSED,
   H_SCORE,
   H_TICK,
+  H_UPGRADE_COUNT,
   type GameState,
 } from '../src/state'
 import { createWorld, type WorldData } from '../src/world'
@@ -69,9 +72,14 @@ import {
   handOccupant,
   plusJunction,
   straightCorridor,
+  teeJunction,
   twoAdjacentJunctions,
+  upgradedJunction,
+  upgradedThenErased,
 } from './junctionRigs'
-import { roadDegree } from '../src/graph'
+import { isJunctionCell, junctionAdmitsOne, roadDegree } from '../src/graph'
+import { applyPlaceUpgrade } from '../src/upgrades'
+import { intersectionSpeedMul } from '../src/cars'
 
 /**
  * M1d Task 2: the occupancy region and its claim/release lifecycle.
@@ -3917,5 +3925,210 @@ describe('a junction cell admits one AXIS at a time (spec 5.5, M1f Tasks 2 and 3
     expect(otherLane(otherLane(1))).toBe(1)
     expect(() => otherLane(2)).toThrow(/is not one of the two/)
     expect(() => otherLane(-1)).toThrow(/is not one of the two/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The junction UPGRADE lifts the rule at its cell — M1f Task 9, spec 5.6
+// ---------------------------------------------------------------------------
+
+/**
+ * **`canEnter` IS NOT MODIFIED BY TASK 9 AND `EnterOutcome` DOES NOT GROW.**
+ * Everything below is the SAME function reading `junctionAdmitsOne`, which now
+ * answers `false` at an upgraded cell — so the junction clause reduces to the
+ * pre-M1f own-lane rule there and nothing new has to be said about the outcome.
+ * The previous design added `REFUSED_RED` as a fifth code; an upgrade never
+ * refuses anything a bare junction would have admitted, so there is nothing to
+ * add.
+ *
+ * ---------------------------------------------------------------------------
+ * THE BRIEF'S FIXTURES ARE THE (E, S) DEFECT AGAIN, AND ITS HEAD-ON CASE IS
+ * STALE BY ONE TASK
+ * ---------------------------------------------------------------------------
+ *
+ * **(1) The crossing pair.** Task 9's brief specifies the admit case as *"claim
+ * the OTHER lane with `DIR_E`, then enter with `DIR_S`"*. `LANE_OF_DIR` is
+ * `[1, 0, 0, 0, 0, 1, 1, 1]`, so E and S are BOTH lane 0 — that is the entrant's
+ * OWN lane, the pre-M1f read refuses it, and an upgrade does not and must not
+ * change that. It is the identical defect `junctionRigs.ts`'s module comment
+ * records against Task 2's brief, arriving again seven tasks later. The pair used
+ * here is **(E, N)**, lanes 0 and 1.
+ *
+ * **(2) The head-on derivation is already discharged, by Task 3, and the brief's
+ * version of it PASSES WITHOUT THE UPGRADE.** The brief says the upgrade gives
+ * back the property `LANE_OF_DIR[d] !== LANE_OF_DIR[OPPOSITE[d]]` provides, using
+ * two cars that entered on the shared east-west axis. **Task 3's narrowing
+ * already gives that one back** — *"the STRAIGHT 2-cycle Task 2 created resolves
+ * again"*, above, asserts `ENTER_FREE` for both halves on a tree with no upgrade
+ * anywhere. Written as the brief gives it the case is vacuous, and its sibling —
+ * *"the same pair still deadlocks when only ONE is upgraded"* — asserts
+ * `REFUSED_OCCUPIED` for a pair this tree admits, so it fails outright.
+ *
+ * What is actually left for this object is the **TURNING** swap, which Task 3
+ * left standing and named: *"and the TURNING one does not"*. The fixture below is
+ * that one, built so BOTH halves refuse — Task 3's turning case is deliberately
+ * one-sided (its right-hand car may still move), and a one-sided refusal cannot
+ * show that half a fix is half a fix.
+ *
+ * **(3) The occupants are `handOccupant`s, never bare `claimCell`s.** A car with
+ * no route answers `crossesAt` with `NO_PREVIOUS_DIR` and `crossesDirections`
+ * fail-closes on it, so a bare-`claimCell` occupant refuses EVERY entrant and
+ * every case here would be green through the sentinel rather than through the
+ * rule — Task 3's F6, which cost four of Task 2's nine junction cases.
+ */
+describe('an upgrade lifts the junction rule at its cell, and changes nothing else', () => {
+  it('ADMITS a crossing entrant a bare junction would refuse', () => {
+    const rig = upgradedJunction('up-admits')
+    handOccupant(rig.s, 0, rig.centre, DIR_E) // the OTHER lane is held, on a crossing axis
+    expect(occupantOf(rig.s, rig.centre, LANE_OF_DIR[DIR_N] as number), "the entrant's own lane is free").toBe(FREE)
+    expect(crossesAt(rig.s, 0), 'a real axis, not the fail-closed sentinel').toBe(DIR_E)
+    expect(crossesDirections(DIR_N, DIR_E), 'and north DOES cross east').toBe(true)
+    expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.ENTER_FREE)
+  })
+
+  it('and the SAME geometry with no upgrade refuses it — the upgrade is what changed', () => {
+    const rig = upgradedJunction('up-admits-control')
+    rig.s.upgradeAt.fill(0)
+    rig.s.header[H_UPGRADE_COUNT] = 0
+    handOccupant(rig.s, 0, rig.centre, DIR_E)
+    expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+  })
+
+  it('still refuses on the OWN lane — an upgrade gives capacity, not immunity', () => {
+    const rig = upgradedJunction('up-own-lane')
+    handOccupant(rig.s, 0, rig.centre, DIR_N)
+    expect(occupantOf(rig.s, rig.centre, LANE_OF_DIR[DIR_N] as number), 'the own lane IS held').toBe(0)
+    expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+  })
+
+  it('KEEPS the intersection slowdown — 5.6, "not the intersection slowdown"', () => {
+    const rig = upgradedJunction('up-slowdown')
+    expect(isJunctionCell(rig.s, rig.centre), 'still a junction for the SLOWDOWN').toBe(true)
+    expect(junctionAdmitsOne(rig.s, rig.centre), 'and not for the default EXCLUSION').toBe(false)
+    expect(intersectionSpeedMul(rig.s, rig.centre)).toBe(INTERSECTION_SPEED_MUL)
+  })
+
+  it('the GHOST check still comes first, even on an upgraded cell', () => {
+    const rig = upgradedJunction('up-ghost')
+    rig.s.ghostMask[rig.centre] = 1 << DIR_S
+    handOccupant(rig.s, 0, rig.centre, DIR_E)
+    expect(isCommittedTo(rig.s, rig.world, 1, rig.centre)).toBe(false)
+    expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.REFUSED_GHOST)
+  })
+
+  it('the VALVE is unreachable at an upgraded cell for a crossing entrant, because nothing refuses it', () => {
+    // Not a new rule — a consequence, asserted because it is the one interaction
+    // between this object and `MAX_BLOCKED_TICKS` that a reader might expect to
+    // go the other way. A saturated car crossing an upgraded junction is granted
+    // `ENTER_FREE`, not `ENTER_VALVE`: the valve lives inside the occupied
+    // branch and the branch is not taken.
+    const rig = upgradedJunction('up-valve')
+    handOccupant(rig.s, 0, rig.centre, DIR_E)
+    rig.s.carBlockedTicks[1] = MAX_BLOCKED_TICKS
+    expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.ENTER_FREE)
+    // ...and the own lane still refuses the same saturated car through the valve,
+    // so the fixture is not simply granting everything.
+    handOccupant(rig.s, 2, rig.centre, DIR_N)
+    expect(canEnter(rig.s, rig.world, 1, rig.centre, DIR_N)).toBe(EnterOutcome.ENTER_VALVE)
+  })
+
+  it('adds NO new EnterOutcome, and isEntryGranted is untouched', () => {
+    // The previous design added REFUSED_RED as a FIFTH code. An upgrade never
+    // refuses anything a bare junction would have admitted, so there is nothing
+    // new to say and the enum must not grow.
+    expect(Object.keys(EnterOutcome).length, 'M1f adds no entry outcome').toBe(4)
+    expect(isEntryGranted(EnterOutcome.ENTER_FREE)).toBe(true)
+    expect(isEntryGranted(EnterOutcome.REFUSED_OCCUPIED)).toBe(false)
+  })
+
+  it('AN UPGRADE GIVES THE TURNING SWAP BACK, on Task 2s own deadlock fixture', () => {
+    // **This is the milestone's mechanism, as a test rather than as a paragraph.**
+    // Before M1f, `LANE_OF_DIR[d] !== LANE_OF_DIR[OPPOSITE[d]]` made two cars
+    // swapping across an edge resolve in one tick. Task 2's mutual exclusion broke
+    // that at junctions; Task 3 gave the STRAIGHT swap back and left the TURNING
+    // one, which is why the shipped arm's valve count fell 15 -> 5 rather than to
+    // 0. This is the rest of it.
+    //
+    // Car 0 came down the left junction's north arm and turns east; car 1 came up
+    // the right junction's south arm and turns west. Each stands in the cell the
+    // other wants, on a crossing axis, so BOTH are refused and only the 45 s
+    // valve clears them — a standing 2-cycle, unlike the one-sided one the
+    // straight/turning case above pins.
+    //
+    // **Nothing is hand-written into state here, and that is the difference from
+    // the previous draft.** Its version had to assign `lightGreenAxis` on both
+    // endpoints, and its own controller could not reach that state in the two-car
+    // case (second review I12): two head-on cars give each junction a nearby count
+    // of 1, below `LIGHT_MIN_NEARBY_CARS` = 2, so neither light could ever swap to
+    // the axis that releases the pair. An upgrade has no phase to reach.
+    //
+    // If this test cannot be made to pass, the mechanism is not what this plan
+    // says it is and THAT IS THE MILESTONE'S HEADLINE FINDING.
+    const control = twoAdjacentJunctions('up-2cycle-control')
+    handOccupant(control.s, 0, control.left, DIR_S, DIR_E)
+    handOccupant(control.s, 1, control.right, DIR_N, DIR_W)
+    expect(crossesAt(control.s, 0), 'car 0 arrived southbound').toBe(DIR_S)
+    expect(crossesAt(control.s, 1), 'car 1 arrived northbound').toBe(DIR_N)
+    expect(canEnter(control.s, control.world, 0, control.right, DIR_E), 'the control deadlocks').toBe(
+      EnterOutcome.REFUSED_OCCUPIED,
+    )
+    expect(canEnter(control.s, control.world, 1, control.left, DIR_W), 'in BOTH directions').toBe(
+      EnterOutcome.REFUSED_OCCUPIED,
+    )
+
+    const rig = twoAdjacentJunctions('up-2cycle')
+    rig.s.header[H_INV_UPGRADES] = 2
+    expect(applyPlaceUpgrade(rig.s, rig.world, rig.left)).toBe(true)
+    expect(applyPlaceUpgrade(rig.s, rig.world, rig.right)).toBe(true)
+    handOccupant(rig.s, 0, rig.left, DIR_S, DIR_E)
+    handOccupant(rig.s, 1, rig.right, DIR_N, DIR_W)
+    expect(canEnter(rig.s, rig.world, 0, rig.right, DIR_E)).toBe(EnterOutcome.ENTER_FREE)
+    expect(canEnter(rig.s, rig.world, 1, rig.left, DIR_W)).toBe(EnterOutcome.ENTER_FREE)
+  })
+
+  it('and the same pair still deadlocks when only ONE of the two is upgraded', () => {
+    // Half the fix is half a fix, and a player with two upgrades has to spend both.
+    const rig = twoAdjacentJunctions('up-2cycle-half')
+    rig.s.header[H_INV_UPGRADES] = 1
+    expect(applyPlaceUpgrade(rig.s, rig.world, rig.right)).toBe(true)
+    handOccupant(rig.s, 0, rig.left, DIR_S, DIR_E)
+    handOccupant(rig.s, 1, rig.right, DIR_N, DIR_W)
+    expect(canEnter(rig.s, rig.world, 0, rig.right, DIR_E)).toBe(EnterOutcome.ENTER_FREE)
+    expect(canEnter(rig.s, rig.world, 1, rig.left, DIR_W)).toBe(EnterOutcome.REFUSED_OCCUPIED)
+  })
+
+  it('is a per-CELL exemption, not a board-wide one — the other junction still refuses', () => {
+    // The mutant this exists for is a clause that reads any non-zero byte of
+    // `upgradeAt`, or the count slot, rather than the cell's own flag. Every case
+    // above uses a board with one junction or two upgraded ones; this one has an
+    // upgraded junction and a bare junction on the same board at once.
+    const rig = twoAdjacentJunctions('up-per-cell')
+    rig.s.header[H_INV_UPGRADES] = 1
+    expect(applyPlaceUpgrade(rig.s, rig.world, rig.right)).toBe(true)
+    handOccupant(rig.s, 0, rig.left, DIR_E)
+    handOccupant(rig.s, 1, rig.right, DIR_E)
+    expect(canEnter(rig.s, rig.world, 2, rig.right, DIR_N), 'the upgraded cell admits').toBe(
+      EnterOutcome.ENTER_FREE,
+    )
+    expect(canEnter(rig.s, rig.world, 2, rig.left, DIR_N), 'and the bare one, one cell away, does not').toBe(
+      EnterOutcome.REFUSED_OCCUPIED,
+    )
+  })
+
+  it('an upgraded CORRIDOR admits exactly what a bare corridor admits — the flag adds nothing off a junction', () => {
+    // The fourth row of `graph.test.ts`'s table, at the entry rule. The flag
+    // persists through an erase, so this state is reachable; both predicates
+    // answer false, and the entrant sees the pre-M1f own-lane rule either way.
+    const up = upgradedThenErased('up-corridor')
+    handOccupant(up.s, 0, up.centre, DIR_E)
+    expect(canEnter(up.s, up.world, 1, up.centre, DIR_N), 'the other lane is not consulted').toBe(
+      EnterOutcome.ENTER_FREE,
+    )
+    const bare = teeJunction('up-corridor-control')
+    expect(eraseRoad(bare.s, bare.world, bare.centre, bare.north)).toBe(true)
+    handOccupant(bare.s, 0, bare.centre, DIR_E)
+    expect(canEnter(bare.s, bare.world, 1, bare.centre, DIR_N), 'and neither does the bare one').toBe(
+      EnterOutcome.ENTER_FREE,
+    )
   })
 })

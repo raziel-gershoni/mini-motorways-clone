@@ -190,21 +190,49 @@ export function isJunctionCell(state: GameState, cell: number): boolean {
  * with one deliberate second reader in test-adjacent code, `carAheadOf`
  * (`game/src/queueProbe.ts`), which reads the same predicate precisely so the
  * probe and the entry rule cannot disagree. It exists as a separate name from
- * `isJunctionCell` so that M1f Task 9 can add its upgrade clause HERE and nowhere
- * else. An upgraded junction is still an intersection (it slows cars) and is no
- * longer under the default rule (nothing replaces it; the rule is simply lifted).
- * `graph.test.ts` holds the table over both shapes and over a whole board, so the
- * two cannot drift into agreement — and the whole-board case is the assertion
- * Task 9 has to EDIT rather than delete.
+ * `isJunctionCell` so that M1f Task 9 could add its upgrade clause HERE and
+ * nowhere else, which is what the one line below is. An upgraded junction is
+ * still an intersection (it slows cars) and is no longer under the default rule
+ * (nothing replaces it; the rule is simply lifted). `graph.test.ts` holds the
+ * table over both shapes and over a whole board, so the two cannot drift into
+ * agreement — and the whole-board case is the assertion Task 9 EDITED rather
+ * than deleted: it now requires the two to agree everywhere EXCEPT the upgraded
+ * cells, and counts the divergences.
  *
- * Identical to `isJunctionCell` at this task. That is not redundancy; it is the
- * seam, named before it is needed, in the one commit where both readers are still
- * asking the same question. **Forcing one predicate false instead of splitting
- * them would remove the slowdown as well as the exclusion**, and a pre-M1f
- * identical control — which is what Task 9 measures its relief against — could
- * not then be built at all.
+ * **The split was named a task before it was needed, and that is what made this
+ * edit one line.** Forcing one predicate false instead of splitting them would
+ * remove the slowdown as well as the exclusion, and a pre-M1f identical control —
+ * which is what Task 9 measures its relief against — could not then be built at
+ * all.
  */
 export function junctionAdmitsOne(state: GameState, cell: number): boolean {
+  // **A JUNCTION UPGRADE LIFTS THE DEFAULT RULE — M1f Task 9.** It does NOT stop
+  // the cell being a junction: `isJunctionCell` is unchanged, so
+  // `intersectionSpeedMul` still slows every car crossing here, which is §5.6's
+  // *"skips the stop, not the intersection slowdown"* honoured by a different
+  // route. The two predicates diverge here and nowhere else, and
+  // `graph.test.ts`'s four-case table is what keeps them apart.
+  //
+  // **This one line is the whole entry rule of M1f's relief object.** `canEnter`
+  // is not modified by that task; its Task 2/Task 3 clause reads `false` here and
+  // reduces to the pre-M1f own-lane rule, which is what gives the TURNING swap
+  // back — Task 3's narrowing had already given back the straight one, so this is
+  // the remainder rather than the whole of the head-on property.
+  // `carAheadOf` (game/src/queueProbe.ts) reads the same predicate, so the queue
+  // probe and the entry rule cannot disagree about an upgraded cell; the
+  // 900-tick iff property is re-run on an upgraded board for exactly that reason.
+  //
+  // **The flag is read BEFORE the degree, and the order is not free.** An
+  // upgraded cell whose roads have all been erased must still answer `false` —
+  // the flag persists through an erase by design (`upgrades.ts`) — and the two
+  // orders agree everywhere else, so putting the degree first would be a
+  // silently-equivalent-looking edit that is wrong on exactly the state
+  // `graph.test.ts`'s fourth row is about.
+  //
+  // No guard on `cell`: an off-board index reads `undefined`, `!== 0` is false,
+  // and `isJunctionCell` answers false — the same answer bare ground gives, and
+  // the same no-guard convention `roadDegree` sets.
+  if ((state.upgradeAt[cell] as number) !== 0) return false
   return isJunctionCell(state, cell)
 }
 

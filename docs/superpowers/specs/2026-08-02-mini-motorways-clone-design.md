@@ -213,11 +213,14 @@ Implementation constraints: preallocate every buffer at boot; never allocate ins
 > M1f plan's **Amendment 2** (`docs/superpowers/plans/2026-08-20-m1f-junctions-and-cards.md`,
 > commit `33d57cd`), which is a real document; an earlier draft of this amendment
 > and of `regions.ts` both cited an "amendment to spec §5.6, 2026-08-21" that was
-> never written. **§5.6 is still unamended**, and the sentence quoted from it —
-> *"Lights place only on an existing road junction, never plain road, and cost 0
-> tiles"* — still describes a metered light rather than the object M1f ships. The
-> named recipient for closing that gap is **the task that lands the junction
-> upgrade (M1f Task 9)**, not "whoever owns the spec".
+> never written. **THAT GAP IS NOW CLOSED: M1f Task 9 wrote the §5.6 amendment,
+> and every reference to it in `graph.ts`, `regions.ts` and `blocking.ts` now
+> resolves.** The sentence those references quote — *"Lights place only on an
+> existing road junction, never plain road, and cost 0 tiles"* — is §5.6's
+> original text and still describes a metered light; it is the JUNCTION UPGRADE's
+> placement rule verbatim, which is why the amendment adopts it rather than
+> rewriting it, and the amendment beneath §5.6 is what says the object it governs
+> is no longer a light.
 >
 > **What it would cost to reverse this**, measured on the shipped board's greedy
 > arm at M1f Task 2 under the WIDE rule (both lanes free at any degree-3 cell):
@@ -299,6 +302,83 @@ Lights are **demand-actuated with hysteresis**, not fixed-cycle [MOD]: 10 s mini
 Lights place only on an existing road **junction**, never plain road, and cost 0 tiles.
 
 Roundabouts are 3×3 — centre plus all 8 neighbours must be clear of buildings, motorway endpoints, lights, water, and mountain. They may overwrite existing road, which is refunded. Cost 0 tiles. Circulating traffic has no enforced right-of-way: cars on the ring will sometimes stop to admit entrants, so the failure mode is the **ring itself backing up** and jamming outward.
+
+> **AMENDMENT, 2026-08-21 (M1f Task 9). This section's traffic light was built,
+> measured, and DEFERRED. M1f ships a JUNCTION UPGRADE in its place.**
+>
+> **What §5.6 specifies.** A light on a junction, demand-actuated with hysteresis,
+> 10 s minimum between changes, 2 s amber, at least 2 nearby cars within 2 tiles
+> before it swaps, idle time weighted up to a 30 s cap, right-on-red modelled.
+> Every one of those numbers is datamined from the game being cloned and none of
+> them is wrong about that game.
+>
+> **What was tried, in a throwaway spike, never merged.** The light was built to
+> this specification and run against a control — the same board, the same seed,
+> the same connector, junction mutual exclusion on, no relief object. Control:
+> **368 completed trips.**
+>
+> - A perfect relief object (the mutual-exclusion rule simply exempted at the
+>   jamming cells) scores **750 trips, +103.8 %** — it recovers the entire cost of
+>   the junction rule, and at the census conflict cells it reproduces the
+>   pre-junction-rule board to the digit.
+> - A fixed alternating light at this section's `changeDelay` and `amberDelay`
+>   scores **320, −13.0 %** — and that is its BEST result over the 30 distinct
+>   phases the same light could have been seated at. Its median is 306, **−17 %**,
+>   and it beats the control on 3 of those 30. The seat phase, which has no design
+>   meaning at all, swings the result **1.19x–1.70x**: more than any positive
+>   effect measured.
+> - The demand-actuated controller this section specifies scores **228, −38 %**,
+>   with **one phase swap in an entire run**.
+>
+> **Why, and the reason is a density mismatch rather than a defect.**
+> `minimumNearbyCarsBeforeSwapping = 2` within `distanceToCountForNearbyCars = 2`
+> tiles is essentially never satisfied on a board carrying about **eleven cars in
+> flight**. Across eight seeds the light swaps `1 0 0 6 4 5 0 11` times per run —
+> **on three of eight it never swaps at all**, latches on its opening axis, and
+> becomes a permanent closure released only by the 45 s
+> `MaximumTimeToWaitAtIntersection` valve. Its own red-light refusals measure
+> **16,490–19,536** against the **6,536** junction-caused refusals it exists to
+> drain: 2.5–3.0x against, on the one channel that can be counted. **These
+> constants presuppose traffic far denser than this board has.**
+>
+> **What M1f ships instead.** A JUNCTION UPGRADE: the same placement rule as the
+> light — *"only on an existing road junction, never plain road, cost 0 tiles"* —
+> and the same §5.10 grant of two items for 20 tiles, with one effect: **at an
+> upgraded cell the junction mutual-exclusion rule does not apply.** Cars cross
+> without conflict. Everything else about the cell is unchanged, including the
+> intersection slowdown, so §5.5's *"approaching an intersection = 0.5"* still
+> applies there. In dossier terms it is `greenLightsIgnoreCollisions` with no
+> phase attached: the collision check is skipped, for every axis, permanently.
+>
+> **Deferred to M1g, with a named recipient and the numbers above:** the metered
+> light itself; `overtimeChangeDelay` (5 s — a real dossier row with no referent
+> in this game, closest candidate mapping *"any destination's overcrowd timer is
+> non-zero"*); `americanRedLightRules` and right-on-red, whose three-rule
+> decomposition (may enter on red; still pays the intersection slowdown; does NOT
+> get the collision exemption, because it crosses a live stream) is correct work
+> and should not be re-derived; and `greenLightsIgnoreCollisions` as a per-axis
+> rather than a whole-cell rule. **No constant from this section is declared in
+> M1f**, because a constant with no caller reads as a supported configuration.
+> `CARD_TRAFFIC_LIGHTS` is declared and excluded by `CARD_IMPLEMENTED_MASK` — an
+> interlock, not an absence.
+>
+> **The three levers M1g inherits**, so the next attempt starts from the
+> measurement rather than from the spec: raise the board's car density until the
+> datamined constants have something to meter; lower
+> `minimumNearbyCarsBeforeSwapping` to 1 (measured: swaps rise to 13–80 per run and
+> the shipped seed recovers 228 → 349, still below its control on 6 of 8 seeds); or
+> make the light a MODIFIER on an upgraded junction rather than a replacement for
+> the exclusion.
+>
+> **The measurement of the object M1f actually ships is NOT in this amendment,
+> because it did not exist when the amendment was written.** The figures above are
+> the spike's, and the spike's *"perfect relief object"* exempted six cells, **two
+> of which can never carry an upgrade** — they never reach degree 3 on any tick of
+> the run. The first per-cell measurement of the *reachable* object is M1f Task 9
+> Step 11, recorded in `packages/game/test/junctionArms.test.ts`; M1f Task 12
+> re-measures it over every legal junction on eight seeds. Read the two together:
+> +103.8 % is an unreachable ceiling and a single reachable upgrade buys a
+> fraction of it.
 
 ### 5.7 Motorways
 

@@ -5,7 +5,15 @@ import { createWorld, type WorldData } from '../src/world'
 import { seedFromString, randomBelow } from '../src/rng'
 import { DIR_COUNT, DX, DY, dirBetween, placeRoad } from '../src/roads'
 import { neighbours, edgeCost, isConnected, roadDegree, isJunctionCell, junctionAdmitsOne } from '../src/graph'
-import { plusJunction, straightCorridor, twoAdjacentJunctions } from './junctionRigs'
+import { applyPlaceUpgrade, isUpgraded } from '../src/upgrades'
+import { H_INV_UPGRADES } from '../src/state'
+import {
+  plusJunction,
+  straightCorridor,
+  twoAdjacentJunctions,
+  upgradedJunction,
+  upgradedThenErased,
+} from './junctionRigs'
 
 /**
  * All-LAND fixture for pure connectivity geometry. Terrain never gates
@@ -530,18 +538,52 @@ describe('isJunctionCell and junctionAdmitsOne are TWO predicates with two jobs'
     expect(junctionAdmitsOne(rig.s, rig.world.cells + 5)).toBe(false)
   })
 
-  it('the two answer the same thing on every cell of a mixed board — TODAY, and this is the seam', () => {
+  it('an upgraded junction keeps isJunctionCell and loses junctionAdmitsOne', () => {
+    // **The divergence, as one line.** M1f Task 9's upgrade lifts the DEFAULT
+    // exclusion and leaves the cell an intersection for every other purpose —
+    // `intersectionSpeedMul` still slows every car crossing here, which is
+    // 5.6's *"skips the stop, not the intersection slowdown"* honoured by a
+    // different route.
+    const rig = upgradedJunction('pred-upgraded')
+    expect(roadDegree(rig.s, rig.centre)).toBe(4)
+    expect(isJunctionCell(rig.s, rig.centre)).toBe(true)
+    expect(junctionAdmitsOne(rig.s, rig.centre)).toBe(false)
+  })
+
+  it('an upgraded CORRIDOR — reachable only by erasing a road — is neither', () => {
+    // The flag persists through an erase, so this combination is a state a player
+    // can reach. It answers false from both, and from `junctionAdmitsOne` it does
+    // so for two independent reasons, which is why the fourth row exists.
+    const rig = upgradedThenErased('pred-upgraded-corridor')
+    expect(roadDegree(rig.s, rig.centre), 'the erase really cut it to a corridor').toBe(2)
+    expect(isJunctionCell(rig.s, rig.centre)).toBe(false)
+    expect(junctionAdmitsOne(rig.s, rig.centre)).toBe(false)
+  })
+
+  it('the two agree on every cell of a mixed board EXCEPT the upgraded ones', () => {
     // The table above is per-shape; this is the whole-board statement, and it is
-    // the assertion Task 9 must EDIT rather than delete. When the upgrade lands,
-    // an upgraded cell is the one place these two disagree, and the sentence
-    // that has to change is right here.
+    // **the assertion Task 9 EDITED rather than deleted**. Until Task 9 it read
+    // "the two answer the same thing on every cell"; an upgraded cell is now the
+    // one place they disagree, and the loop below is what says it is the ONLY
+    // place — a clause that answered `false` one cell wide of its flag would
+    // pass every per-shape case above and fail here.
     const rig = twoAdjacentJunctions('pred-whole-board')
+    rig.s.header[H_INV_UPGRADES] = 1
+    expect(applyPlaceUpgrade(rig.s, rig.world, rig.left)).toBe(true)
     let junctions = 0
+    let diverged = 0
     for (let cell = 0; cell < rig.world.cells; cell++) {
       const a = isJunctionCell(rig.s, cell)
-      expect(junctionAdmitsOne(rig.s, cell), `cell ${cell}`).toBe(a)
+      const b = junctionAdmitsOne(rig.s, cell)
+      if (isUpgraded(rig.s, cell)) {
+        expect(b, `upgraded cell ${cell} is not under the default rule`).toBe(false)
+        if (a !== b) diverged++
+      } else {
+        expect(b, `cell ${cell}`).toBe(a)
+      }
       if (a) junctions++
     }
     expect(junctions, 'non-vacuous: the board really does carry junctions').toBe(2)
+    expect(diverged, 'exactly one cell diverges, and it is the upgraded one').toBe(1)
   })
 })

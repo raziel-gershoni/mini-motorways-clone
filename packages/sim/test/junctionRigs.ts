@@ -1,13 +1,14 @@
 import { expect } from 'vitest'
 import { parseMap, COST_UNIT_SCALE, ORTHO_COST, type MapData } from '@laneways/shared'
-import { createState, type GameState } from '../src/state'
+import { createState, H_INV_UPGRADES, type GameState } from '../src/state'
 import { createWorld, type WorldData } from '../src/world'
 import { createFieldInputRanges } from '../src/regions'
 import { createScratch, createFlowFields, type FlowField, type Scratch } from '../src/scratch'
-import { LANE_OF_DIR, placeRoad } from '../src/roads'
+import { LANE_OF_DIR, placeRoad, eraseRoad } from '../src/roads'
 import { claimCell } from '../src/blocking'
 import { PHASE_OUTBOUND } from '../src/buildings'
 import { packRouteStep } from '../src/dispatch'
+import { applyPlaceUpgrade } from '../src/upgrades'
 
 /**
  * The hand-built junction fixtures for M1f Task 2's mutual-exclusion rule, in a
@@ -333,4 +334,70 @@ function handRacer(s: GameState, i: number, cell: number, dir: number, progress:
   s.carRouteCursor[i] = 1
   for (let k = 0; k < RACE_ROUTE_LEN; k++) packRouteStep(s, i, k, dir)
   claimCell(s, i, cell, dir)
+}
+
+export interface TeeRig extends RigBase {
+  readonly centre: number
+  readonly north: number
+  readonly east: number
+  readonly west: number
+  /** A cell with no road on it at all — the "a plain cell answers false" control. */
+  readonly bare: number
+}
+
+/**
+ * A **T**: arms north, east and west meeting at `centre`, so `roadDegree(centre)`
+ * is exactly **3** — `INTERSECTION_DEGREE`, the threshold.
+ *
+ * **M1f Task 9 needs the erase to land on a CORRIDOR and `twoAdjacentJunctions`
+ * cannot supply that.** Task 9's *"the upgrade PERSISTS when the player erases a
+ * road"* case erases one arm and then asserts the cell is a plain corridor: on
+ * this T the survivors are east and west, a straight through-road, which is the
+ * shape a player would read as "not a junction any more". Erasing an arm of
+ * `twoAdjacentJunctions`'s `left` leaves an elbow whose other endpoint is still a
+ * junction, so the board would carry a second junction the case never mentions.
+ *
+ * `bare` is the board's corner, which no rig here ever roads.
+ */
+export function teeJunction(id = 'tee-junction'): TeeRig {
+  const r = makeRig(id)
+  const north = CENTRE - RIG_W
+  const east = CENTRE + 1
+  const west = CENTRE - 1
+  for (const arm of [north, east, west]) {
+    expect(placeRoad(r.s, r.world, CENTRE, arm), `arm toward ${arm}`).toBe(true)
+  }
+  return { ...r, centre: CENTRE, north, east, west, bare: 0 }
+}
+
+/**
+ * `plusJunction` with a junction upgrade PLACED on its centre — through
+ * `applyPlaceUpgrade`, never by writing `upgradeAt` by hand.
+ *
+ * **Placed rather than written, and that is the difference from the previous
+ * design's fixture.** The traffic light this object replaced needed
+ * `lightGreenAxis` assigned on every cell a case cared about, and the second
+ * review's I12 found the controller could not itself reach the state the fixture
+ * hand-wrote. An upgrade has no phase to reach, so the fixture can be the
+ * production call — and any test built on it is therefore also a test that
+ * `applyPlaceUpgrade` does what the entry rule expects.
+ */
+export function upgradedJunction(id = 'upgraded-junction'): PlusRig {
+  const r = plusJunction(id)
+  r.s.header[H_INV_UPGRADES] = 1
+  expect(applyPlaceUpgrade(r.s, r.world, r.centre), 'the fixture placed its upgrade').toBe(true)
+  return r
+}
+
+/**
+ * A `teeJunction` upgraded and then cut back to a corridor by erasing its north
+ * arm — the fourth row of `graph.test.ts`'s table, and a state a player reaches
+ * by drawing a junction, spending an upgrade on it and then redrawing the road.
+ */
+export function upgradedThenErased(id = 'upgraded-then-erased'): TeeRig {
+  const r = teeJunction(id)
+  r.s.header[H_INV_UPGRADES] = 1
+  expect(applyPlaceUpgrade(r.s, r.world, r.centre), 'the fixture placed its upgrade').toBe(true)
+  expect(eraseRoad(r.s, r.world, r.centre, r.north), 'the fixture erased an arm').toBe(true)
+  return r
 }
