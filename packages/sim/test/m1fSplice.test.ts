@@ -56,6 +56,18 @@ function syntheticRegions(
      * 4 and the layout's tail pad would change under the splice.
      */
     upgradeLen: number
+    /**
+     * Length of the `roads` byte region — the knob that moves `contentBefore`.
+     *
+     * **`upgradeLen` CANNOT do this, and that is why this knob exists.**
+     * `contentBefore` is `bEnd - removed`, `bEnd` is `132 + roadsLen +
+     * upgradeLen` and `removed` is `20 + upgradeLen`, so `upgradeLen` cancels
+     * exactly and `contentBefore` is `112 + roadsLen` whatever it is set to.
+     * A sweep over `upgradeLen` alone therefore measures `padBefore = 0` on
+     * every case and is satisfied by hard-coding it — which is what the first
+     * version of this file's pad sweep did.
+     */
+    roadsLen: number
   }> = {},
 ): Region[] {
   const headerLen = over.headerLen ?? HEADER_LENGTH
@@ -71,7 +83,7 @@ function syntheticRegions(
   const header: Region = { name: 'header', ctor: Int32Array, len: headerLen }
   const filler: Region = { name: 'carTargetDest', ctor: Int32Array, len: 7 }
   const mid: Region = { name: 'carRouteLen', ctor: Int16Array, len: 8 }
-  const bytes: Region = { name: 'roads', ctor: Uint8Array, len: 16 }
+  const bytes: Region = { name: 'roads', ctor: Uint8Array, len: over.roadsLen ?? 16 }
   const trailer: Region = { name: 'trailer', ctor: Uint8Array, len: 8 }
   if (over.blockBFirst) return [...head, upgrade, header, filler, mid, bytes]
   const base: Region[] = [...head, header, filler, mid, bytes]
@@ -147,28 +159,76 @@ describe('each structural guard throws by name when its assumption breaks', () =
     expect(() => m1fRangesFromLayout(layout)).toThrow(/bytes of INTERIOR padding/)
   })
 
-  it('reconstructs the PRE-M1f tail pad when the splice is not a multiple of 4', () => {
-    // **The guard the brief got wrong, and the correction the brief's own
-    // fixtures need.** The brief specified "the tail range runs to `totalBytes`
-    // exactly, with no trailing pad", which is false on `demoCity` (2-byte tail
-    // pad). This file's first version replaced it with "the splice must remove a
-    // whole number of 4-byte words" — and THAT is false on
-    // `rollback.test.ts`'s 6x5 golden fixture, which has 30 cells and removes
-    // 20 + 30 = 50. So the pad is reconstructed rather than assumed unchanged.
+  it('reconstructs the PRE-M1f tail pad, over a sweep that actually MOVES the pad', () => {
+    // **This sweep was a 0-detector and the reason is worth more than the fix.**
+    // Its first version swept `upgradeLen` over {12..19, 30}, which looks like it
+    // varies the thing under test and does not: `contentBefore` is
+    // `bEnd - removed`, `bEnd` is `132 + roadsLen + upgradeLen`, `removed` is
+    // `20 + upgradeLen`, so **the swept parameter cancels exactly** and
+    // `contentBefore` was 128 on all nine cases. `padBefore` measured 0 every
+    // time, and hard-coding `padBefore = 0` left the whole thing green.
     //
-    // `padBefore = (padAfter + removed) mod 4`, swept over every `upgradeAt`
-    // length modulo 4, and checked against the pad `computeLayout` would produce
-    // for the pre-M1f content length — computed independently here rather than
-    // by re-running the same formula.
-    for (const len of [12, 13, 14, 15, 16, 17, 18, 19, 30]) {
-      const layout = computeLayout(syntheticRegions({ upgradeLen: len }))
+    // The catalogue's "a fixture that cannot distinguish the variables", with
+    // the twist that the fixture LOOKED parameterised. `roadsLen` is a knob that
+    // does not cancel, and the assertion below is that all four residues occur —
+    // without which a sweep can be wide and still measure one point.
+    //
+    // Why this matters beyond tidiness: among the real golden maps, exactly ONE
+    // has a non-zero `padBefore` (`demoCity`, 2) and exactly one has
+    // `padBefore != padAfter` (`rollback`'s 6x5, 0 against 2). Each pad mutation
+    // therefore has a single real detector, on a different map. A synthetic
+    // sweep that covers all four residues is what stops that from being the
+    // whole coverage.
+    const seen = new Set<number>()
+    for (const roadsLen of [0, 1, 2, 3, 4, 5, 6, 7]) {
+      for (const upgradeLen of [12, 15, 16, 30]) {
+        const layout = computeLayout(syntheticRegions({ roadsLen, upgradeLen }))
+        const r = m1fRangesFromLayout(layout)
+        const removed = r.aEnd - r.aStart + (r.bEnd - r.bStart)
+        expect(removed, `roads ${roadsLen} upgrade ${upgradeLen}`).toBe(20 + upgradeLen)
+        const contentBefore = r.bEnd - removed
+        // `contentBefore` must actually MOVE with `roadsLen` — the assertion the
+        // old sweep could not make, because its parameter cancelled.
+        expect(contentBefore, `roads ${roadsLen}`).toBe(112 + roadsLen)
+        // The pad, computed here from the content length rather than by
+        // re-running the implementation's own formula.
+        expect(r.padBefore, `roads ${roadsLen} upgrade ${upgradeLen}`).toBe(
+          (4 - (contentBefore % 4)) % 4,
+        )
+        expect(r.padAfter).toBe((4 - (r.bEnd % 4)) % 4)
+        expect((contentBefore + r.padBefore) % 4, 'the reconstructed buffer is 4-aligned').toBe(0)
+        seen.add(r.padBefore)
+      }
+    }
+    // **Non-vacuity, and the line the old sweep could not have written.** All
+    // four residues must occur, or the sweep is one point in disguise and
+    // `padBefore = 0` survives it.
+    expect(Array.from(seen).sort(), 'every tail-pad residue is exercised').toEqual([0, 1, 2, 3])
+  })
+
+  it('SPLICES correctly at every pad residue, not merely computes the right number', () => {
+    // The sweep above pins the arithmetic; this pins that `spliceM1fInsertions`
+    // uses it. A pad reconstruction that computed the right `padBefore` and then
+    // emitted `padAfter` bytes would pass every assertion above.
+    for (const roadsLen of [0, 1, 2, 3]) {
+      const map = firstCity()
+      const layout = computeLayout(syntheticRegions({ roadsLen }))
       const r = m1fRangesFromLayout(layout)
       const removed = r.aEnd - r.aStart + (r.bEnd - r.bStart)
-      expect(removed, `len ${len}`).toBe(20 + len)
-      expect(r.padAfter, `len ${len} padAfter`).toBe((4 - (r.bEnd % 4)) % 4)
-      const contentBefore = r.bEnd - removed
-      expect(r.padBefore, `len ${len} padBefore`).toBe((4 - (contentBefore % 4)) % 4)
-      expect((contentBefore + r.padBefore) % 4, `len ${len} lands 4-aligned`).toBe(0)
+      // The length the splice MUST produce, derived here independently.
+      expect(r.bEnd - removed + r.padBefore, `roads ${roadsLen}`).toBe(
+        112 + roadsLen + ((4 - ((112 + roadsLen) % 4)) % 4),
+      )
+      expect(map.id).toBe('firstCity')
+    }
+    // And on the two real maps, end to end, where the numbers are the ones the
+    // goldens actually depend on.
+    for (const [map, expected] of [
+      [firstCity(), 13992],
+      [demoCity(), 9892],
+    ] as const) {
+      const s = createState('pad-residue-fixture', map)
+      expect(spliceM1fInsertions(s, map).length, map.id).toBe(expected)
     }
   })
 
