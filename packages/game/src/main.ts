@@ -484,7 +484,8 @@ export function createGame(deps: GameDeps): Game {
   // is reached through the same `gameOver()` that this line is what makes true.
   //
   // **Unreachable from the two shipped layouts today** — their warm starts are
-  // 1,200 and 258 ticks against deaths at 6,703 and 5,580, and `layouts.test.ts`
+  // 1,200 and 258 ticks against deaths at 6,660 and 5,580 (the demo's was 6,703
+  // until M1f's junction rule moved it; `deathTicks.ts` owns both), and `layouts.test.ts`
   // drives EVERY registered layout's own warm start and asserts it survives it,
   // rather than leaving the property to these two happening to be short. It
   // stops being unreachable the moment **M3's restore** hands `createGame` a
@@ -493,7 +494,8 @@ export function createGame(deps: GameDeps): Game {
   // One line, above the pointer, so the pointer is constructed against a loop
   // that already knows. Its detector is `integration.test.ts`'s *"a game whose
   // state is ALREADY over at boot ends its loop too"*, which boots a rig with a
-  // 6,703-tick warm start.
+  // warm start of `DEMO_DEATH_TICK` ticks — **6,660**, read from `deathTicks.ts`
+  // rather than written here, which is why this sentence names the constant.
   if (isGameOver(state)) loop.end()
 
   const pointer = createPointerInput({

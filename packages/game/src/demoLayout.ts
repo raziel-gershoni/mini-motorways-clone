@@ -56,7 +56,16 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  * the reason this note names a task rather than "whoever runs the device check".
  *
  * **It is not survivable, and that is why it is not the default.** Seven traces
- * were driven at M1e Task 10 and `demoLayout.test.ts` §8 is the detector:
+ * were driven at M1e Task 10 and `demoLayout.test.ts` §8 is the detector.
+ *
+ * **EVERY DEATH TICK IN THE TABLE BELOW IS PRE-M1f AND IS CORRECT AS HISTORY.**
+ * Spec §5.5's junction mutual exclusion (M1f Task 2) and Task 3's narrowing of it
+ * moved this board's no-input death **6,703 -> 6,660**, which is
+ * `deathTicks.ts`'s `DEMO_DEATH_TICK` and the only value anything asserts. The
+ * table is a comparison BETWEEN traces on one tree and it survives the shift; do
+ * not "correct" its rows to today's numbers, and do not quote a row as a current
+ * figure. The stopwatch reading a player gets is `(6,660 - 1,200) / 30` =
+ * **3:02.0**, not the 3:43 this file said before M1f.
  *
  * ```
  *   trace                       tiles   dies    trips
@@ -90,7 +99,8 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  * 4.6x until M1e's closing sweep. 4.6 is the EXCESS, `31,456 / 5,580 - 1`, set
  * against 1.077 which is a plain RATIO — two different quantities compared as
  * if they were one, and the comparison is the whole point of the sentence.
- * 31,456/5,580 = 5.637; the demo board's own best is 7,221/6,703 = 1.077.) **A
+ * 31,456/5,580 = 5.637; the demo board's own best is 7,221/6,703 = 1.077, both
+ * PRE-M1f — see the note above the table.) **A
  * board a
  * player cannot affect is a demonstration, not a game** — which is exactly what
  * this file is for.
@@ -274,8 +284,13 @@ import type { SeedDestination, SeedHouse } from './startingCity'
  *      both halves. Showing it
  *      silently, on a board built to demonstrate that cars block each other, is
  *      the misleading option; naming it is not.
- *   6. **THE CITY SHUTS DOWN AT 3 MINUTES 43 SECONDS, on tick 6,703, with no
- *      player error possible — measured at M1e Task 7 on this exact boot path.**
+ *   6. **THE CITY SHUTS DOWN AT TICK 6,660 — 3:42 on the source clock and
+ *      3:02.0 ON A STOPWATCH — with no player error possible.** (It was tick
+ *      6,703 and "3 minutes 43 seconds" when M1e Task 7 measured it on this exact
+ *      boot path; M1f Task 2's junction rule and Task 3's narrowing moved it, and
+ *      `deathTicks.ts`'s `DEMO_DEATH_TICK` is the value anything asserts. The
+ *      1,200-tick warm start is 40 seconds the player never sees, which is why
+ *      the two clocks differ by more than rounding.)
  *      D2, the colour-2 circle at grid (16, 9), receives its last car at tick
  *      **1,549** — 349 ticks, 11.6 seconds, after the first frame a player sees
  *      — and then sits at or over its trigger cap of 8 from tick 3,314 for

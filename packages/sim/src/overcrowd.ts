@@ -46,7 +46,14 @@ import { destMetaKind, DEST_KIND_CIRCLE } from './buildings'
  * 84,271; at P = 90 the meter's PEAK parks on 900,000 exactly). Measured on the
  * real boot path at M1e Task 7 by driving each board 40,000 ticks with no
  * input, the demo board dies at tick **6,703** (3 min 43 s) on D2 and
- * `firstCity` at tick **5,580** (3 min 06 s), also on D2 — and removing the
+ * `firstCity` at tick **5,580** (3 min 06 s), also on D2 — **and the demo figure
+ * is M1e's: spec §5.5's junction mutual exclusion (M1f Task 2) and Task 3's
+ * narrowing moved it to 6,660, which is `game/test/deathTicks.ts`'s
+ * `DEMO_DEATH_TICK` and the only value anything asserts. `firstCity`'s 5,580 did
+ * NOT move, because that board has no roads and therefore no junctions.** The
+ * paragraph is about the OVERCROWD boundary and both readings sit far below it,
+ * so the conclusion is unaffected; the figure is corrected because a number in
+ * prose that nothing runs is a number that comes back. Removing the
  * knockback, removing the unwind, or removing both leaves both ticks unchanged,
  * measured by deleting the code rather than by modelling it.
  *
