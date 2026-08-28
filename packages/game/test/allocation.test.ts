@@ -377,6 +377,42 @@ function dirtyFiles(all: readonly Allocator[], frames: number): string[] {
 }
 
 /**
+ * **Allocators the profiler could not attribute to ANY file, and this is a hole
+ * a mutation row fell straight through — M1f Task 10.**
+ *
+ * `dirtyFiles` and `allOffenders` both filter on `file.startsWith(GAME_SRC)`,
+ * so an allocation V8 charges to a frame with **no file at all** is invisible to
+ * both, on every window in this repo. Measured, by the mutation row that
+ * discovered it — `buildFrame` copying `sim`'s 960-byte `upgradeAt` region into
+ * a fresh `Uint8Array` on every frame, which is exactly the mistake
+ * `RenderFrame.upgradeAt`'s "raw view, never a copy" comment exists to prevent:
+ *
+ * ```
+ *   with the copy      functionName "Uint8Array"   file ""   213.83 B/frame
+ *   clean              functionName "delete"       file ""     0.20 B/frame
+ * ```
+ *
+ * **All three allocation windows reported CLEAN under that mutant** —
+ * `allocation.test.ts`'s frame block, `demoAllocation` and `drawAllocation` —
+ * and the only thing that caught it was `frame.test.ts`'s by-reference pin,
+ * which is a structural assertion rather than a measurement. A typed-array
+ * builtin is not an exotic way to allocate inside a frame loop; it is the
+ * *likely* one in this codebase, which is entirely typed arrays.
+ *
+ * So: everything the profiler could not place gets the same floor every file
+ * gets. The clean figure is 0.20 B/frame against a floor of 4 and a caught
+ * mutant at 213.83, so the gap this bound sits in is empty by a factor of 20 in
+ * one direction and 53 in the other.
+ */
+function unattributedBytes(all: readonly Allocator[], frames: number): number {
+  let bytes = 0
+  for (const a of all) {
+    if (a.file === '') bytes += a.bytes
+  }
+  return bytes / frames
+}
+
+/**
  * See the module comment. **Every other file gets `NOISE_FLOOR_BYTES_PER_FRAME`,
  * and that is the assertion doing the work** — over 12 consecutive runs no
  * `game/src` file other than `loop.ts` appeared above the sampling floor even
@@ -973,6 +1009,13 @@ describe('the frame loop allocates nothing, measured', () => {
     // already reports any appearance; this restates it at file granularity for
     // the failure message.
     expect(dirtyFiles(all, PROFILED_FRAMES), 'a game/src file allocated').toEqual([])
+    // See `unattributedBytes`: an allocation made by a typed-array builtin is
+    // charged to a frame with no file, and every file-keyed filter in this repo
+    // is blind to it.
+    expect(
+      unattributedBytes(all, PROFILED_FRAMES),
+      'an allocator the profiler could not attribute to any file went over the floor',
+    ).toBeLessThan(NOISE_FLOOR_BYTES_PER_FRAME)
 
     // Named, because these are the functions the rule is really about.
     const names = all
@@ -1078,6 +1121,13 @@ describe('the frame loop allocates nothing, measured', () => {
     expect(bad, `unbudgeted per-frame allocation:\n${bad.join('\n')}`).toEqual([])
 
     expect(dirtyFiles(all, PROFILED_FRAMES), 'a game/src file allocated').toEqual([])
+    // See `unattributedBytes`: an allocation made by a typed-array builtin is
+    // charged to a frame with no file, and every file-keyed filter in this repo
+    // is blind to it.
+    expect(
+      unattributedBytes(all, PROFILED_FRAMES),
+      'an allocator the profiler could not attribute to any file went over the floor',
+    ).toBeLessThan(NOISE_FLOOR_BYTES_PER_FRAME)
 
     const names = all
       .filter((a) => a.file.startsWith(GAME_SRC) && a.bytes / PROFILED_FRAMES > NOISE_FLOOR_BYTES_PER_FRAME)

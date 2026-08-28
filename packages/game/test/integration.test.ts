@@ -63,6 +63,7 @@ import {
   UPGRADES_PER_CARD,
 } from '@laneways/shared'
 import {
+  CHIP_ICON_CSS,
   PALETTE,
   UPGRADE_SIZE_FRACTION,
   createHudRects,
@@ -5465,6 +5466,20 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
 // M1f Task 10, and the milestone's acceptance criterion B
 // ---------------------------------------------------------------------------
 
+/**
+ * The chip icon's recorded fill on the LAST frame this rig drew — the one
+ * `fillRect` of `CHIP_ICON_CSS` square inside the chip's own column.
+ */
+function chipIconStyle(rig: Rig): string {
+  const rect = hudRects(rig.game.shell.camera, createHudRects()).upgrades
+  const hits = rig.ctx.log.filter(
+    (c): c is FillCommand =>
+      c.op === 'fill' && c.w === CHIP_ICON_CSS && c.h === CHIP_ICON_CSS && c.x >= rect.x,
+  )
+  expect(hits.length, 'exactly one chip icon per frame').toBe(1)
+  return (hits[0] as FillCommand).style
+}
+
 describe('the upgrade a player places relieves a jam they can see', () => {
   /**
    * **One drive per case would be four drives; the hook pays for them once**,
@@ -5478,6 +5493,63 @@ describe('the upgrade a player places relieves a jam they can see', () => {
     upgradedArm()
     upgradedArm(468, B_TICK)
   }, 120000)
+
+  it('wires the chip end to end: the card fills the badge, the tap colours the icon', () => {
+    // **The production WIRING, on its own and cheaply — no arm, no 30,000-tick
+    // drive.** The case above proves the placement reaches `sim`; this one
+    // proves the two things `main.ts` supplies to make the chip work at all,
+    // both of which a plausible wrong version gets silently wrong:
+    //
+    //   - `upgradesHeld: () => state.header[H_INV_UPGRADES]` — the INVENTORY,
+    //     not `H_UPGRADE_COUNT`. Both are counters of upgrades and both read 0
+    //     at boot, so a swap is invisible until a card lands.
+    //   - `upgradeMode: () => pointer.upgradeMode` on the frame driver. A
+    //     `() => false` here leaves the gesture fully live and the only thing
+    //     that says so dead, which is the worst shape available.
+    const rig = buildRig({ layoutId: undefined })
+    while (!rig.game.loop.paused) rig.advanceRaw(16.7)
+    const frame = rig.game.builder.frame
+    expect(frame.offerPending).toBe(true)
+    expect(frame.invUpgrades, 'nothing held before the card').toBe(0)
+
+    // Take whichever card is the JUNCTION UPGRADE, by a tap at its drawn rect.
+    const upgradeInB = frame.offerB === CARD_JUNCTION_UPGRADE
+    const rects = offerRects(rig.game.shell.camera, createOfferRects())
+    const card: Rect = upgradeInB ? rects.cardB : rects.cardA
+    expect(
+      rig.game.pointer.down(1, CANVAS_LEFT + card.x + card.w / 2, CANVAS_TOP + card.y + card.h / 2),
+    ).toBe(PointerOutcome.CARD_CHOSEN)
+    rawTick(rig)
+    rawTick(rig)
+    expect(rig.game.state.header[H_INV_UPGRADES]).toBe(UPGRADES_PER_CARD)
+    expect(frame.invUpgrades, "the BADGE's number, off the inventory and not the placed count").toBe(
+      UPGRADES_PER_CARD,
+    )
+    expect(rig.game.state.header[H_UPGRADE_COUNT], 'and nothing is placed yet').toBe(0)
+
+    const chip = hudRects(rig.game.shell.camera, createHudRects()).upgrades
+    const chipPoint: readonly [number, number] = [
+      CANVAS_LEFT + chip.x + chip.w / 2,
+      CANVAS_TOP + chip.y + chip.h / 2,
+    ]
+
+    // Idle: the icon is drawn solid dark.
+    rawTick(rig)
+    expect(frame.upgradeMode).toBe(false)
+    expect(chipIconStyle(rig)).toBe(PALETTE.uiText)
+
+    // Armed: the same rect, the accent colour, on the very next frame.
+    expect(rig.game.pointer.down(2, ...chipPoint)).toBe(PointerOutcome.UPGRADE_ARMED)
+    rawTick(rig)
+    expect(frame.upgradeMode, 'the driver reads the pointer every frame').toBe(true)
+    expect(chipIconStyle(rig), 'and the renderer draws what the frame says').toBe(PALETTE.cardAccent)
+
+    // Cancelled: back again, so this is a live wire and not a one-way latch.
+    expect(rig.game.pointer.down(3, ...chipPoint)).toBe(PointerOutcome.UPGRADE_ARMED)
+    rawTick(rig)
+    expect(frame.upgradeMode).toBe(false)
+    expect(chipIconStyle(rig)).toBe(PALETTE.uiText)
+  })
 
   it('goes from a SCREEN COORDINATE to a sim region and back to a pixel', () => {
     // ---------------------------------------------------------------------

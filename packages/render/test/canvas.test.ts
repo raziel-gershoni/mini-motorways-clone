@@ -2224,6 +2224,17 @@ describe('the HUD', () => {
     const drawn = texts(draw(frameB(), atlasesAt(B_TILE_DEVICE)))
     const expected = [rects.clock, rects.score, rects.tiles]
 
+    // **Asserted BEFORE the loop, and it is a harness fix rather than a
+    // tidy-up.** The loop indexes `expected` by the drawn label's position, so
+    // a mutant that draws a FOURTH label — §7.2's badge at zero held, which is
+    // one of this task's mutation rows — made this case die with
+    // `TypeError: Cannot read properties of undefined (reading 'w')` instead of
+    // with an assertion. It is a genuine kill either way, but a crash reads
+    // exactly like a kill to a mutation harness's screen and this project's
+    // catalogue calls that its most expensive entry. One line, and the
+    // detector's failure now says what it means.
+    expect(drawn.length, 'a label was drawn that this case has no rect for').toBe(expected.length)
+
     for (const [i, t] of drawn.entries()) {
       const rect = expected[i] as Rect
       expect(t.maxWidth, `label ${i} is unconstrained`).toBe(rect.w)
