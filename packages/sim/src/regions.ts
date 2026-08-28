@@ -353,6 +353,18 @@ export const FIELD_INPUT_REGIONS = Object.freeze(['mapIdentity', 'destCell', 'ro
  *                     traffic-light and roundabout cost is NOT edge weight.
  *                     Dated: M1g, with the rest, and only if that amendment is
  *                     beaten first.
+ *
+ *                     **AS OF M1f TASK 9 THIS REASON IS A FAILING ASSERTION
+ *                     RATHER THAN A SENTENCE, and it took the task that gave the
+ *                     region its first reader to make it one.** Arm 3 above has
+ *                     scrambled `upgradeAt` mechanically since Task 4, and while
+ *                     nothing read it that sweep was vacuous about the reason —
+ *                     every unread region passes it. `flowfield.test.ts`'s
+ *                     **arm 4** pairs the field comparison with a behavioural
+ *                     half on the same board: the same write that leaves `dist`,
+ *                     `dir` and `CT_REBUILDS` untouched flips `canEnter` from
+ *                     `REFUSED_OCCUPIED` to `ENTER_FREE` at a junction. Live,
+ *                     and still invisible to routing.
  */
 export const FIELD_IRRELEVANT_REGIONS = Object.freeze([
   'rng',

@@ -8,8 +8,10 @@ import {
   restore,
   snapshot,
   H_EPOCH,
+  H_INV_UPGRADES,
   H_TICK,
   H_TILES,
+  H_UPGRADE_COUNT,
   H_WEEK,
 } from '../src/state'
 import { createWorld } from '../src/world'
@@ -18,6 +20,7 @@ import { createFlowFields, createScratch, CT_SYNCS, CT_REBUILDS, type FlowField,
 import { createFieldInputRanges } from '../src/regions'
 import { fieldFor } from '../src/flowfield'
 import { roadMask } from '../src/roads'
+import { isUpgraded } from '../src/upgrades'
 import {
   placeDestination,
   placeHouse,
@@ -200,6 +203,74 @@ describe('step', () => {
       expect(field.dist[CARPARK]).toBe(0) // an accepted source, this same tick
     })
 
+    it("dispatches 'upgrade' to applyPlaceUpgrade, not to a road edit (M1f Task 9)", () => {
+      // A 4x4 board, a T at (1,1), the upgrade action queued for that cell.
+      // **The roads and the tile budget are asserted UNCHANGED**, which is what
+      // separates this dispatch from the `'place'` one: `applyPlaceUpgrade` costs
+      // 0 tiles and lays nothing, so a branch wired to `placeRoad(a, b)` would
+      // spend a tile and set a bit and this case names both.
+      const s = createState('upgrade-action', MAP)
+      const fields = freshFields()
+      const scratch = freshScratch()
+      const centre = 1 * 4 + 1
+      const arms: readonly TickAction[] = [
+        { kind: 'place', a: centre, b: centre - 1 },
+        { kind: 'place', a: centre, b: centre + 1 },
+        { kind: 'place', a: centre, b: centre - 4 },
+      ]
+      step(s, WORLD, fields, scratch, { actions: arms })
+      s.header[H_INV_UPGRADES] = 1
+      const tiles = s.header[H_TILES] as number
+      const roadsBefore = [...s.roads]
+
+      step(s, WORLD, fields, scratch, { actions: [{ kind: 'upgrade', a: centre, b: 0 }] })
+
+      expect(isUpgraded(s, centre), 'the flag is set').toBe(true)
+      expect(s.header[H_UPGRADE_COUNT]).toBe(1)
+      expect(s.header[H_INV_UPGRADES], 'and one item was spent').toBe(0)
+      expect(s.header[H_TILES], 'no tile was charged').toBe(tiles)
+      expect([...s.roads], 'and no road bit moved').toEqual(roadsBefore)
+    })
+
+    it("ignores action.b for 'upgrade', because the pooled queue does not clear it", () => {
+      // `game/src/inputs.ts` reuses one object shape, so `b` carries whatever the
+      // previous action left there. A kind that validated or read it would make a
+      // replay depend on the pool's history — the same hazard `choose-card`'s
+      // ECHO is a deliberate exception to, and the reason this one is not.
+      const s = createState('upgrade-b', MAP)
+      const fields = freshFields()
+      const scratch = freshScratch()
+      const centre = 1 * 4 + 1
+      step(s, WORLD, fields, scratch, {
+        actions: [
+          { kind: 'place', a: centre, b: centre - 1 },
+          { kind: 'place', a: centre, b: centre + 1 },
+          { kind: 'place', a: centre, b: centre - 4 },
+        ],
+      })
+      s.header[H_INV_UPGRADES] = 2
+      step(s, WORLD, fields, scratch, { actions: [{ kind: 'upgrade', a: centre, b: -12345 }] })
+      expect(isUpgraded(s, centre)).toBe(true)
+    })
+
+    it("a REFUSED 'upgrade' is a byte-identical no-op tick, and does not throw", () => {
+      // Unlike `choose-card`, this kind has no echo and no divergence detector:
+      // a cell that stopped being a junction between the tap and the tick is an
+      // ordinary refusal. The whole-buffer comparison is against the SAME tick
+      // driven with no action at all, so it covers the tick's own writes too.
+      const withAction = createState('upgrade-refused', MAP)
+      const control = createState('upgrade-refused', MAP)
+      const f1 = freshFields()
+      const f2 = freshFields()
+      const sc1 = freshScratch()
+      const sc2 = freshScratch()
+      expect(() =>
+        step(withAction, WORLD, f1, sc1, { actions: [{ kind: 'upgrade', a: 5, b: 0 }] }),
+      ).not.toThrow()
+      step(control, WORLD, f2, sc2, NO_INPUT)
+      expect(hashState(withAction), 'a refused upgrade wrote nothing at all').toBe(hashState(control))
+    })
+
     it('an unknown action kind throws, naming the offending kind', () => {
       const s = createState('unknown-kind', MAP)
       const fields = freshFields()
@@ -245,7 +316,7 @@ describe('step', () => {
      * `step.ts` sets it out at length.) So this test pins three things, and only
      * the third is load-bearing for the commutation:
      *
-     *   1. The action set is still exactly the three kinds phase 3 dispatches.
+     *   1. The action set is still exactly the four kinds phase 3 dispatches.
      *   2. `roads.ts` still cannot observe the clock. **Kept, but demoted**: it
      *      is the condition M1c and M1d recorded, it is cheap, and a
      *      clock-reading `roads.ts` is still something whoever writes it should
@@ -303,7 +374,7 @@ describe('step', () => {
       expect(cardsSrc.length, 'cards.ts read back empty').toBeGreaterThan(4000)
 
       /**
-       * Half 1: the action set is still exactly the three kinds phase 3
+       * Half 1: the action set is still exactly the FOUR kinds phase 3
        * dispatches.
        *
        * **Anchored to the whole line, and the first version of this assertion
@@ -312,18 +383,28 @@ describe('step', () => {
        * `'place' | 'erase'`, so a widened union passed. Substring containment
        * cannot express "exactly these"; a line-anchored match can.
        *
-       * **It went red at M1f Task 6, which is the tripwire WORKING, and it goes
-       * red AGAIN at Task 9**, which adds `'upgrade'`. Say so, so the second
-       * re-derivation reads as scheduled rather than as alarming: the point of
-       * the pin is that widening the union costs somebody a reading of the
-       * paragraph above, and Task 6's reading is what added half 4 and ended
-       * phase 3's clock-blindness. Retype the whole line each time — do not
-       * loosen the anchor, and do not switch it back to `toContain`.
+       * **It went red at M1f Task 6, which is the tripwire WORKING, and it went
+       * red AGAIN at Task 9**, which added `'upgrade'`. Both re-derivations were
+       * scheduled rather than alarming, and each cost what the pin exists to
+       * charge — a reading of the paragraph above. Task 6's reading is what
+       * added half 4 and ended phase 3's clock-blindness; **Task 9's is half 5,
+       * and its answer is that phase 3's third module is clock-BLIND**, so
+       * guards 2 and 3 keep their subjects and only the scan set widens.
+       * `applyPlaceUpgrade` reads `H_INV_UPGRADES`, `H_UPGRADE_COUNT` and
+       * `roads` and writes `upgradeAt` plus those two slots — none of which
+       * `runDemand` touches and none of which is the clock. Retype the whole
+       * line each time — do not loosen the anchor, and do not switch it back to
+       * `toContain`.
+       *
+       * **THE COUNT IN THE HALF-1 HEADING IS NOW FOUR, and the union is total
+       * over what phase 3 dispatches**: a fifth kind added without a fifth
+       * branch would be a silent no-op in `step`, which the sibling case above
+       * catches as an *unknown action kind* throw.
        */
       expect(
         stepSrc,
         'the TickAction set changed — re-derive tick phases 1..6 before widening it; see step.ts',
-      ).toMatch(/^export type TickActionKind = 'place' \| 'erase' \| 'choose-card'$/m)
+      ).toMatch(/^export type TickActionKind = 'place' \| 'erase' \| 'choose-card' \| 'upgrade'$/m)
 
       /**
        * Half 2: phase 3 still cannot observe the clock. `roads.ts` is the
@@ -398,6 +479,35 @@ describe('step', () => {
           cardsSrc,
           `cards.ts now touches ${name}, which runDemand reads — phase 3 dispatches into this ` +
             'module too (applyChooseCard), so phases 3 and 6 no longer commute; see step.ts',
+        ).not.toMatch(demandRe(name))
+      }
+
+      /**
+       * Half 5: the THIRD module phase 3 dispatches into, on the same five names
+       * and the same patterns.
+       *
+       * `applyPlaceUpgrade` (M1f Task 9) is dispatched from the same loop, so
+       * "phase 3 writes nothing phase 6 reads" is now a claim about three files.
+       * It reads `H_INV_UPGRADES`, `H_UPGRADE_COUNT` and `roads` (through
+       * `isJunctionCell`) and writes `upgradeAt` and the same two slots — none of
+       * which `runDemand` touches — and this scan is what keeps it that way. The
+       * subject widening is the same shape half 4 was: a disjointness scan that
+       * covers two thirds of a phase is the catalogue's *"a check whose coverage
+       * is a strict subset"* with the subset on the wrong axis.
+       *
+       * **And `upgrades.ts` is CLOCK-BLIND, which is why guard 2 is not widened
+       * to it and this is stated instead of asserted.** Guard 2's subject is
+       * `roads.ts`, the road-edit half of phase 3, and it says exactly what it
+       * has always said about that file; the clock-freedom of phase 3 *as a
+       * whole* ended at Task 6 and no later task can end it twice.
+       */
+      const upgradesSrc = readFileSync(new URL('../src/upgrades.ts', import.meta.url), 'utf8')
+      expect(upgradesSrc.length, 'upgrades.ts read back empty').toBeGreaterThan(2000)
+      for (const name of DEMAND_STATE) {
+        expect(
+          upgradesSrc,
+          `upgrades.ts now touches ${name}, which runDemand reads — phase 3 dispatches into this ` +
+            'module too (applyPlaceUpgrade), so phases 3 and 6 no longer commute; see step.ts',
         ).not.toMatch(demandRe(name))
       }
 

@@ -310,18 +310,35 @@ function boot(layoutId: string): Boot {
 }
 
 /**
- * The occupancy replay's view of the world: the two regions `releaseCell`,
+ * The occupancy replay's view of the world: the three regions `releaseCell`,
  * `claimCell` and `junctionAdmitsOne` read, and nothing else.
  *
  * A structural shim rather than a second `GameState`: those three functions are
  * the production owners of the two occupancy lifecycle events and of the
  * junction predicate, and handing them a rig-owned `occupancy` view is what
- * makes the replay use production code instead of a copy of it. `roads` is the
- * REAL post-tick region — road bits change only at the top of a tick, so their
- * value during `runMovement` is the post-tick one.
+ * makes the replay use production code instead of a copy of it. `roads` and
+ * `upgradeAt` are the REAL post-tick regions — both change only at the top of a
+ * tick (phase 3), so their value during `runMovement` is the post-tick one.
+ *
+ * **`upgradeAt` was added at M1f Task 9, and the shim's failure mode is worth
+ * recording because it is the one a partial `GameState` always has.** Until that
+ * task `junctionAdmitsOne` read `roads` alone; the moment it grew its one-line
+ * upgrade clause every case in `junctionArms.test.ts` died with
+ * `TypeError: Cannot read properties of undefined`. That is the GOOD failure —
+ * loud, immediate, and impossible to mistake for a measurement — and it is loud
+ * only because the shim omits the field rather than supplying a zero-filled
+ * stand-in. **Do not "fix" a future one by handing this shim a fresh
+ * `new Uint8Array(cells)`**: that would make the replay silently disagree with
+ * the tick about every upgraded cell, which is exactly the class of defect the
+ * probe/`canEnter` iff property exists to catch, and it would catch nothing here
+ * because this rig IS the instrument.
  */
-function occupancyShim(occupancy: Int16Array, roads: GameState['roads']): GameState {
-  return { occupancy, roads } as unknown as GameState
+function occupancyShim(
+  occupancy: Int16Array,
+  roads: GameState['roads'],
+  upgradeAt: GameState['upgradeAt'],
+): GameState {
+  return { occupancy, roads, upgradeAt } as unknown as GameState
 }
 
 function driveArm(arm: JunctionArm): JunctionArmRun {
@@ -342,7 +359,7 @@ function driveArm(arm: JunctionArm): JunctionArmRun {
   const preInFlight = new Uint8Array(carCount)
   const occPre = new Int16Array(state.occupancy.length)
   const occWork = new Int16Array(state.occupancy.length)
-  const shim = occupancyShim(occWork, state.roads)
+  const shim = occupancyShim(occWork, state.roads, state.upgradeAt)
 
   const refusalsByCell = new Int32Array(cells)
   const junctionRefusalsByCell = new Int32Array(cells)

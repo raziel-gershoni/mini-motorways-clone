@@ -3,6 +3,7 @@ import type { GameState } from './state'
 import { H_HOUSE_COUNT, H_DEST_COUNT, H_TICK } from './state'
 import { hasTree } from './roads'
 import type { WorldData } from './world'
+import { isUpgraded } from './upgrades'
 
 /**
  * Buildings and cars: placement validity, footprint/carpark geometry,
@@ -332,6 +333,15 @@ export type BuildingPlaceFailure =
   | 'spacing'
   | 'building'
   | 'capacity'
+  /**
+   * **M1f Task 9: the cell carries a junction upgrade.** Its own code rather
+   * than `'building'`, which is what the previous draft reused: a caller that
+   * logs *"there is a building here"* about an empty cell with an upgrade on it
+   * sends the next reader to the wrong file, and this module's own rule is that
+   * a function with more than two ways to decline puts the reason in the
+   * signature.
+   */
+  | 'upgrade'
 
 export type PlaceCheck = { readonly ok: true } | { readonly ok: false; readonly reason: BuildingPlaceFailure }
 
@@ -401,6 +411,7 @@ const B_ROAD = Object.freeze({ ok: false, reason: 'road' } as const)
 const B_SPACING = Object.freeze({ ok: false, reason: 'spacing' } as const)
 const B_BUILDING = Object.freeze({ ok: false, reason: 'building' } as const)
 const B_CAPACITY = Object.freeze({ ok: false, reason: 'capacity' } as const)
+const B_UPGRADE = Object.freeze({ ok: false, reason: 'upgrade' } as const)
 
 /**
  * Whether `cell` coincides with any existing house cell or lies within any
@@ -442,6 +453,13 @@ export function canPlaceHouse(state: GameState, world: WorldData, cell: number):
   if (world.passable[cell] !== 1) return B_TERRAIN
   if (hasTree(state, world, cell)) return B_TREE
   if ((state.roads[cell] as number) !== 0) return B_ROAD
+  // M1f Task 9. A cell carrying a junction upgrade is not buildable, even if the
+  // player has erased every road under it. The reachable path is exactly that
+  // erase; §5.9's "nothing ever spawns on an existing road tile" covers the rest,
+  // which is why this sits directly behind the road check and is reached only
+  // when there is no road left. A house under an upgrade would be undrawable and
+  // unexplainable.
+  if (isUpgraded(state, cell)) return B_UPGRADE
   if (cellOverlapsAnyDestination(state, world, cell) || cellOverlapsAnyHouse(state, cell)) {
     return B_BUILDING
   }
@@ -548,6 +566,16 @@ export function canPlaceDestination(
     }
   }
   if ((state.roads[carpark] as number) !== 0) return B_ROAD
+  // M1f Task 9, over ALL SEVEN cells — six footprint plus carpark — in the same
+  // pass shape as the road check above, and for the same reason it is a pass
+  // rather than a single read: a footprint is not its origin cell, and a check
+  // on `destCell` alone would let a destination land on top of six upgrades.
+  for (let dy = 0; dy < height; dy++) {
+    for (let dx = 0; dx < width; dx++) {
+      if (isUpgraded(state, (y0 + dy) * world.w + (x0 + dx))) return B_UPGRADE
+    }
+  }
+  if (isUpgraded(state, carpark)) return B_UPGRADE
 
   const destCount = state.header[H_DEST_COUNT] as number
   for (let d = 0; d < destCount; d++) {

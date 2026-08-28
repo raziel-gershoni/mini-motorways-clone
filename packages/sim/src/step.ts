@@ -8,6 +8,7 @@ import { syncFields } from './flowfield'
 import { placeRoad, eraseRoad } from './roads'
 import { runDemand } from './demand'
 import { applyChooseCard, runOffer } from './cards'
+import { applyPlaceUpgrade } from './upgrades'
 import { runSpawn } from './spawn'
 import { assembleSources, runDispatch } from './dispatch'
 import { runMovement } from './cars'
@@ -30,10 +31,19 @@ import { runOvercrowd } from './overcrowd'
  *     holds**. `b` is an ECHO and not an instruction: `applyChooseCard` throws
  *     when it disagrees with what this simulation offered, and that throw is
  *     the replay-divergence detector a verified leaderboard is built on.
- *
- * Task 9 adds a fourth kind, `'upgrade'`.
+ *   - `'upgrade'` (M1f Task 9) — `a` is the CELL to place a junction upgrade on.
+ *     `b` is unused and must be ignored rather than validated: the pooled queue
+ *     in `game/src/inputs.ts` reuses one object shape, so `b` carries whatever
+ *     the previous action left there, and a kind that read it would make a
+ *     replay depend on the pool's history. **Unlike `choose-card` this action
+ *     does not throw on a bad argument** — `applyPlaceUpgrade` returns `false`
+ *     and writes nothing, because an upgrade aimed at a cell that stopped being
+ *     a junction between the tap and the tick is an ordinary refusal, not a
+ *     divergence. The echo throw exists for `choose-card` because a client and
+ *     a server can disagree about which card was OFFERED; nothing here is
+ *     offered.
  */
-export type TickActionKind = 'place' | 'erase' | 'choose-card'
+export type TickActionKind = 'place' | 'erase' | 'choose-card' | 'upgrade'
 export interface TickAction {
   readonly kind: TickActionKind
   readonly a: number
@@ -69,6 +79,13 @@ export interface TickInputs {
  * controller, and M1f's relief object is a flag `canEnter` reads — there is
  * nothing to advance. Tasks 6 and 9 add ACTION KINDS, which the input loop
  * dispatches inside phase 3; they add no phase. Eleven.
+ *
+ * **M1f TASK 9 HAS LANDED AND THE COUNT IS STILL ELEVEN**, stated in the past
+ * tense so the next reader does not have to check: the fourth action kind
+ * `'upgrade'` is dispatched from phase 3's loop into `upgrades.ts`, no phase was
+ * appended, and there is no twelfth position left open for one. An upgrade is a
+ * flag `canEnter` reads inside phase 9 (movement); it owns no timer, no counter
+ * and no per-tick work of any kind, so there is nothing for a phase to do.
  *
  * **The eleven phases — seven until M1e Task 2 inserted the week boundary at
  * position 2, eight until M1e Task 5 inserted the spawn phase at what was then
@@ -127,12 +144,16 @@ export interface TickInputs {
  *      read the clock**, and the disclosure below is about what that changes.
  *   3. Apply inputs — the only phase that changes `roads`. Must precede the
  *      field sync, or a road drawn on tick T is invisible to this tick's
- *      field. **From M1f Task 6 it dispatches into TWO modules, not one**:
- *      `roads.ts` for the road edits and `cards.ts` for `applyChooseCard`. That
- *      is what ends the "no `TickAction` reads the clock" condition M1c and M1d
- *      recorded — `applyChooseCard` reads `H_WEEK` and writes `H_TILES` — and
- *      `step.test.ts`'s tripwire scans both modules for the disjointness that
- *      keeps `3 <-> 6` commuting.
+ *      field. **From M1f Task 9 it dispatches into THREE modules, not one**:
+ *      `roads.ts` for the road edits, `cards.ts` for `applyChooseCard` (Task 6)
+ *      and `upgrades.ts` for `applyPlaceUpgrade` (Task 9). Task 6 is what ended
+ *      the "no `TickAction` reads the clock" condition M1c and M1d recorded —
+ *      `applyChooseCard` reads `H_WEEK` and writes `H_TILES` — and
+ *      `step.test.ts`'s tripwire scans all three modules for the disjointness
+ *      that keeps `3 <-> 6` commuting. **Task 9's module is clock-blind again**
+ *      (it reads two header slots and `roads`, and writes `upgradeAt` and the
+ *      same two slots), so the widening costs the tripwire a third scan and no
+ *      re-derivation of the order.
  *   4. The card offer (`cards.ts`, M1f Task 5, spec §5.10) — raise this week's
  *      pair into `H_OFFER_A`/`H_OFFER_B`. AFTER phase 3, because a `choose-card`
  *      queued on the boundary tick (Task 6) must resolve the offer the slots
@@ -913,6 +934,13 @@ export function step(
       // mismatch: that throw IS the replay-divergence detector, and a Worker
       // that hits it must report `unverifiable` rather than apply either card.
       applyChooseCard(s, action.a, action.b)
+    } else if (action.kind === 'upgrade') {
+      // `a` is the cell. `b` is not read — see `TickActionKind`. The return value
+      // is deliberately dropped: a refusal is a no-op on the buffer, so a caller
+      // that wants the reason asks `canPlaceUpgrade` before enqueueing, which is
+      // what the UI does. Replays stay byte-identical either way, which is the
+      // property that matters here.
+      applyPlaceUpgrade(s, world, action.a)
     } else {
       throw new Error(`step: unknown action kind "${String(action.kind)}"`)
     }

@@ -1,6 +1,15 @@
 import { describe, it, expect } from 'vitest'
 import { parseMap, CARS_PER_HOUSE, type MapData } from '@laneways/shared'
-import { createState, houseAt, destAt, H_HOUSE_COUNT, H_DEST_COUNT, H_TICK } from '../src/state'
+import {
+  createState,
+  houseAt,
+  destAt,
+  H_HOUSE_COUNT,
+  H_DEST_COUNT,
+  H_INV_UPGRADES,
+  H_TICK,
+  type GameState,
+} from '../src/state'
 import { createWorld, type WorldData } from '../src/world'
 import { placeRoad, eraseRoad, hasTree } from '../src/roads'
 import { fieldFor, syncFields } from '../src/flowfield'
@@ -31,6 +40,7 @@ import {
   placeDestination,
   type PlaceCheck,
 } from '../src/buildings'
+import { applyPlaceUpgrade, isUpgraded } from '../src/upgrades'
 
 /**
  * Non-square (w=9, h=6) fixture, all LAND, large enough to hold several
@@ -328,6 +338,36 @@ describe('house placement validity', () => {
     expect(state.houseColour[0]).toBe(4)
   })
 })
+
+
+/**
+ * Builds a degree-3 junction at `cell`, places a junction upgrade on it, then
+ * erases every arm — leaving bare ground with an upgrade flag still on it.
+ *
+ * **The whole fixture is the reachable path, driven through production calls.**
+ * An upgrade can only ever be placed on a junction, so `upgradeAt[cell] = 1` on
+ * an empty cell is a state no player produces; the erase is what produces it,
+ * and it is the exact sequence §5.9's *"nothing spawns on an existing road
+ * tile"* does not cover. Writing the byte directly would have tested the same
+ * branch and proved nothing about whether a player can reach it.
+ *
+ * `arms` are the three neighbours, so a caller can keep the junction clear of
+ * whatever else its board carries.
+ */
+function upgradedBareCell(
+  state: GameState,
+  world: WorldData,
+  cell: number,
+  arms: readonly number[],
+): void {
+  expect(arms.length, 'a junction needs three arms').toBe(3)
+  for (const arm of arms) expect(placeRoad(state, world, cell, arm), `arm ${arm}`).toBe(true)
+  state.header[H_INV_UPGRADES] = 1
+  expect(applyPlaceUpgrade(state, world, cell), 'the upgrade seated').toBe(true)
+  for (const arm of arms) expect(eraseRoad(state, world, cell, arm), `erase ${arm}`).toBe(true)
+  expect(state.roads[cell], 'and the cell is bare ground again').toBe(0)
+  expect(isUpgraded(state, cell), 'with the flag still on it').toBe(true)
+}
 
 /** Cell index helper for the W=9 fixture grid above. */
 function destCellFor(x: number, y: number): number {
@@ -1196,8 +1236,121 @@ function everyPlaceOutcome(): PlaceCase[] {
     expect(placeHouse(state, world, 1, 0)).toBe(true)
     add('house capacity', { ok: false, reason: 'capacity' }, () => canPlaceHouse(state, world, 2))
   }
+
+  // --- the M1f Task 9 refusal: three sites, one per `return B_UPGRADE` ---
+  {
+    const { map, world } = fixture('sgl-house-upgrade')
+    const state = createState('s', map)
+    upgradedBareCell(state, world, 10, [9, 11, 1])
+    add('house upgrade', { ok: false, reason: 'upgrade' }, () => canPlaceHouse(state, world, 10))
+  }
+  {
+    // **A NON-CENTRE footprint cell, deliberately.** The origin of this
+    // destination is (3,1) and the upgrade goes on (4,3) — the far corner of the
+    // 2x3 footprint — so a check that reads `destCell` alone, or reads only the
+    // first cell of the pass, scores a detector here rather than nowhere.
+    const { map, world } = fixture('sgl-dest-upgrade')
+    const state = createState('s', map)
+    const corner = destCellFor(4, 3)
+    upgradedBareCell(state, world, corner, [corner - 1, corner + 1, corner - W])
+    add('dest upgrade', { ok: false, reason: 'upgrade' }, () =>
+      canPlaceDestination(state, world, destCellFor(3, 1), ORIENTATION_N),
+    )
+  }
+  {
+    // The carpark half, on the same precedent as the four carpark cases above:
+    // it is a separate `return` site and the footprint pass never visits it.
+    const { map, world } = fixture('sgl-dest-upgrade-carpark')
+    const state = createState('s', map)
+    const cp = carparkCell(destCellFor(3, 1), ORIENTATION_N, W, H)
+    expect(cp, 'the fixture has a carpark on the grid').toBeGreaterThanOrEqual(0)
+    upgradedBareCell(state, world, cp, [cp - 1, cp + 1, cp + W])
+    add('dest upgrade (carpark)', { ok: false, reason: 'upgrade' }, () =>
+      canPlaceDestination(state, world, destCellFor(3, 1), ORIENTATION_N),
+    )
+  }
   return cases
 }
+
+
+// ---------------------------------------------------------------------------
+// Nothing is built on an upgraded cell — M1f Task 9, spec 5.9
+// ---------------------------------------------------------------------------
+
+/**
+ * **The reachable path is narrow and real, and the fixture drives all of it.**
+ * An upgrade's cell has road at placement time and §5.9 says nothing spawns on
+ * road, so for as long as the road stands the road check already refuses. What
+ * the player can do is erase every road at the cell — at which point the spawner
+ * sees bare ground with an upgrade on it, and a house under an upgrade would be
+ * undrawable and unexplainable.
+ *
+ * `B_UPGRADE` and not `B_BUILDING`: the previous draft of this task reused the
+ * building code, which is this module's own *"a function with more than two ways
+ * to decline puts the reason in the signature"* broken at the site that states
+ * it. A caller that logs "there is a building here" about an empty cell sends the
+ * next reader to the wrong file.
+ */
+describe('a cell carrying a junction upgrade is not buildable (M1f Task 9)', () => {
+  it('refuses a HOUSE on bare ground that still carries the flag', () => {
+    const { map, world } = fixture('up-house')
+    const state = createState('s', map)
+    upgradedBareCell(state, world, 10, [9, 11, 1])
+    expect(canPlaceHouse(state, world, 10)).toEqual({ ok: false, reason: 'upgrade' })
+    expect(placeHouse(state, world, 10, 0), 'and the placement itself refuses').toBe(false)
+    expect(state.header[H_HOUSE_COUNT]).toBe(0)
+  })
+
+  it('refuses a DESTINATION whose FOOTPRINT covers one, at a cell that is not its origin', () => {
+    const { map, world } = fixture('up-dest-footprint')
+    const state = createState('s', map)
+    const corner = destCellFor(4, 3)
+    upgradedBareCell(state, world, corner, [corner - 1, corner + 1, corner - W])
+    expect(canPlaceDestination(state, world, destCellFor(3, 1), ORIENTATION_N)).toEqual({
+      ok: false,
+      reason: 'upgrade',
+    })
+    expect(
+      placeDestination(state, world, destCellFor(3, 1), ORIENTATION_N, 0, DEST_KIND_SQUARE),
+    ).toBe(false)
+    expect(state.header[H_DEST_COUNT]).toBe(0)
+  })
+
+  it('refuses a DESTINATION whose CARPARK covers one — the seventh cell, which the footprint pass never visits', () => {
+    const { map, world } = fixture('up-dest-carpark')
+    const state = createState('s', map)
+    const cp = carparkCell(destCellFor(3, 1), ORIENTATION_N, W, H)
+    upgradedBareCell(state, world, cp, [cp - 1, cp + 1, cp + W])
+    expect(canPlaceDestination(state, world, destCellFor(3, 1), ORIENTATION_N)).toEqual({
+      ok: false,
+      reason: 'upgrade',
+    })
+  })
+
+  it('still names ROAD, not the upgrade, while the junction is still standing', () => {
+    // The truthful reason at the moment a player asks. An upgraded cell that
+    // still has its roads is refused by the road check first, which is right:
+    // *the road* is what a player would have to remove, and it is the reason
+    // §5.9 gives. This is the case that says the new check sits BEHIND the road
+    // check rather than in front of it.
+    const { map, world } = fixture('up-still-roaded')
+    const state = createState('s', map)
+    for (const arm of [9, 11, 1]) expect(placeRoad(state, world, 10, arm)).toBe(true)
+    state.header[H_INV_UPGRADES] = 1
+    expect(applyPlaceUpgrade(state, world, 10)).toBe(true)
+    expect(canPlaceHouse(state, world, 10)).toEqual({ ok: false, reason: 'road' })
+  })
+
+  it('leaves every OTHER cell buildable — the refusal is per cell, not per board', () => {
+    // A board with an upgrade on it is not a board nothing can be built on. The
+    // mutant this exists for reads `H_UPGRADE_COUNT` rather than the cell's flag.
+    const { map, world } = fixture('up-elsewhere')
+    const state = createState('s', map)
+    upgradedBareCell(state, world, 10, [9, 11, 1])
+    expect(canPlaceHouse(state, world, 40)).toEqual({ ok: true })
+    expect(placeHouse(state, world, 40, 0)).toBe(true)
+  })
+})
 
 /**
  * **`canPlaceDestination` and `canPlaceHouse` return module-scope frozen
@@ -1238,8 +1391,11 @@ describe('placement validity allocates nothing per call — frozen singletons', 
     // One case per `return` statement in the two predicates. Counted, because
     // the list being SHORTER than the code is exactly how six sites went
     // unpinned: `grep -c 'return B_' packages/sim/src/buildings.ts` is 21.
-    expect(cases.length, 'one case per return SITE — see the block comment').toBe(21)
-    expect(new Set(cases.map((c) => (c.expected.ok ? 'ok' : c.expected.reason))).size).toBe(8)
+    // 21 until M1f Task 9, which adds three `return B_UPGRADE` sites: one in
+    // `canPlaceHouse` and two in `canPlaceDestination` (the footprint pass and
+    // the carpark).
+    expect(cases.length, 'one case per return SITE — see the block comment').toBe(24)
+    expect(new Set(cases.map((c) => (c.expected.ok ? 'ok' : c.expected.reason))).size).toBe(9)
   })
 
   it('returns a FROZEN value for every outcome, so one caller cannot scribble on the next caller’s answer', () => {
@@ -1258,13 +1414,15 @@ describe('placement validity allocates nothing per call — frozen singletons', 
     const cases = everyPlaceOutcome()
     const seen = new Set<PlaceCheck>()
     for (const { call } of cases) seen.add(call())
-    // Exactly 8 distinct instances across 15 calls: the singletons are neither
-    // one collapsed object (which would be 1) nor per-call literals (15), and
+    // Exactly 9 distinct instances across 24 calls: the singletons are neither
+    // one collapsed object (which would be 1) nor per-call literals (24), and
     // `canPlaceHouse` and `canPlaceDestination` return the same instance for
     // the same reason rather than keeping two parallel tables that can drift.
-    expect(seen.size).toBe(8)
+    // 8 until M1f Task 9 added `B_UPGRADE`, which both predicates share — and
+    // the sharing is asserted below rather than assumed.
+    expect(seen.size).toBe(9)
     const byName = new Map(cases.map((c) => [c.name, c.call]))
-    for (const reason of ['ok', 'out-of-bounds', 'terrain', 'tree', 'road', 'building', 'capacity']) {
+    for (const reason of ['ok', 'out-of-bounds', 'terrain', 'tree', 'road', 'building', 'capacity', 'upgrade']) {
       expect(byName.get(`dest ${reason}`)!(), `dest/house ${reason} are different instances`).toBe(
         byName.get(`house ${reason}`)!(),
       )

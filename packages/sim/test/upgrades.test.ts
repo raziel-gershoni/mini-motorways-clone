@@ -7,7 +7,17 @@ import {
   type UpgradePlaceResult,
   type UpgradeRefusal,
 } from '../src/upgrades'
-import { H_INV_UPGRADES, H_UPGRADE_COUNT, H_TILES, H_EPOCH, hashState, type GameState } from '../src/state'
+import {
+  H_INV_UPGRADES,
+  H_UPGRADE_COUNT,
+  H_TILES,
+  H_EPOCH,
+  hashState,
+  snapshot,
+  restore,
+  type GameState,
+} from '../src/state'
+import { createWorld } from '../src/world'
 import { isJunctionCell, junctionAdmitsOne, roadDegree } from '../src/graph'
 import { eraseRoad } from '../src/roads'
 import { step, type TickInputs } from '../src/step'
@@ -296,5 +306,69 @@ describe('applyPlaceUpgrade', () => {
     for (let i = 0; i < rig.s.upgradeAt.length; i++) if ((rig.s.upgradeAt[i] as number) !== 0) flags++
     expect(rig.s.header[H_UPGRADE_COUNT]).toBe(flags)
     expect(flags).toBe(centres.length)
+  })
+})
+
+/**
+ * **The upgrade is hashed state, so it must survive the two things hashed state
+ * has to survive**: a snapshot restored into a world this buffer has never met,
+ * and a rollback that throws the placement away. Structurally it is one byte of
+ * the single `ArrayBuffer` and `snapshot` copies the whole buffer — but "covered
+ * by construction" is a claim, and this milestone's own catalogue is largely
+ * about claims that were true until a region was added at the end of a tier.
+ */
+describe('the upgrade survives snapshot/restore and is undone by a rollback', () => {
+  it('restores into a COLD world — one built after the snapshot was taken', () => {
+    const rig = junctionWithInventory(2)
+    expect(applyPlaceUpgrade(rig.s, rig.world, rig.centre)).toBe(true)
+    const before = hashState(rig.s)
+    const buf = snapshot(rig.s)
+
+    // A world with no shared identity with the one that produced the buffer.
+    const cold = createWorld(rig.map)
+    expect(cold, 'a genuinely different object').not.toBe(rig.world)
+    const back = restore(buf, cold)
+
+    expect(hashState(back), 'byte-identical through the round trip').toBe(before)
+    expect(isUpgraded(back, rig.centre), 'the flag came back').toBe(true)
+    expect(back.header[H_UPGRADE_COUNT]).toBe(1)
+    expect(back.header[H_INV_UPGRADES]).toBe(1)
+    // And the RULE follows the flag into the cold world, which is the half a
+    // byte comparison cannot see: `junctionAdmitsOne` reads the restored view.
+    expect(isJunctionCell(back, rig.centre)).toBe(true)
+    expect(junctionAdmitsOne(back, rig.centre)).toBe(false)
+    // A second placement on the restored state still refuses, so the count and
+    // the flag came back consistent with each other rather than merely present.
+    expect(applyPlaceUpgrade(back, cold, rig.centre)).toBe(false)
+  })
+
+  it('is UNDONE by a rollback to a snapshot taken before it', () => {
+    const rig = junctionWithInventory(1)
+    const buf = snapshot(rig.s)
+    const before = hashState(rig.s)
+    expect(applyPlaceUpgrade(rig.s, rig.world, rig.centre)).toBe(true)
+    expect(hashState(rig.s), 'the placement moved the digest').not.toBe(before)
+
+    const back = restore(buf, rig.world)
+    expect(hashState(back)).toBe(before)
+    expect(isUpgraded(back, rig.centre), 'the upgrade is gone').toBe(false)
+    expect(back.header[H_UPGRADE_COUNT]).toBe(0)
+    expect(back.header[H_INV_UPGRADES], 'and the item is back in hand').toBe(1)
+    expect(junctionAdmitsOne(back, rig.centre), 'and the default rule governs again').toBe(true)
+  })
+
+  it('moves hashState, so a browser and a Worker cannot disagree about it', () => {
+    // The region is inside the digest — the same assertion `occupancy` and
+    // `carBlockedTicks` carry in `blocking.test.ts`, made here because
+    // `upgradeAt` is the last region of the last tier and a layout change is the
+    // one edit that could silently drop it off the end.
+    // The SAME id, so the two buffers are byte-identical to begin with: the
+    // seed and `mapIdentity` both fold the id, and two rigs named differently
+    // would differ before the flag was written.
+    const a = junctionWithInventory(1, 'hash-pair')
+    const b = junctionWithInventory(1, 'hash-pair')
+    expect(hashState(a.s)).toBe(hashState(b.s))
+    a.s.upgradeAt[a.centre] = 1
+    expect(hashState(a.s), 'one flag byte moves the whole-buffer digest').not.toBe(hashState(b.s))
   })
 })

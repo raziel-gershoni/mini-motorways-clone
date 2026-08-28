@@ -5,11 +5,17 @@ import { createState, hashState, isGameOver, nonZeroWord, H_SCORE, type GameStat
 import { createWorld, type WorldData } from '../src/world'
 import { placeRoad, DIR_COUNT, DX, DY, LANE_COUNT } from '../src/roads'
 import { seedFromString, randomBelow } from '../src/rng'
-import { edgeCost } from '../src/graph'
+import { edgeCost, isJunctionCell } from '../src/graph'
 import { hashBytes } from '../src/hash'
-import { FREE } from '../src/blocking'
-import { placeDestination, placeHouse, ORIENTATION_S, DEST_KIND_SQUARE } from '../src/buildings'
-import { assembleSources } from '../src/dispatch'
+import { FREE, canEnter, claimCell, EnterOutcome } from '../src/blocking'
+import {
+  placeDestination,
+  placeHouse,
+  ORIENTATION_S,
+  DEST_KIND_SQUARE,
+  PHASE_OUTBOUND,
+} from '../src/buildings'
+import { assembleSources, packRouteStep } from '../src/dispatch'
 import { step, type TickAction } from '../src/step'
 import {
   createFlowField,
@@ -1435,6 +1441,10 @@ describe('fieldFor: staleness', () => {
  *      remembering to add it here.
  */
 
+/** `roads.ts`'s direction indices, for arm 4's hand-built crossing pair. */
+const DIR_N = 0
+const DIR_E = 2
+
 const CB_W = 16
 const CB_H = 20
 /** The corridor's column, and the only column with any road on it. */
@@ -1786,6 +1796,96 @@ describe('routing stays congestion-blind (M1e Task 11)', () => {
       firstFieldDifference(baseline, fieldBytes(rig.fields)),
       'some FIELD_IRRELEVANT region reaches the field',
     ).toBe('identical')
+  })
+
+  /**
+   * **Arm 4: `upgradeAt` alone, and it exists because arm 3 could not tell the
+   * difference between a region that is field-irrelevant and a region nothing
+   * reads at all** (M1f Task 9).
+   *
+   * `upgradeAt` has been in `FIELD_IRRELEVANT_REGIONS` since Task 4, so arm 3
+   * has been scrambling it — mechanically, from the frozen list, with no test
+   * naming it. That was worth having and it was **vacuous about the
+   * classification's REASON**: until this task no production code read the
+   * region, so "scrambling it does not move the field" was a statement about a
+   * region no code consults, which every unread region satisfies.
+   *
+   * The reason the classification gives is *"an upgrade changes a car's right to
+   * ENTER a cell and nothing else — not its SPEED through one and never the
+   * distance of a step"*. That is now checkable, and it takes both halves:
+   *
+   *   - the field is byte-identical and `CT_REBUILDS` does not move, **and**
+   *   - the same scramble genuinely CHANGES what `canEnter` answers, on this
+   *     board, on this tick.
+   *
+   * Without the second half a clause that read the wrong array, or read nothing,
+   * would pass. This is the arm that says the region is live and still invisible
+   * to routing — the same pairing `occupancy` gets from arms 1 and 2 plus the
+   * fixture's own jam assertions.
+   */
+  it('arm 4: `upgradeAt` is LIVE and still invisible to the field — the reason, not only the sweep', () => {
+    const rig = buildJammedRig()
+
+    // The corridor is degree <= 2 everywhere, so nothing on this board is a
+    // junction and the flag would have nothing to lift. Raise one corridor cell
+    // to degree 4 first, exactly as `queueProbe.test.ts`'s junction rig does.
+    const jx = CB_X
+    const jy = CB_FIRST_HOUSE_Y + 2
+    const jcell = cbCell(jx, jy)
+    expect(placeRoad(rig.state, rig.world, jcell, cbCell(jx - 1, jy))).toBe(true)
+    expect(placeRoad(rig.state, rig.world, jcell, cbCell(jx + 1, jy))).toBe(true)
+    expect(isJunctionCell(rig.state, jcell), 'the fixture really is a junction now').toBe(true)
+
+    // Baseline AFTER the road edit, so the two side roads — which ARE
+    // FIELD_INPUT — are in both arms and only the flag differs.
+    assembleSources(rig.state, rig.world, rig.scratch)
+    syncFields(rig.state, rig.world, rig.fields, rig.scratch)
+    forceRebuild(rig)
+    const baseline = fieldBytes(rig.fields)
+    const rebuildsBefore = rig.scratch.counters[CT_REBUILDS] as number
+
+    // The behavioural half FIRST, so a green field comparison can never be the
+    // whole result. A crossing entrant at the junction, with the other lane held
+    // on a crossing axis: refused bare, admitted upgraded.
+    rig.state.occupancy.fill(FREE)
+    rig.state.carPhase[0] = PHASE_OUTBOUND
+    rig.state.carCell[0] = jcell
+    rig.state.carRouteLen[0] = 4
+    rig.state.carRouteCursor[0] = 1
+    for (let k = 0; k < 4; k++) packRouteStep(rig.state, 0, k, DIR_E)
+    claimCell(rig.state, 0, jcell, DIR_E)
+    rig.state.carBlockedTicks[1] = 0
+    expect(canEnter(rig.state, rig.world, 1, jcell, DIR_N), 'bare: the junction rule refuses').toBe(
+      EnterOutcome.REFUSED_OCCUPIED,
+    )
+
+    rig.state.upgradeAt[jcell] = 1
+    expect(canEnter(rig.state, rig.world, 1, jcell, DIR_N), 'upgraded: the same question, admitted').toBe(
+      EnterOutcome.ENTER_FREE,
+    )
+
+    // Now the routing half, over the WHOLE region rather than the one cell —
+    // every flag set, which is a board no player can produce and is exactly why
+    // it belongs here: the claim is about arbitrary `upgradeAt`, not reachable
+    // `upgradeAt`.
+    rig.state.upgradeAt.fill(1)
+    assembleSources(rig.state, rig.world, rig.scratch)
+    syncFields(rig.state, rig.world, rig.fields, rig.scratch)
+    expect(
+      rig.scratch.counters[CT_REBUILDS],
+      'upgradeAt is in the staleness key — it has been classified FIELD_INPUT',
+    ).toBe(rebuildsBefore)
+    forceRebuild(rig)
+    expect(
+      firstFieldDifference(baseline, fieldBytes(rig.fields)),
+      'an upgrade changed a distance or a direction, so it has become an edge weight — ' +
+        'see the 2026-08-21 amendment to spec 5.4',
+    ).toBe('identical')
+
+    // And the classification's own list still names it, derived rather than
+    // retyped: a task that reclassified the region would leave this arm passing
+    // while the sentence above stopped being true.
+    expect(isFieldIrrelevantRegion('upgradeAt')).toBe(true)
   })
 })
 
