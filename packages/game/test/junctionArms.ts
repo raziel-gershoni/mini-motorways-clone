@@ -190,6 +190,19 @@ export interface JunctionArmRun {
   readonly endTick: number
   /** Ticks on which at least one car was refused. */
   readonly ticksWithBlockedCar: number
+  /**
+   * Refusals on the LAST tick driven — the death tick, when the arm dies there.
+   *
+   * **The reconciliation constant between two conventions that both ship.** This
+   * rig samples the tick the run ends on; `integration.test.ts`'s per-week
+   * `blockedTicks` row does not, because its driver breaks on `isGameOver`
+   * before it counts. So the two disagree by exactly this many car-ticks and by
+   * one tick, and the difference is the cars still standing when §5.8 fires. It
+   * is measured rather than described, because the paragraph that reconciles
+   * them is prose and prose about a number is how this milestone has already
+   * lost two figures.
+   */
+  readonly finalTickRefusals: number
   /** Ticks driven after the warm start. */
   readonly ticksDriven: number
   /**
@@ -355,6 +368,7 @@ function driveArm(arm: JunctionArm): JunctionArmRun {
   let firstConflictTick = -1
   let firstRuleEventTick = -1
   let refusalMisses = 0
+  let finalTickRefusals = 0
   let grantMisses = 0
   let grantsWithOtherLaneTaken = 0
   let saturatedStalls = 0
@@ -395,6 +409,7 @@ function driveArm(arm: JunctionArm): JunctionArmRun {
     // ---------------------------------------------------------------------
     occWork.set(occPre)
     let blockedThisTick = false
+    let refusalsThisTick = 0
     for (let c = 0; c < carCount; c++) {
       const post = state.carCell[c] as number
       const blocked = state.carBlockedTicks[c] as number
@@ -438,6 +453,7 @@ function driveArm(arm: JunctionArm): JunctionArmRun {
         const admitsOne = junctionAdmitsOne(shim, cell)
         const other = admitsOne ? occupantOf(shim, cell, otherLane(lane)) : FREE
         refusals++
+        refusalsThisTick++
         refusalsByCell[cell] = (refusalsByCell[cell] as number) + 1
         if (admitsOne) refusalsOnJunctionCells++
         if (own === FREE && other !== FREE) {
@@ -480,6 +496,7 @@ function driveArm(arm: JunctionArm): JunctionArmRun {
       }
     }
     if (blockedThisTick && !warming) ticksWithBlockedCar++
+    if (!warming) finalTickRefusals = refusalsThisTick
 
     if (warming) {
       // The census and the queue probe are deliberately NOT run over the warm
@@ -525,6 +542,7 @@ function driveArm(arm: JunctionArm): JunctionArmRun {
     ruleEvents,
     endTick: state.header[H_TICK] as number,
     ticksWithBlockedCar,
+    finalTickRefusals,
     ticksDriven,
     valveFirings,
     worstWait,
