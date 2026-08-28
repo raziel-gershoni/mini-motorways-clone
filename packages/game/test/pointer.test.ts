@@ -1823,6 +1823,36 @@ describe('peek: it hides the modal, and it does not skip the week', () => {
     expect(r.input.peeking).toBe(false)
   })
 
+  it('refuses the drag that was in progress when the boundary arrived, and queues nothing', () => {
+    // **`move`'s `paused` guard is LIVE, and this is the fixture that says so.**
+    // `pointer.ts` claimed for two milestones that a drag could not survive
+    // into a paused state, on the argument that pause is only reachable from a
+    // clock tap and the single-pointer rule refuses that mid-drag. M1f Task 7
+    // made it false: the boundary arrives from inside a TICK, `onOfferRaised`
+    // fires, `main.ts` pauses, and no tap happened at all.
+    //
+    // Without the guard those samples enqueue `place` actions that no tick
+    // drains — the loop is paused — and they all land in a burst on the tick
+    // after the player answers the modal.
+    const r = rig()
+    expect(r.input.down(1, T9_14_X, T9_14_Y)).toBe(PointerOutcome.DRAG_START)
+    expect(r.input.dragging).toBe(true)
+    // Exactly what `main.ts` does from `onOfferRaised`: no tap, no `down`.
+    r.raiseOffer()
+    expect(r.input.move(1, T11_15_X, T11_15_Y)).toBe(PointerOutcome.REFUSED_PAUSED)
+    expect(queued(r.queue), 'road was drawn onto a frozen board').toEqual([])
+    expect(r.input.dragging, 'and the stroke is still the owner’s to end').toBe(true)
+    // `up` stays live on a paused board, so nothing latches.
+    expect(r.input.up(1)).toBe(PointerOutcome.DRAG_END)
+    // Non-vacuous: the SAME two samples on the same rig draw road when the
+    // offer is not up, so this is the guard refusing and not the fixture
+    // failing to move.
+    const live = rig()
+    live.input.down(1, T9_14_X, T9_14_Y)
+    expect(live.input.move(1, T11_15_X, T11_15_Y)).toBe(PointerOutcome.DRAW)
+    expect(queued(live.queue).length).toBeGreaterThan(0)
+  })
+
   it('is BELOW game over too: a dead board offers a restart, not a peek', () => {
     const r = rig()
     r.raiseOffer()

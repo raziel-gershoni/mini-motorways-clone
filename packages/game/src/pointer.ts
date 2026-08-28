@@ -642,24 +642,54 @@ export function createPointerInput(host: PointerHost): PointerInput {
 
   function move(pointerId: number, clientX: number, clientY: number): PointerOutcomeCode {
     if (!dragging || pointerId !== (slots[D_POINTER_ID] as number)) return PointerOutcome.IGNORED
-    // Unreachable through the DOM today — pause can only be toggled by a
-    // `pointerdown` on the clock, and the single-pointer rule refuses that
-    // while a drag is live, so no drag can survive into a paused state.
+    // **THIS GUARD IS LIVE. Do not delete it — the state it refuses is reached
+    // on the production boot path, and this comment claimed the opposite for
+    // two milestones.**
     //
-    // **Kept, and the RULE is the reason, not the caller list this used to
-    // give.** It said "`setPaused` is also callable from `main.ts` (a Telegram
-    // `deactivated` event, M3's hard pause)". Checked at the close of M1e:
-    // there is no `deactivated` handler in `packages/` and never has been, and
-    // `visibilitychange` (`attachVisibility`, `main.ts`) calls `pointer.abort()`
-    // and nothing else. The real caller set of `setPaused` today is exactly two
-    // — the HUD clock tap 40 lines above, and `Loop.end()` on §5.8's shutdown —
-    // plus `Game.setPaused`, which `main.ts` exports and nothing in `packages/`
-    // calls. So this guard is kept because the rule is **"no board input while
-    // paused", not "no board taps while paused"**: an exported pause is
-    // reachable from outside this module by construction, and a guard that
-    // depends on enumerating its callers is a guard with a shelf life. The rule
-    // was always the right justification; the caller list was decoration that
-    // happened to be false.
+    // What it used to say, kept because the correction is the useful part:
+    // *"Unreachable through the DOM today — pause can only be toggled by a
+    // `pointerdown` on the clock, and the single-pointer rule refuses that
+    // while a drag is live, so no drag can survive into a paused state"*, and
+    // *"the real caller set of `setPaused` today is exactly two"*.
+    //
+    // **The reachable path, in the order it happens.** A drag is in progress.
+    // A week boundary arrives from INSIDE a tick: `step` raises §5.10's offer,
+    // `frame.ts`'s `advance` sees `offerPending` and calls `onOfferRaised`,
+    // and `main.ts` answers it with `loop.setPaused(true)` — all while finger 1
+    // still owns the drag and without any tap having happened at all. The next
+    // `pointermove` lands here with `dragging === true` and `paused === true`.
+    // Nothing about that needs a second finger, a hidden webview or M3.
+    // Pinned by `test/pointer.test.ts` › *"refuses the drag that was in
+    // progress when the boundary arrived"* and, on the real wiring, by
+    // `test/integration.test.ts` › *"a week boundary that lands MID-DRAG"*.
+    //
+    // **The caller set is FOUR, not two** — the HUD clock tap 40 lines above,
+    // `Loop.end()` on §5.8's shutdown, `main.ts`'s `onOfferRaised` (M1f Task 7)
+    // and `chooseCard`'s `host.setPaused(false)` 160 lines ABOVE THIS COMMENT
+    // (M1f Task 8) — plus `Game.setPaused`, which `main.ts` exports and nothing
+    // in `packages/` calls.
+    //
+    // **What deleting it would cost, since "unreachable" invites exactly that.**
+    // `down()` refuses to START a drag while the modal is up, but an existing
+    // drag keeps receiving `move`. Without this line those samples enqueue
+    // `place` actions that no tick drains — the loop is paused — and every one
+    // of them lands in a burst on the tick after the player answers the modal:
+    // road the player drew on a frozen board they could not see, appearing
+    // somewhere else, later. `up`/`cancel` stay live regardless, so the stroke
+    // can still be ended.
+    //
+    // **The rule was always the right justification and still is** — *"no board
+    // input while paused", not "no board taps while paused"*: an exported pause
+    // is reachable from outside this module by construction, and a guard that
+    // depends on enumerating its callers is a guard with a shelf life. The
+    // caller list was decoration that happened to be false, and then the
+    // unreachability claim became false too.
+    //
+    // **Why it stayed wrong through the task that falsified it**, recorded
+    // because it is the same failure twice: M1f Task 8 added the fourth caller
+    // 160 lines above and swept only the files its diff touched, which cannot
+    // find a claim written about you in a paragraph you did not edit. Grep for
+    // the claim, not the file.
     if (host.paused()) return PointerOutcome.REFUSED_PAUSED
 
     const camera = host.camera()

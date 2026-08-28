@@ -4077,6 +4077,41 @@ describe('the weekly card offer stops the board', () => {
     expect(rig.game.state.header[H_TICK]).toBeGreaterThan(TICKS_PER_WEEK)
   })
 
+  it('a week boundary that lands MID-DRAG pauses under the finger, and no road reaches the sim', () => {
+    // **The state `pointer.ts` called unreachable for two milestones, driven on
+    // the production wiring.** No second finger, no tap, no hidden webview: a
+    // drag is in progress, `step` raises the offer from inside a tick,
+    // `frame.ts`'s `advance` calls `onOfferRaised`, `main.ts` pauses — and the
+    // next `pointermove` arrives with `dragging` true and `paused` true.
+    //
+    // This is what makes `move`'s `paused` guard load-bearing rather than
+    // vestigial, and it is the case `down`'s modal branch cites when it says
+    // `move` needs no companion guard of its own.
+    const rig = buildRig({ layoutId: undefined, warmStartTicks: TICKS_PER_WEEK - 1 })
+    rig.advanceRaw(16.7)
+    expect(rig.game.loop.paused, 'still running one tick short of the boundary').toBe(false)
+
+    // A drag on the board, started while the game is live.
+    expect(rig.game.pointer.down(1, rig.cx(8), rig.cy(13))).toBe(PointerOutcome.DRAG_START)
+    expect(rig.game.pointer.dragging).toBe(true)
+    const queuedBefore = rig.game.queue.length
+
+    // The boundary arrives inside a tick, with the finger still down.
+    while (!rig.game.loop.paused) rig.advanceRaw(16.7)
+    expect(rig.game.state.header[H_TICK]).toBe(TICKS_PER_WEEK)
+    expect(offerPending(rig.game.state)).toBe(true)
+    expect(rig.game.pointer.dragging, 'the drag survived into the pause').toBe(true)
+
+    // The next sample of that same stroke.
+    expect(rig.game.pointer.move(1, rig.cx(8), rig.cy(12))).toBe(PointerOutcome.REFUSED_PAUSED)
+    expect(rig.game.queue.length, 'nothing was drawn onto a frozen board').toBe(queuedBefore)
+
+    // And the stroke can still be ended — `up` stays live on a paused board, so
+    // a captured pointer never latches.
+    expect(rig.game.pointer.up(1)).toBe(PointerOutcome.DRAG_END)
+    expect(rig.game.pointer.dragging).toBe(false)
+  })
+
   it('shows the frozen board under the modal without letting the clock move', () => {
     // **The peek clause of the milestone's acceptance criterion, end to end**
     // (plan Decision 16). Peek is the one part of the modal whose wiring
