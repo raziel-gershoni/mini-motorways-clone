@@ -1,4 +1,4 @@
-import { CARD_GRANT_ITEM, CARD_GRANT_ROAD_TILES, TERRAIN, UPGRADES_PER_CARD } from '@laneways/shared'
+import { CARD_GRANT_ITEM, CARD_GRANT_ROAD_TILES, UPGRADES_PER_CARD } from '@laneways/shared'
 import { mixWord } from './rng'
 import type { GameState } from './state'
 import {
@@ -413,34 +413,40 @@ export function pickFromPool(pool: number, n: number, word: number): number {
  * `WorldData` (widening a shared shape for one consumer) or at module scope
  * (which `no-module-mutable-state` forbids, correctly).
  *
- * **Cost, MEASURED rather than argued, and the brief's version of this
- * paragraph was wrong.** It said `runOffer` calls this *"on every tick of an
- * unresolved week"*. It calls it on **every tick, full stop**: `runOffer` is
- * `runOfferFromPool(state, poolFor(world), scratch)`, and the argument is
- * evaluated before the callee's `offerPending` early return. So the scan is a
- * per-tick cost on every board, including week 0 and every resolved week. The
- * early exit is what keeps that cheap where it can: on `firstCity` water is at
- * cell 12 and mountain at cell 123, so the loop stops after 124 of 960 cells;
- * on `demoCity` neither code exists and it reads all 960. **MEASURED, because
- * the worst case is a real fixture and not a hypothetical:** `demoLayout.test.ts`
- * drives seven 3,000-tick runs on `demoCity` — 21,000 ticks x 960 cells — and
- * that case runs at 3.34 s in isolation against vitest's 5,000 ms per-case
- * default (the delta this scan adds is measured in this task's report). It allocates nothing, so `allocation.test.ts`'s
- * 4 B/tick window over `packages/sim/src` is unmoved. See this task's report for
- * why the margin, not the mean, is the number that matters here.
+ * **Cost, MEASURED — and the brief's paragraph was wrong twice in the same
+ * direction, which is why this reads terrain ONCE instead of on every tick.**
+ * The brief first said this runs *"once every 4,500 ticks, which is nothing"*,
+ * then corrected itself to *"every tick of an unresolved week"*, and specified a
+ * 960-cell scan with an early exit on that basis. Both understate the call rate:
+ * `runOffer` passes `poolFor(world)` as an ARGUMENT, so it is evaluated before
+ * `runOfferFromPool`'s `offerPending` early return — on **every tick of every
+ * run**, week 0 included.
+ *
+ * With the scan in here, on `demoCity` (960 cells, neither terrain code, so the
+ * early exit could never fire) that DOUBLED the sim's per-tick cost on a real
+ * fixture: `demoLayout.test.ts`'s seven 3,000-tick runs went 1.58/1.61/1.61 s ->
+ * 3.46/3.48/3.30 s, **2.16x**, and the case then exceeded vitest's 5,000 ms
+ * per-case default under the full suite's concurrent load. Gating the call on
+ * `offerPending` in `runOffer` cut it to **+34 %** — still visible, because a
+ * headless rig that takes no card leaves every tick from the boundary to the end
+ * of the run inside an unresolved week.
+ *
+ * So the two terrain facts are computed **once, in `createWorld`, inside the
+ * walk that already builds `passable`** — where they cost nothing and where
+ * `world.ts` already states this exact precedent. This function is now three
+ * branches, `runOffer` is a one-liner again with no second guard to keep in
+ * sync, and the measured case is back at baseline. It allocates nothing, so
+ * `allocation.test.ts`'s 4 B/tick window over `packages/sim/src` is unmoved.
+ *
+ * **Precomputation, not a cache: there is no invalidation question.**
+ * `WorldData` is built once from `MapData` and nothing in `sim/src` writes it.
+ * `cards.test.ts` asserts the mask is identical across six week boundaries of a
+ * live run anyway, rather than trusting the word "immutable".
  */
 export function capabilityMask(world: WorldData): number {
   let mask = CARDS_CAPABLE_ANYWHERE
-  let water = 0
-  let mountain = 0
-  for (let c = 0; c < world.cells; c++) {
-    const t = world.terrain[c] as number
-    if (t === TERRAIN.WATER) water = 1
-    else if (t === TERRAIN.MOUNTAIN) mountain = 1
-    if (water === 1 && mountain === 1) break
-  }
-  if (water === 1) mask |= CARD_NEEDS_WATER
-  if (mountain === 1) mask |= CARD_NEEDS_MOUNTAIN
+  if (world.hasWater === 1) mask |= CARD_NEEDS_WATER
+  if (world.hasMountain === 1) mask |= CARD_NEEDS_MOUNTAIN
   return mask
 }
 

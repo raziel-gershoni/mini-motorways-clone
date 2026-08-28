@@ -22,21 +22,56 @@ export interface WorldData {
   readonly cells: number
   readonly terrain: Uint8Array
   readonly passable: Uint8Array
+  /**
+   * 1 if any cell on this board is `TERRAIN.WATER` / `TERRAIN.MOUNTAIN`, else 0.
+   *
+   * **Precomputed for exactly the reason `passable` is, and the reason is a
+   * measurement.** `cards.ts`'s `capabilityMask` — spec §5.10's *"the pool is
+   * filtered by map capability"* — needs these two facts on the offer path, and
+   * `runOffer` evaluates `poolFor(world)` as an ARGUMENT, so a terrain scan
+   * there ran on every tick of every run. On `demoCity` (960 cells, neither
+   * code present, so no early exit could fire) that DOUBLED the sim's per-tick
+   * cost on a real fixture — `demoLayout.test.ts`'s seven 3,000-tick runs went
+   * 1.58/1.61/1.61 s to 3.46/3.48/3.30 s, **2.16x** — and the case then blew
+   * vitest's 5,000 ms per-case default under the full suite's concurrent load.
+   * Gating the call on `offerPending` cut that to +34 %, still visible. Computed
+   * here it costs **nothing**: the loop below already walks every cell.
+   *
+   * **This is precomputation, not a cache, and the difference is that there is
+   * no invalidation question to get wrong.** `WorldData` is built once by
+   * `createWorld`, from `MapData`, and nothing in `sim/src` ever writes it —
+   * roads land in `state.roads`, cleared trees in `state.cleared`. Terrain is
+   * immutable by design decision 1, which is the same property `passable` rests
+   * on. `cards.test.ts` asserts the mask is identical across six week boundaries
+   * of a live run rather than trusting the word "immutable".
+   *
+   * Numbers rather than booleans, matching `passable`'s convention in this file
+   * and `state.ts`'s throughout: everything the sim compares is an integer.
+   */
+  readonly hasWater: number
+  readonly hasMountain: number
 }
 
 export function createWorld(map: MapData): WorldData {
   const cells = map.w * map.h
   const terrain = new Uint8Array(cells)
   const passable = new Uint8Array(cells)
+  let hasWater = 0
+  let hasMountain = 0
   // Precomputed once, not per pathfinding query: `passable` is read on every
   // flow-field relaxation (Task 5), and recomputing it from `terrain` on
-  // every read would be the dominant cost.
+  // every read would be the dominant cost. `hasWater`/`hasMountain` ride along
+  // in the same walk for the same reason — see their declaration above, and
+  // note that no early exit is possible or wanted here: this loop has to visit
+  // every cell for `terrain` and `passable` regardless.
   for (let i = 0; i < cells; i++) {
     const code = map.terrain[i] as TerrainCode
     terrain[i] = code
     passable[i] = code === TERRAIN.LAND || code === TERRAIN.TREE ? 1 : 0
+    if (code === TERRAIN.WATER) hasWater = 1
+    else if (code === TERRAIN.MOUNTAIN) hasMountain = 1
   }
-  return { map, w: map.w, h: map.h, cells, terrain, passable }
+  return { map, w: map.w, h: map.h, cells, terrain, passable, hasWater, hasMountain }
 }
 
 /**

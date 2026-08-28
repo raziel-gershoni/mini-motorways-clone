@@ -59,6 +59,39 @@ describe('createWorld', () => {
     const b = createWorld(map)
     expect(Array.from(a.terrain)).toEqual(Array.from(b.terrain))
     expect(Array.from(a.passable)).toEqual(Array.from(b.passable))
+    expect([a.hasWater, a.hasMountain]).toEqual([b.hasWater, b.hasMountain])
+  })
+
+  it('sets hasWater and hasMountain INDEPENDENTLY, and neither on a board with neither', () => {
+    // **The two flags `cards.ts`'s `capabilityMask` reads on every tick** (M1f
+    // Task 11 — spec §5.10 filters the card pool by map capability). They ride
+    // in the walk above rather than being scanned on the offer path, where a
+    // 960-cell read per tick measured 2.16x on `demoCity`.
+    //
+    // Four boards, because a fixture carrying both codes cannot tell the water
+    // arm from the mountain arm — the same shape as a square map hiding a `w`/`h`
+    // swap. `TERRAIN.TREE` is code 3 and `MOUNTAIN` is 2, so the all-tree board
+    // is what says a `>=` is not an `===`.
+    const cases: readonly [string, string[], number, number][] = [
+      ['both', ['.~.', '.^.'], 1, 1],
+      ['water only', ['.~.', '...'], 1, 0],
+      ['mountain only', ['...', '.^.'], 0, 1],
+      ['neither', ['...', '...'], 0, 0],
+      ['trees are neither', ['TTT', 'TTT'], 0, 0],
+      // The only non-land cell is the LAST one, so a loop that stopped a cell
+      // short would be invisible to every other case here.
+      ['water in the final cell', ['...', '..~'], 1, 0],
+      ['mountain in the final cell', ['...', '..^'], 0, 1],
+    ]
+    for (const [name, rows, water, mountain] of cases) {
+      const w = createWorld(parseMap(name, rows, 5, 40, 16, 5))
+      expect(w.hasWater, `${name}: hasWater`).toBe(water)
+      expect(w.hasMountain, `${name}: hasMountain`).toBe(mountain)
+    }
+    // And on the two boards that SHIP, so both arms are reachable from the game
+    // rather than only from fixtures.
+    const first = createWorld(firstCity())
+    expect([first.hasWater, first.hasMountain], 'firstCity has a river and a mountain').toEqual([1, 1])
   })
 })
 

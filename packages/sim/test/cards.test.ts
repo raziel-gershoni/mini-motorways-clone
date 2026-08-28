@@ -1135,6 +1135,46 @@ describe('runOfferFromPool degrades on EVERY short pool, not on one stubbed exam
     expect(hits, `these files call drawOfferPair directly: ${hits.join(', ')}`).toEqual([])
   })
 
+  it('capabilityMask reads no per-cell array, because runOffer calls it on EVERY tick', () => {
+    // **A source scan because the property is a COST, and a cost has no
+    // assertion.** `runOffer` passes `poolFor(world)` as an ARGUMENT, so it is
+    // evaluated before `runOfferFromPool`'s `offerPending` early return — on
+    // every tick of every run, week 0 included. A terrain scan in here is
+    // therefore an O(cells) per-tick cost on the sim's hottest path.
+    //
+    // Measured, on the design the brief specified (a 960-cell walk with an early
+    // exit): on `demoCity`, which has neither terrain code so the exit never
+    // fires, `demoLayout.test.ts`'s seven 3,000-tick runs went 1.58/1.61/1.61 s
+    // to 3.46/3.48/3.30 s — **2.16x** — and the case then exceeded vitest's
+    // 5,000 ms per-case default under the full suite's concurrent load. Gating
+    // the call on `offerPending` cut it to +34 %, still visible. The two facts
+    // are now computed once in `createWorld`, in the walk that already builds
+    // `passable`.
+    //
+    // **The instrument that caught it was a per-case TIMEOUT**, which this
+    // project's catalogue records as invisible to both mutation screens — no
+    // error class, collection unchanged. So it is precisely the instrument not to
+    // rely on, and this scan is the cheap standing one. It says nothing about how
+    // fast the code is; it says the per-cell read is not back.
+    const src = readFileSync(new URL('../src/cards.ts', import.meta.url), 'utf8')
+    const start = src.indexOf('export function capabilityMask(')
+    expect(start, 'capabilityMask is no longer declared in cards.ts').toBeGreaterThan(0)
+    const body = src.slice(start, src.indexOf('\n}\n', start))
+    expect(body.length, 'the body slice came back empty').toBeGreaterThan(40)
+    for (const banned of ['world.terrain', 'world.cells', 'world.passable']) {
+      expect(
+        body,
+        `capabilityMask reads ${banned} again — that is an O(cells) walk on every tick of ` +
+          'every run. The two terrain facts are precomputed in createWorld; use them.',
+      ).not.toContain(banned)
+    }
+    // Vacuity, both ways: the body really is the function (it names the fields it
+    // DOES read), and the scan really would fire on the banned form.
+    expect(body).toContain('world.hasWater')
+    expect(body).toContain('world.hasMountain')
+    expect('  const t = world.terrain[c] as number').toContain('world.terrain')
+  })
+
   it('the drawOfferPair scan fires on a real call and leaves its counter-examples alone', () => {
     // A scan matches comments, not just code, and this one is checked against the
     // prose forms `cards.ts` and `scratch.ts` actually use rather than assumed
