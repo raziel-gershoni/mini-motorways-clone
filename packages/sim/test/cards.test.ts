@@ -203,8 +203,12 @@ describe('the offer draw is a pure function of the seed word and the week', () =
     // mutant, and the measurement is why.** The brief specified "adjacent weeks
     // differ in at least a third of their bits, `toBeGreaterThan(10)`",
     // presented as the detector for replacing `mixWord(...)` with the bare xor.
-    // Measured over four seeds x 40 week-pairs: the real function scores
-    // min 10 / mean 15.85 and the BARE XOR scores min 13 / mean 16.80 — the
+    // Measured over four seeds x 40 week-pairs (n = 160): the real function
+    // scores min 10 / mean 15.97 and the BARE XOR min 13 / mean 16.80.
+    // **The mean is quoted with its enumeration because an earlier version of
+    // this comment said "four seeds" while quoting 15.85 — which is the ONE-seed
+    // figure. Two quantities under one description, and the load-bearing halves
+    // (both minima) are 10 and 13 on either enumeration.** The
     // mutant avalanches BETTER, and the specified bound fails on the real
     // function at weeks 2 and 3 (exactly 10 bits). A Hamming distance cannot
     // separate them at all.
@@ -326,14 +330,25 @@ describe('nthSetBit and popCountCards', () => {
     expect(() => nthSetBit(0, 0)).toThrow(/only 0 set bits/)
   })
 
-  it('throws on a NEGATIVE k too, which is the only place seen === k and seen >= k differ', () => {
+  it('throws on an OUT-OF-CONTRACT k — negative or fractional — where seen === k and seen >= k part company', () => {
     // **Added from a mutation result, and the enumeration is why it is here.**
-    // `seen === k` -> `seen >= k` scored 0 detectors over the whole 1,995-test
-    // suite. It is not equivalent, though: swept over all 256 masks and k in
-    // [-8, 12), the two disagree on **2,040 cases, every one of them at k < 0,
-    // and on ZERO cases at k >= 0**. `drawOfferPair` never produces a negative
-    // k and the exhaustive agreement test above only walks [0, popcount), so
-    // the difference sat entirely outside every fixture.
+    // `seen === k` -> `seen >= k` scored 0 detectors over the whole suite. It is
+    // not equivalent, though: swept over all 256 masks and INTEGER k in [-8, 12),
+    // the two disagree on **2,040 cases, every one of them at k < 0, and on ZERO
+    // cases at integer k >= 0**.
+    //
+    // **The word INTEGER is a correction.** This test was first named "the only
+    // place ... differ" about negative k, and its own third assertion below
+    // refutes that: at a FRACTIONAL k the two also part company (722 of 1,024
+    // fractional cases), because `seen === 1.5` is never true and falls through
+    // to the throw while `seen >= 1.5` returns bit 2. A test name contradicted
+    // by its own body is the same defect class as a comment that overstates its
+    // case — it reads as verified. The domain is out-of-contract k, of which
+    // negative and fractional are the two kinds.
+    //
+    // `drawOfferPair` produces neither, and the exhaustive agreement test above
+    // only walks integer [0, popcount), so the difference sat entirely outside
+    // every fixture.
     //
     // It is worth closing rather than recording, because of what the mutant
     // RETURNS: `nthSetBit(mask, -1)` under `seen >= k` hands back the first set
@@ -343,9 +358,9 @@ describe('nthSetBit and popCountCards', () => {
     // looks from today's callers.
     expect(() => nthSetBit(0b0110, -1)).toThrow(/asked for set bit -1/)
     expect(() => nthSetBit(0xff, -3)).toThrow(/asked for set bit -3/)
-    // And a non-integer, for the same reason: `seen === 1.5` is never true, so
-    // the loop falls through to the throw, which is the right answer — pinned
-    // so a future `>=` rewrite cannot quietly return bit 1.
+    // And a non-integer, which is the OTHER out-of-contract kind and the one
+    // this test used to deny existed: `seen === 1.5` is never true, so the loop
+    // falls through to the throw, where `seen >= 1.5` would return bit 2.
     expect(() => nthSetBit(0b0110, 1.5)).toThrow(/asked for set bit 1.5/)
   })
 })
