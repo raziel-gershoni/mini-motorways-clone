@@ -250,8 +250,9 @@ describe('the splice over the real maps', () => {
   })
 
   it('leaves upgradeAt all-zero on a fresh state, so the re-bless is PURE LAYOUT', () => {
-    // `createState` writes nothing into either range and no code writes
-    // `upgradeAt` until M1f Task 9 — asserted rather than assumed, because a
+    // `createState` writes nothing into either range, and the one function that
+    // writes `upgradeAt` (`applyPlaceUpgrade`, M1f Task 9) is not called here —
+    // asserted rather than assumed, because a
     // re-bless that moved partly for layout and partly for a stray write would
     // be indistinguishable from one that moved purely for layout.
     for (const map of [firstCity(), demoCity()]) {

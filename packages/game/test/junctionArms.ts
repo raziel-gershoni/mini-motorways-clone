@@ -7,8 +7,14 @@ import {
   createState,
   createWorld,
   dirBetween,
+  carparkCell,
+  destMetaColour,
+  destMetaOrientation,
+  hashState,
   isGameOver,
+  isUpgraded,
   junctionAdmitsOne,
+  neighbours,
   occupantOf,
   otherLane,
   releaseCell,
@@ -17,6 +23,9 @@ import {
   step,
   stepCell,
   FREE,
+  H_DEST_COUNT,
+  H_HOUSE_COUNT,
+  H_INV_UPGRADES,
   H_ROUTES_REFUSED,
   H_SCORE,
   H_TICK,
@@ -702,4 +711,233 @@ export function inFlightCars(state: GameState): number {
     if (phase === PHASE_OUTBOUND || phase === PHASE_RETURNING) n++
   }
   return n
+}
+
+// ---------------------------------------------------------------------------
+// M1f Task 9 Step 11: the same arm, with upgrades seated at a stated tick
+// ---------------------------------------------------------------------------
+
+/**
+ * **`H_INV_UPGRADES` is written to this value on the seat tick by EVERY arm,
+ * INCLUDING THE CONTROL, and that is the point.**
+ *
+ * The slot is read by exactly one function (`canPlaceUpgrade`) and can change no
+ * car's behaviour, but it IS inside `hashState` — so an arm that granted itself
+ * inventory while the control did not would differ from the control in the
+ * digest before a single upgrade was placed, and *"at least one placement changes
+ * the run"* would be satisfied by the grant rather than by the object. Every arm
+ * pays the same write at the same tick; the only difference between the control
+ * and a row is the flag.
+ *
+ * Granted directly rather than through `applyChooseCard`, because that function
+ * also pays `CARD_GRANT_ITEM` tiles — and the greedy connector reads the tile
+ * budget, so a card would change which ROADS the arm lays and the rows would
+ * differ from the control by a road network as well as by an upgrade.
+ */
+const UPGRADE_ARM_INVENTORY = 8
+
+export interface UpgradeArmOptions {
+  /** Cells to place an upgrade on, in order, on `seatTick`. */
+  readonly upgrades: readonly number[]
+  /**
+   * The tick the upgrades are enqueued on. **Stated, never defaulted to 0 or to
+   * the first boundary**: the board has no junction at all until tick 4,500, so
+   * a rig that seated at tick 0 would have every placement refused
+   * (`not-a-junction`), every arm byte-identical to the control, and the failure
+   * would surface as *"at least one placement changes the run at all"* — which
+   * reads as an entry-rule bug and sends the implementer into `canEnter`.
+   */
+  readonly seatTick: number
+}
+
+export interface UpgradeArmRun {
+  /** Every placement was accepted by `applyPlaceUpgrade`. False if any was refused. */
+  readonly placed: boolean
+  readonly trips: number
+  readonly deathTick: number
+  readonly endTick: number
+  readonly blockedCarTicks: number
+  readonly valveFirings: number
+  readonly longestQueue: number
+  readonly routesRefused: number
+  /** `hashState` at the end of the run — the byte-level "did anything change". */
+  readonly hash: number
+  /** Destinations whose carpark is joined by road to a house of its own colour, at the end. */
+  readonly reachableDestinations: number
+  /** How many destinations exist at the end, so the figure above has a denominator. */
+  readonly destinations: number
+}
+
+/**
+ * Destinations whose carpark is connected, over `state.roads`, to at least one
+ * house of the destination's own colour.
+ *
+ * **A pure graph question, asked of `roads` and nothing else**, because that is
+ * the only thing a placement could break: an upgrade writes one flag and lays no
+ * road, so the ONLY path by which relief could disconnect anything is the greedy
+ * connector laying different roads once the traffic differs. `H_ROUTES_REFUSED`
+ * is deliberately not used for this — `blocking.ts` says at length that it
+ * measures the route WALK (length, zero-length, wrong carpark) and never the
+ * board, and it is 0 on every arm this project has measured.
+ */
+function reachableDestinations(state: GameState, world: WorldData): number {
+  const seen = new Uint8Array(world.cells)
+  const queue = new Int32Array(world.cells)
+  const outCell = new Int32Array(8)
+  const outDir = new Int8Array(8)
+  const destCount = state.header[H_DEST_COUNT] as number
+  const houseCount = state.header[H_HOUSE_COUNT] as number
+  let reachable = 0
+  for (let d = 0; d < destCount; d++) {
+    const meta = state.destMeta[d] as number
+    const colour = destMetaColour(meta)
+    const cp = carparkCell(state.destCell[d] as number, destMetaOrientation(meta), world.w, world.h)
+    if (cp < 0) continue
+    seen.fill(0)
+    let head = 0
+    let tail = 0
+    queue[tail++] = cp
+    seen[cp] = 1
+    let found = false
+    while (head < tail && !found) {
+      const cell = queue[head++] as number
+      for (let h = 0; h < houseCount; h++) {
+        if ((state.houseCell[h] as number) === cell && (state.houseColour[h] as number) === colour) {
+          found = true
+          break
+        }
+      }
+      if (found) break
+      const n = neighbours(state, world, cell, outCell, outDir)
+      for (let k = 0; k < n; k++) {
+        const nb = outCell[k] as number
+        if (seen[nb] === 1) continue
+        seen[nb] = 1
+        queue[tail++] = nb
+      }
+    }
+    if (found) reachable++
+  }
+  return reachable
+}
+
+/**
+ * The shipped city under the greedy connector, with `opts.upgrades` seated on
+ * `opts.seatTick` — **driven identically to `driveArm('city-greedy')` in every
+ * respect that reaches the sim.**
+ *
+ * The occupancy replay is deliberately absent: it is an instrument for
+ * attributing refusals to a cell and a cause, it writes nothing to `state`, and
+ * omitting it makes a row cost about a third of what `runJunctionArm` costs.
+ * What must be identical is the INPUT — the same boot, the same opening stroke
+ * on the same tick, the same `GREEDY_PERIOD_TICKS` cadence, the same horizon —
+ * and `junctionArms.test.ts` asserts the control reproduces the memoised arm's
+ * trips, death tick, blocked car-ticks and valve firings rather than trusting
+ * this paragraph.
+ *
+ * The upgrade actions are APPENDED to whatever the connector queues on the seat
+ * tick, never substituted for them: `seatTick % GREEDY_PERIOD_TICKS === 0` for
+ * every week boundary, so the two always collide and a rig that replaced the
+ * connector's actions would drop one stroke of road out of the arm it is
+ * comparing.
+ */
+export function runUpgradeArm(opts: UpgradeArmOptions): UpgradeArmRun {
+  const { state, world, drive, bootTick, warmStartTicks } = boot(DEFAULT_LAYOUT_ID)
+  const startTick = bootTick + warmStartTicks
+  const endHorizon = startTick + CITY_HORIZON_WEEKS * TICKS_PER_WEEK
+
+  const carCount = state.carPhase.length
+  const preCell = new Int32Array(carCount)
+  const preBlocked = new Int32Array(carCount)
+  const preInFlight = new Uint8Array(carCount)
+
+  const openingActions: TickAction[] = []
+  for (const stroke of CITY_OPENING) openingActions.push(...armPathActions(stroke))
+  const tally = { unaffordable: 0 }
+  const upgradeActions: TickAction[] = opts.upgrades.map((cell) => ({ kind: 'upgrade', a: cell, b: 0 }))
+
+  let deathTick = -1
+  let refusals = 0
+  let valveFirings = 0
+  let peakQueue = 0
+  let placed = true
+
+  for (let tick = bootTick + 1; tick <= endHorizon; tick++) {
+    const warming = tick <= startTick
+    for (let c = 0; c < carCount; c++) {
+      preCell[c] = state.carCell[c] as number
+      preBlocked[c] = state.carBlockedTicks[c] as number
+      const phase = state.carPhase[c] as number
+      preInFlight[c] = phase === PHASE_OUTBOUND || phase === PHASE_RETURNING ? 1 : 0
+    }
+
+    let actions: readonly TickAction[] | undefined
+    if (!warming) {
+      if (tick === startTick + 1) actions = openingActions
+      else if (tick % GREEDY_PERIOD_TICKS === 0) actions = armGreedyActions(state, world, tally)
+    }
+    if (tick === opts.seatTick) {
+      // Every arm pays the grant, including the one placing nothing — see
+      // `UPGRADE_ARM_INVENTORY`.
+      state.header[H_INV_UPGRADES] = UPGRADE_ARM_INVENTORY
+      actions = actions === undefined ? upgradeActions : [...actions, ...upgradeActions]
+    }
+    drive(actions)
+    if (tick === opts.seatTick) {
+      for (const cell of opts.upgrades) if (!isUpgraded(state, cell)) placed = false
+    }
+
+    for (let c = 0; c < carCount; c++) {
+      const post = state.carCell[c] as number
+      const blocked = state.carBlockedTicks[c] as number
+      if (preInFlight[c] === 0) continue
+      const moved = post !== (preCell[c] as number)
+      if (!moved && blocked === (preBlocked[c] as number) + 1) {
+        if (!warming) refusals++
+      } else if (moved && (preBlocked[c] as number) >= MAX_BLOCKED_TICKS) {
+        valveFirings++
+      }
+    }
+
+    if (!warming && tick % CITY_QUEUE_SAMPLE === 0) {
+      const q = longestQueue(state, world)
+      if (q > peakQueue) peakQueue = q
+    }
+    if (isGameOver(state)) {
+      deathTick = state.header[H_TICK] as number
+      break
+    }
+  }
+
+  return {
+    placed,
+    trips: state.header[H_SCORE] as number,
+    deathTick,
+    endTick: state.header[H_TICK] as number,
+    blockedCarTicks: refusals,
+    valveFirings,
+    longestQueue: peakQueue,
+    routesRefused: state.header[H_ROUTES_REFUSED] as number,
+    hash: hashState(state),
+    reachableDestinations: reachableDestinations(state, world),
+    destinations: state.header[H_DEST_COUNT] as number,
+  }
+}
+
+/** The per-cell table, formatted for the report. */
+export function formatUpgradeRows(
+  control: UpgradeArmRun,
+  rows: readonly (UpgradeArmRun & { readonly cell: number })[],
+  w: number,
+): string {
+  const line = (name: string, r: UpgradeArmRun): string =>
+    `${name.padEnd(14)} trips=${String(r.trips).padStart(4)} death=${String(r.deathTick).padStart(6)} ` +
+    `blocked=${String(r.blockedCarTicks).padStart(6)} valves=${String(r.valveFirings).padStart(3)} ` +
+    `queue=${String(r.longestQueue).padStart(3)} reach=${r.reachableDestinations}/${r.destinations} ` +
+    `vs control ${r.trips === control.trips ? '0.0' : (((r.trips - control.trips) * 1000) / control.trips / 10).toFixed(1)}%`
+  const out = [line('control', control)]
+  for (const r of rows) out.push(line(cellName(r.cell, w), r))
+  const worse = rows.filter((r) => r.trips < control.trips).length
+  out.push(`rows strictly WORSE than the control: ${worse} of ${rows.length}`)
+  return out.join('\n')
 }

@@ -3863,9 +3863,13 @@ describe('a junction cell admits one AXIS at a time (spec 5.5, M1f Tasks 2 and 3
     // falls from 15 to 5 rather than to 0.** Both halves are on one fixture
     // because a pair of tests could each be green for the other's reason.
     //
-    // Task 9 Step 7 reuses this exact fixture to show that a junction upgrade on
-    // each cell gives the property back for BOTH, with nothing hand-written
-    // into state.
+    // **Task 9 reuses this exact fixture for the TURNING half only**, and
+    // deliberately not for the straight one: (a) above already passes on a bare
+    // board, so an upgrade case built on it would be green without the object
+    // under test. Its occupants also enter on crossing axes at BOTH ends —
+    // unlike (b), which is one-sided — because a one-sided refusal cannot show
+    // that one upgrade is half a fix. See *"AN UPGRADE GIVES THE TURNING SWAP
+    // BACK"* below.
     const rig = twoAdjacentJunctions('xing-2cycle')
     expect(roadDegree(rig.s, rig.left), 'both ends are junctions, at the threshold').toBe(3)
     expect(roadDegree(rig.s, rig.right)).toBe(3)

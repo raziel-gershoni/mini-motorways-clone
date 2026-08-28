@@ -4777,8 +4777,13 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     // ONE FIGURE ABOVE MOVED.** The opening is a fixed 20-tile stroke laid on
     // the first tick, so the arm has nothing to spend a bonus on — the extra
     // tiles sit in the ledger, which this arm does not assert, and the two
-    // items sit in `H_INV_UPGRADES`, which nothing in M1f places. Task 8 owns
-    // the modal; Task 9 owns spending the upgrade.
+    // items sit in `H_INV_UPGRADES`. **Task 9 landed `applyPlaceUpgrade`, and
+    // this arm still moves not one figure**, which is the correct outcome and
+    // is worth stating rather than leaving as an absence: nothing in `game/src`
+    // enqueues an `'upgrade'` action, so no production driver places one and the
+    // arm cannot see the mechanism. Task 8 owns the modal; **Task 10 owns the
+    // gesture that spends the upgrade**, and it is the task that will move these
+    // figures.
     expect(r.cardsTaken, 'one boundary at 4,500 inside 8,661 ticks').toBe(1)
     expect(r.upgradesHeld + armCardTiles(r), 'a card WAS taken, and it granted something').toBeGreaterThan(0)
 
@@ -5064,7 +5069,11 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     // rather than to 0** — two cars swapping across an edge with a junction at
     // each end resolve in one tick when both entered on the shared axis, and
     // still deadlock when either entered on another. `blocking.test.ts`'s
-    // *"breaks the 2-cycle"* is that fixture; Task 9's upgrade is the relief.
+    // *"the STRAIGHT 2-cycle ... and the TURNING one does not"* is that fixture,
+    // and **Task 9's upgrade is the relief for the turning half** — landed, and
+    // measured at 0 valve firings on this arm with three upgrades seated at tick
+    // 13,500 (`junctionArms.test.ts`). It does not move this figure, because no
+    // production driver places one.
     expect(r.maxBlockedTicks, 'the worst wait, in ticks — SATURATED').toBe(MAX_BLOCKED_TICKS)
     expect(r.maxBlockedTicks, 'and that is the constant, not a coincidence').toBe(1350)
     expect(r.valveFirings, 'the valve fires on the board that ships — 15 under the wide rule').toBe(5)

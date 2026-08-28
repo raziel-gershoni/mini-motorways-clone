@@ -14,6 +14,10 @@ import {
   PHASE_NONE,
   PHASE_OUTBOUND,
   PHASE_RETURNING,
+  applyPlaceUpgrade,
+  isUpgraded,
+  junctionAdmitsOne,
+  H_INV_UPGRADES,
   type GameState,
 } from '@laneways/sim'
 import { NO_CROSSING, carAheadOf, longestQueue, travelDir } from '../src/queueProbe'
@@ -63,6 +67,16 @@ const W = 6
 
 const cellAt = (y: number): number => y * JAM_W + JAM_X
 const cellXY = (x: number, y: number): number => y * JAM_W + x
+
+/**
+ * The corridor row raised to degree 4 by the junction fixtures below, at module
+ * scope because **two** blocks need it: the hand-built tie-break cases, and M1f
+ * Task 9's driven upgrade arm in the property block above. Two copies of a cell
+ * index in one file is how two fixtures come to be about two different cells
+ * while both comments say "the junction".
+ */
+const JY = 10
+const JCELL = cellAt(JY)
 
 /**
  * Silences every car and empties every occupancy slot, so each case starts from
@@ -392,6 +406,145 @@ describe('the probe asks the same question canEnter does', () => {
     expect(blocked).toBeGreaterThan(1000)
     expect(free).toBeGreaterThan(1000)
   })
+
+  /**
+   * **The same property on an UPGRADED board — M1f Task 9, and it is the
+   * surviving half of the second review's I4.**
+   *
+   * The arm above is 90,533 questions on a board with **no junction on it at
+   * all** (the jam corridor is degree <= 2 everywhere), so it is vacuous about
+   * the one case Task 9 adds and would stay green if `carAheadOf` and `canEnter`
+   * grew two different opinions of an upgraded cell. It is cheap to re-point:
+   * raise one corridor cell to degree 4, seat an upgrade on it, and drive.
+   *
+   * **Expected: it passes unchanged, because both sides read
+   * `junctionAdmitsOne`** — `queueProbe.ts` is not edited by Task 9 and tracks
+   * the upgrade with no change at all, which is that review item closed
+   * structurally rather than by a test. If it does not pass, one of them has
+   * grown a second copy of the predicate and that is the finding.
+   *
+   * Two arms rather than one, because "they agree" is satisfiable by a board
+   * where the junction is never contended: the BARE arm is the control and the
+   * case asserts that the two arms give different refusal counts at the same
+   * cell, so the upgrade is measurably doing something while the two readers
+   * stay in step.
+   */
+  it('agrees on an UPGRADED junction too, on the same driven board (M1f Task 9)', () => {
+    interface Arm {
+      readonly asked: number
+      readonly blocked: number
+      readonly atJunction: number
+      readonly blockedAtJunction: number
+    }
+
+    const drive = (seed: string, upgrade: boolean): Arm => {
+      const r = buildJamRig(seed)
+      // The junction, on the jam board's own road column — the same shape
+      // `junctionRig()` below builds, so `stepCell`, the lanes and the occupancy
+      // slots are all production and only the degree is hand-made.
+      expect(placeRoad(r.state, r.world, JCELL, JCELL - 1)).toBe(true)
+      expect(placeRoad(r.state, r.world, JCELL, JCELL + 1)).toBe(true)
+      expect(roadDegree(r.state, JCELL)).toBe(4)
+      if (upgrade) {
+        r.state.header[H_INV_UPGRADES] = 1
+        expect(applyPlaceUpgrade(r.state, r.world, JCELL), 'the upgrade seated').toBe(true)
+      }
+      expect(isUpgraded(r.state, JCELL)).toBe(upgrade)
+      expect(junctionAdmitsOne(r.state, JCELL), 'the default rule, or not').toBe(!upgrade)
+
+      let asked = 0
+      let blocked = 0
+      let atJunction = 0
+      let blockedAtJunction = 0
+      for (let t = 0; t < 900; t++) {
+        r.drive(1)
+        const state = r.state
+        for (let c = 0; c < state.carPhase.length; c++) {
+          const dir = travelDir(state, c)
+          if (dir === NO_CROSSING) continue
+          const next = stepCell(state.carCell[c] as number, dir, r.world.w, r.world.h)
+          if (next < 0) continue
+          const outcome = canEnter(state, r.world, c, next, dir)
+          const simSaysBlocked =
+            outcome === EnterOutcome.REFUSED_OCCUPIED || outcome === EnterOutcome.ENTER_VALVE
+          const probeSaysBlocked = carAheadOf(state, r.world, c) !== FREE
+          expect(
+            probeSaysBlocked,
+            `${upgrade ? 'upgraded' : 'bare'} tick ${t}, car ${c}: canEnter said ${outcome}`,
+          ).toBe(simSaysBlocked)
+          asked++
+          if (simSaysBlocked) blocked++
+          if (next === JCELL) {
+            atJunction++
+            if (simSaysBlocked) blockedAtJunction++
+          }
+        }
+      }
+      return { asked, blocked, atJunction, blockedAtJunction }
+    }
+
+    const bare = drive('probe-vs-canenter-bare-junction', false)
+    const up = drive('probe-vs-canenter-upgraded', true)
+
+    // The property itself is the `expect` inside the loop; these say the loop
+    // was worth running.
+    expect(up.asked, 'the upgraded arm asked a real number of questions').toBeGreaterThan(10000)
+    expect(up.atJunction, 'and asked about the UPGRADED CELL specifically').toBeGreaterThan(100)
+    expect(bare.atJunction, 'as did the control').toBeGreaterThan(100)
+
+    // **AND THE DRIVEN ARM CANNOT DISCRIMINATE ON THIS BOARD, WHICH IS MEASURED
+    // RATHER THAN ASSUMED.** The jam corridor is single-file and every car on it
+    // is northbound or southbound, so the two side roads that make `JCELL`
+    // degree 4 are dead ends nothing routes through: every refusal at that cell
+    // is an OWN-lane refusal, which no upgrade touches. Measured, the two arms
+    // are identical — `blockedAtJunction` is 719 in both — and the first version
+    // of this case asserted `up < bare` and went red on its own vacuity check.
+    // Recorded, not deleted: the two arms being equal is the evidence that the
+    // 900 driven ticks cover the AGREEMENT and say nothing about the exemption.
+    expect(up.blockedAtJunction, 'same board, same traffic, same own-lane refusals').toBe(
+      bare.blockedAtJunction,
+    )
+
+    // So the discriminating half is hand-built, on the SAME cell of the SAME
+    // board: one crossing occupant, and both readers asked before and after the
+    // upgrade. This is the point at which the two could disagree, and the driven
+    // arm above is what says they do not disagree anywhere else either.
+    const cross = (upgrade: boolean): { probe: number; sim: number } => {
+      const r = buildJamRig(`probe-upgrade-cross-${upgrade}`)
+      expect(placeRoad(r.state, r.world, JCELL, JCELL - 1)).toBe(true)
+      expect(placeRoad(r.state, r.world, JCELL, JCELL + 1)).toBe(true)
+      if (upgrade) {
+        r.state.header[H_INV_UPGRADES] = 1
+        expect(applyPlaceUpgrade(r.state, r.world, JCELL)).toBe(true)
+      }
+      parkEveryone(r.state)
+      // Car 0 one cell south of the junction heading north (lane 1); car 1
+      // standing ON it, having entered heading east (lane 0) — the (E, N)
+      // crossing pair, the only kind this rule can newly refuse.
+      placeCar(r.state, 0, JY + 1, PHASE_OUTBOUND, N, 6, 1)
+      r.state.carCell[1] = JCELL
+      r.state.carPhase[1] = PHASE_OUTBOUND
+      r.state.carRouteLen[1] = 4
+      r.state.carRouteCursor[1] = 1
+      for (let k = 0; k < 4; k++) packRouteStep(r.state, 1, k, E)
+      claimCell(r.state, 1, JCELL, E)
+      expect(occupantOf(r.state, JCELL, LANE_OF_DIR[N] as number), "car 0's own lane is free").toBe(FREE)
+      return {
+        probe: carAheadOf(r.state, r.world, 0),
+        sim: canEnter(r.state, r.world, 0, JCELL, N),
+      }
+    }
+
+    const bareCross = cross(false)
+    expect(bareCross.sim, 'bare: the junction rule refuses the crossing').toBe(
+      EnterOutcome.REFUSED_OCCUPIED,
+    )
+    expect(bareCross.probe, 'and the probe names the other lane').toBe(1)
+
+    const upCross = cross(true)
+    expect(upCross.sim, 'upgraded: the same crossing is admitted').toBe(EnterOutcome.ENTER_FREE)
+    expect(upCross.probe, 'and the probe stops naming it, with no edit to queueProbe.ts').toBe(FREE)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -423,8 +576,6 @@ describe('the probe asks the same question canEnter does', () => {
  * production ones and only the degree is hand-made.
  */
 describe('carAheadOf at a JUNCTION, where both lanes can hold the entrant up', () => {
-  const JY = 10
-  const JCELL = cellAt(JY)
 
   /** The jam board with `(8, 10)` raised from degree 2 to degree 4. */
   function junctionRig() {

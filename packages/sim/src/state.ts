@@ -79,8 +79,11 @@ import { assertWorldMatches, mapIdHash, type WorldData } from './world'
  *     mechanism for both "one card per week" and "already chosen"; a second flag
  *     would leave neither half with a detector.
  *   - `H_INV_UPGRADES` — incremented by `applyChooseCard` (Task 6), decremented
- *     by `applyPlaceUpgrade` (Task 9, **not yet landed**).
- *   - `H_UPGRADE_COUNT` — still unwritten; Task 9 owns it.
+ *     by `applyPlaceUpgrade` (`upgrades.ts`, Task 9, **landed**). It has a
+ *     reader as well as a writer now: `canPlaceUpgrade` refuses with
+ *     `'no-inventory'` below 1.
+ *   - `H_UPGRADE_COUNT` — written by `applyPlaceUpgrade` (Task 9) and by nothing
+ *     else. It only ever rises: deleting an upgrade is M1g's.
  *
  * `offerPending` has three production callers now (`runOffer`,
  * `applyChooseCard`, `offerSlot`) and **so does `offerSlot`.** Every clause of

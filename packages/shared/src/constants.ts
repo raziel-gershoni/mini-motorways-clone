@@ -136,9 +136,14 @@ export const INTERSECTION_DEGREE = 3
  * one-lane rule could not fire at all. The lane property itself is unchanged and
  * still true; what changed is what it implies at a junction.
  * `blocking.test.ts`'s *"the STRAIGHT 2-cycle Task 2 created resolves again, and
- * the TURNING one does not"* holds both halves on one fixture, and M1f Task 9's
- * junction upgrade is the relief for the rest: an upgraded cell falls back to
- * the own-lane rule and the property returns there, whole, with no phase.
+ * the TURNING one does not"* holds both halves on one fixture, and **M1f Task 9's
+ * junction upgrade landed the relief for the rest**: an upgraded cell falls back
+ * to the own-lane rule and the property returns there, whole, with no phase.
+ * `blocking.test.ts`'s *"AN UPGRADE GIVES THE TURNING SWAP BACK"* is that case,
+ * on a two-sided deadlock built from the same fixture — and note that it is the
+ * TURNING swap and not the head-on one, because Task 3 had already given the
+ * head-on one back and a test that claimed otherwise would pass without the
+ * object under test.
  *
  * The rest of the paragraph survives: 1,350 ticks is 30 % of a 4,500-tick week —
  * an acceptable price for a genuine circular wait, and an absurd one for the
@@ -624,14 +629,24 @@ export const CARD_GRANT_ROAD_TILES = 30
  * and not one road it lays moves: `armGreedyActions` reads the budget in exactly
  * one place and `unaffordable` is 0 across the whole run.
  *
- * **So on the tree as it stands the modal is not a trade-off at all, and both
- * halves of that are worse than "the tiles are slack".** `H_INV_UPGRADES` has
- * exactly one writer (`applyChooseCard`) and **zero readers** — `applyPlaceUpgrade`
- * is Task 9 and has not landed — so the choice a player is offered is *30
- * unspendable tiles* against *20 unspendable tiles plus two items nothing can
- * place*. Task 9 closes the second half by making the items placeable. **The
- * first half — 4.29x slack on tiles — is untouched by any planned task**, and
- * the lever above is the only thing that would close it.
+ * **HALF OF THIS IS CLOSED AT M1f TASK 9 AND HALF IS NOT.** The sentence here
+ * read *"`H_INV_UPGRADES` has exactly one writer (`applyChooseCard`) and zero
+ * readers — `applyPlaceUpgrade` is Task 9 and has not landed — so the choice a
+ * player is offered is 30 unspendable tiles against 20 unspendable tiles plus
+ * two items nothing can place."* **Task 9 landed `applyPlaceUpgrade`, so the
+ * items are placeable and the slot has a reader** (`canPlaceUpgrade` refuses
+ * with `'no-inventory'` below 1). Measured on the shipped arm, one upgrade
+ * seated at the week-3 boundary is worth **+105.2 % on trips at the right cell
+ * and +7.1 % at the wrong one**, so the item side of the modal is now a real
+ * choice with a real spread.
+ *
+ * **The first half — 4.29x slack on tiles — is untouched by any planned task**,
+ * and the lever above is the only thing that would close it. So the modal is
+ * *20 tiles nobody needs plus two items worth up to a doubled run* against *30
+ * tiles nobody needs*, which is a different sentence from the one above and is
+ * still not a dilemma: the item card strictly dominates once a legal site
+ * exists. **No gesture grants or places one in M1f** — Task 10 owns the UI —
+ * so nothing a player can do today reaches any of it.
  *
  * **The caveat, because the measurement is one arm's.** The greedy connector
  * lays MINIMAL road: a 0-1 BFS to the nearest same-colour house and nothing

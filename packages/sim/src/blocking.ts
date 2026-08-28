@@ -951,16 +951,30 @@ export function crossesDirections(a: number, b: number): boolean {
  * wide rule and this one, and the worst wait is still the saturated 1,350 on
  * both M1f arms: **fewer deadlocks, not none.**
  *
- * **The only thing that lifts the rest is a junction upgrade** (M1f Task 9,
- * §5.6): `junctionAdmitsOne` returns false at an upgraded cell, this clause
- * reduces to the pre-M1f own-lane rule there, and the head-on property comes
- * back whole, at that cell, with no phase and no timer. Measured at Task 3 on
- * this arm, exempting the three junction-eligible cells that carry the jam
- * takes the run from 368 trips to **759** and from 29,267 blocked car-ticks to
- * **2,298**; exempting all five cells the rule ever fires on reproduces the
- * pre-M1f board to the digit — 747 trips, 2,120 blocked, tick 31,456. A traffic
- * light would do the same job by refusing cars instead of admitting them; M1f
- * measured one and rejected it, and it is deferred to M1g.
+ * **The only thing that lifts the rest is a junction upgrade, AND IT HAS
+ * LANDED** (M1f Task 9, §5.6): `junctionAdmitsOne` returns false at an upgraded
+ * cell, this clause reduces to the pre-M1f own-lane rule there, and the head-on
+ * property comes back whole, at that cell, with no phase and no timer.
+ *
+ * Measured at Task 3 by exempting the rule at a hard-coded cell set, exempting
+ * the three junction-eligible cells that carry the jam takes the run from 368
+ * trips to **759** and from 29,267 blocked car-ticks to **2,298**; exempting all
+ * five cells the rule ever fires on reproduces the pre-M1f board to the digit —
+ * 747 trips, 2,120 blocked, tick 31,456. **Task 9 re-measured the same three
+ * cells with the shipped object — three `applyPlaceUpgrade` calls on tick 13,500,
+ * this clause untouched — and got 759 / 2,298 / 31,761, the same three numbers
+ * from an instrument sharing no constant with the first.**
+ *
+ * **Per cell it is not close to uniform, and that is the placement decision.**
+ * One upgrade at `(9,22)` is worth **755 trips (+105.2 %)** and takes blocked
+ * car-ticks to 2,519 with zero valve firings; one at `(12,19)` — the cell with
+ * the MOST junction-caused refusals — is worth **394 (+7.1 %)**. And the seat
+ * tick decides as much: the same cell is refused at boundary 2 (not a junction
+ * yet) and worth nothing at boundary 4 (the run dies at 21,783).
+ * `game/test/junctionArms.test.ts` owns that table.
+ *
+ * A traffic light would do the same job by refusing cars instead of admitting
+ * them; M1f measured one and rejected it, and it is deferred to M1g.
  *
  * **Queueing is not implemented — it emerges.** There is no queue structure, no
  * follower list and no "who is behind me" anywhere in this milestone. A car

@@ -9,13 +9,20 @@ import {
   spawnZoneCells,
   ORIENTATION_COUNT,
   SpawnOutcome,
+  canPlaceUpgrade,
+  applyPlaceUpgrade,
+  hashState,
+  placeRoad,
+  roadDegree,
   H_DEST_COUNT,
   H_HOUSE_COUNT,
+  H_INV_UPGRADES,
   H_PINS_DROPPED,
   H_TICK,
+  H_UPGRADE_COUNT,
   H_WEEK,
 } from '@laneways/sim'
-import { FIRST_PIN_DELAY_TICKS } from '@laneways/shared'
+import { FIRST_PIN_DELAY_TICKS, MAX_UPGRADES } from '@laneways/shared'
 import type { GameState, Scratch, WorldData } from '@laneways/sim'
 import type { AtlasContext, AtlasSurface } from '@laneways/render'
 import { createGame, type GameContext } from '../src/main'
@@ -769,5 +776,214 @@ describe('the spawn arm pins its own shape', () => {
     expect(SPAWN_ATTEMPTS).toBe(3000)
     expect((SPAWN_ATTEMPTS * 40) / SAMPLING_INTERVAL_BYTES).toBeGreaterThan(200)
     expect(WINDOW_COUNT).toBeGreaterThanOrEqual(3)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The junction upgrade's placement rule — M1f Task 9, per CALL for the same
+// reason everything above is
+// ---------------------------------------------------------------------------
+
+/**
+ * **`upgrades.ts` cannot be covered by a TICK window, and this is that stated
+ * plainly rather than worked around.**
+ *
+ * `applyPlaceUpgrade` is dispatched from `step`'s phase-3 input loop, so it is
+ * nominally "on the tick" — but no rig in this repo enqueues an `'upgrade'`
+ * action inside a profiled window, and none should: a player places at most two
+ * per week and `allocation.test.ts`'s tick block works precisely because no rig
+ * resolves a week (Task 8's note, kept). One event per 3,000-tick window is
+ * below a 512-byte sampling profiler's floor **by construction**, which is Task
+ * 7's finding about `applyChooseCard` and is unchanged by this task. Structural
+ * rather than measured, so it cannot rot into a reading:
+ * `grep -c "kind: 'upgrade'" packages/game/test/allocation.test.ts` is **0**, so
+ * the module is never entered inside a profiled window and a clean budget there
+ * says nothing about it.
+ *
+ * Task 8 fixed the RENDER half of the same shape with `modalGame()` — a rig that
+ * parks the sim in the state you want to profile — and handed this task the
+ * template. **It does not transfer, and the reason is a real difference rather
+ * than effort.** A modal is a STATE: park the sim in it and phase 12 draws on
+ * all 9,000 profiled frames, on a board a player genuinely sees. A placement is
+ * an EVENT, and a window whose ticks are mostly placements is not a board any
+ * player produces — profiling it would measure a fiction and report a budget
+ * about it.
+ *
+ * What IS honest is the per-call rig this file already is, for functions with no
+ * per-frame caller — the same argument, the same instrument and the same 2 B
+ * budget as `canPlaceHouse`, which was measured at 40.0 B/call before its
+ * literal was made a singleton. `upgrades.ts` returns six frozen module-scope
+ * singletons for exactly that reason and this is what says they stayed that way.
+ */
+const UPGRADES_FILE = 'packages/sim/src/upgrades.ts'
+
+/** 200 attempts x 6 cells = 1,200 `canPlaceUpgrade` calls plus 200 `applyPlaceUpgrade`. */
+const UPGRADE_ATTEMPTS = 200
+const UPGRADE_CELLS_PER_ATTEMPT = 6
+const UPGRADE_CALLS_PER_SCAN = UPGRADE_ATTEMPTS * (UPGRADE_CELLS_PER_ATTEMPT + 1)
+
+/**
+ * A board with a real degree-3 junction on it, built through `placeRoad` so the
+ * scan's `ok` and `occupied` outcomes are reachable rather than hand-written.
+ *
+ * The demo layout already carries road; the junction is added at a cell chosen
+ * to be clear of it, and the call site asserts the degree rather than assuming
+ * it — a rig whose "junction" is a corridor measures `not-a-junction` five ways
+ * and reports it as coverage.
+ */
+function upgradeBoard(layoutId: string): { state: GameState; world: WorldData; junction: number } {
+  const { state, world } = board(layoutId)
+  let junction = -1
+  for (let cell = world.w + 1; cell < world.cells - world.w - 1 && junction < 0; cell++) {
+    if ((state.roads[cell] as number) !== 0) continue
+    const arms = [cell - 1, cell + 1, cell - world.w]
+    if (arms.some((a) => (state.roads[a] as number) !== 0)) continue
+    if (arms.every((a) => placeRoad(state, world, cell, a))) junction = cell
+  }
+  expect(junction, 'the rig could not build a junction on this board').toBeGreaterThanOrEqual(0)
+  expect(roadDegree(state, junction), 'and it really is one').toBe(3)
+  return { state, world, junction }
+}
+
+/**
+ * Every outcome of both functions, in a fixed ratio, with the state restored to
+ * its starting point at the end of each attempt so the scan is repeatable
+ * across the three profiling windows.
+ *
+ * **This function must not allocate**, on the same terms as `scan` above: it
+ * reads `.ok`/`.reason` off the returned singleton and keeps one integer.
+ */
+function upgradeScan(
+  state: GameState,
+  world: WorldData,
+  junction: number,
+  escapePerCall: boolean,
+): number {
+  let accepted = 0
+  for (let a = 0; a < UPGRADE_ATTEMPTS; a++) {
+    // ok / not-a-junction / off-board, twice each, then a placement that makes
+    // the next attempt's first call `occupied` until it is undone below.
+    state.header[H_INV_UPGRADES] = 2
+    state.header[H_UPGRADE_COUNT] = 0
+    if (canPlaceUpgrade(state, world, junction).ok) accepted++
+    if (canPlaceUpgrade(state, world, (a * 7) % world.cells).ok) accepted++
+    if (canPlaceUpgrade(state, world, world.cells + (a % 4)).ok) accepted++
+    state.header[H_UPGRADE_COUNT] = MAX_UPGRADES
+    if (canPlaceUpgrade(state, world, junction).ok) accepted++
+    state.header[H_UPGRADE_COUNT] = 0
+    state.header[H_INV_UPGRADES] = 0
+    if (canPlaceUpgrade(state, world, junction).ok) accepted++
+    state.header[H_INV_UPGRADES] = 2
+    if (applyPlaceUpgrade(state, world, junction)) accepted++
+    if (canPlaceUpgrade(state, world, junction).ok) accepted++
+    if (escapePerCall) {
+      // **It has to ESCAPE**, per the note on `scan`'s control.
+      ;(globalThis as Record<string, unknown>).__upgradeSink = { a, junction }
+    }
+    state.upgradeAt[junction] = 0
+    state.header[H_UPGRADE_COUNT] = 0
+  }
+  return accepted
+}
+
+function upgradePerCallMin(
+  state: GameState,
+  world: WorldData,
+  junction: number,
+  pick: (byFile: Map<string, number>) => number,
+): number {
+  let min = Infinity
+  for (let w = 0; w < WINDOW_COUNT; w++) {
+    const byFile = profileBytesByFile(() => {
+      upgradeScan(state, world, junction, false)
+    })
+    min = Math.min(min, pick(byFile) / UPGRADE_CALLS_PER_SCAN)
+  }
+  return min
+}
+
+describe('the junction upgrade allocates nothing per call, measured (M1f Task 9)', () => {
+  it('charges upgrades.ts under the same per-call budget on both boards, floored over three windows', () => {
+    for (const layoutId of [DEMO_LAYOUT_ID, CITY_LAYOUT_ID]) {
+      const { state, world, junction } = upgradeBoard(layoutId)
+      const perCall = upgradePerCallMin(state, world, junction, (byFile) => bytesIn(byFile, UPGRADES_FILE))
+      expect(
+        perCall,
+        `${layoutId}: upgrades.ts charges ${perCall.toFixed(4)} B/call — a returned object literal ` +
+          'costs 40 B/call, which is what canPlaceHouse measured before its singletons',
+      ).toBeLessThan(PLACEMENT_BUDGET_BYTES_PER_CALL)
+    }
+  })
+
+  it('charges NOTHING anywhere under packages/, so an inlined regression cannot hide in a neighbour', () => {
+    // The same attribution argument the buildings arm makes: V8 may inline
+    // `canPlaceUpgrade` into the rig, at which point its allocation is charged to
+    // this file rather than to `upgrades.ts` and a per-file budget reads clean.
+    for (const layoutId of [DEMO_LAYOUT_ID, CITY_LAYOUT_ID]) {
+      const { state, world, junction } = upgradeBoard(layoutId)
+      const perCall = upgradePerCallMin(state, world, junction, bytesUnderPackages)
+      expect(
+        perCall,
+        `${layoutId}: something under packages/ charges ${perCall.toFixed(4)} B/call`,
+      ).toBeLessThan(PLACEMENT_BUDGET_BYTES_PER_CALL)
+    }
+  })
+
+  it('the instrument SEES an escaping allocation on this exact path — the positive control', () => {
+    // A clean profile resolves nothing without this. One escaping object per
+    // attempt is 1 in 7 calls, so the floor it has to clear is low; it clears it
+    // by two orders of magnitude.
+    const { state, world, junction } = upgradeBoard(DEMO_LAYOUT_ID)
+    const byFile = profileBytesByFile(() => {
+      upgradeScan(state, world, junction, true)
+    })
+    const perCall = bytesUnderPackages(byFile) / UPGRADE_CALLS_PER_SCAN
+    expect(perCall, 'the rig cannot see an escaping object on its own path').toBeGreaterThan(
+      PLACEMENT_BUDGET_BYTES_PER_CALL,
+    )
+  })
+
+  it('is not vacuous: the scan reaches all six outcomes of canPlaceUpgrade', () => {
+    // A green harness is a claim about its inputs. `not-a-junction` is the easy
+    // one and `ok`/`occupied` are the two that need a real junction, so a rig
+    // whose board had none would profile five ways of returning the same
+    // singleton and report it as coverage.
+    for (const layoutId of [DEMO_LAYOUT_ID, CITY_LAYOUT_ID]) {
+      const { state, world, junction } = upgradeBoard(layoutId)
+      const seen = new Set<string>()
+      const note = (r: ReturnType<typeof canPlaceUpgrade>): void => {
+        seen.add(r.ok ? 'ok' : r.reason)
+      }
+      state.header[H_INV_UPGRADES] = 0
+      note(canPlaceUpgrade(state, world, junction))
+      state.header[H_INV_UPGRADES] = 2
+      state.header[H_UPGRADE_COUNT] = MAX_UPGRADES
+      note(canPlaceUpgrade(state, world, junction))
+      state.header[H_UPGRADE_COUNT] = 0
+      note(canPlaceUpgrade(state, world, world.cells + 1))
+      note(canPlaceUpgrade(state, world, 0))
+      note(canPlaceUpgrade(state, world, junction))
+      expect(applyPlaceUpgrade(state, world, junction)).toBe(true)
+      note(canPlaceUpgrade(state, world, junction))
+      expect([...seen].sort(), layoutId).toEqual([
+        'capacity',
+        'no-inventory',
+        'not-a-junction',
+        'occupied',
+        'off-board',
+        'ok',
+      ])
+    }
+  })
+
+  it('the scan leaves the board where it found it, so three windows measure one thing', () => {
+    const { state, world, junction } = upgradeBoard(DEMO_LAYOUT_ID)
+    const before = hashState(state)
+    upgradeScan(state, world, junction, false)
+    // The header slots the scan writes are restored by its own last two lines;
+    // this is what says so, and it is why the three profiling windows are
+    // repeats rather than a sequence.
+    state.header[H_INV_UPGRADES] = 0
+    expect(hashState(state), 'the scan left state behind').toBe(before)
   })
 })

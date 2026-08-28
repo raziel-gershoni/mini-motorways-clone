@@ -41,7 +41,11 @@ import {
  * benign change. It is also unnecessary here in the strongest possible sense:
  * `createState` writes nothing into either range, so this task's re-bless is
  * **PURE LAYOUT with no behavioural term at all**, and `upgradeAt` is all-zero
- * on every fixture because no code writes it until M1f Task 9.
+ * on every fixture because the only thing that writes it is
+ * `applyPlaceUpgrade` (M1f Task 9), and no fixture here places an upgrade. That
+ * was a statement about an unwritten region when it was written and is now a
+ * statement about an unexercised call — the proof is unchanged either way, and
+ * the assertion below is what keeps it honest rather than this sentence.
  *
  * ---------------------------------------------------------------------------
  * THE TAIL PAD, and why the brief's guard for it was wrong

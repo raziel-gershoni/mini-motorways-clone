@@ -200,9 +200,15 @@ export interface TwoJunctionRig extends RigBase {
  * and west. Each is exactly at `INTERSECTION_DEGREE`, so this rig is also the
  * boundary case for `isJunctionCell`'s `>=`.
  *
- * **Task 9 Step 7 reuses this fixture** to show that a junction upgrade written
- * onto both cells gives the head-on property back with nothing hand-written into
- * state, which is why it lives in a module and not in a `.test.ts`.
+ * **Task 9 reuses this fixture** — which is why it lives in a module and not in
+ * a `.test.ts` — but for the TURNING swap rather than the head-on one, and the
+ * correction is worth carrying here because this sentence named the wrong one.
+ * Task 3's narrowing already gives the head-on (straight) swap back on a bare
+ * board, so a Task 9 case built on that pair passes without the object under
+ * test. Task 9's occupants therefore enter on crossing axes — car 0 southbound
+ * into `left` turning east, car 1 northbound into `right` turning west — which
+ * is the two-sided deadlock the valve alone clears, and which two upgrades
+ * release and one upgrade half-releases.
  */
 export function twoAdjacentJunctions(id = 'two-adjacent-junctions'): TwoJunctionRig {
   const r = makeRig(id)

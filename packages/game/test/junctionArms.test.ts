@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeAll } from 'vitest'
-import { isJunctionCell } from '@laneways/sim'
+import {
+  isJunctionCell,
+  canPlaceUpgrade,
+  applyPlaceUpgrade,
+  H_INV_UPGRADES,
+  H_UPGRADE_COUNT,
+} from '@laneways/sim'
+import { MAX_UPGRADES } from '@laneways/shared'
 import { CITY_DEATH_TICK, DEMO_DEATH_TICK } from './deathTicks'
 import {
   cellName,
@@ -10,6 +17,7 @@ import {
   SHIPPED_ARM,
 } from './junctionArms'
 import { GREEDY_PERIOD_TICKS } from './cityArms'
+import { formatUpgradeRows, runUpgradeArm } from './junctionArms'
 
 /**
  * **M1f Task 3's triage, as tests: the criterion, the site survey and the
@@ -155,6 +163,16 @@ const SAMPLES = BOUNDARIES.flatMap((b) => WINDOW.map((w) => b + w))
  * the case the budget has to cover. Two arms plus headroom: 2 x 4.5 s x 3.3.
  */
 const SURVEY_TIMEOUT_MS = 30_000
+
+/**
+ * **Derived.** Each `runUpgradeArm` row measures 0.36-0.60 s on this tree (the
+ * occupancy replay is absent, which is where `runJunctionArm`'s 3.8-4.5 s goes);
+ * the heaviest case below drives 14 of them, and the `beforeAll` warms the
+ * memoised arm so no case pays for it. 14 x 0.6 s is 8.4 s; 60 s is that plus
+ * headroom for the `-t` run of one case on a machine under a mutation battery,
+ * which is the busiest this tree ever is.
+ */
+const UPGRADE_TIMEOUT_MS = 60_000
 
 /** Pre-M1f blocked car-ticks on the shipped seed's greedy arm — criterion 2's base. */
 const PRE_M1F_BLOCKED_CAR_TICKS = 2120
@@ -305,16 +323,22 @@ describe('M1f Task 3: the junction triage, applied to the arm that ships', () =>
       // number that bounds how much relief a player can seat, and the plan
       // predicted 0 / 2 / 6 / 6.
       //
-      // **These are UPPER BOUNDS on the seatable sites, not the count.**
-      // Task 3's predicate is `isJunctionCell` plus a bounds check, which is
-      // deliberately the DEGREE half of `canPlaceUpgrade`'s five refusals; the
-      // other four — no-inventory, capacity, off-board, occupied — are
-      // inventory and bookkeeping rather than board properties and are not
-      // exercised here because neither `canPlaceUpgrade` nor an inventory
-      // exists yet. A cell counted here can still be refused by one of the four.
-      // **Task 9 Step 5 re-runs this table through the real predicate and
-      // asserts the two agree cell-for-cell**, which is where the bound becomes
-      // a count.
+      // **These were UPPER BOUNDS on the seatable sites when Task 3 wrote them,
+      // and M1f Task 9 Step 5 turned them into COUNTS.** Task 3's predicate here
+      // is `isJunctionCell` plus a bounds check, which is deliberately the DEGREE
+      // half of `canPlaceUpgrade`'s five refusals; the other four — no-inventory,
+      // capacity, off-board, occupied — are the player's ledger and bookkeeping
+      // rather than board properties, and Task 3 could not exercise them because
+      // neither `canPlaceUpgrade` nor an inventory existed. **The case below,
+      // *"the REAL predicate agrees with Task 3s cell-for-cell"*, re-runs this
+      // table through `canPlaceUpgrade` over all 16 sample ticks x 960 cells with
+      // ZERO disagreements, gets the same 1 / 2 / 6 / 6, and exercises all four
+      // of the remaining refusals on this board.** So these numbers are exact for
+      // a player holding at least one upgrade and below the cap — and 0 / 0 / 0 / 0
+      // for a player holding none, which is the same timing finding read off the
+      // other axis. This test is kept as Task 3's own instrument rather than
+      // rewritten: the two predicates agreeing is the evidence, and it needs
+      // both.
       const sitesPerBoundary: number[] = []
       for (const b of BOUNDARIES) {
         const sites = new Set<number>()
@@ -413,6 +437,103 @@ describe('M1f Task 3: the junction triage, applied to the arm that ships', () =>
     SURVEY_TIMEOUT_MS,
   )
 
+  it(
+    'M1f Task 9 Step 5: the REAL predicate agrees with Task 3s cell-for-cell, and the bound becomes a count',
+    () => {
+      // **Task 3 Step 3a could not call `canPlaceUpgrade` — it did not exist —
+      // and used `isJunctionCell` plus a bounds check instead.** That
+      // substitution is sound by inspection, and *"sound by inspection"* is what
+      // this project's catalogue calls a claim, so it is checked here rather than
+      // trusted across five tasks. The four refusals Task 3 could not exercise
+      // are exercised too, at the bottom of this case.
+      const run = runJunctionArm(SHIPPED_ARM)
+      const snaps = replayCapturing(SHIPPED_ARM, SAMPLES)
+      expect(snaps.size, 'every sample tick was captured').toBe(SAMPLES.length)
+
+      // (a) AGREEMENT, cell for cell, tick for tick, with inventory and capacity
+      // NEUTRALISED — one in hand, none placed, nothing on the board. Those two
+      // refusals are a property of the player's ledger and not of the board, so
+      // neutralising them is what isolates the question Task 3 was asking.
+      let asked = 0
+      let accepted = 0
+      const disagreements: string[] = []
+      for (const t of SAMPLES) {
+        const snap = snaps.get(t)!
+        snap.state.header[H_INV_UPGRADES] = 1
+        snap.state.header[H_UPGRADE_COUNT] = 0
+        for (let cell = 0; cell < snap.world.cells; cell++) {
+          const task3 = isJunctionCell(snap.state, cell)
+          const real = canPlaceUpgrade(snap.state, snap.world, cell).ok
+          asked++
+          if (real) accepted++
+          if (task3 !== real) disagreements.push(`tick ${t} ${cellName(cell, run.w)}: ${task3} vs ${real}`)
+        }
+      }
+      expect(asked, 'non-vacuous: 16 sample ticks x 960 cells').toBe(SAMPLES.length * run.cells)
+      expect(accepted, 'and the predicate accepts SOMETHING, or agreement is trivial').toBeGreaterThan(0)
+      expect(disagreements, "Task 3's predicate and canPlaceUpgrade disagree — see the report").toEqual([])
+
+      // (b) The site table, RE-DERIVED through `canPlaceUpgrade` rather than
+      // re-asserted. **This is where 1 / 2 / 6 / 6 stops being an upper bound**:
+      // for a player holding at least one upgrade and below the cap, these are
+      // the exact counts of legal sites, because the three remaining refusals
+      // (off-board, not-a-junction, occupied) are all board properties and all
+      // three are now the real function's.
+      const sitesPerBoundary: number[] = []
+      for (const b of BOUNDARIES) {
+        const sites = new Set<number>()
+        for (const w of WINDOW) {
+          const snap = snaps.get(b + w)!
+          for (let cell = 0; cell < snap.world.cells; cell++) {
+            if (canPlaceUpgrade(snap.state, snap.world, cell).ok) sites.add(cell)
+          }
+        }
+        sitesPerBoundary.push(sites.size)
+      }
+      expect(
+        sitesPerBoundary,
+        'legal sites per boundary window through the REAL predicate — a COUNT, not a bound',
+      ).toEqual([1, 2, 6, 6])
+
+      // (c) The four refusals Task 3 could not exercise, each on the real board
+      // at the boundary-3 snapshot, where six sites exist. **This is what closes
+      // M4 of Task 3's review**: the bound was a bound because these were
+      // untested, not because they were suspected.
+      const late = snaps.get(13500)!
+      const site = [...Array(late.world.cells).keys()].find((c) => isJunctionCell(late.state, c))!
+      const reasonAt = (cell: number): string => {
+        const r = canPlaceUpgrade(late.state, late.world, cell)
+        return r.ok ? 'ok' : r.reason
+      }
+      late.state.header[H_INV_UPGRADES] = 0
+      late.state.header[H_UPGRADE_COUNT] = 0
+      expect(reasonAt(site), 'a player holding nothing has no legal site anywhere').toBe('no-inventory')
+      late.state.header[H_INV_UPGRADES] = 1
+      late.state.header[H_UPGRADE_COUNT] = MAX_UPGRADES
+      expect(reasonAt(site), 'and one at the cap has none either').toBe('capacity')
+      late.state.header[H_UPGRADE_COUNT] = 0
+      expect(reasonAt(late.world.cells), 'off-board').toBe('off-board')
+      expect(reasonAt(site), 'and with the ledger clear the site is legal').toBe('ok')
+      expect(applyPlaceUpgrade(late.state, late.world, site)).toBe(true)
+      late.state.header[H_INV_UPGRADES] = 1
+      expect(reasonAt(site), 'occupied, once something is on it').toBe('occupied')
+
+      // And the count really did fall by one, on the real board: the site that
+      // was legal is no longer offered, which is the half of "the bound is now a
+      // count" that a cell-for-cell agreement cannot show.
+      let stillLegal = 0
+      for (let cell = 0; cell < late.world.cells; cell++) {
+        if (canPlaceUpgrade(late.state, late.world, cell).ok) stillLegal++
+      }
+      let junctions = 0
+      for (let cell = 0; cell < late.world.cells; cell++) if (isJunctionCell(late.state, cell)) junctions++
+      expect(stillLegal, 'one fewer site than there are junctions, and it is the seated one').toBe(
+        junctions - 1,
+      )
+    },
+    SURVEY_TIMEOUT_MS,
+  )
+
   it('the refusal distribution and the two conflict distributions name the same cells', () => {
     // **They measure different things and a divergence is information rather
     // than an error** — a conflict is a co-presence or a swap observed BETWEEN
@@ -444,4 +565,214 @@ describe('M1f Task 3: the junction triage, applied to the arm that ships', () =>
       'and the orders are not the same list',
     ).not.toEqual(cellsCarryingAtLeast(run.ruleEventsByCell, 0))
   })
+})
+
+/**
+ * **M1f Task 9 Step 11 — WHERE the upgrade goes, measured against a control
+ * rather than against zero.**
+ *
+ * *"Does it help"* is already measured: Task 3 Step 3b exempted the junction
+ * rule at these cells by a committed-then-reverted edit and got 759 trips
+ * against 368. **The question this block asks is whether the PLACEMENT is a
+ * real decision**, and the answer is that it is the whole decision — see the
+ * table the case prints.
+ *
+ * **Two instruments, one answer, and that is the strongest thing here.** Task 3
+ * measured the three-cell exemption by editing `junctionAdmitsOne` to consult a
+ * hard-coded cell set and reverting it; this measures the same three cells by
+ * placing three upgrades through `applyPlaceUpgrade` on a tick, driven by the
+ * production `step`, with the rule untouched. They agree to the digit — **759
+ * trips, 2,298 blocked car-ticks, death at 31,761** — which is what says the
+ * shipped object does what the spike's edit stood in for.
+ */
+describe('M1f Task 9: one upgrade per junction-eligible jam cell, against the same run with none', () => {
+  /**
+   * The week-3 boundary. **Stated, and it is the only boundary that works**, for
+   * two reasons that come from opposite directions and are both measured below:
+   * the site survey says `(8,21)` and `(9,22)` are not junctions until boundary
+   * 3, and the run dies at 21,783 — so by boundary 4 (18,000) there are 3,783
+   * ticks left and the jam has already done its damage.
+   */
+  const SEAT_TICK = 13_500
+
+  beforeAll(() => {
+    runJunctionArm(SHIPPED_ARM)
+  }, 120_000)
+
+  it(
+    'the control reproduces the memoised arm, so the two rigs are one instrument',
+    () => {
+      // `runUpgradeArm` drops the occupancy replay — an attribution instrument
+      // that writes nothing — so a row costs a third of what `runJunctionArm`
+      // costs. What must be identical is the INPUT, and this is what says it is
+      // rather than the paragraph in the source that claims it.
+      const arm = runJunctionArm(SHIPPED_ARM)
+      const control = runUpgradeArm({ upgrades: [], seatTick: SEAT_TICK })
+      expect(control.trips, 'trips').toBe(arm.trips)
+      expect(control.deathTick, 'death tick').toBe(arm.deathTick)
+      expect(control.blockedCarTicks, 'blocked car-ticks').toBe(arm.blockedCarTicks)
+      expect(control.valveFirings, 'valve firings').toBe(arm.valveFirings)
+      expect(control.longestQueue, 'longest queue').toBe(arm.longestQueue)
+      expect(control.placed, 'a control places nothing and reports so vacuously').toBe(true)
+
+      // And the inventory grant every arm pays is behaviour-free: three controls
+      // seated at three different ticks are byte-identical at the end.
+      const early = runUpgradeArm({ upgrades: [], seatTick: 9_000 })
+      const late = runUpgradeArm({ upgrades: [], seatTick: 18_000 })
+      expect(early.hash, 'the grant itself changes nothing, at any tick').toBe(control.hash)
+      expect(late.hash).toBe(control.hash)
+    },
+    UPGRADE_TIMEOUT_MS,
+  )
+
+  it(
+    'one upgrade per junction-eligible jam cell, each measured against the same run with none',
+    () => {
+      // **The metric is TRIPS.** An upgrade never makes a car wait, so blocked
+      // car-ticks is a valid secondary read — but it is REPORTED, never
+      // asserted, because a placement that improves it by killing the board
+      // faster is not help.
+      const arm = runJunctionArm(SHIPPED_ARM)
+      const control = runUpgradeArm({ upgrades: [], seatTick: SEAT_TICK })
+
+      // Ranked by JUNCTION-CAUSED refusals, not total: spillback lands on
+      // degree <= 2 cells that can never be seated, and ranking by the total
+      // names two of them in the top six on this board. Task 3 Step 3a owns that
+      // finding, and Task 9 Step 5 above turned its bound into a count.
+      const hot = cellsCarryingAtLeast(arm.junctionRefusalsByCell, 5)
+      expect(hot.length, 'three junction-eligible hot cells, as Task 3 measured').toBe(3)
+
+      const rows = hot.map((cell) => {
+        const r = runUpgradeArm({ upgrades: [cell], seatTick: SEAT_TICK })
+        expect(r.placed, `applyPlaceUpgrade refused at ${cellName(cell, arm.w)}`).toBe(true)
+        return { cell, ...r }
+      })
+
+      // The board still has the problem, so a green result is not a green board:
+      expect(control.blockedCarTicks, 'the control still jams').toBeGreaterThan(10000)
+
+      // The object does SOMETHING. An upgrade that changed nothing anywhere would
+      // mean `junctionAdmitsOne`'s clause is not reaching the movement path.
+      expect(rows.some((r) => r.hash !== control.hash), 'at least one placement changes the run').toBe(
+        true,
+      )
+
+      // **The object does something GOOD at its best cell.**
+      const best = rows.reduce((m, r) => (r.trips > m.trips ? r : m))
+      const worst = rows.reduce((m, r) => (r.trips < m.trips ? r : m))
+      expect(best.trips, `best ${cellName(best.cell, arm.w)} vs control`).toBeGreaterThan(control.trips)
+
+      // **THE SPREAD IS THE SECOND DECISION AND IT IS WHAT TASK 12 ASSERTS.** An
+      // upgrade cannot make its own junction worse, so "does it help" is not the
+      // interesting question; "does it matter WHERE" is. Measured: 755 at (9,22)
+      // against 394 at (12,19), a spread of 91.6 % — and the threshold Task 12
+      // uses is written from this table minus a stated margin (report §11).
+      console.log(
+        `spread: best ${cellName(best.cell, arm.w)} ${best.trips} / ` +
+          `worst ${cellName(worst.cell, arm.w)} ${worst.trips} / control ${control.trips}`,
+      )
+      console.log(formatUpgradeRows(control, rows, arm.w))
+
+      // **AND THE RANKING DOES NOT PREDICT THE PAYOFF, WHICH IS THE FINDING.**
+      // `hot` is descending by junction-caused refusals, so `hot[0]` carries the
+      // most (2,579, 39.5 %) and `hot[2]` the fewest (1,418, 21.7 %) — and the
+      // LAST is the best placement by a factor of nearly two. A policy that
+      // upgrades the cell with the most refusals buys +7.1 % where the right cell
+      // buys +105.2 %. Task 12 must not assume the top-ranked cell is the site.
+      expect(best.cell, 'the best placement is the LOWEST-ranked hot cell').toBe(hot[2])
+      expect(worst.cell, 'and the worst is the highest-ranked').toBe(hot[0])
+
+      // Reachability, because a placement that helps by disconnecting a
+      // destination is not help. Measured as a graph question over `roads` — see
+      // `reachableDestinations` — and compared against the control rather than
+      // against a literal, because a longer run spawns more destinations.
+      expect(control.reachableDestinations).toBe(control.destinations)
+      for (const r of rows) {
+        expect(r.reachableDestinations, `cell ${cellName(r.cell, arm.w)}`).toBe(r.destinations)
+        expect(r.destinations, 'and relief never costs the board a destination').toBeGreaterThanOrEqual(
+          control.destinations,
+        )
+      }
+
+      // **How many rows are strictly WORSE than the control.** Not zero on
+      // principle — an upgrade is a buff at its own cell but relief moves traffic
+      // downstream, and the spike's eight-seed row contains a -5. Measured here:
+      // 0 of 3, and that count is what Task 12 compares its larger population
+      // against.
+      const worseRows = rows.filter((r) => r.trips < control.trips)
+      expect(worseRows.length, 'rows strictly worse than the control — see the report').toBe(0)
+    },
+    UPGRADE_TIMEOUT_MS,
+  )
+
+  it(
+    'the three together reproduce Task 3s committed-then-reverted exemption to the digit',
+    () => {
+      // **Two instruments, one answer.** Task 3 measured this by editing
+      // `junctionAdmitsOne` to read `isJunctionCell(state, cell) && !HOT.has(cell)`
+      // on a committed tree and reverting it. This places three upgrades through
+      // `applyPlaceUpgrade` on tick 13,500, with the rule untouched, driven by
+      // the production `step`. The catalogue's *"two independent measurements
+      // that share one wrong constant agree perfectly"* is the hazard, and these
+      // two share no constant at all: one is a hard-coded cell set inside a
+      // predicate, the other is three `TickAction`s.
+      const arm = runJunctionArm(SHIPPED_ARM)
+      const hot = cellsCarryingAtLeast(arm.junctionRefusalsByCell, 5)
+      const all = runUpgradeArm({ upgrades: hot, seatTick: SEAT_TICK })
+      expect(all.placed).toBe(true)
+      expect(all.trips, "Task 3 Step 3b's 759").toBe(759)
+      expect(all.blockedCarTicks, "Task 3 Step 3b's 2,298").toBe(2298)
+      expect(all.deathTick, "Task 3 Step 3b's 31,761").toBe(31761)
+      expect(all.valveFirings, 'and its zero valve firings').toBe(0)
+
+      // And the third cell is free: `(12,19)` adds nothing on top of the other
+      // two, which is the same inversion the per-cell table shows from the other
+      // side. Reported as an assertion because it is what says the +7.1 % that
+      // cell buys alone is not additive.
+      const two = runUpgradeArm({ upgrades: [hot[1]!, hot[2]!], seatTick: SEAT_TICK })
+      expect(two.trips, 'the top-ranked cell adds no trip to the other two').toBe(all.trips)
+    },
+    UPGRADE_TIMEOUT_MS,
+  )
+
+  it(
+    'WHEN it is seated decides as much as WHERE — the window is one boundary wide',
+    () => {
+      // **The seat tick is not a free parameter and this is the case that says
+      // so.** The rejected traffic light's seat phase — a parameter with no
+      // design meaning — swung its result 1.19x-1.70x, more than any positive
+      // effect it produced, and that was the strongest single argument against
+      // it. The upgrade's seat tick is NOT meaningless (a card arrives on a week
+      // boundary and a player chooses when to spend it), but it is measured here
+      // for the same reason: a payoff quoted without its tick is not a number.
+      const arm = runJunctionArm(SHIPPED_ARM)
+      const hot = cellsCarryingAtLeast(arm.junctionRefusalsByCell, 5)
+      const control = runUpgradeArm({ upgrades: [], seatTick: SEAT_TICK })
+      const best = hot[2]!
+
+      // Boundary 2: the site survey says this cell is not a junction yet, and
+      // the REAL predicate refuses. This is the survey's timing finding arriving
+      // as a placement failure rather than as a table.
+      const early = runUpgradeArm({ upgrades: [best], seatTick: 9_000 })
+      expect(early.placed, 'not a junction at boundary 2 — the card must be HELD').toBe(false)
+      expect(early.trips, 'so the arm is the control').toBe(control.trips)
+
+      // Boundary 3: legal, and worth more than doubling the run.
+      const onTime = runUpgradeArm({ upgrades: [best], seatTick: SEAT_TICK })
+      expect(onTime.placed).toBe(true)
+      expect(onTime.trips).toBeGreaterThan(control.trips * 2)
+
+      // Boundary 4: still legal, and worth NOTHING — the run dies at 21,783, so
+      // 18,000 leaves 3,783 ticks and the jam has already taken the board.
+      const late = runUpgradeArm({ upgrades: [best], seatTick: 18_000 })
+      expect(late.placed, 'still a junction').toBe(true)
+      expect(late.trips, 'and the same upgrade at the same cell buys nothing').toBe(control.trips)
+
+      console.log(
+        `seat-tick sweep at ${cellName(best, arm.w)}: 9,000 refused (${early.trips}) / ` +
+          `13,500 ${onTime.trips} / 18,000 ${late.trips} / control ${control.trips}`,
+      )
+    },
+    UPGRADE_TIMEOUT_MS,
+  )
 })

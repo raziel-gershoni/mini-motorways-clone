@@ -877,7 +877,13 @@ describe('it cannot lie about blocking', () => {
     // **What it can no longer do is distinguish "the renderer never reverses a
     // queue" from "there were barely any queues to reverse", and that limitation
     // is real** — Task 9's upgrade should push this back up, and if it does not,
-    // this floor is the place to notice.
+    // this floor is the place to notice. **Task 9 has landed and this floor has
+    // NOT moved, which is not a refutation**: the mechanism exists and no
+    // production driver places an upgrade, so this arm still runs the jammed
+    // board. Measured on the shipped city arm, one upgrade at the right cell
+    // takes blocked car-ticks 29,267 -> 2,519 — so the pressure that would raise
+    // this floor is real and arrives with **Task 10's gesture**, which is the
+    // task that should re-derive it.
     //
     // **Anchored exactly as well as floored, because a floor alone is not a
     // pin.** `demoLayout.test.ts` in this same commit pins its moved values
