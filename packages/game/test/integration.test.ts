@@ -5612,7 +5612,9 @@ describe('the upgrade a player places relieves a jam they can see', () => {
     // this board can produce ANYWHERE is tick 15,001, which is the same
     // `firstConflictTick` the arm block above already pins from a completely
     // different instrument. Traffic at these corners is sparse: two cars are
-    // simultaneously present at a junction cell 232 times in a 21,783-tick run.
+    // simultaneously present at a junction cell **42 times** in the whole
+    // 21,783-tick control run — 232 times before the junction rule existed, and
+    // the rule is what removed them. The arm block's own `r.conflicts` is that 42.
     expect(p.firstCrossTick).toBe(16704)
     expect(p.firstCrossTick - B_TICK, 'ticks after the taps').toBe(367)
     expect(armRun('greedy').firstConflictTick, 'the earliest this board can do it at all').toBe(15001)
