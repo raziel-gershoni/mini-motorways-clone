@@ -712,7 +712,9 @@ export function assertEnterCarValid(i: number, carCount: number): void {
  *
  * **Two mutations say this is not a wrapper, measured on the canonical
  * whole-suite invocation.** Reconstructing the direction from
- * `carRouteCursor - 1` instead of delegating scores **15 detectors** and is
+ * `carRouteCursor - 1` instead of delegating scores **17-19 detectors** over two
+ * draws — the spread is one allocation-harness case and one suite-level abort,
+ * and 17 is the stable core — and is
  * killed by `routeStep`'s own bounds guard on a leg-first car —
  * *"carRoute: step index must be an integer in [0, 96), got -1"*, which is the
  * case `previousLegDir` exists to answer and a reconstruction has to
@@ -767,15 +769,24 @@ export function crossesAt(state: GameState, i: number): number {
  * branch.
  *
  * **Measured, on the canonical whole-suite invocation, with the collection
- * counts unchanged at 902 / 651 and no crash-class line in the output:**
+ * counts unchanged at the tree's own totals — 908 / 651 at the last
+ * re-measurement — and no crash-class line in the output:**
  *
  * ```
  *   mutation                                      detectors
  *   return true always (i.e. Task 2's wide rule)         25
- *   return false always                                  27
+ *   return false always                                  29
  *   the range guard deleted                               1
  *   `a === b` deleted                                     2, both DIRECT
  * ```
+ *
+ * **Two of those rows were recorded two detectors LOW when Task 3 shipped, and
+ * the missing pair is the same in both.** `carSmoothing.test.ts` pinned two
+ * moved figures exactly in the Task-2/3 fix round, after the battery had run,
+ * and both mutants move them. The direction was conservative and the cause is a
+ * test that did not exist yet rather than a screen that missed something —
+ * which is the one benign way a mutation count goes stale, and it goes stale
+ * upward every time a pin is added.
  *
  * **The `a === b` row is the labelled equivalent, and its two detectors are
  * both assertions on this function rather than on a board.** Through `canEnter`
