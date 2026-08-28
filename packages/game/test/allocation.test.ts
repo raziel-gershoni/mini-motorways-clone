@@ -39,6 +39,7 @@ import {
   H_DEST_COUNT,
   H_DEST_SPAWN_TIMER,
   H_PINS_DROPPED,
+  H_INV_UPGRADES,
   H_TICK,
   OFFER_SLOT_A,
   OFFER_SLOT_B,
@@ -589,6 +590,10 @@ function buildRig(draw: (frame: RenderFrame) => void): Rig {
       // per `onOfferRaised` above), so it reads `false` on every frame — but it
       // reads it from the object that would say otherwise.
       peeking: () => pointer.peeking,
+      // M1f Task 10, and wired to the SAME pointer for `peeking`'s reason: a
+      // `() => false` here would profile a chip that can never be armed, while
+      // the production one is armed by a tap this rig can make.
+      upgradeMode: () => pointer.upgradeMode,
     }),
     queue,
   )
@@ -623,6 +628,12 @@ function buildRig(draw: (frame: RenderFrame) => void): Rig {
     offerPending: () => offerPending(state),
     offerA: () => offerSlot(state, OFFER_SLOT_A),
     offerB: () => offerSlot(state, OFFER_SLOT_B),
+    // §5.6's inventory, off the same header `main.ts` reads — M1f Task 10, and
+    // for the same reason as the three lines above rather than a stub. It reads
+    // 0 for the whole profiled window (the rig never resolves a card offer), so
+    // a chip tap in here is `HUD_INERT` and no placement is ever queued — which
+    // is a property of the tick count, not of a stub.
+    upgradesHeld: () => state.header[H_INV_UPGRADES] as number,
   })
   // Precomputed OUTSIDE the profiled window: `hudRects` writes into a
   // caller-owned object, but building one per frame would charge this file's own

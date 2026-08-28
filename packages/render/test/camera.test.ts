@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import {
+  CHIP_MIN_CSS,
   DPR_CAP_DEFAULT,
   DPR_CAP_LOW,
   HUD_BAND_CSS,
+  HUD_GAP_CSS,
+  HUD_PAD_CSS,
   OFFER_CARD_MAX_H_CSS,
   OFFER_GAP_CSS,
   OFFER_MARGIN_CSS,
@@ -26,6 +29,7 @@ import {
   HitRegion,
   type Camera,
   type GridHit,
+  type HudRects,
   type OfferRects,
   type Rect,
   type RevealedRect,
@@ -617,25 +621,111 @@ describe('screenToGrid — CSS client px to board cell, canvas offset (40, 23)',
 // hudRects
 // ---------------------------------------------------------------------------
 
-describe('hudRects — three elements, all inside the HUD band and below the grid rect', () => {
-  it('lays out the three rects at hand-computed coordinates on the 390 px fixture', () => {
-    // cssW 390, hudTop 738, hudHeight 72, pad 8, gap 8
-    // usable width 390 - 16 = 374; colW = floor((374 - 16)/3) = floor(119.33) = 119
+describe('hudRects — four elements, all inside the HUD band and below the grid rect', () => {
+  // ---------------------------------------------------------------------
+  // **RE-DERIVED, NOT NUDGED, FOR THE FOURTH COLUMN — M1f Task 10.**
+  // ---------------------------------------------------------------------
+  //
+  // §7.2's inventory chip arrived with its first chip and it is TAPPABLE, so
+  // §8.3 — *"The top band is dead space ... No interactive element, score, or
+  // pause button may live there"* — puts it in the bottom band beside the other
+  // three. The task brief preferred the top band and offered a measurement to
+  // decide it; the measurement refuses it too. `camera.originY` — the top band's
+  // whole height — is **86** on M0_DEVICE, **95** on PHONE_390 and **27** on
+  // SHORT_WIDE, against a floor of `CHIP_MIN_CSS + 2 * HUD_PAD_CSS` = 44 + 16 =
+  // **60**; and the two degenerate clamps below give **-47** (0x0) and **0**
+  // (320x160), where a top-band rect would be off the canvas entirely. Asserted
+  // just below rather than left in this comment.
+  //
+  // Every coordinate in the two cases below is recomputed from the fit by hand
+  // at four columns. The old three-column figures — 119 / 135 / 262 at
+  // PHONE_390 and 124 / 140 / 272 at M0_DEVICE — are quoted here only so it is
+  // visible that they were re-derived rather than patched until green.
+  it('measures the top band the chip did NOT go in, at every viewport including the clamps', () => {
+    // The fork's own arithmetic, asserted. `CHIP_MIN_CSS` is a touch target
+    // (44), not a look, and it is the same figure `OFFER_PEEK_H_CSS` is.
+    const floor = CHIP_MIN_CSS + 2 * HUD_PAD_CSS
+    expect(floor, '44 px of chip plus the band padding either side').toBe(60)
+    expect(fitCamera(M0_DEVICE, REVEALED_RECT).originY).toBe(86)
+    expect(fitCamera(PHONE_390, REVEALED_RECT).originY).toBe(95)
+    expect(fitCamera(SHORT_WIDE, REVEALED_RECT).originY).toBe(27)
+    // The binding one, and the reason the fork resolves without §8.3 being
+    // consulted: HEIGHT binds on SHORT_WIDE, so the top band is 27 CSS px.
+    expect(fitCamera(SHORT_WIDE, REVEALED_RECT).originY).toBeLessThan(floor)
+    // And the clamps, where the band has no pixels at all or is off-canvas.
+    expect(fitCamera(DEGENERATE, REVEALED_RECT).originY).toBe(-47)
+    expect(
+      fitCamera(
+        { cssW: 320, cssH: 160, topInset: 0, bottomInset: 0, rawDpr: 1, performanceClass: null },
+        REVEALED_RECT,
+      ).originY,
+    ).toBe(0)
+  })
+
+  it('lays out the four rects at hand-computed coordinates on the 390 px fixture', () => {
+    // cssW 390, hudTop 738, hudHeight 72, pad 8, gap 8, HUD_COLUMNS 4
+    // usable width 390 - 16 = 374; three gaps = 24
+    // colW = floor((374 - 24)/4) = floor(87.5) = 87;  stride = 87 + 8 = 95
     // y = 738 + 8 = 746; h = 72 - 16 = 56
-    // clock x 8; score x 8 + 119 + 8 = 135; tiles x 135 + 119 + 8 = 262
+    // clock x 8; score x 103; tiles x 198; upgrades x 293, right edge 380 <= 382
     const r = hudRects(phone390Camera(), createHudRects())
-    expect([r.clock.x, r.clock.y, r.clock.w, r.clock.h]).toEqual([8, 746, 119, 56])
-    expect([r.score.x, r.score.y, r.score.w, r.score.h]).toEqual([135, 746, 119, 56])
-    expect([r.tiles.x, r.tiles.y, r.tiles.w, r.tiles.h]).toEqual([262, 746, 119, 56])
+    expect([r.clock.x, r.clock.y, r.clock.w, r.clock.h]).toEqual([8, 746, 87, 56])
+    expect([r.score.x, r.score.y, r.score.w, r.score.h]).toEqual([103, 746, 87, 56])
+    expect([r.tiles.x, r.tiles.y, r.tiles.w, r.tiles.h]).toEqual([198, 746, 87, 56])
+    expect([r.upgrades.x, r.upgrades.y, r.upgrades.w, r.upgrades.h]).toEqual([293, 746, 87, 56])
+    // The chip is a touch target before it is a layout, so the column has to be
+    // able to hold one. This is the assertion `CHIP_MIN_CSS` exists for.
+    expect(r.upgrades.w, 'the chip column is at least a touch target wide').toBeGreaterThanOrEqual(
+      CHIP_MIN_CSS,
+    )
+    expect(r.upgrades.h).toBeGreaterThanOrEqual(CHIP_MIN_CSS)
   })
 
   it('lays them out against the M0 device\'s wider band too', () => {
-    // cssW 406, hudTop 764: usable 390; colW = floor((390 - 16)/3) = 124
-    // y = 772; h = 56; x = 8, 140, 272
+    // cssW 406, hudTop 764: usable 390; three gaps 24
+    // colW = floor((390 - 24)/4) = floor(91.5) = 91; stride 99
+    // y = 772; h = 56; x = 8, 107, 206, 305, right edge 396 <= 398
     const r = hudRects(fitCamera(M0_DEVICE, REVEALED_RECT), createHudRects())
-    expect([r.clock.x, r.clock.y, r.clock.w, r.clock.h]).toEqual([8, 772, 124, 56])
-    expect(r.score.x).toBe(140)
-    expect(r.tiles.x).toBe(272)
+    expect([r.clock.x, r.clock.y, r.clock.w, r.clock.h]).toEqual([8, 772, 91, 56])
+    expect(r.score.x).toBe(107)
+    expect(r.tiles.x).toBe(206)
+    expect(r.upgrades.x).toBe(305)
+    expect(r.upgrades.x + r.upgrades.w, 'the last column clears the right padding').toBeLessThanOrEqual(
+      406 - HUD_PAD_CSS,
+    )
+  })
+
+  it('never reports a NEGATIVE width, on the viewports fitCamera deliberately survives', () => {
+    // **The degenerate clamps, which this function did not carry before the
+    // fourth column and which are not about the fourth column.** `(20 - 16 -
+    // 16) / 3` is -4 at three columns and `(20 - 16 - 24) / 4` is -5 at four:
+    // the expression has always gone negative on a viewport with no pixels, and
+    // a negative-width rect is the one thing `offerRects` clamps for. `inRect`
+    // answers false against one either way, so nothing was ever mis-hit — but
+    // the fourth column is not the place to inherit an unclamped expression
+    // silently.
+    for (const view of [
+      DEGENERATE,
+      { cssW: 20, cssH: 600, topInset: 0, bottomInset: 0, rawDpr: 1, performanceClass: null },
+      { cssW: 320, cssH: 160, topInset: 0, bottomInset: 0, rawDpr: 1, performanceClass: null },
+    ] as const) {
+      const r = hudRects(fitCamera(view, REVEALED_RECT), createHudRects())
+      for (const [name, rect] of fourRects(r)) {
+        expect(rect.w, `${name} has a negative width at ${view.cssW}x${view.cssH}`).toBeGreaterThanOrEqual(0)
+      }
+    }
+    // Non-vacuous: the 20 px viewport really is the one that would have gone
+    // negative, so the clamp is doing work rather than agreeing with the
+    // formula.
+    const narrow = fitCamera(
+      { cssW: 20, cssH: 600, topInset: 0, bottomInset: 0, rawDpr: 1, performanceClass: null },
+      REVEALED_RECT,
+    )
+    expect(
+      Math.floor((narrow.cssW - 2 * HUD_PAD_CSS - 3 * HUD_GAP_CSS) / 4),
+      'the unclamped expression is negative here',
+    ).toBeLessThan(0)
+    expect(hudRects(narrow, createHudRects()).clock.w).toBe(0)
   })
 
   it('keeps every rect entirely inside the HUD band and entirely below the grid rect', () => {
@@ -643,11 +733,7 @@ describe('hudRects — three elements, all inside the HUD band and below the gri
       const cam = fitCamera(view, REVEALED_RECT)
       const r = hudRects(cam, createHudRects())
       const gridBottom = cam.originY + cam.rows * cam.tileSize
-      for (const [name, rect] of [
-        ['clock', r.clock],
-        ['score', r.score],
-        ['tiles', r.tiles],
-      ] as const) {
+      for (const [name, rect] of fourRects(r)) {
         expect(rect.y, `${name} starts above the HUD band`).toBeGreaterThanOrEqual(cam.hudTop)
         expect(rect.y + rect.h, `${name} runs past the HUD band`).toBeLessThanOrEqual(
           cam.hudTop + cam.hudHeight,
@@ -661,10 +747,30 @@ describe('hudRects — three elements, all inside the HUD band and below the gri
     }
   })
 
-  it('never overlaps its own three rects', () => {
+  it('never overlaps its own four rects', () => {
     const r = hudRects(phone390Camera(), createHudRects())
     expect(r.clock.x + r.clock.w).toBeLessThanOrEqual(r.score.x)
     expect(r.score.x + r.score.w).toBeLessThanOrEqual(r.tiles.x)
+    expect(r.tiles.x + r.tiles.w).toBeLessThanOrEqual(r.upgrades.x)
+  })
+
+  it('never overlaps the OFFER modal\'s rects either, at any viewport', () => {
+    // The chip is tappable and so are the modal's three rects, and `pointer.ts`
+    // answers the modal FIRST — so an overlap would be a chip the player can see
+    // and cannot press while a card is up. That ordering is asserted in
+    // `pointer.test.ts`; this is the geometric half, and it holds because
+    // `offerRects` lives in the BOARD's band `[originY, hudTop)` and every HUD
+    // rect starts at `hudTop + HUD_PAD_CSS`.
+    for (const view of [M0_DEVICE, PHONE_390, SHORT_WIDE]) {
+      const cam = fitCamera(view, REVEALED_RECT)
+      const hud = hudRects(cam, createHudRects())
+      const offer = offerRects(cam, createOfferRects())
+      for (const [hudName, hudRect] of fourRects(hud)) {
+        for (const [offerName, offerRect] of threeRects(offer)) {
+          expect(overlaps(hudRect, offerRect), `${hudName} overlaps ${offerName}`).toBe(false)
+        }
+      }
+    }
   })
 
   it('puts every rect in the HUD region as screenToGrid classifies it', () => {
@@ -674,7 +780,7 @@ describe('hudRects — three elements, all inside the HUD band and below the gri
     const cam = phone390Camera()
     const r = hudRects(cam, createHudRects())
     const hit = createGridHit()
-    for (const rect of [r.clock, r.score, r.tiles]) {
+    for (const rect of [r.clock, r.score, r.tiles, r.upgrades]) {
       for (const [px, py] of [
         [rect.x, rect.y],
         [rect.x + rect.w - 1, rect.y + rect.h - 1],
@@ -698,6 +804,19 @@ describe('hudRects — three elements, all inside the HUD band and below the gri
 // ---------------------------------------------------------------------------
 // offerRects — §5.10's modal, M1f Task 8
 // ---------------------------------------------------------------------------
+
+/**
+ * The four HUD rects, as a list with names, so every loop reports WHICH one
+ * failed rather than that something did — M1f Task 10 added the fourth.
+ */
+function fourRects(r: HudRects): readonly (readonly [string, Rect])[] {
+  return [
+    ['clock', r.clock],
+    ['score', r.score],
+    ['tiles', r.tiles],
+    ['upgrades', r.upgrades],
+  ] as const
+}
 
 /**
  * The three rects, as a list with names, so every loop below reports WHICH one

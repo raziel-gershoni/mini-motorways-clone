@@ -9,6 +9,7 @@ import {
   offerPending,
   offerSlot,
   step,
+  H_INV_UPGRADES,
   OFFER_SLOT_A,
   OFFER_SLOT_B,
   type FlowField,
@@ -428,6 +429,15 @@ export function createGame(deps: GameDeps): Game {
       // once no offer is pending, and this per-frame read is the poll that does
       // it — see the getter.
       peeking: () => pointer.peeking,
+      // §5.6's placement mode, for the inventory chip's colour — M1f Task 10.
+      // A function for `peeking`'s reason: the mode lives in `pointer.ts`, the
+      // pointer machine outlives no rebuild of this closure, and a value
+      // snapshotted here would freeze the chip in whatever state it had at boot.
+      //
+      // **Unlike `peeking`, this read has no side effect and nothing depends on
+      // it happening.** Peek's getter clears its own latch; this mode is cleared
+      // by the tap that spends it.
+      upgradeMode: () => pointer.upgradeMode,
     }),
     queue,
   )
@@ -520,6 +530,14 @@ export function createGame(deps: GameDeps): Game {
     offerPending: () => offerPending(state),
     offerA: () => offerSlot(state, OFFER_SLOT_A),
     offerB: () => offerSlot(state, OFFER_SLOT_B),
+    // §5.6's inventory, for the chip — M1f Task 10. Straight off the header,
+    // because unlike the two card slots above it needs no guard: `H_INV_UPGRADES`
+    // is a plain counter that `applyChooseCard` raises and `applyPlaceUpgrade`
+    // lowers, and it means the same thing on every tick of every run.
+    //
+    // Read on every chip tap rather than latched: it moves inside a tick the
+    // pointer never sees.
+    upgradesHeld: () => state.header[H_INV_UPGRADES] as number,
   })
 
   const erase = createEraseControl({

@@ -20,8 +20,10 @@ import {
   weekOfTick,
   H_DEST_COUNT,
   H_HOUSE_COUNT,
+  H_INV_UPGRADES,
   H_SCORE,
   H_TICK,
+  H_UPGRADE_COUNT,
   type FlowField,
   type GameState,
   type Scratch,
@@ -181,6 +183,14 @@ export function createFrameBuilder(state: GameState, world: WorldData, camera: C
     // produce the bytes we already have. `buildFrame` therefore never touches
     // this field, which is why it is assigned once, here.
     ghosts: state.ghostMask,
+    // §5.6's junction upgrades, M1f Task 10. **A raw view exactly like `roads`
+    // and `ghosts`, assigned ONCE here and never rewritten**, and for their
+    // reason rather than a new one: `sim` already stores one flag per cell in the
+    // shape `render` reads, so a per-frame fold would copy 960 bytes to produce
+    // the bytes we already have — a second source of truth for a per-cell array
+    // that `sim` rewrites, with a staleness question attached that a view cannot
+    // have. `buildFrame` therefore never touches this field.
+    upgradeAt: state.upgradeAt,
     terrainClass: new Uint8Array(world.cells),
     houseCount: 0,
     houseCell: state.houseCell,
@@ -212,6 +222,9 @@ export function createFrameBuilder(state: GameState, world: WorldData, camera: C
     offerItemsA: 0,
     offerItemsB: 0,
     offerPeek: false,
+    upgradeCount: 0,
+    invUpgrades: 0,
+    upgradeMode: false,
   }
   return {
     frame,
@@ -443,6 +456,7 @@ export function buildFrame(
   alpha: number,
   paused: boolean,
   peeking: boolean,
+  upgradeMode: boolean,
 ): RenderFrame {
   const frame = builder.frame
   frame.camera = camera
@@ -565,6 +579,24 @@ export function buildFrame(
   // it reaches the renderer here. Putting it in the state buffer would make a
   // cosmetic toggle a replay input.
   frame.offerPeek = peeking
+  // §5.6's junction upgrades — M1f Task 10. Two header slots, straight off
+  // `sim`, with no guard between them and the frame because neither has one to
+  // need: `H_UPGRADE_COUNT` and `H_INV_UPGRADES` are plain counters that
+  // `applyPlaceUpgrade` moves together, and they mean the same thing on every
+  // tick of every run. (Contrast the four offer fields above, every one of which
+  // goes through `offerPending`/`offerSlot` because the RAW header keeps last
+  // week's cards for the rest of the run.)
+  //
+  // The per-cell flags are not folded here at all — `createFrameBuilder`
+  // assigned the view once. See there.
+  frame.upgradeCount = state.header[H_UPGRADE_COUNT] as number
+  frame.invUpgrades = state.header[H_INV_UPGRADES] as number
+  // The placement mode is UI and not simulation, exactly like `peeking` above
+  // and for the identical reason (plan Decision 16's argument, applied to a
+  // second mode): `pointer.ts` owns the boolean beside `eraseMode`, the driver
+  // reads it through `deps.upgradeMode`, and a copy here would be a third place
+  // for it to be wrong. A mode in the state buffer would be a replay input.
+  frame.upgradeMode = upgradeMode
 
   return frame
 }
@@ -681,6 +713,21 @@ export interface FrameDriverDeps {
    * `setPaused` on that path.
    */
   readonly peeking: () => boolean
+  /**
+   * Is `pointer.ts`'s junction-upgrade placement mode armed? — M1f Task 10.
+   *
+   * A function, and read every frame, for `peeking`'s reasons exactly: the mode
+   * lives outside both the loop and the sim, `main.ts` supplies
+   * `() => pointer.upgradeMode`, and `buildFrame` folds it into
+   * `RenderFrame.upgradeMode` so the chip can show it.
+   *
+   * **Unlike `peeking`, reading this has no side effect.** Peek is cleared by
+   * the act of reading it, because peek belongs to one modal and this module
+   * never sees a week resolve. The placement mode is cleared by the tap that
+   * spends it, which `pointer.ts` sees directly, so there is no latch here and
+   * nothing depends on the poll happening.
+   */
+  readonly upgradeMode: () => boolean
 }
 
 /**
@@ -749,7 +796,9 @@ export function createFrameDriver(deps: FrameDriverDeps): LoopDriver {
       snapshotCurr(builder.snapshots, state, world, ticks)
     },
     render(alpha: number, paused: boolean): void {
-      deps.draw(buildFrame(builder, state, world, deps.camera(), alpha, paused, deps.peeking()))
+      deps.draw(
+        buildFrame(builder, state, world, deps.camera(), alpha, paused, deps.peeking(), deps.upgradeMode()),
+      )
     },
   }
 }

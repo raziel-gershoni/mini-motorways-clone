@@ -33,6 +33,7 @@ import {
   dayOfWeek,
   tilesLeft,
   carparkCell,
+  hashState,
   destMetaColour,
   destMetaKind,
   destMetaOrientation,
@@ -57,12 +58,14 @@ import {
   H_FAILED_DEST,
   H_GAME_OVER,
   H_HOUSE_COUNT,
+  H_INV_UPGRADES,
   H_OFFER_A,
   H_OFFER_B,
   H_OFFER_WEEK,
   H_SCORE,
   H_TICK,
   H_TILES,
+  H_UPGRADE_COUNT,
   H_WEEK,
   type FlowField,
   type GameState,
@@ -160,8 +163,15 @@ function builderFor(r: Rig): FrameBuilder {
   return fb
 }
 
-function build(r: Rig, fb: FrameBuilder, alpha = 0, paused = false, peeking = false): RenderFrame {
-  return buildFrame(fb, r.state, r.world, r.camera, alpha, paused, peeking)
+function build(
+  r: Rig,
+  fb: FrameBuilder,
+  alpha = 0,
+  paused = false,
+  peeking = false,
+  upgradeMode = false,
+): RenderFrame {
+  return buildFrame(fb, r.state, r.world, r.camera, alpha, paused, peeking, upgradeMode)
 }
 
 function cellOf(x: number, y: number): number {
@@ -456,6 +466,72 @@ describe('the destination unpack', () => {
       cellOf(17, 18),
     ])
     expect(Array.from(frame.houseColour.subarray(0, 3))).toEqual([0, 0, 1])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2a2. §5.6's junction upgrades reach the renderer — M1f Task 10
+// ---------------------------------------------------------------------------
+
+describe("the frame carries §5.6's junction upgrades", () => {
+  it('carries sim’s upgrade flags BY REFERENCE, not by copy', () => {
+    // A copy would be a second source of truth for a per-cell array that `sim`
+    // rewrites; a view cannot go stale. Same construction as `roads` and
+    // `ghosts`, and for the same reason: `sim` already stores one flag per cell
+    // in the shape `render` reads.
+    const r = rig(true)
+    const f = build(r, builderFor(r))
+    expect(f.upgradeAt, 'the same object, not an equal one').toBe(r.state.upgradeAt)
+  })
+
+  it('follows a placement made AFTER the builder was constructed', () => {
+    // The behavioural half of the pin above, and the half a copy would actually
+    // break: the builder is made once at boot and a placement happens thousands
+    // of ticks later. `toBe` alone would pass on a copy taken at the right
+    // moment; this cannot.
+    const r = rig(true)
+    const fb = builderFor(r)
+    expect(build(r, fb).upgradeAt[cellOf(8, 13)]).toBe(0)
+    r.state.upgradeAt[cellOf(8, 13)] = 1
+    expect(build(r, fb).upgradeAt[cellOf(8, 13)]).toBe(1)
+  })
+
+  it('folds the two counters off the header, in the right slots', () => {
+    // Two counters that both count upgrades, so a swap is the natural mistake:
+    // `H_UPGRADE_COUNT` is how many are ON THE BOARD and `H_INV_UPGRADES` is how
+    // many are IN HAND. They are given different values here so the frame cannot
+    // pass with them exchanged.
+    const r = rig(true)
+    const fb = builderFor(r)
+    r.state.header[H_UPGRADE_COUNT] = 3
+    r.state.header[H_INV_UPGRADES] = 5
+    const f = build(r, fb)
+    expect(f.upgradeCount, 'placed on the board').toBe(3)
+    expect(f.invUpgrades, 'held in hand').toBe(5)
+    expect(f.upgradeCount).not.toBe(f.invUpgrades)
+  })
+
+  it('folds the placement mode from the caller, not from the sim', () => {
+    // The mode is UI: `pointer.ts` owns it beside `eraseMode` and it reaches the
+    // renderer through `buildFrame`'s parameter. Nothing in the state buffer
+    // moves, which is what keeps a cosmetic toggle out of the replay.
+    const r = rig(true)
+    const fb = builderFor(r)
+    const before = hashState(r.state)
+    expect(build(r, fb, 0, false, false, false).upgradeMode).toBe(false)
+    expect(build(r, fb, 0, false, false, true).upgradeMode).toBe(true)
+    expect(hashState(r.state), 'the mode wrote nothing into sim state').toBe(before)
+  })
+
+  it('does not confuse the placement mode with the peek flag', () => {
+    // Two booleans, same shape, adjacent parameters. Given opposite values so a
+    // swapped pair cannot pass.
+    const r = rig(true)
+    const fb = builderFor(r)
+    const f = build(r, fb, 0, false, true, false)
+    expect([f.offerPeek, f.upgradeMode]).toEqual([true, false])
+    const g = build(r, fb, 0, false, false, true)
+    expect([g.offerPeek, g.upgradeMode]).toEqual([false, true])
   })
 })
 
@@ -816,7 +892,7 @@ describe('the HUD scalars', () => {
     )
     expect(narrow.tileSize).not.toBe(r.camera.tileSize)
     expect(build(r, fb).camera).toBe(r.camera)
-    expect(buildFrame(fb, r.state, r.world, narrow, 0, false, false).camera).toBe(narrow)
+    expect(buildFrame(fb, r.state, r.world, narrow, 0, false, false, false).camera).toBe(narrow)
   })
 })
 
@@ -1374,6 +1450,7 @@ function driverFor(
   onGameOver?: () => void,
   onOfferRaised?: () => void,
   peeking?: () => boolean,
+  upgradeMode?: () => boolean,
 ): ReturnType<typeof createFrameDriver> {
   return createFrameDriver({
     state: r.state,
@@ -1390,6 +1467,7 @@ function driverFor(
     onGameOver: onGameOver ?? ((): void => {}),
     onOfferRaised: onOfferRaised ?? ((): void => {}),
     peeking: peeking ?? ((): boolean => false),
+    upgradeMode: upgradeMode ?? ((): boolean => false),
   })
 }
 
@@ -1704,6 +1782,7 @@ describe('createFrameDriver', () => {
           drawn.push(f.camera)
         },
         peeking: (): boolean => false,
+        upgradeMode: (): boolean => false,
       }),
       createInputQueue(),
     )
@@ -1899,16 +1978,17 @@ describe('the frame driver follows the sim into game over', () => {
     // completely different error and still read as this guard.
     //
     // **BOTH required properties, and that is what keeps this arm honest.**
-    // M1f Task 7 made `onOfferRaised` required too, and M1f Task 8 made
-    // `peeking` required, so `{ ...deps, onGameOver }` alone is now ALSO a type
-    // error — the directive above would still be "used" and this line would
-    // silently stop being a vacuity check. Sections 8c and 8d pin the other two
-    // separately.
+    // M1f Task 7 made `onOfferRaised` required too, M1f Task 8 made `peeking`
+    // required and M1f Task 10 made `upgradeMode` required, so
+    // `{ ...deps, onGameOver }` alone is now ALSO a type error — the directive
+    // above would still be "used" and this line would silently stop being a
+    // vacuity check. Sections 8c, 8d and 8e pin the other three separately.
     const ok = createFrameDriver({
       ...deps,
       onGameOver: (): void => {},
       onOfferRaised: (): void => {},
       peeking: (): boolean => false,
+      upgradeMode: (): boolean => false,
     })
     expect(typeof driver.advance).toBe('function')
     expect(typeof ok.advance).toBe('function')
@@ -2035,6 +2115,7 @@ describe('the frame driver raises the offer pause on the CONDITION', () => {
       ...deps,
       onOfferRaised: (): void => {},
       peeking: (): boolean => false,
+      upgradeMode: (): boolean => false,
     })
     expect(typeof driver.advance).toBe('function')
     expect(typeof ok.advance).toBe('function')
@@ -2098,9 +2179,80 @@ describe('the driver reads the peek flag on every render, not once at constructi
     const driver = createFrameDriver(deps)
     // Vacuity, exactly as in 8b and 8c: the same object plus the one property
     // must compile, or the directive could be suppressing an unrelated error.
-    const ok = createFrameDriver({ ...deps, peeking: (): boolean => false })
+    const ok = createFrameDriver({
+      ...deps,
+      peeking: (): boolean => false,
+      upgradeMode: (): boolean => false,
+    })
     expect(typeof driver.advance).toBe('function')
     expect(typeof ok.advance).toBe('function')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 8e. upgradeMode: the driver reads it every frame — M1f Task 10
+// ---------------------------------------------------------------------------
+
+describe('the frame driver folds the placement mode, and cannot be built without it', () => {
+  it('is REQUIRED on FrameDriverDeps, so a caller cannot silently draw an unarmed chip', () => {
+    // The fourth instance of this file's required-dependency guard, and the
+    // reason is the one `peeking`'s carries: a mode with no visible state is a
+    // mode the player cannot get out of. An optional dependency defaulting to
+    // `false` would leave the chip permanently idle on any caller that forgot
+    // it, with the placement gesture still fully live — the worst shape, because
+    // the mechanism works and the only thing that says so does not.
+    const r = rig()
+    const fb = builderFor(r)
+    const deps = {
+      state: r.state,
+      world: r.world,
+      fields: r.fields,
+      scratch: r.scratch,
+      builder: fb,
+      camera: () => r.camera,
+      draw: (): void => {},
+      onGameOver: (): void => {},
+      onOfferRaised: (): void => {},
+      peeking: (): boolean => false,
+    }
+    // @ts-expect-error upgradeMode is REQUIRED — see the comment above.
+    const driver = createFrameDriver(deps)
+    // Vacuity, exactly as in 8b, 8c and 8d.
+    const ok = createFrameDriver({ ...deps, upgradeMode: (): boolean => false })
+    expect(typeof driver.advance).toBe('function')
+    expect(typeof ok.advance).toBe('function')
+  })
+
+  it('reads it on EVERY frame, not once at construction', () => {
+    // Same shape as 8d's peek case: the mode is armed and disarmed by taps this
+    // module never sees, so a driver that snapshotted the function's value at
+    // construction would draw a chip that never changed colour.
+    const r = rig()
+    const fb = builderFor(r)
+    let armed = false
+    const seen: boolean[] = []
+    const driver = createFrameDriver({
+      state: r.state,
+      world: r.world,
+      fields: r.fields,
+      scratch: r.scratch,
+      builder: fb,
+      camera: () => r.camera,
+      draw: (f): void => {
+        seen.push(f.upgradeMode)
+      },
+      onGameOver: (): void => {},
+      onOfferRaised: (): void => {},
+      peeking: (): boolean => false,
+      upgradeMode: () => armed,
+    })
+    const loop = createLoop(driver, createInputQueue())
+    loop.frame(0)
+    armed = true
+    loop.frame(16.7)
+    armed = false
+    loop.frame(33.4)
+    expect(seen).toEqual([false, true, false])
   })
 })
 

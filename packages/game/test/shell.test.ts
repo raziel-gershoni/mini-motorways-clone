@@ -512,6 +512,7 @@ describe('the five matte fills tile the backing store the shell actually created
     y: number
     w: number
     h: number
+    style: string
   }
 
   function emptyFrame(camera: ReturnType<typeof fitCamera>): RenderFrame {
@@ -559,6 +560,13 @@ describe('the five matte fills tile the backing store the shell actually created
       offerItemsA: 0,
       offerItemsB: 0,
       offerPeek: false,
+      // The four M1f Task 10 fields. This file is about the shell's band fills,
+      // which the marker pass and the chip sit above and inside respectively —
+      // both explicit and empty so nothing here draws either.
+      upgradeAt: new Uint8Array(24 * 40),
+      upgradeCount: 0,
+      invUpgrades: 0,
+      upgradeMode: false,
     }
   }
 
@@ -578,7 +586,7 @@ describe('the five matte fills tile the backing store the shell actually created
       textAlign: 'center',
       textBaseline: 'middle',
       fillRect: (x, y, w, h) => {
-        fills.push({ x, y, w, h })
+        fills.push({ x, y, w, h, style: String(ctx.fillStyle) })
       },
       fillText: () => undefined,
       drawImage: () => undefined,
@@ -622,12 +630,27 @@ describe('the five matte fills tile the backing store the shell actually created
 
   for (const [name, view] of CASES) {
     it(`covers every device pixel exactly once on ${name}`, () => {
-      const { fills, canvas } = bandsFor(view)
+      const { fills: all, canvas } = bandsFor(view)
       // An empty board: all terrain LAND, no roads, no buildings, no cars, not
-      // paused. So the only fills are the five matte fills — the top band, a
-      // letterbox column each side of the playfield, the playfield, and the
+      // paused. So the only BOARD fills are the five matte fills — the top band,
+      // a letterbox column each side of the playfield, the playfield, and the
       // bottom band.
-      expect(fills.length).toBe(5)
+      //
+      // **Classified by fill STYLE and not by count, since M1f Task 10**, which
+      // added §7.2's inventory chip: the chip is one `fillRect` in the HUD band
+      // on every frame, so the raw count is six. `background` and `land` are the
+      // only two entries the matte uses and the only two no content path can
+      // produce, so this filter is exact in both directions — the same
+      // classifier `canvas.test.ts`'s `isMatte` uses, and for the reason it
+      // gives: the letterbox columns are 2 CSS px wide here and 0 on the M0
+      // device, so no geometric test separates them from content.
+      const fills = all.filter((f) => f.style === PALETTE.background || f.style === PALETTE.land)
+      expect(fills.length, 'five matte fills').toBe(5)
+      expect(all.length - fills.length, "one non-matte fill: §7.2's chip icon").toBe(1)
+      expect(
+        all.find((f) => f.style === PALETTE.chipEmpty),
+        'and it is the chip, greyed because the fixture holds none',
+      ).toBeDefined()
       const dpr = view.performanceClass === 'LOW' ? Math.min(view.rawDpr, 1.5) : Math.min(view.rawDpr, 2)
 
       // **A partition proof, not a strip walk.** Since Task 9 the fills are not

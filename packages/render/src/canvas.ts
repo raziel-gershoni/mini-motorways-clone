@@ -325,6 +325,66 @@ const TAU = Math.PI * 2
 export const PAUSE_BAR_FRACTION = 1 / 8
 
 /**
+ * The junction-upgrade marker: a solid square, `UPGRADE_SIZE_FRACTION` of a tile
+ * on a side, centred on the cell — M1f Task 10.
+ *
+ * ---------------------------------------------------------------------------
+ * **A SQUARE AND NOT A RING, AND THE REASON IS THE OBJECT THIS REPLACED.**
+ * ---------------------------------------------------------------------------
+ *
+ * The brief offers *"a filled diamond or a ring centred on the cell"* and asks
+ * for something that reads as *"this junction resolves"* and **not** as a
+ * signal. **A ring on a junction is what a traffic light looks like** — and
+ * §5.6's traffic light is the object M1f measured, rejected (-13.0 % on trips at
+ * its best seat phase) and handed to M1g, so a round mark on a corner is the one
+ * shape on this board that would name the wrong mechanism. It would also be the
+ * second stroked ring on the playfield: `strokeRing` already draws the overcrowd
+ * meter, whose whole meaning is a *changing* sweep, and an upgrade has no state
+ * to change.
+ *
+ * A diamond needs a path fill, which `DrawContext` deliberately does not carry
+ * (it has `fillRect`, `fillText`, `drawImage` and a stroked arc, and nothing
+ * else). So: one `fillRect`, one colour, no state it could be read as having.
+ *
+ * **1/3 of a tile, and the fraction is chosen to be unlike every other inset
+ * square on the board.** A tree and a carpark bay are 1/2 (`TREE_SIZE_FRACTION`,
+ * `CARPARK_SIZE_FRACTION`), a car is 1/2 (`CAR_SIZE_FRACTION`), a house is 2/3
+ * and a waiting pin is 1/6. 1/3 is in none of those, so size alone separates the
+ * marker from everything else the board draws — which is what lets
+ * `canvas.test.ts`'s classifier name it without reading the draw order.
+ *
+ * At the M0 device's 29 px tile that is a 9.67 px square with 9.67 px of road
+ * showing on each side of it, so the road mask underneath stays legible as a
+ * mask rather than being covered.
+ */
+export const UPGRADE_INSET_FRACTION = 1 / 3
+export const UPGRADE_SIZE_FRACTION = 1 / 3
+
+/**
+ * The inventory chip's icon: a square of exactly this many CSS px, vertically
+ * centred in the chip's HUD column — M1f Task 10.
+ *
+ * **CSS px and not a fraction of the column**, unlike everything on the board:
+ * the column's width is `floor((cssW - 32) / 4)` and runs from 87 CSS px at
+ * PHONE_390 to 190 at SHORT_WIDE, and an icon that scaled with it would be a
+ * different size on a phone and on a tablet for no reason. The board scales
+ * because the board is the thing being zoomed; a HUD glyph does not.
+ *
+ * It is **the same shape as the board marker** — a solid square — so the thing
+ * the player taps and the thing that appears where they tap are the same object
+ * at two sizes. That is the whole affordance, and it is why the icon is not a
+ * lettermark.
+ */
+export const CHIP_ICON_CSS = 20
+
+/** The icon's inset from the chip column's left edge, CSS px. */
+export const CHIP_ICON_INSET_CSS = 12
+
+/** The gap between the icon and the badge, CSS px. See `drawHud`. */
+export const CHIP_BADGE_GAP_CSS = 8
+
+
+/**
  * How many bar-widths of the clock rect the pause indicator reserves before the
  * clock text starts. Four is the bars themselves (`[1·barW, 4·barW]`); the fifth
  * is the gap between the indicator and the text.
@@ -638,6 +698,39 @@ function itemsText(items: number): string {
 }
 
 /**
+ * The inventory chip's badge — the bare count, memoised on the value that
+ * produced it. The **seventh** instance of this file's single-slot cache, in
+ * `scoreText`'s idiom and for its reason (M1f Task 10).
+ *
+ * Its own slot rather than a reuse of `itemsText`: that one formats `x2` for a
+ * card face, this one formats `2` for a chip, and the two are keyed on numbers
+ * that move on completely different schedules — the offer's item count changes
+ * at a week boundary and the held count changes every time the player places
+ * one.
+ *
+ * **What is and is not testable about this, said once here rather than at the
+ * test.** The task brief prescribes `expect(badgeText(2)).toBe(badgeText(2))`.
+ * **That assertion cannot fail**: strings are primitives, `toBe` is `Object.is`,
+ * and `Object.is('2', '2')` is true whether one string was allocated or a
+ * thousand were. It is the catalogue's *"a test that cannot fail"* in one line,
+ * and it is not shipped. What IS observable is the same pair every other memo in
+ * this file is held to: the **staleness** (change the count between two frames
+ * and the drawn text must follow, then change it back), asserted in
+ * `canvas.test.ts`, and the **byte count**, which `packages/game`'s allocation
+ * profiler charges to this file through a real `drawFrame` caller.
+ */
+let cachedBadge = -1
+let cachedBadgeText = ''
+
+function badgeText(count: number): string {
+  if (count !== cachedBadge) {
+    cachedBadge = count
+    cachedBadgeText = `${count}`
+  }
+  return cachedBadgeText
+}
+
+/**
  * A card's name, with a fallback that draws an EMPTY card rather than the word
  * `undefined`.
  *
@@ -785,25 +878,42 @@ function destinationIsUnreachable(frame: RenderFrame, d: number): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Draws one frame. Twelve phases, in this order, and the order is load-bearing:
+ * Draws one frame. Thirteen phases, in this order, and the order is load-bearing:
  *
  * ```
  * 1 top band + letterbox fills    2 playfield fill    3 non-land terrain
- * 4 ghost roads                   5 live roads        6 destinations
- *                                   (+ the overcrowd ring, M1e Task 9)
- * 7 houses                        8 cars              9 bottom band fill
- * 10 HUD content                  11 the shutdown screen — ONLY when
- *                                    `frame.gameOver`, see `drawShutdown`
- *                                 12 the offer modal — ONLY when
+ * 4 ghost roads                   5 live roads        6 junction upgrades —
+ *                                   ONLY when `frame.upgradeCount`, see
+ *                                   `drawUpgrades`
+ * 7 destinations                  8 houses            9 cars
+ *   (+ the overcrowd ring, M1e Task 9)
+ * 10 bottom band fill             11 HUD content      12 the shutdown screen —
+ *                                    ONLY when `frame.gameOver`, see
+ *                                    `drawShutdown`
+ *                                 13 the offer modal — ONLY when
  *                                    `frame.offerPending`, see `drawOffer`
  * ```
  *
- * **These twelve are THIS FILE'S LAYER COUNT and have nothing to do with
+ * **These thirteen are THIS FILE'S LAYER COUNT and have nothing to do with
  * `sim`'s eleven tick phases.** The two numbering schemes were equal at eleven
  * for exactly one milestone and diverged at M1f Task 8; a reader who conflates
  * them goes looking for a tick phase 12 that does not exist, or reads "phase 4"
  * in a `sim` comment as the ghost layer. There is no correspondence between the
  * two lists at any index and there never was.
+ *
+ * **Phase 6 is M1f Task 10's, and it is a PASS of its own rather than a branch
+ * folded into the live-road blit — which is what the task brief asked for and
+ * the reason it is not is a state a player reaches.** Folding the marker into
+ * `drawMaskLayer`'s loop costs no second iteration, and that loop's very first
+ * statement is `if (mask === 0) continue`. `sim` never clears `upgradeAt`
+ * (`upgrades.ts`, deliberately: a mechanism that silently stops working is this
+ * project's worst defect shape), so **an upgrade on a cell whose roads have all
+ * been erased is a real, reachable, tested state** — and inside that loop its
+ * marker would silently stop being drawn, which is the one moment the player
+ * most needs to be told where their permanent, unrefundable upgrade is. A
+ * separate pass reads the flag and nothing else. It costs one `if` per frame on
+ * every frame before the player places their first upgrade, because
+ * `frame.upgradeCount` gates the whole pass — see `drawUpgrades`.
  *
  * **Phases 11 and 12 are the conditional ones, and that is worth a warning
  * rather than a note.** A new gated phase is unconstrained by every fixture that
@@ -890,7 +1000,7 @@ function destinationIsUnreachable(frame: RenderFrame, d: number): boolean {
  * building whose anchor is outside is not drawn at all, even if its footprint
  * would reach inside — correct for M2, where the rect is frozen and Task 2's
  * seed places every building well within it, and the thing M1f must revisit when
- * the rect becomes dynamic (the fix then is a `clip` around phases 3-8, which
+ * the rect becomes dynamic (the fix then is a `clip` around phases 3-9, which
  * would also stop a partially-visible building painting into the HUD band).
  * **Repointed from M1d at the close of M1d and from M1e at the close of M1e**,
  * both of which declined board expansion; the rect is still frozen and this is
@@ -903,8 +1013,8 @@ function destinationIsUnreachable(frame: RenderFrame, d: number): boolean {
  * and a car near the rect's last column or row overhangs it by up to
  * `3 * tileSize / 4` CSS px.** That is correct — the sprite is centred on a
  * position the sim genuinely put at the edge — and the reason it never reaches
- * the HUD is the **draw order**: the bottom band is phase 9 and cars are phase
- * 8, so it paints over anything that spilled below the grid rect. Not anchor
+ * the HUD is the **draw order**: the bottom band is phase 10 and cars are phase
+ * 9, so it paints over anything that spilled below the grid rect. Not anchor
  * culling, which is the buildings' protection and not the cars'. Sideways the
  * overhang survives, because the two letterbox columns are phase 1.
  */
@@ -945,7 +1055,7 @@ export function drawFrame(
 
   // 1. The background matte, in three pieces: the top band down to the grid
   //    rect, then the letterbox column on each side of it. The fourth piece is
-  //    phase 9, because it has to paint over the cars.
+  //    phase 10, because it has to paint over the cars.
   ctx.fillStyle = palette.background
   ctx.fillRect(0, 0, right, gridTop)
   ctx.fillRect(0, gridTop, gridLeft, gridBottom - gridTop)
@@ -961,11 +1071,16 @@ export function drawFrame(
   // live one is drawn second so that it wins if they ever stop being.
   drawMaskLayer(ctx, frame, frame.ghosts, atlases.ghost)
   drawMaskLayer(ctx, frame, frame.roads, atlases.road)
+  // 6. The junction-upgrade markers, ABOVE the road mask and BELOW the
+  //    buildings. Ordering is the one thing a static glyph can still get wrong:
+  //    under the road mask the marker would be hidden by the very cell it names,
+  //    and over the destinations it would cover the bay a player is routing to.
+  drawUpgrades(ctx, frame, palette)
   drawDestinations(ctx, frame, palette)
   drawHouses(ctx, frame, palette)
   drawCars(ctx, frame, palette)
 
-  // 9. The bottom band: from the grid rect's bottom edge down to the canvas
+  // 10. The bottom band: from the grid rect's bottom edge down to the canvas
   // BOTTOM, not merely to the HUD band's own height. It covers three things at
   // once — the vertical gap between the grid rect and the band, the band, and
   // the bottom safe-area inset under it. A fill that started at `hudTop` would
@@ -977,9 +1092,9 @@ export function drawFrame(
 
   drawHud(ctx, frame, palette)
 
-  // 11. The shutdown screen, and NOTHING when the run is live. Last, after the
+  // 12. The shutdown screen, and NOTHING when the run is live. Last, after the
   //     HUD, because the HUD's own labels must not be able to paint over it.
-  // 12. §5.10's offer modal — and NOTHING on a dead board, which is an `else`
+  // 13. §5.10's offer modal — and NOTHING on a dead board, which is an `else`
   //     rather than a second `if` for a reason `drawOffer` spells out: the
   //     pointer's game-over branch sits ABOVE its modal branch, so a tap on
   //     that screen restarts the run. A modal drawn over a shutdown screen
@@ -989,7 +1104,8 @@ export function drawFrame(
 }
 
 /**
- * Phase 11, and the only phase in this file that does not run every frame.
+ * Phase 12, and one of the three phases in this file that do not run every
+ * frame.
  *
  * **What a person sees.** The board they were watching dims but stays visible —
  * the scrim is translucent, so the frozen cars, the frozen queues and the
@@ -1072,7 +1188,7 @@ function drawShutdown(
 }
 
 /**
- * Phase 12 — §5.10's weekly card offer, and the second of this file's two
+ * Phase 13 — §5.10's weekly card offer, and the last of this file's three
  * conditional phases (M1f Task 8).
  *
  * **What a person sees.** At the first week boundary the board stops and this
@@ -1350,7 +1466,51 @@ function drawMaskLayer(
 }
 
 /**
- * Phase 6, above both road layers: a road is legal on a carpark cell (it is the
+ * Phase 6 — M1f Task 10. One solid square per upgraded cell, in
+ * `palette.upgrade`, and nothing at all when none is placed.
+ *
+ * **`frame.upgradeCount === 0` is an early return and not an optimisation.** It
+ * is the whole cost of this phase on every frame of every run before the player
+ * places their first upgrade, and on every frame of every run in which they
+ * never place one — one integer comparison, no `fillStyle` write, no iteration.
+ * `upgradeCount` exists for this and is drawn nowhere.
+ *
+ * **The pass reads `upgradeAt` and NOT `roads`**, which is what makes it correct
+ * on the state `sim` deliberately allows: an upgrade whose junction has been
+ * erased. The flag persists (`upgrades.ts`), the player still owns it, they
+ * cannot get it back, and this mark is the only thing on screen that says which
+ * cell to redraw the junction on. A version keyed on `roads[cell] !== 0` — which
+ * is what folding this into `drawMaskLayer` would have produced — makes the mark
+ * vanish at exactly that moment.
+ *
+ * `fillStyle` is set once, outside both loops, because every marker is the same
+ * colour: an upgrade has no state, so there is nothing for a second colour to
+ * mean.
+ */
+function drawUpgrades(ctx: DrawContext, frame: RenderFrame, palette: Palette): void {
+  if (frame.upgradeCount === 0) return
+
+  const camera = frame.camera
+  const tile = camera.tileSize
+  const inset = tile * UPGRADE_INSET_FRACTION
+  const size = tile * UPGRADE_SIZE_FRACTION
+  const upgrades = frame.upgradeAt
+  const yEnd = camera.y0 + camera.rows
+  const xEnd = camera.x0 + camera.cols
+
+  ctx.fillStyle = palette.upgrade
+  for (let y = camera.y0; y < yEnd; y++) {
+    const rowBase = y * frame.gridW
+    const py = gridToScreenY(camera, y) + inset
+    for (let x = camera.x0; x < xEnd; x++) {
+      if ((upgrades[rowBase + x] as number) === 0) continue
+      ctx.fillRect(gridToScreenX(camera, x) + inset, py, size, size)
+    }
+  }
+}
+
+/**
+ * Phase 7, above both road layers: a road is legal on a carpark cell (it is the
  * driveway), so drawing the building first would leave the road on top of it.
  *
  * The footprint box is derived from the orientation — the second copy of
@@ -1481,7 +1641,7 @@ function drawDestinations(ctx: DrawContext, frame: RenderFrame, palette: Palette
 /**
  * One overcrowd ring, around destination `d`'s footprint.
  *
- * Shared by phase 6 and phase 11, and shared rather than copied for the reason
+ * Shared by phase 7 and phase 12, and shared rather than copied for the reason
  * `drawMaskLayer` is called twice instead of written twice: two copies would be
  * two geometries, and the second one's only protection would be a copied test.
  * `widthScale` is the only thing the two call sites differ by — the shutdown
@@ -1530,7 +1690,7 @@ function strokeRing(
 }
 
 /**
- * Phase 7, above the roads for the same reason as phase 6: `placeRoad` allows a
+ * Phase 8, above the roads for the same reason as phase 7: `placeRoad` allows a
  * road on a house cell.
  *
  * Reads `[0, houseCount)` and nothing beyond it. That prefix is the whole
@@ -1562,7 +1722,7 @@ function drawHouses(ctx: DrawContext, frame: RenderFrame, palette: Palette): voi
 }
 
 /**
- * Phase 8, above the buildings: a car drives onto the carpark, and a car parked
+ * Phase 9, above the buildings: a car drives onto the carpark, and a car parked
  * under its destination is a car the player cannot see.
  *
  * **`carXY` is in cell-CENTRE units and this is the one place the two coordinate
@@ -1600,12 +1760,39 @@ function drawCars(ctx: DrawContext, frame: RenderFrame, palette: Palette): void 
 }
 
 /**
- * Phase 10. Spec §7.2's three persistent elements, laid out by `hudRects` and
- * drawn centred in its rectangles.
+ * Phase 11. Spec §7.2's persistent elements, laid out by `hudRects` and drawn
+ * centred in its rectangles.
  *
- * All three are in the **bottom** band: §7.2 puts the clock at the top and §8.3
- * forbids any interactive element in the top band, and M2 resolves that toward
- * §8.3 because it is a platform fact and §7.2 is a preference.
+ * All of them are in the **bottom** band: §7.2 puts the clock at the top and
+ * §8.3 forbids any interactive element in the top band, and M2 resolves that
+ * toward §8.3 because it is a platform fact and §7.2 is a preference. M1f Task
+ * 10's inventory chip is the first element for which that rule is load-bearing
+ * rather than incidental — it is tappable, and §8.3's sentence names exactly
+ * that.
+ *
+ * ---------------------------------------------------------------------------
+ * **THE CHIP: §7.2's *"icon plus count; greyed with badge suppressed at zero"*,
+ * plus one state §7.2 does not have — ARMED.**
+ * ---------------------------------------------------------------------------
+ *
+ * Three states, one `fillRect`, and only the colour moves:
+ *
+ * | state | icon | badge |
+ * |---|---|---|
+ * | holds none | `palette.chipEmpty`, greyed | **suppressed** |
+ * | holds some, idle | `palette.uiText`, solid dark | the count |
+ * | holds some, armed | `palette.cardAccent` | the count |
+ *
+ * **The armed state is not decoration and it is not in §7.2, because §7.2 has no
+ * mode.** Once the chip is tapped the next board tap places an upgrade instead
+ * of starting a road. A player who armed it by accident — a mis-hit on a
+ * 87 CSS px column next to the tiles readout — has no other way to find out why
+ * their drag did not draw, so the mode must be visible for as long as it is
+ * held. That is the same argument `eraseControl.ts` makes for its own label.
+ *
+ * **The badge is suppressed rather than drawn as `0`, which is §7.2's word.** An
+ * `0` is a number a player reads and acts on; an absent badge beside a greyed
+ * icon is the thing itself saying it has nothing to give.
  *
  * The pause indicator is two bars at the left of the clock rect, drawn only when
  * the frame is paused — the clock doubles as the pause control (§7.2), so its
@@ -1637,6 +1824,22 @@ function drawHud(ctx: DrawContext, frame: RenderFrame, palette: Palette): void {
     ctx.fillRect(clock.x + 3 * barW, barY, barW, barH)
   }
 
+  // §7.2's inventory chip, drawn BEFORE the text pass so the one `fillStyle`
+  // assignment below covers every string on the band — M1f Task 10.
+  const chip = rects.upgrades
+  const held = frame.invUpgrades > 0
+  // Clamped to the column, so the icon is inside its own rect at every viewport
+  // including the degenerate ones `fitCamera` survives (a hidden webview, a
+  // measurement mid-rotation), where `hudRects` reports a zero-width column.
+  const iconSide = CHIP_ICON_CSS < chip.w ? CHIP_ICON_CSS : chip.w
+  const iconInset = CHIP_ICON_INSET_CSS < chip.w - iconSide ? CHIP_ICON_INSET_CSS : chip.w - iconSide
+  ctx.fillStyle = held
+    ? frame.upgradeMode
+      ? palette.cardAccent
+      : palette.uiText
+    : palette.chipEmpty
+  ctx.fillRect(chip.x + iconInset, chip.y + (chip.h - iconSide) / 2, iconSide, iconSide)
+
   ctx.font = HUD_FONT
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
@@ -1644,6 +1847,11 @@ function drawHud(ctx: DrawContext, frame: RenderFrame, palette: Palette): void {
   fillCentred(ctx, clockText(frame.week, frame.day), clock, gutter)
   fillCentred(ctx, scoreText(frame.score), rects.score, 0)
   fillCentred(ctx, tilesText(frame.tilesLeft), rects.tiles, 0)
+  // Suppressed at zero, per §7.2 — see the header. The gutter is what the icon
+  // and its gap occupy, so the count is centred in what is LEFT of the column
+  // rather than through the icon, exactly as the clock is centred in what is
+  // left of its own rect when the pause bars are up.
+  if (held) fillCentred(ctx, badgeText(frame.invUpgrades), chip, iconInset + iconSide + CHIP_BADGE_GAP_CSS)
 }
 
 /**

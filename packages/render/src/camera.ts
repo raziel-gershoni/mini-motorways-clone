@@ -265,24 +265,52 @@ export function screenToGrid(
   return out
 }
 
+/**
+ * How many equal columns the HUD band is divided into. **Four since M1f Task
+ * 10**, when §7.2's inventory chip arrived with its first chip.
+ *
+ * A named constant rather than a literal 3 written twice, because the column
+ * count appears in the width AND in the gap count, and the two disagreeing is a
+ * layout that overflows the band by one gap.
+ */
+export const HUD_COLUMNS = 4
+
+/**
+ * The smallest a tappable chip may be drawn, CSS px.
+ *
+ * **44 is a touch target and not a look** — the same figure `OFFER_PEEK_H_CSS`
+ * and `eraseControl.ts`'s fallback pill are built to. It is the number the top
+ * band was measured against when M1f Task 10 chose which band the chip goes in:
+ * `camera.originY` is 86 / 95 / **27** on the three viewports `camera.test.ts`
+ * covers, and 27 is below `CHIP_MIN_CSS + 2 * HUD_PAD_CSS` = 60, so the top band
+ * cannot hold one on a landscape viewport even before §8.3 forbids putting an
+ * interactive element there at all. See `HudRects.upgrades`.
+ */
+export const CHIP_MIN_CSS = 44
+
 /** A `HudRects` for `hudRects` to write into. Allocate once, outside the loop. */
 export function createHudRects(): HudRects {
   return {
     clock: { x: 0, y: 0, w: 0, h: 0 },
     score: { x: 0, y: 0, w: 0, h: 0 },
     tiles: { x: 0, y: 0, w: 0, h: 0 },
+    upgrades: { x: 0, y: 0, w: 0, h: 0 },
   }
 }
 
 /**
- * Lays spec §7.2's three HUD elements across the HUD band as three equal
+ * Lays spec §7.2's HUD elements across the HUD band as `HUD_COLUMNS` equal
  * columns, written into `out`'s existing rects — the nested `Rect`s are reused,
  * never replaced, so this allocates nothing.
  *
- * All three sit in the **bottom** band, thumb-reachable, and the top band gets
+ * All of them sit in the **bottom** band, thumb-reachable, and the top band gets
  * nothing at all: §7.2 puts the clock at the top and §8.3 forbids any
  * interactive element there, and M2 resolves that toward §8.3 because it is a
- * platform fact and §7.2 is a preference.
+ * platform fact and §7.2 is a preference. **M1f Task 10's inventory chip is the
+ * first element for which §8.3's rule is load-bearing rather than incidental**
+ * — the clock and the two readouts could have lived anywhere, and a chip that
+ * arms a placement mode is exactly the "interactive element" §8.3 names. See
+ * `HudRects.upgrades` for the measurement that decided it.
  *
  * Every rect is inside the band by construction, and the band is below the grid
  * rect by construction — `fitCamera` subtracted `HUD_BAND_CSS` before fitting.
@@ -290,25 +318,44 @@ export function createHudRects(): HudRects {
  * function, which is why `pointer.ts` still asserts its hit-test ordering
  * (Task 7): a change to `fitCamera` must not silently make the board eat pause
  * taps.
+ *
+ * **The width is floored at zero, which is new at Task 10 and is about the
+ * degenerate viewports rather than the fourth column.** `fitCamera` deliberately
+ * survives a 0x0 or 20-px-wide viewport (a hidden webview, a measurement taken
+ * mid-rotation), and on those the column arithmetic has always been negative —
+ * `(20 - 16 - 16) / 3` is -4 at three columns and `(20 - 16 - 24) / 4` is -5 at
+ * four. A negative-width rect is the one thing `offerRects` clamps for and this
+ * function never did; `inRect` answers false for every point against one, so
+ * nothing was ever mis-hit, but the fourth column is not the place to inherit an
+ * unclamped expression silently.
  */
 export function hudRects(camera: Camera, out: HudRects): HudRects {
   const y = camera.hudTop + HUD_PAD_CSS
   const h = camera.hudHeight - 2 * HUD_PAD_CSS
-  const w = Math.floor((camera.cssW - 2 * HUD_PAD_CSS - 2 * HUD_GAP_CSS) / 3)
+  const w = Math.max(
+    0,
+    Math.floor((camera.cssW - 2 * HUD_PAD_CSS - (HUD_COLUMNS - 1) * HUD_GAP_CSS) / HUD_COLUMNS),
+  )
   const stride = w + HUD_GAP_CSS
 
-  // Written out rather than looped over `[out.clock, out.score, out.tiles]`:
-  // that array literal is itself an allocation, once per call, in a function
-  // whose whole point is not to allocate.
+  // Written out rather than looped over `[out.clock, out.score, out.tiles,
+  // out.upgrades]`: that array literal is itself an allocation, once per call,
+  // in a function whose whole point is not to allocate.
   //
   // This comment used to end "caught by review of this file, not by a test —
   // there is no allocation profiler in this toolchain". That claim was false
   // and has now been refuted twice; `packages/game/test/allocation.test.ts`
   // profiles this call under a live drag through `pointer.ts` and holds it to
   // the same budget as everything else.
+  //
+  // **The chip is LAST rather than beside the clock**, so the two elements a
+  // player reaches for most — pause, and the thing they just bought — are at
+  // opposite ends of the band and a mis-hit lands on a readout that does
+  // nothing, never on the other one.
   setRect(out.clock, HUD_PAD_CSS, y, w, h)
   setRect(out.score, HUD_PAD_CSS + stride, y, w, h)
   setRect(out.tiles, HUD_PAD_CSS + 2 * stride, y, w, h)
+  setRect(out.upgrades, HUD_PAD_CSS + 3 * stride, y, w, h)
   return out
 }
 

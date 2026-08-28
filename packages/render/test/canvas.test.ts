@@ -14,6 +14,7 @@ import {
   CARD_LABELS,
   CARD_LABEL_COUNT,
   CAR_SIZE_FRACTION,
+  CHIP_ICON_CSS,
   DEST_ORIENTATION_N,
   DEST_ORIENTATION_S,
   HUD_FONT,
@@ -28,6 +29,8 @@ import {
   RING_WIDTH_FRACTION,
   SHUTDOWN_RING_WIDTH_SCALE,
   SHUTDOWN_TEXT_INSET_CSS,
+  UPGRADE_INSET_FRACTION,
+  UPGRADE_SIZE_FRACTION,
   destFootprintH,
   destFootprintW,
   drawFrame,
@@ -423,6 +426,15 @@ function frameA(paused = false): RenderFrame {
     offerItemsA: 0,
     offerItemsB: 0,
     offerPeek: false,
+    // The four M1f Task 10 fields, explicit for the same reason again — and
+    // `upgradeCount` in particular gates a whole PHASE, so a fixture that left
+    // it absent would make the marker pass unreachable while every "no marker is
+    // drawn" assertion still passed on `undefined`. That is the exact failure
+    // the `gameOver` note above records.
+    upgradeAt: new Uint8Array(cells),
+    upgradeCount: 0,
+    invUpgrades: 0,
+    upgradeMode: false,
   }
 }
 
@@ -667,6 +679,13 @@ function frameB(paused = false): RenderFrame {
     offerItemsA: 0,
     offerItemsB: 0,
     offerPeek: false,
+    // See `frameA`. `upgradeAt` is all-zero here on purpose: the whole-log
+    // literal below is written against a board with no upgrade on it, and the
+    // marker cases build their own flags.
+    upgradeAt: new Uint8Array(B_CELLS),
+    upgradeCount: 0,
+    invUpgrades: 0,
+    upgradeMode: false,
   }
 }
 
@@ -1016,6 +1035,10 @@ const ROAD_EDGE = PALETTE.roadEdge
  */
 const OVERCROWD = PALETTE.overcrowd
 const UI_TEXT = PALETTE.uiText
+/** §5.6's junction-upgrade marker on the board — M1f Task 10. */
+const UPGRADE = PALETTE.upgrade
+/** The inventory chip's icon when the player holds none. See `chipEmpty`. */
+const CHIP_EMPTY = PALETTE.chipEmpty
 const GROUP = PALETTE.groups
 
 // ---------------------------------------------------------------------------
@@ -1025,8 +1048,8 @@ describe('drawFrame: the entire recorded frame, hand-written', () => {
     // The strongest single assertion in this file: every command, every
     // coordinate and every colour of a complete frame, hand-computed from
     // fixture B's camera. It pins the draw order the plan calls load-bearing
-    // (top band -> land -> terrain -> ghosts -> roads -> destinations -> houses
-    // -> cars -> HUD band -> HUD content) together with the geometry of every
+    // (top band -> land -> terrain -> ghosts -> roads -> UPGRADES -> destinations
+    // -> houses -> cars -> HUD band -> HUD content) together with the geometry of every
     // element, so a reordering and a mis-transform are the same failure to write
     // down.
     const atlases = atlasesAt(B_TILE_DEVICE)
@@ -1069,7 +1092,11 @@ describe('drawFrame: the entire recorded frame, hand-written', () => {
       blit(atlases.road, 132, 0, 2, 324), //     (1, 3) mask 1  -> tile (1, 0)
       blit(atlases.road, 528, 0, 134, 390), //   (3, 4) mask 4  -> tile (4, 0)
       blit(atlases.road, 264, 0, 332, 390), //   (6, 4) mask 2  -> tile (2, 0)
-      // 6. the destination: a 3x2 footprint, its carpark, then its waiting pins
+      // 6. junction upgrades — M1f Task 10 — and this fixture places NONE, so
+      //    the pass issues nothing at all: not a `fillStyle` write, not a
+      //    `fillRect`, not an iteration. `frame.upgradeCount` is 0 and the phase
+      //    early-returns on it. Its absence from this literal is the assertion.
+      // 7. the destination: a 3x2 footprint, its carpark, then its waiting pins
       set('fillStyle', GROUP[4] as string),
       fill(GROUP[4] as string, 200, 192, 198, 132),
       set('fillStyle', ROAD_EDGE),
@@ -1078,32 +1105,43 @@ describe('drawFrame: the entire recorded frame, hand-written', () => {
       fill(UI_TEXT, 211, 203, 11, 11),
       fill(UI_TEXT, 233, 203, 11, 11),
       fill(UI_TEXT, 255, 203, 11, 11),
-      // 7. houses, above roads because a road is legal on a house cell
+      // 8. houses, above roads because a road is legal on a house cell
       set('fillStyle', GROUP[2] as string),
       fill(GROUP[2] as string, 13, 401, 44, 44),
       set('fillStyle', GROUP[5] as string),
       fill(GROUP[5] as string, 343, 401, 44, 44),
-      // 8. cars, above buildings because a car drives onto the carpark
+      // 9. cars, above buildings because a car drives onto the carpark
       set('fillStyle', GROUP[1] as string),
       fill(GROUP[1] as string, 150.5, 406.5, 33, 33),
       set('fillStyle', GROUP[3] as string),
       fill(GROUP[3] as string, 315.5, 340.5, 33, 33),
-      // 9. the bottom band: from the grid rect's bottom edge (456) down to the
+      // 10. the bottom band: from the grid rect's bottom edge (456) down to the
       //    canvas bottom — the vertical gap, the HUD band and the safe-area
       //    inset in one fill, and issued after the cars so nothing spilling out
       //    of the playfield survives into the HUD.
       set('fillStyle', BACKGROUND),
       fill(BACKGROUND, 0, 456, 400, 244),
-      // 10. HUD content
+      // 11. HUD content, and §7.2's inventory chip FIRST — M1f Task 10. The
+      //     chip is one `fillRect` in all three of its states and only the
+      //     colour moves; this fixture holds none, so it is `chipEmpty` and its
+      //     badge is suppressed, which is why the text run below has three
+      //     entries for four columns.
+      //     Column x = 8 + 3 * (90 + 8) = 302; icon x = 302 + 12 = 314;
+      //     y = 616 + (56 - 20)/2 = 634.
+      set('fillStyle', CHIP_EMPTY),
+      fill(CHIP_EMPTY, 314, 634, 20, 20),
       set('font', HUD_FONT),
       set('textAlign', 'center'),
       set('textBaseline', 'middle'),
       set('fillStyle', UI_TEXT),
       // Every label carries `maxWidth = rect.w`, which is what makes "it fits"
       // a construction guarantee rather than a device-dependent hope.
-      text('W3 D5', 69, 644, 122),
-      text('12 TRIPS', 199, 644, 122),
-      text('17 TILES', 329, 644, 122),
+      // **The three x's and the maxWidth moved at M1f Task 10**, when the band
+      // went from three equal columns to four: 69/199/329 at 122 -> 53/151/249
+      // at 90. Re-derived in `camera.test.ts`, not nudged.
+      text('W3 D5', 53, 644, 90),
+      text('12 TRIPS', 151, 644, 90),
+      text('17 TILES', 249, 644, 90),
     ])
   })
 
@@ -1578,7 +1616,12 @@ describe('the transform: a car at a fractional grid position', () => {
     // is one multiply.
     const camera = cameraA()
     const paints = content(draw(frameA(), atlasesAt(58)))
-    expect(paints.length).toBe(1)
+    // **Two, not one, since M1f Task 10**: the car, and §7.2's inventory chip,
+    // which is drawn on EVERY frame — greyed, with its badge suppressed, on this
+    // fixture, which holds none. It is HUD furniture in the bottom band, 618 CSS
+    // px below the car, and it is named here rather than filtered out so that
+    // "the board drew exactly one thing" stays an exact claim.
+    expect(paints.length).toBe(2)
     expect(paints[0]?.command).toEqual({
       op: 'fillRect',
       fillStyle: GROUP[3] as string,
@@ -1586,6 +1629,17 @@ describe('the transform: a car at a fractional grid position', () => {
       y: 303.5,
       w: 14.5,
       h: 14.5,
+    })
+    // The chip: `CHIP_ICON_INSET_CSS` from its column's left edge, centred in
+    // the band's 56 px of content height, in `chipEmpty` because none is held.
+    // Column x at fixture A: 8 + 3 * (91 + 8) = 305; y = 772 + (56 - 20)/2 = 790.
+    expect(paints[1]?.command).toEqual({
+      op: 'fillRect',
+      fillStyle: PALETTE.chipEmpty,
+      x: 305 + 12,
+      y: 790,
+      w: 20,
+      h: 20,
     })
     expect(A_TILE).toBe(29)
     expect(A_ORIGIN_X).toBe(camera.originX)
@@ -2121,7 +2175,7 @@ describe('destinations: the footprint, the carpark and the waiting pins', () => 
 })
 
 describe('the HUD', () => {
-  it('renders week, day, score and tilesLeft centred in hudRects’ three rectangles', () => {
+  it('renders week, day, score and tilesLeft centred in hudRects’ first three rectangles', () => {
     const camera = cameraB()
     const rects = hudRects(camera, createHudRects())
     const drawn = texts(draw(frameB(), atlasesAt(B_TILE_DEVICE)))
@@ -2133,13 +2187,20 @@ describe('the HUD', () => {
       [rects.tiles.x + rects.tiles.w / 2, rects.tiles.y + rects.tiles.h / 2],
     ])
     // Hand-written as well, so this is not an assertion against the same
-    // expression twice: w = floor((400 - 16 - 16)/3) = 122, stride = 130,
-    // y = 608 + 8 + (72 - 16)/2 = 644.
+    // expression twice. **RE-DERIVED at four columns — M1f Task 10** (the
+    // three-column figures were 122 / 130 / 69 / 199 / 329):
+    // w = floor((400 - 16 - 3*8)/4) = floor(90) = 90, stride = 98,
+    // y = 608 + 8 + (72 - 16)/2 = 644, x = 8+45, 106+45, 204+45.
     expect(drawn.map((t) => [t.x, t.y])).toEqual([
-      [69, 644],
-      [199, 644],
-      [329, 644],
+      [53, 644],
+      [151, 644],
+      [249, 644],
     ])
+    // The fourth column holds the inventory chip and draws NO text here: the
+    // fixture holds no upgrades, so §7.2's badge is suppressed. That is the
+    // suppression case's neighbour and is why this list has three entries and
+    // not four.
+    expect(drawn.length, 'the badge is suppressed at zero held').toBe(3)
     for (const t of drawn) {
       expect(t.textAlign).toBe('center')
       expect(t.textBaseline).toBe('middle')
@@ -2169,32 +2230,39 @@ describe('the HUD', () => {
       expect(t.x - t.maxWidth / 2).toBeGreaterThanOrEqual(rect.x)
       expect(t.x + t.maxWidth / 2).toBeLessThanOrEqual(rect.x + rect.w)
     }
-    expect(drawn.map((t) => t.maxWidth)).toEqual([122, 122, 122])
+    expect(drawn.map((t) => t.maxWidth)).toEqual([90, 90, 90])
   })
 
-  it('still fits at the NARROWEST viewport fitCamera accepts — 96 CSS px, not 122', () => {
+  it('still fits at the NARROWEST viewport fitCamera accepts — 70 CSS px, not 96', () => {
     // The first report wrote its overflow risk against 122 CSS px, which is
     // fixture B's rect and not the worst case. `hudRects` gives
-    // `floor((cssW - 32) / 3)`: 124 on the M0 device, 119 at 390, 114 at 375 and
-    // **96 at 320** — a viewport `fitCamera` fits without complaint. And the
+    // `floor((cssW - 2*8 - 3*8) / 4)`: 91 on the M0 device, 87 at 390, 83 at 375
+    // and **70 at 320** — a viewport `fitCamera` fits without complaint. And the
     // labels are unbounded: `score` and `week` have no ceiling in the sim, so
     // overflow is a certainty at some value rather than a device risk. The
     // `maxWidth` guarantee is what makes that a legible condense instead of a
     // collision with the neighbouring element.
+    //
+    // **The figures fell by a whole column at M1f Task 10** — the band went from
+    // three equal columns to four when §7.2's inventory chip arrived — and this
+    // case is the one that says what that cost: 96 -> 70 CSS px at the narrowest
+    // viewport in the suite. The cost is a more-condensed label and never an
+    // overflowing one, which is exactly what `maxWidth` buys and why the fourth
+    // column was affordable at all.
     const camera = fitCamera(
       { cssW: 320, cssH: 568, topInset: 20, bottomInset: 0, rawDpr: 2, performanceClass: null },
       { x0: 5, y0: 9, cols: 14, rows: 22 },
     )
     const rects = hudRects(camera, createHudRects())
-    expect(rects.clock.w).toBe(96)
-    expect(Math.floor((320 - 32) / 3)).toBe(96) // the arithmetic, independently
+    expect(rects.clock.w).toBe(70)
+    expect(Math.floor((320 - 16 - 24) / 4)).toBe(70) // the arithmetic, independently
 
     const frame: RenderFrame = { ...frameOn(camera, 24, 40), score: 999_999, week: 1234, day: 6 }
     const drawn = texts(draw(frame, atlasesAt(camera.tileSize * camera.dpr)))
     expect(drawn.map((t) => t.text)).toEqual(['W1234 D6', '999999 TRIPS', '40 TILES'])
-    for (const t of drawn) expect(t.maxWidth).toBe(96)
+    for (const t of drawn) expect(t.maxWidth).toBe(70)
     // Containment holds for a label of any length, which is the point.
-    expect(drawn[1]?.x ?? 0).toBe(rects.score.x + 48)
+    expect(drawn[1]?.x ?? 0).toBe(rects.score.x + 35)
   })
 
   it('re-formats the text when a value changes, so the per-frame cache cannot go stale', () => {
@@ -2247,10 +2315,18 @@ describe('the HUD', () => {
 
   it('reserves the pause bars’ gutter, so the clock text cannot be drawn through them', () => {
     // Review M4: the bars occupy CSS [15, 22] and [29, 36] while `fillCentred`
-    // was centring the clock text on the WHOLE rect at x = 69 with maxWidth 122
-    // — so a clock string wider than 66 CSS px runs straight through the second
-    // bar. That is layout arithmetic, true whatever the glyph widths are, and it
-    // is why this assertion is over coordinates and not over metrics.
+    // was centring the clock text on the WHOLE rect — so a clock string wider
+    // than a bit over half the rect runs straight through the second bar. That
+    // is layout arithmetic, true whatever the glyph widths are, and it is why
+    // this assertion is over coordinates and not over metrics.
+    //
+    // **RE-DERIVED at four columns — M1f Task 10.** The rect is 90 CSS px wide
+    // here rather than 122, so the running figures go 69 / 122 -> 53 / 90 and
+    // the paused ones 86.5 / 87 -> 70.5 / 55. **The left edge does NOT move**,
+    // and that is the part worth seeing: it is `clock.x + gutter` = 43 at any
+    // column width, because the gutter is derived from the band's HEIGHT
+    // (`clock.h / 8`) and the band's height did not change. The guarantee below
+    // is therefore about the same pixels it was about before.
     const atlas = atlasesAt(B_TILE_DEVICE)
     const clock = hudRects(cameraB(), createHudRects()).clock
     const barW = clock.h / 8 // 7
@@ -2260,14 +2336,262 @@ describe('the HUD', () => {
     const pausedClock = texts(draw(frameB(true), atlas))[0]
 
     // Unpaused: the full rect, centred. Paused: the rect minus the gutter.
-    expect([runningClock?.x, runningClock?.maxWidth]).toEqual([69, 122])
-    expect([pausedClock?.x, pausedClock?.maxWidth]).toEqual([clock.x + gutter + (122 - gutter) / 2, 87])
-    expect([pausedClock?.x, pausedClock?.maxWidth]).toEqual([86.5, 87])
+    expect([runningClock?.x, runningClock?.maxWidth]).toEqual([53, 90])
+    expect([pausedClock?.x, pausedClock?.maxWidth]).toEqual([clock.x + gutter + (90 - gutter) / 2, 55])
+    expect([pausedClock?.x, pausedClock?.maxWidth]).toEqual([70.5, 55])
 
     // The guarantee: the text's own span cannot reach the second bar's right edge.
     const left = (pausedClock?.x ?? 0) - (pausedClock?.maxWidth ?? 0) / 2
     expect(left).toBeGreaterThanOrEqual(clock.x + 4 * barW)
     expect(left).toBe(43)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 6 and §7.2's chip: §5.6's junction upgrade — M1f Task 10
+// ---------------------------------------------------------------------------
+
+/** A `upgradeAt` view over fixture B's board with a flag set at each cell. */
+function flagsAt(cells: readonly number[]): Uint8Array {
+  const flags = new Uint8Array(B_CELLS)
+  for (const c of cells) flags[c] = 1
+  return flags
+}
+
+/**
+ * A fixture-B frame with the four M1f Task 10 fields overridden.
+ *
+ * `upgradeCount` defaults to `cells.length` rather than being passed
+ * separately, because the two disagreeing is a state `sim` cannot produce —
+ * `applyPlaceUpgrade` moves the flag and the counter together and
+ * `upgrades.test.ts` asserts the identity in both directions. The one case that
+ * DOES pass them apart is the vacuity check below, which is about the renderer's
+ * gate and not about the sim.
+ */
+function upgradeFrame(
+  cells: readonly number[],
+  over: { invUpgrades?: number; upgradeMode?: boolean; upgradeCount?: number } = {},
+): RenderFrame {
+  return {
+    ...frameB(),
+    upgradeAt: flagsAt(cells),
+    upgradeCount: over.upgradeCount ?? cells.length,
+    invUpgrades: over.invUpgrades ?? 0,
+    upgradeMode: over.upgradeMode ?? false,
+  }
+}
+
+/** Every marker fill, as the board cell it sits on. Reads only the recording. */
+function markerCells(log: readonly Command[]): number[] {
+  const size = B_TILE * UPGRADE_SIZE_FRACTION
+  const inset = B_TILE * UPGRADE_INSET_FRACTION
+  return log
+    .filter((c): c is FillRectCommand => c.op === 'fillRect' && c.fillStyle === UPGRADE)
+    .map((c) => {
+      // The exact inverse of the draw, so a marker drawn at the wrong offset
+      // fails the size check below rather than decoding to a plausible cell.
+      expect([c.w, c.h], 'a marker is 1/3 of a tile square').toEqual([size, size])
+      const gx = (c.x - inset - B_ORIGIN_X) / B_TILE + 1
+      const gy = (c.y - inset - B_ORIGIN_Y) / B_TILE + 1
+      expect(Number.isInteger(gx) && Number.isInteger(gy), 'a marker off the cell grid').toBe(true)
+      return gy * B_W + gx
+    })
+}
+
+/** The chip icon's fill command — exactly one per frame, in any of its states. */
+function chipIcon(log: readonly Command[]): FillRectCommand {
+  const rect = hudRects(cameraB(), createHudRects()).upgrades
+  const hits = log.filter(
+    (c): c is FillRectCommand =>
+      c.op === 'fillRect' && c.w === CHIP_ICON_CSS && c.h === CHIP_ICON_CSS && c.x >= rect.x,
+  )
+  expect(hits.length, 'exactly one chip icon per frame').toBe(1)
+  return hits[0] as FillRectCommand
+}
+
+describe('phase 6: the junction-upgrade marker', () => {
+  const atlas = atlasesAt(B_TILE_DEVICE)
+
+  it('draws a marker on every upgraded cell and on no other', () => {
+    // (2, 2) = 18 and (5, 3) = 29, both strictly inside the revealed rect and
+    // on different rows AND different columns, so a transposed index lands
+    // nowhere.
+    expect(markerCells(draw(upgradeFrame([18, 29]), atlas))).toEqual([18, 29])
+  })
+
+  it('draws nothing at all when no upgrade is placed', () => {
+    const log = draw(upgradeFrame([]), atlas)
+    expect(markerCells(log)).toEqual([])
+    // Stronger than "no marker": the phase issues no `fillStyle` write either,
+    // which is what `upgradeCount`'s early return buys on every frame of every
+    // run before the player places their first one.
+    expect(log.some((c) => c.op === 'set' && c.value === UPGRADE)).toBe(false)
+  })
+
+  it('is gated on the COUNT, so the pass cannot run on a board that has none', () => {
+    // The vacuity half, and it is the one the brief's `upgradeCount` field exists
+    // for: with the count at 0 the flags are never read at all. A renderer that
+    // ignored the count and iterated anyway would draw these two markers.
+    expect(markerCells(draw(upgradeFrame([18, 29], { upgradeCount: 0 }), atlas))).toEqual([])
+    // ...and the same flags with a non-zero count DO draw, so the case above
+    // fails for the gate rather than for the flags.
+    expect(markerCells(draw(upgradeFrame([18, 29], { upgradeCount: 2 }), atlas))).toEqual([18, 29])
+  })
+
+  it('culls to the revealed rect, exactly as terrain and roads do', () => {
+    // (0, 0) = 0 and (7, 5) = 47 are outside `x in [1, 7), y in [1, 5)`. Both
+    // carry a flag, and the count is 3, so nothing here passes because the pass
+    // did not run.
+    expect(markerCells(draw(upgradeFrame([0, 18, 47], { upgradeCount: 3 }), atlas))).toEqual([18])
+  })
+
+  it('draws the marker UNDER the buildings and OVER the road mask', () => {
+    // Ordering is the one thing a static glyph can still get wrong: under the
+    // road mask the marker is hidden by the very cell it names, and over a
+    // destination it covers the thing the player is routing to.
+    //
+    // (3, 2) = 19 carries road mask 17, so the marker and a road blit are on the
+    // SAME cell — which is what makes "over the road mask" a claim about pixels
+    // rather than about two disjoint regions.
+    const log = draw(upgradeFrame([19]), atlas)
+    const lastRoadBlit = log.reduce(
+      (n, c, i) => (c.op === 'drawImage' && c.image === atlas.road.surface ? i : n),
+      -1,
+    )
+    const marker = log.findIndex((c) => c.op === 'fillRect' && c.fillStyle === UPGRADE)
+    const destination = log.findIndex(
+      (c) => c.op === 'fillRect' && c.w === 198 && c.h === 132,
+    )
+    expect(lastRoadBlit, 'no road blit was recorded').toBeGreaterThan(-1)
+    expect(destination, 'no destination footprint was recorded').toBeGreaterThan(-1)
+    expect(lastRoadBlit).toBeLessThan(marker)
+    expect(marker).toBeLessThan(destination)
+  })
+
+  it('sits well inside its tile, so the road mask stays legible under it', () => {
+    const cmd = draw(upgradeFrame([19]), atlas).find(
+      (c): c is FillRectCommand => c.op === 'fillRect' && c.fillStyle === UPGRADE,
+    ) as FillRectCommand
+    // A third of the tile, centred: 22 px of marker with 22 px of road showing
+    // on each side at fixture B's 66 px tile.
+    expect([cmd.w, cmd.h]).toEqual([22, 22])
+    expect(cmd.x - bx(3)).toBe(22)
+    expect(cmd.y - by(2)).toBe(22)
+    expect(UPGRADE_INSET_FRACTION + UPGRADE_SIZE_FRACTION).toBeLessThan(1)
+    expect(2 * UPGRADE_INSET_FRACTION + UPGRADE_SIZE_FRACTION, 'centred').toBeCloseTo(1, 12)
+  })
+
+  it('is drawn from the FLAGS and not from the roads, so an erased junction keeps its mark', () => {
+    // **The state `sim` deliberately allows and the reason this is a pass of its
+    // own.** `upgrades.ts` never clears `upgradeAt` — a mechanism that silently
+    // stops working is this project's worst defect shape — so a player who
+    // erases the junction still owns an upgrade there, cannot get it back, and
+    // this mark is the only thing on screen that says which cell to redraw it
+    // on. (1, 4) = 33 carries no road bit at all on this fixture.
+    expect(frameB().roads[33]).toBe(0)
+    expect(markerCells(draw(upgradeFrame([33]), atlas))).toEqual([33])
+  })
+
+  it('is not one of the six colour-group colours, nor the alarm colour', () => {
+    // A mark in a group colour reads as a building or a car belonging to that
+    // group; a mark in `overcrowd` reads as the one alarm this game has.
+    expect(PALETTE.groups).not.toContain(UPGRADE)
+    expect(UPGRADE).not.toBe(OVERCROWD)
+    expect(UPGRADE).not.toBe(PALETTE.cardAccent)
+  })
+})
+
+describe("§7.2's inventory chip", () => {
+  const atlas = atlasesAt(B_TILE_DEVICE)
+
+  it('draws a numeric badge when upgrades are held', () => {
+    const drawn = texts(draw(upgradeFrame([], { invUpgrades: 2 }), atlas)).map((t) => t.text)
+    expect(drawn).toContain('2')
+    expect(drawn, 'the badge is the fourth label, after the three readouts').toEqual([
+      'W3 D5',
+      '12 TRIPS',
+      '17 TILES',
+      '2',
+    ])
+  })
+
+  it('SUPPRESSES the badge and greys the icon at zero held, per §7.2', () => {
+    // §7.2: "Icon plus count; greyed with badge suppressed at zero."
+    const log = draw(upgradeFrame([], { invUpgrades: 0 }), atlas)
+    expect(texts(log).map((t) => t.text)).not.toContain('0')
+    expect(chipIcon(log).fillStyle).toBe(CHIP_EMPTY)
+  })
+
+  it('draws the icon in the ACCENT colour while the mode is ARMED, and dark when it is not', () => {
+    // The mode must be visible, or a player who armed it by accident has no way
+    // to know why their next tap did not draw a road.
+    const armed = draw(upgradeFrame([], { invUpgrades: 1, upgradeMode: true }), atlas)
+    const idle = draw(upgradeFrame([], { invUpgrades: 1, upgradeMode: false }), atlas)
+    expect(chipIcon(armed).fillStyle).toBe(PALETTE.cardAccent)
+    expect(chipIcon(idle).fillStyle).not.toBe(PALETTE.cardAccent)
+    expect(chipIcon(idle).fillStyle).toBe(UI_TEXT)
+    // ...and the geometry does not move with the state: only the colour does,
+    // so the chip cannot be read as changing size or place.
+    expect([chipIcon(armed).x, chipIcon(armed).y]).toEqual([chipIcon(idle).x, chipIcon(idle).y])
+  })
+
+  it('greys ahead of arming: zero held wins even if the mode is somehow armed', () => {
+    // `pointer.ts` refuses to arm at zero held, so this pair is unreachable
+    // through the DOM today — and the frame is a plain struct that a restore or
+    // a future caller can hand over in any combination. Greyed is the honest
+    // answer: the count is what the player can spend.
+    const log = draw(upgradeFrame([], { invUpgrades: 0, upgradeMode: true }), atlas)
+    expect(chipIcon(log).fillStyle).toBe(CHIP_EMPTY)
+    expect(texts(log).map((t) => t.text)).not.toContain('0')
+  })
+
+  it('re-formats the badge when the held count changes, so its cache cannot go stale', () => {
+    // The seventh single-slot memo in `canvas.ts`, held to the same standard as
+    // the other six. **The brief's own assertion for this — `badgeText(2)` is
+    // `badgeText(2)` — cannot fail**: strings are primitives and `toBe` is
+    // `Object.is`, so it is true whether one string was allocated or a thousand.
+    // Staleness is the observable half; the byte count is `packages/game`'s.
+    expect(texts(draw(upgradeFrame([], { invUpgrades: 2 }), atlas)).map((t) => t.text)).toContain('2')
+    expect(texts(draw(upgradeFrame([], { invUpgrades: 7 }), atlas)).map((t) => t.text)).toContain('7')
+    // And back, so the cache is keyed on the value rather than on a dirty flag
+    // that only ever fires once.
+    expect(texts(draw(upgradeFrame([], { invUpgrades: 2 }), atlas)).map((t) => t.text)).toContain('2')
+  })
+
+  it('keeps the icon and the badge inside the chip rect, at every viewport in this file', () => {
+    for (const [name, camera] of [
+      ['fixture A', cameraA()],
+      ['fixture B', cameraB()],
+      [
+        'the narrowest fitCamera accepts',
+        fitCamera(
+          { cssW: 320, cssH: 568, topInset: 20, bottomInset: 0, rawDpr: 2, performanceClass: null },
+          { x0: 5, y0: 9, cols: 14, rows: 22 },
+        ),
+      ],
+    ] as const) {
+      const rect = hudRects(camera, createHudRects()).upgrades
+      const frame: RenderFrame = {
+        ...frameOn(camera, 24, 40),
+        invUpgrades: 12,
+      }
+      const log = draw(frame, atlasesAt(camera.tileSize * camera.dpr))
+      const icon = log.filter(
+        (c): c is FillRectCommand =>
+          c.op === 'fillRect' && c.w === CHIP_ICON_CSS && c.h === CHIP_ICON_CSS && c.x >= rect.x,
+      )[0] as FillRectCommand
+      expect(icon.x, `${name}: the icon starts left of its column`).toBeGreaterThanOrEqual(rect.x)
+      expect(icon.x + icon.w, `${name}: the icon runs past its column`).toBeLessThanOrEqual(
+        rect.x + rect.w,
+      )
+      expect(icon.y, `${name}: the icon starts above its column`).toBeGreaterThanOrEqual(rect.y)
+      expect(icon.y + icon.h).toBeLessThanOrEqual(rect.y + rect.h)
+      const badge = texts(log).find((t) => t.text === '12') as FillTextCommand
+      expect(badge.x - badge.maxWidth / 2, `${name}: the badge overlaps the icon`).toBeGreaterThanOrEqual(
+        icon.x + icon.w,
+      )
+      expect(badge.x + badge.maxWidth / 2).toBeLessThanOrEqual(rect.x + rect.w)
+    }
   })
 })
 

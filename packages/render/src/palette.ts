@@ -100,6 +100,52 @@ export const PALETTE: Palette = Object.freeze({
    */
   cardAccent: '#1f6f6b',
   /**
+   * The junction-upgrade marker on the board (M1f Task 10), and a SEPARATE entry
+   * from `cardAccent` for a reason that was measured rather than chosen.
+   *
+   * The obvious reuse is `cardAccent` — the accent of the card the upgrade
+   * arrives on, which is the colour thread a player follows from the modal to
+   * the chip. It measures **1.48 : 1 against `road`**, and the marker sits on a
+   * junction, which is by definition road. A mark at 1.48 : 1 on the one surface
+   * it always sits on is not a mark. So this is the same hue, lightened until it
+   * reads on **both** surfaces the marker can land on:
+   *
+   * ```
+   *   upgrade   #2aa39b   Y = 0.29053
+   *   road      #4a4a52   Y = 0.06963   ->  2.85 : 1
+   *   land      #f2ece1   Y = 0.84304   ->  2.62 : 1
+   * ```
+   *
+   * **Both, because the flag OUTLIVES the road.** `sim` never clears
+   * `upgradeAt` — deliberately, because a mechanism that silently stops working
+   * is this project's worst defect shape (`upgrades.ts`) — so a player who
+   * erases the junction still owns an upgrade there and this mark is the only
+   * thing on screen that says where. Those are shape-legibility figures, not
+   * text ones; §7.4's simulator pass is in no milestone and this palette is
+   * still a placeholder.
+   */
+  upgrade: '#2aa39b',
+  /**
+   * The inventory chip's icon when the player holds NONE — §7.2's *"greyed with
+   * badge suppressed at zero"*.
+   *
+   * The three chip states are separated on LIGHTNESS against the band's own
+   * `background` (#d9d3c7, Y = 0.65464), so the state survives being read in
+   * greyscale as well as in colour:
+   *
+   * ```
+   *   held, idle    uiText      #2e2b28   Y = 0.02462   ->  9.44 : 1
+   *   armed         cardAccent  #1f6f6b   Y = 0.12722   ->  3.98 : 1
+   *   none held     chipEmpty   #8e877e   Y = 0.24585   ->  2.38 : 1
+   * ```
+   *
+   * Distinct from `mountain` (#9a9287), which is the palette's other grey and is
+   * terrain: `interface.test.ts` requires every entry to differ from every other,
+   * and reusing a terrain colour for a UI state is what `cardFace`'s comment
+   * argues against one entry above.
+   */
+  chipEmpty: '#8e877e',
+  /**
    * Six, because spec §4.2's enumeration makes the group count per-map and
    * either 5 or 6 (`MAX_GROUP_COUNT` in `shared`). A palette of five hands
    * `undefined` to `fillStyle` on a six-group map, which paints black.

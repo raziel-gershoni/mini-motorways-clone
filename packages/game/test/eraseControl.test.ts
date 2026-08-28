@@ -379,6 +379,10 @@ describe('wired to the real PointerInput', () => {
       offerPending: () => false,
       offerA: () => 0,
       offerB: () => 0,
+      // M1f Task 10. Same reasoning again: this file is about the erase MODE,
+      // and the two modes are independent — arming a placement does not touch
+      // `eraseMode` and vice versa. Zero held, so the chip is inert here.
+      upgradesHeld: () => 0,
       restart: () => {
         throw new Error('the erase-control rig has no shutdown; this call means the guard inverted')
       },

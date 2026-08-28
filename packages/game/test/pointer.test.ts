@@ -69,8 +69,14 @@ import { PointerOutcome, createPointerInput, type PointerHost, type PointerInput
  *   grid rect  = cssX in [6, 384), cssY in [95, 689)
  *   hudTop     = max(95 + 594, 844 - 34 - 72) = max(689, 738) = 738
  *   HUD band   = cssY in [738, 810)
- *   hudRects   = y 746, h 56; w = floor((390 - 16 - 16)/3) = 119; stride 127
- *                clock cssX in [8, 127), score [135, 254), tiles [262, 381)
+ *   hudRects   = y 746, h 56; w = floor((390 - 16 - 3*8)/4) = 87; stride 95
+ *                clock cssX in [8, 95), score [103, 190), tiles [198, 285),
+ *                upgrades [293, 380)
+ *
+ *   **FOUR columns since M1f Task 10**, when §7.2's inventory chip arrived. The
+ *   three-column figures were `w = 119`, `stride 127`, clock `[8, 127)`, score
+ *   `[135, 254)`, tiles `[262, 381)`; every literal below was re-derived from
+ *   the fit rather than patched until green.
  *
  * `centreOf` composes `gridToScreenX`/`gridToScreenY` — the FORWARD transform —
  * for the bulk sweeps. That is a cross-check against the other direction, not a
@@ -151,8 +157,8 @@ const CELL_9_17 = 417
 const CELL_9_18 = 441
 const CELL_14_20 = 494
 
-/** HUD clock rect: cssX in [8, 127), cssY in [746, 802). Centre css (67.5, 774). */
-const CLOCK_X = 107.5
+/** HUD clock rect: cssX in [8, 95), cssY in [746, 802). Centre css (51.5, 774). */
+const CLOCK_X = 91.5
 const CLOCK_Y = 797
 
 // ---------------------------------------------------------------------------
@@ -180,6 +186,17 @@ interface Rig {
   readonly raiseOffer: (a?: number, b?: number) => void
   /** Clears it, the way the tick that applies `choose-card` does. */
   readonly resolveOffer: () => void
+  /**
+   * Puts junction upgrades in the player's hand, the way the tick that applies a
+   * `choose-card` for `CARD_JUNCTION_UPGRADE` does — M1f Task 10.
+   *
+   * **A setter rather than a constructor argument**, because the count moves
+   * inside a tick and the whole point of `PointerHost.upgradesHeld` being a
+   * function is that the pointer picks the new value up without being rebuilt.
+   */
+  readonly grantUpgrades: (n: number) => void
+  /** What the host currently reports. Never written by this module. */
+  readonly upgradesHeld: number
 }
 
 function rig(camera: Camera = phone390()): Rig {
@@ -190,6 +207,7 @@ function rig(camera: Camera = phone390()): Rig {
   let pending = false
   let cardA = 0
   let cardB = 0
+  let held = 0
   const setPausedCalls: boolean[] = []
   const host: PointerHost = {
     camera: () => camera,
@@ -212,6 +230,10 @@ function rig(camera: Camera = phone390()): Rig {
     offerPending: () => pending,
     offerA: () => cardA,
     offerB: () => cardB,
+    // §5.6's inventory — M1f Task 10, a function for the same reason: it moves
+    // inside a tick this module never sees, so a value snapshotted at
+    // construction would make the chip permanently inert or permanently armable.
+    upgradesHeld: () => held,
   }
   const input = createPointerInput(host)
   return {
@@ -249,6 +271,12 @@ function rig(camera: Camera = phone390()): Rig {
     },
     resolveOffer: () => {
       pending = false
+    },
+    grantUpgrades: (n: number) => {
+      held = n
+    },
+    get upgradesHeld(): number {
+      return held
     },
   }
 }
@@ -338,9 +366,10 @@ describe('the fixture cannot hide a variable', () => {
 
   it('lays the HUD clock rect out at the hand-computed literals every marker below uses', () => {
     const rects = hudRects(phone390(), createHudRects())
-    expect(rects.clock).toEqual({ x: 8, y: 746, w: 119, h: 56 })
-    expect(rects.score).toEqual({ x: 135, y: 746, w: 119, h: 56 })
-    expect(rects.tiles).toEqual({ x: 262, y: 746, w: 119, h: 56 })
+    expect(rects.clock).toEqual({ x: 8, y: 746, w: 87, h: 56 })
+    expect(rects.score).toEqual({ x: 103, y: 746, w: 87, h: 56 })
+    expect(rects.tiles).toEqual({ x: 198, y: 746, w: 87, h: 56 })
+    expect(rects.upgrades, "§7.2's inventory chip — M1f Task 10").toEqual({ x: 293, y: 746, w: 87, h: 56 })
   })
 
   it('places a marker one CSS px past exactly ONE bound, never a diagonal corner', () => {
@@ -356,7 +385,7 @@ describe('the fixture cannot hide a variable', () => {
     expect(T8_14_Y - CANVAS_TOP).toBeLessThan(GRID_BOTTOM)
     // the clock markers' shared centre line is inside the clock rect on the
     // other axis
-    expect(CLOCK_X - CANVAS_LEFT).toBe(67.5)
+    expect(CLOCK_X - CANVAS_LEFT).toBe(51.5)
     expect(CLOCK_Y - CANVAS_TOP).toBe(774)
   })
 })
@@ -490,14 +519,14 @@ describe('the M0 reference device, where there is no horizontal letterbox', () =
   })
 
   it('pauses on its own clock rect, which is a different rectangle from PHONE_390’s', () => {
-    // w = floor((406 - 16 - 16)/3) = 124, so clock cssX in [8, 132), y in [772, 828).
-    // Centre (70, 800). On PHONE_390 the clock is [8, 127) x [746, 802) — the y
+    // w = floor((406 - 16 - 3*8)/4) = 91, so clock cssX in [8, 99), y in [772, 828).
+    // Centre (53.5, 800). On PHONE_390 the clock is [8, 95) x [746, 802) — the y
     // ranges do not even overlap, so this cannot pass by reusing that fixture.
     const camera = m0Device()
     const rects = hudRects(camera, createHudRects())
-    expect(rects.clock).toEqual({ x: 8, y: 772, w: 124, h: 56 })
+    expect(rects.clock).toEqual({ x: 8, y: 772, w: 91, h: 56 })
     const r = rig(camera)
-    expect(r.input.down(1, 70 + CANVAS_LEFT, 800 + CANVAS_TOP)).toBe(PointerOutcome.PAUSE_TOGGLED)
+    expect(r.input.down(1, 53.5 + CANVAS_LEFT, 800 + CANVAS_TOP)).toBe(PointerOutcome.PAUSE_TOGGLED)
     expect(r.paused).toBe(true)
     expect(r.queue.length).toBe(0)
   })
@@ -580,7 +609,12 @@ describe('the HUD', () => {
   })
 
   it('does nothing on the score and tiles readouts — they are inert in M2', () => {
-    for (const x of [234.5, 361.5]) {
+    // Centres of the SECOND and THIRD columns, re-derived at four: score
+    // [103, 190) centres on css 146.5, tiles [198, 285) on css 241.5. (The
+    // three-column figures were 194.5 and 321.5, and 321.5 now lands in the
+    // chip's column — which would still answer `HUD_INERT` at zero held, and
+    // would have made this case pass for the wrong reason.)
+    for (const x of [146.5 + CANVAS_LEFT, 241.5 + CANVAS_LEFT]) {
       const r = rig()
       expect(r.input.down(1, x, CLOCK_Y)).toBe(PointerOutcome.HUD_INERT)
       expect(r.paused).toBe(false)
@@ -599,8 +633,8 @@ describe('the HUD', () => {
     // name, clientX, clientY, expected outcome
     ['inside the left edge', 8 + CANVAS_LEFT, CLOCK_Y, PointerOutcome.PAUSE_TOGGLED],
     ['one px outside the left edge', 7 + CANVAS_LEFT, CLOCK_Y, PointerOutcome.HUD_INERT],
-    ['inside the right edge', 126 + CANVAS_LEFT, CLOCK_Y, PointerOutcome.PAUSE_TOGGLED],
-    ['at the right edge', 127 + CANVAS_LEFT, CLOCK_Y, PointerOutcome.HUD_INERT],
+    ['inside the right edge', 94 + CANVAS_LEFT, CLOCK_Y, PointerOutcome.PAUSE_TOGGLED],
+    ['at the right edge', 95 + CANVAS_LEFT, CLOCK_Y, PointerOutcome.HUD_INERT],
     ['inside the top edge', CLOCK_X, 746 + CANVAS_TOP, PointerOutcome.PAUSE_TOGGLED],
     ['one px outside the top edge', CLOCK_X, 745 + CANVAS_TOP, PointerOutcome.HUD_INERT],
     ['inside the bottom edge', CLOCK_X, 801 + CANVAS_TOP, PointerOutcome.PAUSE_TOGGLED],
@@ -678,13 +712,16 @@ describe('the hit-test order: HUD first, then the grid rect, then nothing', () =
   it('has a fixture whose two regions genuinely overlap', () => {
     expect(OVERLAPPING.hudTop).toBeLessThan(OVERLAPPING.originY + OVERLAPPING.rows * OVERLAPPING.tileSize)
     const rects = hudRects(OVERLAPPING, createHudRects())
-    expect(rects.clock).toEqual({ x: 8, y: 408, w: 119, h: 56 })
+    expect(rects.clock).toEqual({ x: 8, y: 408, w: 87, h: 56 })
   })
 
   it('gives a point in the overlap to the HUD, and lays no road', () => {
     const r = rig(OVERLAPPING)
-    // css (67.5, 430): inside the clock rect [8,127)x[408,464) AND inside the
-    // grid rect, where it would be board cell (7, 21) = 511.
+    // css (67.5, 430): inside the clock rect [8,95)x[408,464) AND inside the
+    // grid rect, where it would be board cell (7, 21) = 511. **Not the clock's
+    // centre**, deliberately — the centre of the narrower four-column rect is
+    // css 51.5, which resolves to cell (6, 21) and would have quietly re-pointed
+    // the vacuity check below at a different cell.
     expect(r.input.down(1, 67.5 + CANVAS_LEFT, 430 + CANVAS_TOP)).toBe(PointerOutcome.PAUSE_TOGGLED)
     expect(r.paused).toBe(true)
     expect(r.input.dragging).toBe(false)
@@ -1433,6 +1470,233 @@ describe('pointer.ts reuses render’s inverse rather than writing a second one'
 // ---------------------------------------------------------------------------
 // Housekeeping the rest of the milestone depends on
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// §7.2's inventory chip and §5.6's placement gesture — M1f Task 10
+// ---------------------------------------------------------------------------
+
+/** The client CSS point at the centre of the chip's HUD column. */
+function chipPoint(r: Rig): readonly [number, number] {
+  return centreOf(hudRects(r.host.camera(), createHudRects()).upgrades)
+}
+
+describe('the inventory chip and its placement gesture', () => {
+  it('arms the mode when the chip is tapped and the player holds some', () => {
+    const r = rig()
+    r.grantUpgrades(2)
+    expect(r.input.upgradeMode, 'a fresh machine is not armed').toBe(false)
+    expect(r.input.down(1, ...chipPoint(r))).toBe(PointerOutcome.UPGRADE_ARMED)
+    expect(r.input.upgradeMode).toBe(true)
+    // Arming is not a board action and queues nothing.
+    expect(r.queue.length).toBe(0)
+    expect(r.setPausedCalls, 'and it does not touch the clock').toEqual([])
+  })
+
+  it('refuses to arm at zero held, and HUD_INERT is the honest answer there', () => {
+    // The chip is drawn greyed with no badge at zero, exactly like the two
+    // readouts beside it, and it does exactly what they do.
+    const r = rig()
+    expect(r.upgradesHeld).toBe(0)
+    expect(r.input.down(1, ...chipPoint(r))).toBe(PointerOutcome.HUD_INERT)
+    expect(r.input.upgradeMode).toBe(false)
+  })
+
+  it('queues an upgrade action at the tapped cell and DISARMS', () => {
+    const r = rig()
+    r.grantUpgrades(2)
+    r.input.down(1, ...chipPoint(r))
+    expect(r.input.down(2, T9_15_X, T9_15_Y)).toBe(PointerOutcome.UPGRADE_PLACED)
+    expect(queued(r.queue)).toEqual([{ kind: 'upgrade', a: CELL_9_15, b: 0 }])
+    expect(r.input.upgradeMode, 'one tap, one attempt').toBe(false)
+  })
+
+  it('disarms on a placement `sim` will REFUSE too, and the badge is the feedback', () => {
+    // `pointer.ts` cannot know whether `sim` accepted — `canPlaceUpgrade` is in
+    // `sim` and this file must not grow a `sim` import for it. One tap, one
+    // attempt; a badge that did not decrement and a marker that did not appear
+    // are what tell the player it was refused. The alternative — a latch that
+    // watches the count — is a second piece of state that can disagree.
+    //
+    // (8, 14) is bare ground on every fixture in this file, so this is the
+    // refusal case as far as the SIM is concerned, and this module still queues
+    // the action and still disarms.
+    const r = rig()
+    r.grantUpgrades(1)
+    r.input.down(1, ...chipPoint(r))
+    expect(r.input.down(2, T8_14_X, T8_14_Y)).toBe(PointerOutcome.UPGRADE_PLACED)
+    expect(queued(r.queue)).toEqual([{ kind: 'upgrade', a: CELL_8_14, b: 0 }])
+    expect(r.input.upgradeMode).toBe(false)
+    // The count did NOT move here: only the tick can spend it.
+    expect(r.upgradesHeld).toBe(1)
+  })
+
+  it('does NOT start a drag while armed, and lays no road', () => {
+    const r = rig()
+    r.grantUpgrades(1)
+    r.input.down(1, ...chipPoint(r))
+    r.input.down(2, T9_15_X, T9_15_Y)
+    expect(r.input.dragging).toBe(false)
+    expect(r.input.activePointerId).toBe(-1)
+    expect(r.queue.length, 'exactly one action, and it is not a road').toBe(1)
+    // And a `move` after it is IGNORED rather than drawing from the tapped cell.
+    expect(r.input.move(2, T11_15_X, T11_15_Y)).toBe(PointerOutcome.IGNORED)
+    expect(r.queue.length).toBe(1)
+  })
+
+  it('a second chip tap CANCELS', () => {
+    const r = rig()
+    r.grantUpgrades(2)
+    r.input.down(1, ...chipPoint(r))
+    expect(r.input.down(2, ...chipPoint(r))).toBe(PointerOutcome.UPGRADE_ARMED)
+    expect(r.input.upgradeMode).toBe(false)
+    // ...and the board is a board again.
+    expect(r.input.down(3, T9_15_X, T9_15_Y)).toBe(PointerOutcome.DRAG_START)
+    expect(r.input.dragging).toBe(true)
+  })
+
+  it('is BELOW the offer modal, so a card up wins over an armed chip', () => {
+    const r = rig()
+    r.grantUpgrades(2)
+    r.raiseOffer()
+    expect(r.input.down(1, ...chipPoint(r))).toBe(PointerOutcome.REFUSED_OFFER_MODAL)
+    expect(r.input.upgradeMode).toBe(false)
+    // Non-vacuous: the same tap arms once the week is resolved and the loop runs.
+    r.resolveOffer()
+    r.forcePaused(false)
+    expect(r.input.down(2, ...chipPoint(r))).toBe(PointerOutcome.UPGRADE_ARMED)
+  })
+
+  it('is BELOW game over, so a dead board restarts instead of arming', () => {
+    const r = rig()
+    r.grantUpgrades(2)
+    r.endRun()
+    expect(r.input.down(1, ...chipPoint(r))).toBe(PointerOutcome.RESTART_REQUESTED)
+    expect(r.restarts).toBe(1)
+    expect(r.input.upgradeMode).toBe(false)
+  })
+
+  it('arms while PAUSED — the chip is not a board action', () => {
+    // A paused board is where a player plans (§7.3) and the pause toggle is the
+    // rect next door. A chip that went dead there would be dead on the one
+    // screen where reading the board is the point.
+    const r = rig()
+    r.grantUpgrades(2)
+    r.forcePaused(true)
+    expect(r.input.down(1, ...chipPoint(r))).toBe(PointerOutcome.UPGRADE_ARMED)
+    expect(r.input.upgradeMode).toBe(true)
+  })
+
+  it('refuses the PLACEMENT while paused, and drops the mode rather than latching it', () => {
+    const r = rig()
+    r.grantUpgrades(1)
+    r.forcePaused(true)
+    r.input.down(1, ...chipPoint(r))
+    expect(r.input.down(2, T9_15_X, T9_15_Y)).toBe(PointerOutcome.REFUSED_PAUSED)
+    expect(r.queue.length, 'nothing reached the sim').toBe(0)
+    expect(
+      r.input.upgradeMode,
+      'the mode is dropped rather than latched over a paused board',
+    ).toBe(false)
+    // ...so resuming and tapping the board draws a road, which is what the
+    // player is now asking for.
+    r.forcePaused(false)
+    expect(r.input.down(3, T9_15_X, T9_15_Y)).toBe(PointerOutcome.DRAG_START)
+  })
+
+  it('is not consumed by a tap that misses the chip, in either direction', () => {
+    // The column immediately left of the chip is the tiles readout, which is
+    // inert; the band padding to its right is inert too. Neither may arm.
+    const r = rig()
+    r.grantUpgrades(2)
+    const chip = hudRects(r.host.camera(), createHudRects()).upgrades
+    expect(r.input.down(1, CANVAS_LEFT + chip.x - 1, CLOCK_Y)).toBe(PointerOutcome.HUD_INERT)
+    expect(r.input.upgradeMode).toBe(false)
+    expect(r.input.down(2, CANVAS_LEFT + chip.x + chip.w, CLOCK_Y)).toBe(PointerOutcome.HUD_INERT)
+    expect(r.input.upgradeMode).toBe(false)
+    // Non-vacuous: one CSS px the other way, on each side, DOES arm.
+    expect(r.input.down(3, CANVAS_LEFT + chip.x, CLOCK_Y)).toBe(PointerOutcome.UPGRADE_ARMED)
+    expect(r.input.down(4, CANVAS_LEFT + chip.x + chip.w - 1, CLOCK_Y)).toBe(
+      PointerOutcome.UPGRADE_ARMED,
+    )
+  })
+
+  it('does not survive an ERASE-mode stroke, and does not become one', () => {
+    // The two modes are independent flags and neither reads the other. An armed
+    // placement in erase mode still places — the gesture the player just made is
+    // the one that is honoured — and it does not erase.
+    const r = rig()
+    r.grantUpgrades(1)
+    r.input.setEraseMode(true)
+    r.input.down(1, ...chipPoint(r))
+    expect(r.input.down(2, T9_15_X, T9_15_Y)).toBe(PointerOutcome.UPGRADE_PLACED)
+    expect(queued(r.queue)).toEqual([{ kind: 'upgrade', a: CELL_9_15, b: 0 }])
+    expect(r.input.eraseMode, 'and the erase mode is untouched').toBe(true)
+  })
+
+  it('a tap OFF the board while armed neither places nor disarms', () => {
+    // The top band and the letterbox are `IGNORED`, and an armed mode that a
+    // stray tap silently cancelled would be a mode the player had to re-arm for
+    // reasons they never saw. `screenToGrid`'s classification is the only guard
+    // this needs: the placement lives inside the `GRID` branch.
+    const r = rig()
+    r.grantUpgrades(1)
+    r.input.down(1, ...chipPoint(r))
+    expect(r.input.down(2, T8_14_X, ORIGIN_Y - 1 + CANVAS_TOP)).toBe(PointerOutcome.IGNORED)
+    expect(r.input.upgradeMode).toBe(true)
+    expect(r.queue.length).toBe(0)
+  })
+})
+
+describe('the hit test resolves to a whole CSS pixel', () => {
+  // **M1f Task 10, and it is an allocation fix rather than a behaviour change.**
+  // See `wholePixel` in `pointer.ts` for the measurement. The property asserted
+  // here is the half that has to stay true: every rect and every cell this
+  // module tests against has integer CSS bounds, so flooring the client point
+  // changes no answer.
+
+  it('gives a fractional point and its floor the same board cell', () => {
+    // Sub-pixel offsets in both directions from a cell centre, and one just
+    // inside the cell's own right edge, where a wrong rounding would step into
+    // the next column.
+    const camera = phone390()
+    const edgeX = CANVAS_LEFT + camera.originX + (9 - camera.x0 + 1) * camera.tileSize - 0.5
+    for (const [x, y] of [
+      [T9_15_X, T9_15_Y],
+      [T9_15_X + 0.25, T9_15_Y + 0.75],
+      [T9_15_X - 0.25, T9_15_Y - 0.75],
+      [edgeX, T9_15_Y],
+    ] as const) {
+      const r = rig()
+      expect(r.input.down(1, x, y)).toBe(PointerOutcome.DRAG_START)
+      expect(r.input.lastCell, `${x},${y} landed on a different cell`).toBe(CELL_9_15)
+    }
+  })
+
+  it('gives a fractional point and its floor the same HUD rect, on both edges', () => {
+    // The clock rect is [8, 95) in CSS x. A point at 7.9 is outside and must
+    // stay outside; one at 94.6 is inside and must stay inside. Flooring moves
+    // each toward the origin and neither across an integer bound.
+    for (const [cssX, outcome] of [
+      [7.9, PointerOutcome.HUD_INERT],
+      [8.4, PointerOutcome.PAUSE_TOGGLED],
+      [94.6, PointerOutcome.PAUSE_TOGGLED],
+      [95.2, PointerOutcome.HUD_INERT],
+    ] as const) {
+      const r = rig()
+      expect(r.input.down(1, cssX + CANVAS_LEFT, CLOCK_Y), `css ${cssX}`).toBe(outcome)
+    }
+  })
+
+  it('does not shift a tap by a whole pixel: floor, not round', () => {
+    // `Math.round(94.6)` is 95, which is OUTSIDE the clock rect — so a rounding
+    // implementation flips exactly the case above. This is the mutation that
+    // separates the two, written as a case rather than left in a comment.
+    const r = rig()
+    expect(Math.round(94.6), 'round would leave the rect').toBe(95)
+    expect(Math.floor(94.6), 'floor stays inside it').toBe(94)
+    expect(r.input.down(1, 94.6 + CANVAS_LEFT, CLOCK_Y)).toBe(PointerOutcome.PAUSE_TOGGLED)
+  })
+})
 
 describe('the outcome codes', () => {
   it('are all distinct and all non-zero, so `if (outcome)` cannot misread one', () => {

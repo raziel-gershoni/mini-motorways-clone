@@ -77,6 +77,16 @@ import type { InputQueue } from './inputs'
  * Task 5's "the three opaque fills tile the canvas" arithmetic, which is
  * asserted, so the surface belongs to Task 8.
  *
+ * **Both halves of that paragraph are now historical, and the second half was
+ * measured false when it was finally tried.** Erase mode reached the player at
+ * M1f Task 8 as Telegram's `MainButton` with a DOM pill fallback, and M1f Task
+ * 10 did add the fourth HUD rect — the inventory chip — and it moved **no**
+ * fill arithmetic at all: the band is ONE opaque fill from the grid rect's
+ * bottom edge to the canvas bottom (`canvas.ts` phase 10), so the number of
+ * rects laid out inside it is invisible to the tiling. What the fourth column
+ * did move is every hand-computed `hudRects` coordinate, which is a different
+ * and much cheaper thing — three cases in `camera.test.ts`, re-derived.
+ *
  * **It must be Telegram's `MainButton`, not a DOM button, and the arithmetic
  * says so.** `fitCamera` leaves **49 CSS px** of free strip on PHONE_390 and
  * **40** on the M0 reference device, both below a 44 px touch target — "outside
@@ -243,6 +253,24 @@ export const PointerOutcome = Object.freeze({
    * wrong mechanism.
    */
   REFUSED_OFFER_MODAL: 12,
+  /**
+   * The inventory chip was tapped and the junction-upgrade placement mode is now
+   * armed — M1f Task 10. The next board tap places one instead of starting a
+   * road.
+   */
+  UPGRADE_ARMED: 13,
+  /**
+   * An armed board tap: an `'upgrade'` action was queued at the tapped cell and
+   * the mode is now off.
+   *
+   * **It says the action was QUEUED, not that `sim` accepted it**, and the
+   * distinction is the reason there is no third code for a refusal. `pointer.ts`
+   * is in `game` and must not grow a `sim` import to answer
+   * `canPlaceUpgrade` — that is the same rule that makes `gameOver` and
+   * `offerPending` host functions. What tells the player it was refused is the
+   * badge, which did not go down. See `down`.
+   */
+  UPGRADE_PLACED: 14,
 } as const)
 
 /** A `PointerOutcome` value, derived from the const rather than hand-written. */
@@ -324,6 +352,22 @@ export interface PointerHost {
   readonly offerA: () => number
   /** The card id in slot B. See `offerA`. */
   readonly offerB: () => number
+  /**
+   * How many junction upgrades the player is HOLDING — `sim`'s
+   * `H_INV_UPGRADES`, read through `main.ts` for the same reason `offerPending`
+   * is: `pointer.ts` must not grow a `GameState` import for one number.
+   *
+   * **A function, and read on every chip tap rather than latched**, because it
+   * moves inside a tick this module never sees: `applyChooseCard` raises it at a
+   * week boundary and `applyPlaceUpgrade` lowers it on the tick that consumes
+   * the action this module queued. A copy here would be wrong for one frame
+   * after every placement and for the whole of every week after a card.
+   *
+   * It gates arming and nothing else: it is not consulted at the placement tap,
+   * because between arming and tapping the count can only have gone DOWN through
+   * an action this module queued, and one tap already disarms.
+   */
+  readonly upgradesHeld: () => number
 }
 
 /** The pointer state machine. One per run; `main.ts` wires the DOM events to it. */
@@ -362,6 +406,25 @@ export interface PointerInput {
    * **Reading it is also the poll that ends it** — see the getter.
    */
   readonly peeking: boolean
+  /**
+   * Is §5.6's junction-upgrade placement mode armed — has the chip been tapped
+   * and no board tap spent it yet? (M1f Task 10.)
+   *
+   * **UI and not simulation, so it lives here beside `eraseMode`** rather than
+   * in the state buffer: a mode in `GameState` would be a replay input, and the
+   * ACTION this mode produces is the replay input. `main.ts` hands this to the
+   * frame driver as `upgradeMode: () => pointer.upgradeMode` and `buildFrame`
+   * folds it into `RenderFrame.upgradeMode`, which is what colours the chip.
+   *
+   * **Unlike `peeking`, reading it has no side effect.** Peek is cleared by its
+   * own getter because peek belongs to one modal and nothing here ever sees a
+   * week resolve. This mode is cleared by the tap that spends it — an event this
+   * module handles itself — so there is no latch and no dependence on a caller
+   * polling.
+   *
+   * **It is ONE tap, one attempt.** See `down`.
+   */
+  readonly upgradeMode: boolean
   /** True while a pointer owns the drag. */
   readonly dragging: boolean
   /** The owning `pointerId`, or -1 when no drag is active. */
@@ -417,6 +480,57 @@ function inRect(rect: Rect, x: number, y: number): boolean {
   return x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h
 }
 
+/**
+ * The client point, resolved to a **whole CSS pixel** — M1f Task 10, and it is
+ * an allocation fix with a measurement behind it rather than a tidy-up.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT IT COSTS AND WHY IT IS EXACT
+ * ---------------------------------------------------------------------------
+ *
+ * Every rectangle this module hit-tests against has **integer CSS-pixel bounds**
+ * — `fitCamera` floors both origins and the tile size, `hudRects` floors its
+ * column width, `offerRects` floors every edge — and for an integer bound `b`,
+ * `floor(x) >= b` iff `x >= b` and `floor(x) < b` iff `x < b`. The grid is the
+ * same statement one step later: with an integer `originX` and an integer
+ * `tileSize`, `floor((floor(x) - originX) / tileSize)` is
+ * `floor((x - originX) / tileSize)` for every real `x`, by
+ * `floor(floor(u)/n) === floor(u/n)`. So on a canvas whose own
+ * `getBoundingClientRect()` offset is integral this changes **no** hit test at
+ * all, and on a fractionally-offset canvas it moves the sampled point by less
+ * than one CSS pixel — a resolution at which a 27-pixel tile and a 44-pixel
+ * touch target have no opinion.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT IT BUYS, MEASURED
+ * ---------------------------------------------------------------------------
+ *
+ * A fractional `clientX` makes every value derived from it a double, and the
+ * doubles are boxed at this module's call boundaries — `screenToGrid` and
+ * `hudRects` are cross-package and `inRect` is called two to five times per
+ * event. `allocation.test.ts`'s live-drag window measured it, on the M0 rig
+ * whose HUD taps are the centres of `hudRects`' columns:
+ *
+ * ```
+ *   HUD taps landing on integers   down @ pointer.ts   0.18 B/frame
+ *   HUD taps landing on .5         down @ pointer.ts   3.64 B/frame   (pre-Task 10)
+ *   ...and with Task 10's chip rect as a second `inRect`   4.51 B/frame
+ *   with this floor, either way                          under the floor
+ * ```
+ *
+ * **The residual is older than this task and the rig had never exercised it.**
+ * Three HUD columns on the M0 device are 124 CSS px wide, so the centre of the
+ * clock rect is the integer 70; four columns are 91, so it is 53.5. The task
+ * that changed the column count did not create the allocation — it made an
+ * existing one reachable, on a rig whose coordinates a real `PointerEvent`
+ * would have produced from the start. Fixed here rather than exempted in
+ * `BUDGETS`, on M1d's precedent with `canPlaceRoad`: an exemption is a dead
+ * entry the next reader mistakes for a real constraint.
+ */
+function wholePixel(value: number): number {
+  return Math.floor(value)
+}
+
 export function createPointerInput(host: PointerHost): PointerInput {
   const slots = new Float64Array(DRAG_SLOT_COUNT)
   slots[D_POINTER_ID] = NO_POINTER
@@ -441,6 +555,10 @@ export function createPointerInput(host: PointerHost): PointerInput {
    * `peekActive` below for why it is never read raw.
    */
   let peek = false
+  /**
+   * Is §5.6's junction-upgrade placement mode armed? See `PointerInput.upgradeMode`.
+   */
+  let upgradeMode = false
 
   /**
    * Peek, **cleared by the act of reading it once the modal is gone.**
@@ -526,6 +644,13 @@ export function createPointerInput(host: PointerHost): PointerInput {
       return PointerOutcome.RESTART_REQUESTED
     }
 
+    // The whole-CSS-pixel resolution of this event. See `wholePixel`: it is
+    // exact against every rect and every cell this module tests, and it is what
+    // keeps a fractional `clientX` from boxing a double at each of the three
+    // call boundaries below.
+    const px = wholePixel(clientX)
+    const py = wholePixel(clientY)
+
     // **§5.10's modal owns every tap while it is up, and it is ONE branch
     // rather than a guard on each of the paths below** — M1f Task 8.
     //
@@ -558,8 +683,8 @@ export function createPointerInput(host: PointerHost): PointerInput {
         return PointerOutcome.PEEK_TOGGLED
       }
       offerRects(host.camera(), offer)
-      const cssX = clientX - host.canvasLeft()
-      const cssY = clientY - host.canvasTop()
+      const cssX = px - host.canvasLeft()
+      const cssY = py - host.canvasTop()
       if (inRect(offer.peek, cssX, cssY)) {
         // **No `setPaused` on this path, and that is plan Decision 16 rather
         // than an omission.** A peek that resumed the sim would be a free
@@ -594,16 +719,48 @@ export function createPointerInput(host: PointerHost): PointerInput {
     const camera = host.camera()
     const left = host.canvasLeft()
     const top = host.canvasTop()
-    screenToGrid(camera, clientX, clientY, left, top, hit)
+    screenToGrid(camera, px, py, left, top, hit)
 
     // --- 1. the HUD ---
     if (hit.region === HitRegion.HUD) {
       hudRects(camera, rects)
-      const cssX = clientX - left
-      const cssY = clientY - top
+      const cssX = px - left
+      const cssY = py - top
       if (inRect(rects.clock, cssX, cssY)) {
         host.setPaused(!host.paused())
         return PointerOutcome.PAUSE_TOGGLED
+      }
+      // **§7.2's inventory chip — the first HUD element that is neither a
+      // readout nor the clock, M1f Task 10.**
+      //
+      // It is here, inside the `HitRegion.HUD` branch, rather than hit-tested
+      // ahead of the region dispatch the way the offer modal is. The task brief
+      // prescribed the second shape because it put the chip in the TOP band, and
+      // the top band is the one region `screenToGrid` classifies (`ABOVE`) and
+      // this file deliberately drops — spec §8.3: *"The top band is dead space
+      // ... No interactive element, score, or pause button may live there."* The
+      // chip is in the bottom band precisely because that sentence forbids the
+      // other option, so the ordinary HUD path is the right one and
+      // `screenToGrid` is untouched either way.
+      //
+      // **`HUD_INERT` is the honest answer at zero held**, and it is the reason
+      // this is a branch rather than a guard on the arming: the chip is drawn
+      // greyed with no badge, the tap is consumed so the board never sees it,
+      // and nothing happens — which is exactly what the two readouts beside it
+      // do and exactly what the chip looks like it will do.
+      //
+      // **Arming is NOT refused while paused**, deliberately: a paused board is
+      // where a player plans (§7.3), the clock beside this chip is the pause
+      // toggle, and refusing to arm would make the chip dead on the one screen
+      // where reading the board is the point. The PLACEMENT is refused while
+      // paused, by the grid branch below, which also drops the mode — see there.
+      if (inRect(rects.upgrades, cssX, cssY)) {
+        if (host.upgradesHeld() < 1) return PointerOutcome.HUD_INERT
+        // A second chip tap CANCELS rather than re-arming, so the gesture has a
+        // way out of itself that is not "tap the board somewhere harmless" —
+        // which, on an armed board, is not harmless.
+        upgradeMode = !upgradeMode
+        return PointerOutcome.UPGRADE_ARMED
       }
       // The score and tiles readouts, and the band's own padding. Consumed, so
       // the board never sees them, and inert — but the two halves of that split
@@ -621,7 +778,38 @@ export function createPointerInput(host: PointerHost): PointerInput {
       // pause freezes, so the player would draw twenty segments and see
       // nothing. M2 therefore REJECTS board input while paused, as a rule
       // rather than an accident.
-      if (host.paused()) return PointerOutcome.REFUSED_PAUSED
+      //
+      // **An armed placement mode is DROPPED here rather than latched over a
+      // paused board** — M1f Task 10. A mode that survived the refusal would sit
+      // armed behind a pause the player may never connect to it, and the next
+      // board tap after they resume would spend an upgrade they had stopped
+      // meaning to place. One tap, one attempt, on this path as on every other.
+      if (host.paused()) {
+        upgradeMode = false
+        return PointerOutcome.REFUSED_PAUSED
+      }
+      // **§5.6's placement — M1f Task 10. ONE TAP, ONE ATTEMPT, and the mode
+      // goes off whether or not `sim` accepts.**
+      //
+      // `pointer.ts` cannot know whether the placement was legal: the answer is
+      // `canPlaceUpgrade`, which is in `sim`, and this file must not grow a
+      // `sim` import for it — the same rule that makes `gameOver`,
+      // `offerPending` and `upgradesHeld` host functions. So the alternative to
+      // disarming unconditionally is a latch that watches the held count fall,
+      // which is a second piece of state that can disagree with this one.
+      //
+      // **What tells the player it was refused is the badge, which did not go
+      // down** — and the marker, which did not appear. Both are on screen, both
+      // are drawn from `sim`'s own bytes, and neither can lie about it.
+      //
+      // Above the drag, so an armed tap never starts a stroke: `dragging` stays
+      // false and no road action is queued.
+      if (upgradeMode) {
+        upgradeMode = false
+        // `b` is unread by `applyPlaceUpgrade` — see `TickActionKind`.
+        host.queue.enqueue('upgrade', hit.gy * host.gridW + hit.gx, 0)
+        return PointerOutcome.UPGRADE_PLACED
+      }
       dragging = true
       // Latched here, once. See `setEraseMode` for why a stroke does not change
       // mode half way through.
@@ -693,7 +881,9 @@ export function createPointerInput(host: PointerHost): PointerInput {
     if (host.paused()) return PointerOutcome.REFUSED_PAUSED
 
     const camera = host.camera()
-    screenToGrid(camera, clientX, clientY, host.canvasLeft(), host.canvasTop(), hit)
+    // The same whole-pixel resolution `down` uses, so a stroke's first cell and
+    // its next sample are decided by one rule rather than two. See `wholePixel`.
+    screenToGrid(camera, wholePixel(clientX), wholePixel(clientY), host.canvasLeft(), host.canvasTop(), hit)
     // The grid-bounds guard, and the whole of it: a sample that left the grid
     // rect is dropped and the drag keeps its cell, so re-entering emits an
     // 8-connected walk from where the finger left rather than a jump.
@@ -758,6 +948,9 @@ export function createPointerInput(host: PointerHost): PointerInput {
     },
     get peeking(): boolean {
       return peekActive()
+    },
+    get upgradeMode(): boolean {
+      return upgradeMode
     },
     get dragging(): boolean {
       return dragging

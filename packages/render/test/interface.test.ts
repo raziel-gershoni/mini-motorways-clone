@@ -157,6 +157,15 @@ function handBuiltFrame(): RenderFrame {
     offerItemsA: 0,
     offerItemsB: 0,
     offerPeek: false,
+    // The four M1f Task 10 fields, explicit for the same reason. `upgradeAt` is
+    // a raw per-cell flag view — the point of this file is that the whole frame
+    // is constructible from plain typed arrays and scalars, and a cross-package
+    // colour fold would have broken that claim. §5.6's amendment deleted the
+    // phase the previous draft's relief object had, so there is nothing to fold.
+    upgradeAt: new Uint8Array(CELLS),
+    upgradeCount: 0,
+    invUpgrades: 0,
+    upgradeMode: false,
   }
 }
 
@@ -369,15 +378,18 @@ describe('the palette — spec 7.1\'s theme object, plus tree, minus shadow', ()
     // invitation to reintroduce a full-canvas layer that costs twice what the
     // road bake M0 deleted did.
     //
-    // **Fourteen since M1f Task 8**: `overcrowd` (the ring) and `scrim` (the
-    // shutdown dim) arrived at M1e Task 9, and `cardFace`/`cardText`/
-    // `cardAccent` are §5.10's offer modal. All five are `render`-side entries
-    // with no spec §7.1 row, exactly as `tree` is.
+    // **Sixteen since M1f Task 10**: `overcrowd` (the ring) and `scrim` (the
+    // shutdown dim) arrived at M1e Task 9, `cardFace`/`cardText`/`cardAccent`
+    // are §5.10's offer modal, and `upgrade`/`chipEmpty` are §5.6's junction
+    // upgrade — the board marker and the inventory chip's greyed state. All
+    // seven are `render`-side entries with no spec §7.1 row, exactly as `tree`
+    // is.
     expect(Object.keys(PALETTE).sort()).toEqual([
       'background',
       'cardAccent',
       'cardFace',
       'cardText',
+      'chipEmpty',
       'groups',
       'land',
       'mountain',
@@ -387,6 +399,7 @@ describe('the palette — spec 7.1\'s theme object, plus tree, minus shadow', ()
       'scrim',
       'tree',
       'uiText',
+      'upgrade',
       'water',
     ])
     expect('shadow' in PALETTE).toBe(false)
@@ -438,7 +451,7 @@ describe('the palette — spec 7.1\'s theme object, plus tree, minus shadow', ()
       .filter(([name]) => name !== 'groups')
       .map(([, value]) => value as string)
       .concat(PALETTE.groups)
-    expect(all.length, 'thirteen scalar entries plus six groups').toBe(19)
+    expect(all.length, 'fifteen scalar entries plus six groups').toBe(21)
     expect(new Set(all).size).toBe(all.length)
     // Non-vacuous on the entries most likely to collide, since `overcrowd` is
     // an alarm red and the six groups include a deep red — and since the three

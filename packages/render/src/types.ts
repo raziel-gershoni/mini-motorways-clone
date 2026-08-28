@@ -211,6 +211,41 @@ export interface HudRects {
   readonly score: Rect
   /** Road tiles remaining. */
   readonly tiles: Rect
+  /**
+   * §7.2's inventory chip, arriving with its first chip — the JUNCTION UPGRADE
+   * (M1f Task 10). Icon plus count, greyed with the badge suppressed at zero,
+   * and **tappable**: it arms the placement mode.
+   *
+   * ---------------------------------------------------------------------------
+   * **IT IS IN THE BOTTOM BAND AS A FOURTH COLUMN, AND THE TASK BRIEF PREFERRED
+   * THE TOP BAND. BOTH REASONS AGAINST THAT ARE MEASUREMENTS.**
+   * ---------------------------------------------------------------------------
+   *
+   * 1. **§8.3 forbids it.** *"The top band is dead space. Telegram's header
+   *    remains drag-to-dismiss by design ... No interactive element, score, or
+   *    pause button may live there."* The chip is the first HUD element in this
+   *    game that is neither a readout nor the clock: a tap arms a mode. That is
+   *    exactly the element §8.3 names, and it is the same rule that put the
+   *    clock at the bottom against §7.2's own preference — see `hudRects`.
+   *    `pointer.ts` drops every `HitRegion.ABOVE` tap for this reason, so a chip
+   *    up there would also have needed the drop removed.
+   * 2. **The brief's own fork test refuses it.** It says to measure
+   *    `camera.originY` — the top band's height — across the three viewports
+   *    `camera.test.ts` covers and to move to the bottom band if the smallest is
+   *    below `CHIP_MIN_CSS + 2 * HUD_PAD_CSS` = 44 + 16 = 60. Measured:
+   *    **M0_DEVICE 86, PHONE_390 95, SHORT_WIDE 27**, and the two degenerate
+   *    clamps give **-47** (0x0) and **0** (320x160). 27 < 60, so the fork
+   *    resolves to the bottom band on the arithmetic alone, before §8.3 is
+   *    consulted.
+   *
+   * The cost, stated rather than discovered: the band is now four equal columns
+   * instead of three, so every column is narrower — 119 -> 87 CSS px at
+   * PHONE_390 — and `hudRects`'s three geometry cases were **re-derived** rather
+   * than nudged. `fillCentred`'s `maxWidth` keeps every label inside its own
+   * rect by construction, so the failure mode of the narrower column is a
+   * condensed label rather than an overlapping one.
+   */
+  readonly upgrades: Rect
 }
 
 /**
@@ -284,6 +319,51 @@ export interface Palette {
    * it, and both are the accent against the face.
    */
   readonly cardAccent: string
+  /**
+   * The junction-upgrade marker on the board (M1f Task 10) — and it is a
+   * SEPARATE entry from `cardAccent` for a reason that was measured rather than
+   * chosen.
+   *
+   * The obvious reuse is `cardAccent`, which is the accent of the card the
+   * upgrade arrives on. It measures **1.48 : 1 against `road`** — the marker
+   * sits on a junction, which is by definition road — and a mark at 1.48 : 1 on
+   * the surface it always sits on is not a mark. This is the same hue, lightened
+   * until it reads on both surfaces the marker can land on:
+   *
+   * ```
+   *   upgrade  #2aa39b  Y = 0.29053
+   *   road     #4a4a52  Y = 0.06963   ->  2.85 : 1
+   *   land     #f2ece1  Y = 0.84304   ->  2.62 : 1
+   * ```
+   *
+   * **Both surfaces, because the flag OUTLIVES the road.** `sim` never clears
+   * `upgradeAt`, deliberately (`upgrades.ts`: a mechanism that silently stops
+   * working is this project's worst defect shape), so a player who erases the
+   * junction still has an upgrade there and the mark is the only thing that says
+   * where. 2.62 : 1 is a shape-legibility figure and not a text one; §7.4's
+   * simulator pass is in no milestone and this palette is still a placeholder.
+   */
+  readonly upgrade: string
+  /**
+   * The inventory chip's icon when the player holds NONE — §7.2's *"greyed with
+   * badge suppressed at zero"*.
+   *
+   * **Greyed, not outlined**, which is §7.2's own word: the task brief
+   * paraphrased it as *"grey outline"* and an outline would have grown
+   * `DrawContext` a `strokeRect` for one state of one element. The icon is one
+   * `fillRect` in all three states and only the colour moves, which is also what
+   * makes "the chip is greyed" a single-command assertion.
+   *
+   * The three states are separated on LIGHTNESS, against the band's own
+   * `background` (#d9d3c7, Y = 0.65464):
+   *
+   * ```
+   *   held, idle   uiText     #2e2b28  Y = 0.02462  ->  9.44 : 1
+   *   armed        cardAccent #1f6f6b  Y = 0.12722  ->  3.98 : 1
+   *   none held    chipEmpty  #8e877e  Y = 0.24585  ->  2.38 : 1
+   * ```
+   */
+  readonly chipEmpty: string
   /** Per colour group. Length 6 — spec §4.2 allows 5 or 6 per map. */
   readonly groups: readonly string[]
 }
@@ -539,6 +619,48 @@ export interface RenderFrame {
    * matters while `offerPending`; `canvas.ts` reads it inside that gate.
    */
   readonly offerPeek: boolean
+  /**
+   * One flag per cell: non-zero means a junction upgrade sits there — M1f Task
+   * 10.
+   *
+   * **A RAW VIEW of `sim`'s `upgradeAt` region, exactly as `roads` and `ghosts`
+   * are** — assigned once in `createFrameBuilder` and never rewritten — because
+   * `sim` already stores it in the shape `render` wants and a per-frame copy
+   * would be a second copy with a staleness question attached.
+   *
+   * **There is no cross-package colour fold here, and the previous draft of this
+   * milestone needed one.** Its relief object was a traffic light with a phase,
+   * so `render` had to know green from amber without importing `LIGHT_NO_PENDING`
+   * and `game` folded the phase into a colour byte. Spec §5.6's 2026-08-21
+   * amendment deleted the phase: **an upgrade has no state**, so this is a flag
+   * and `canvas.ts` draws one static mark wherever it is set.
+   */
+  readonly upgradeAt: Uint8Array
+  /**
+   * How many upgrades are placed. **Drawn nowhere**; it is what lets the marker
+   * pass be skipped entirely on the overwhelming majority of frames — every
+   * frame of every run before the player places their first one, and every frame
+   * of every run in which they never do.
+   */
+  readonly upgradeCount: number
+  /**
+   * How many junction upgrades the player is HOLDING — `sim`'s
+   * `H_INV_UPGRADES`. The chip's badge, suppressed at zero (§7.2).
+   */
+  readonly invUpgrades: number
+  /**
+   * Is the placement mode armed — has the player tapped the chip and not yet
+   * tapped the board?
+   *
+   * **UI and not simulation, exactly like `offerPeek`**: `pointer.ts` owns the
+   * boolean beside `eraseMode`, and it reaches the renderer through this field.
+   * A mode in the state buffer would be a replay input.
+   *
+   * It is on the frame because **a mode with no visible state is a mode the
+   * player cannot get out of**: armed, the next board tap places an upgrade
+   * instead of starting a road, and nothing else on screen would say so.
+   */
+  readonly upgradeMode: boolean
 }
 
 /**
