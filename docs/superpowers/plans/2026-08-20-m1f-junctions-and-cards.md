@@ -393,12 +393,62 @@ satisfies A and not B is diminished; a milestone that satisfies neither is M1d a
 > **Verified on hardware by Task 12's device session, which owns the half no test can hold: that a
 > person who was not told any of this does it anyway.**
 
-**B — THE JAM, AND WHETHER THE CHOICE MATTERED. Owner: Task 10, verified by Task 12.**
+**B — THE JAM, AND WHICH CORNER. Owner: Task 10, satisfied at `453ed01`. Verified by Task 12.**
 
-> *At **8 min 56 s** cars begin to stack at a handful of specific corners. The player taps the
-> inventory chip and then a jammed junction; a marker appears on that cell and, from that tick, cars
-> cross that corner the way they did before minute seven. A good corner makes the run measurably
-> longer; a corner that was not the constraint changes almost nothing.*
+> *Take the **JUNCTION UPGRADE** card when it is offered and **hold it** — no corner on this board is
+> a legal site at the first boundary, so the card has to be kept. From **8 min 56 s** (tick 16,337)
+> cars stand still at a handful of specific corners; three at once is the first thing on this board a
+> person can see that minute seven's rule changed. The chip in the bottom HUD band now reads **2**.
+> **Tap it** — the icon turns teal — **and then tap one of the stopped corners.** A small teal square
+> appears on that cell and stays there; nothing about it moves. Within about **twelve seconds** a car
+> crosses that corner with another car already standing in it, which has not happened there since
+> minute seven, and the queue drains and does not re-form.*
+>
+> ***Which corner is the whole decision, and the busiest-looking one is the wrong answer.*** *On the
+> shipped seed, **(9, 22)** — the corner carrying **21.7 %** of the junction-caused refusals — takes
+> the run from **368 trips to 755** (**2.05×**, and it lives 5 min 30 s longer). **(12, 19)** — the
+> corner carrying **39.5 %**, the one that looks worst — takes it to **394**, **+7.1 %**. Placing it
+> at 8:56 buys the whole 755; waiting until the next card at **12:00** (tick 18,000) buys **368**,
+> the control, to the trip.*
+
+**What a device tester must read literally, because each was measured and two were wrong in an
+earlier draft of this task:**
+
+- **The chip is in the BOTTOM band, as a fourth column beside the clock, score and tiles readouts.**
+  The task brief preferred the top band; §8.3 forbids it (*"The top band is dead space … No
+  interactive element, score, or pause button may live there"*, and this is the first HUD element in
+  the game that is neither a readout nor the clock), and the brief's own fork test refuses it too —
+  the top band measures 86 / 95 / **27** CSS px on the three viewports `camera.test.ts` covers,
+  against a floor of 60. **A tester looking for a chip above the board is looking in the wrong band.**
+- **Nothing about the marker animates, and that is Amendment 2 rather than an omission.** §5.6's
+  traffic light had a phase and was measured at **−13.0 %** on trips at its best seat phase; the
+  object that ships has no state at all, so the whole feedback is in the traffic. A tester waiting
+  for the marker to do something will wait for the rest of the run.
+- **The mark is a SQUARE and not a ring.** A ring on a junction is what a traffic light looks like,
+  and this board already draws exactly one changing ring — the overcrowd meter, which is an alarm.
+- **"The queue drains" is the second thing to look for, not the first.** The first crossing is
+  measured at tick **16,704**, 367 ticks — **12.2 s** — after the two taps, and the earliest crossing
+  this board can produce at *any* corner from *any* seat tick is tick **15,001**. Traffic at these
+  corners is sparse. **Task 12 must not read a corner that takes ten seconds to clear as a failure.**
+- **The badge does not go down until the tick lands, and a refused placement is silent.**
+  `pointer.ts` cannot know whether `sim` accepted (it must not grow a `sim` import for
+  `canPlaceUpgrade`), so one tap is one attempt: tap plain road and the mode simply drops, with the
+  unchanged badge and the missing marker as the only feedback.
+
+Driven end to end on the production boot, from a screen coordinate to a `sim` region and back to a
+drawn pixel, in `integration.test.ts` › *"goes from a SCREEN COORDINATE to a sim region and back to a
+pixel"*, *"and a car crosses that corner again, with another car already in it"*, *"makes the run
+measurably longer — 368 trips to 755, on the same driver"*, *"the corner that LOOKS worst is not the
+corner to fix"* and *"restores the delivery fraction the junction rule cost — 0.891 to 0.973"*.
+**Verified on hardware by Task 12's device session, which owns the half no test can hold: that a
+person who was not told any of this finds the corner anyway.**
+
+**The thresholds Task 12 inherits, quoted the way M1f Task 9 handed them over.** `BEST_MARGIN` — the
+best single placement's trips ratio over the control, **measured 2.05×**, handed over at **1.50×**;
+`SPREAD_MARGIN` — `(best − worst) / worst`, **measured 0.916**, handed over at **0.50**; and the
+count of single placements strictly worse than the control, **0 of 3**. **`BEST_MARGIN` must NOT be
+applied per seed** — the spike's eight-seed row for perfect relief wins 7 of 8 and contains a loser,
+so a per-seed floor would fail on that seed for a correct object. Aggregate or median.
 
 **Task 8's own honest caveat, and it must not be papered over: criterion A does NOT require the
 30-vs-20 choice to be a trade-off, because measured, it is not one.** Task 7 measured the greedy

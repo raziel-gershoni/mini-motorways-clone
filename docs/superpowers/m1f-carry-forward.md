@@ -91,15 +91,53 @@ The criterion is two sentences, three tasks apart, and each has an owner.
 > the city's no-input arm has `maxInFlight` 0 — so what resumes is the clock.
 > **A still board is not a failure of A.**
 
-**B — THE JAM, AND WHETHER THE CHOICE MATTERED. Owner: M1f Task 10.**
+**B — THE JAM, AND WHICH CORNER. Owner: M1f Task 10. Satisfied at `453ed01`.**
 
-> At **8 min 56 s** cars stack at specific corners. The player taps the inventory
-> chip and then a jammed junction; a marker appears and cars cross that corner
-> the way they did before minute seven. A good corner makes the run measurably
-> longer; a corner that was not the constraint changes almost nothing.
+> Take the **JUNCTION UPGRADE** card when it is offered and **hold it** — no
+> corner is a legal site at the first boundary, so it has to be kept. From
+> **8 min 56 s** (tick 16,337) cars stand still at a handful of corners; three at
+> once is the first thing on this board a person can see that minute seven's rule
+> changed. The chip in the **bottom** HUD band, fourth column, reads **2**. Tap
+> it — the icon turns teal — then tap one of the stopped corners. A small teal
+> square appears on that cell and **stays there; nothing about it moves**. Within
+> about **twelve seconds** a car crosses that corner with another car already
+> standing in it, which has not happened there since minute seven.
+>
+> **Which corner is the whole decision, and the busiest-looking one is the wrong
+> answer.** On the shipped seed **(9, 22)** — 21.7 % of the junction refusals —
+> takes the run from **368 trips to 755** (**2.05×**, 5 min 30 s longer).
+> **(12, 19)** — 39.5 %, the one that looks worst — takes it to **394**, +7.1 %.
+> Placing it at 8:56 buys the whole 755; waiting for the next card at **12:00**
+> buys **368**, the control, to the trip.
+
+**Four things a device tester must read literally**, each measured and two of
+them wrong in an earlier draft:
+
+- **The chip is in the BOTTOM band.** §8.3 forbids an interactive element in the
+  top band, and the top band measures 86 / 95 / **27** CSS px across the three
+  viewports `camera.test.ts` covers against a 60 px floor. Looking above the
+  board is looking in the wrong place.
+- **Nothing about the marker animates**, and that is spec §5.6's 2026-08-21
+  amendment rather than an omission: the light that had a phase measured
+  **−13.0 %** on trips and went to M1g. The whole feedback is in the traffic.
+- **The mark is a square, not a ring.** A ring on a junction is what a traffic
+  light looks like, and this board draws exactly one changing ring already — the
+  overcrowd alarm.
+- **The first crossing is 367 ticks (12.2 s) after the taps**, and the earliest
+  crossing this board can produce at any corner from any seat tick is tick
+  **15,001**. A corner that takes ten seconds to clear is not a failure.
 
 **Both are verified on hardware by M1f Task 12's device session**, which owns the
-half no test can hold: that a person who was told none of this does it anyway.
+half no test can hold: that a person who was told none of this finds the corner
+anyway.
+
+**The thresholds Task 12 inherits, quoted the way M1f Task 9 handed them over.**
+`BEST_MARGIN` **measured 2.05×**, handed over at **1.50×**; `SPREAD_MARGIN` —
+`(best − worst) / worst` — **measured 0.916**, handed over at **0.50**; single
+placements strictly worse than the control **0 of 3**. **`BEST_MARGIN` must NOT
+be applied per seed**: the spike's eight-seed row for perfect relief wins 7 of 8
+and contains a loser, so a per-seed floor would fail on that seed for a correct
+object. Aggregate or median.
 
 **A does NOT claim the 30-vs-20 choice is a trade-off, and must not be quoted as
 if it did.** Measured: the greedy arm's tile slack goes **2.7× → 4.3× for
@@ -127,7 +165,7 @@ M1f. They are listed here so nobody has to re-derive the connection:
 | `sim/cars.ts` `laneSpeedMul` | the same motorway tier, as a cost-model change |
 | `sim/roads.ts` `LANE_OF_DIR` | **traffic lights and roundabouts**, for the two-lane model's intersection gap |
 | `shared/constants.ts` `MOTORWAY_SPEED_MAX` / `ROUNDABOUT_SPEED_MUL` | both are still uncalled |
-| `render/types.ts` `HudRects`, `game/pointer.ts`'s `HUD_INERT` | §7.2's **inventory chip row** — there is now something to spend and still nothing to choose |
+| ~~`render/types.ts` `HudRects`, `game/pointer.ts`'s `HUD_INERT`~~ | ~~§7.2's **inventory chip row**~~ — **CLOSED at M1f Task 10**: `HudRects.upgrades` is the fourth column of the bottom band, tapping it arms the placement mode, and `HUD_INERT` is still the honest answer at zero held |
 
 **Read `scratch.ts`'s `NB` doc comment before adding any edge cost.** It carries
 the full derivation, the measured modulus table, and the two ways a penalty can
