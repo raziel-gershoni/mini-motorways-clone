@@ -299,7 +299,18 @@ spike and measured it against its own control. Every figure here is **SPIKE**
 vintage: the code is not in the tree and none of it is re-runnable.
 
 **The control, ANCHORED:** 368 trips, 29,267 blocked car-ticks, death at tick
-21,783, 5 valve firings, 6,536 junction-caused refusals (22.3 % of blocked).
+21,783, **5 valve firings with the first at tick 17,658 (9:40.0 on a stopwatch)
+and a worst wait of 1,350 — saturated**, and 6,536 junction-caused refusals
+(22.3 % of blocked).
+
+**And what the shipped relief object does to that valve, which is the cleanest
+derivation of the mechanism this milestone has:** an upgrade admits cars the bare
+junction refuses, so it takes pressure OFF the valve. Taking the item card every
+week and seating it gives **0 firings and a worst wait of 32** — the pre-M1f
+values exactly. **But the direction is NOT uniform and that is a finding: three
+of the six legal SINGLE placements RAISE the count from 5 to 6**, because relief
+moves traffic downstream rather than deleting it and a badly-seated upgrade
+admits cars into a queue that saturates somewhere else.
 
 | variant | trips | vs control |
 |---|---|---|
@@ -574,16 +585,30 @@ the register would shrink. **It did not.**
 
 | entry | state at M1f close |
 |---|---|
+| **`4 <-> 5`** — the card offer against the spawner | **OPEN, 0 detectors, AND THE OWNER TASK 5 NAMED HAS LANDED.** Task 5 recorded it as an absence and named **Task 8's frame fold** as what would give it a detector. Task 8 landed; Task 12 re-measured it at **0**. The obligation is open and it is nobody's until M1g assigns it |
 | **`5 <-> 6`** — spawn against demand | **OPEN**, 0 detectors. Renamed from `4 <-> 5` by Task 5's insertion at position 4; `step.ts` carries a sentence a grep for `4 <-> 5` lands on. **Do not manufacture a detector**: the only edits that produce one are backdating `destSpawnTick` or routing §5.3.5's push around `fireColour`, and both are what the tripwires exist to catch |
 | **`laneSpeedMul`'s rounding inertness** | **UNCHANGED AND STILL OPEN.** The values that would have closed it came from `ROUNDABOUT_SPEED_MUL`, and M1f defers the roundabout. `583/584 → 192` and `416/417 → 137` are pinned at `cars.test.ts:1590-1593`, so the entry is anchored rather than merely read |
 | **`stepCell`'s `y < 0`** | unchanged, verified equivalent through either caller |
 | **`spawn.ts`'s `maxHouses` short-circuit** | unchanged, 0 detectors — **and its comment names the suite size it was measured at**, because *"0 detectors across the whole suite"* in a durable comment silently re-points at whatever suite the reader has |
 | **`3 <-> 5`** (M1e's numbering; `3 <-> 6` today) | still OFF the register at 1 detector. The scheduled failure M1f owns is unchanged: adding a `destPins` write to `placeRoad`/`eraseRoad` (§5.9's connectivity rule) makes phases 3 and 6 stop commuting, **at 0 detectors**, with `step.test.ts`'s disjointness scan as the only tripwire |
 
-**Two rows M1f newly recorded as absences and then closed:** `3 <-> 4` (inputs
-against the offer) was 0 at Task 5 and is **2** from Task 6's boundary-tick
-`choose-card` test; `4 <-> 5` (the offer against the spawner) was 0 at Task 5 and
-Task 8's frame fold was named as its owner.
+**One row M1f recorded as an absence and closed:** `3 <-> 4` (inputs against the
+offer) was 0 at Task 5 and is **2** from Task 6's boundary-tick `choose-card`
+test, re-measured at exactly 2 by Task 12's battery.
+
+**Task 12 re-ran 27 of the 55 pairs** — every pair involving phase 3, 5 or 9,
+which is the set a code-only diff (comments stripped) says actually changed since
+Task 5's sweep, and it is **eight rows larger than the brief's `{3, 9}`**:
+`buildings.ts` gained three `isUpgraded` refusals at Task 9 and `runSpawn` is
+phase 5. Phase 4 is discharged by Task 11's **pinned identity** (`poolFor` returns
+130 on all ten maps) rather than by a diff, and the remaining 21 by a zero
+code-line diff. **Every re-run row scored >= 1 except the two above.** Flake over
+both batteries: **1 of 7 baselines = 14.3 %**, all allocation windows — so every
+non-zero row is +/-1 and every zero is safe, because a flake can only add.
+
+**And the counts of the 28 rows NOT re-run are lower bounds today**: the suite has
+grown 2,044 -> 2,286 cases since Task 5's sweep, and a mutation count goes stale
+**upward** every time somebody adds a pin.
 
 ---
 
@@ -827,20 +852,32 @@ both.
 **Consequences M1g must act on:**
 
 1. **`packages/game`'s `testTimeout` was NOT raised, deliberately.** Cases run at
-   2.1–2.7 s against the 5,000 ms default and the package's wall clock went 44 s →
-   90 s this task, so raising it is tempting. **Raising it blinds the only
+   2.1-2.7 s against the 5,000 ms default and the package's wall clock went
+   44 s -> 61 s this task, so raising it is tempting. **Raising it blinds the only
    per-tick cost instrument the project has**: a 2.16× regression on a 2.7 s case
    is 5.8 s, which passes a 15,000 ms budget silently. The long cases added by
    Task 12 carry **explicit per-case timeouts** instead (`SWEEP_TIMEOUT_MS`
-   60,000; `SEED_MATRIX_TIMEOUT_MS` 300,000; the Step 5 sweep 120,000), so the
+   60,000; `SEED_MATRIX_TIMEOUT_MS` 180,000; the Step 5 sweep 120,000), so the
    default stays tight for everything else.
-2. **The offer path has no cost instrument at all.** `poolFor` is guarded by a
+2. **A SECOND instrument was needed for a different reason and it is worth
+   knowing about.** Committing 24 frame-driven twelve-week runs made
+   `packages/game` report `Timeout calling "onTaskUpdate"` as an **unhandled
+   error** — 764 tests passing, the package red. Yielding inside the driver's tick
+   loop, splitting the file in two, `--pool=forks` and `--maxWorkers=6` were each
+   measured and none fixed it; removing the two files made the package clean. **It
+   is total CPU**: the matrix doubled the package's worker time and starved
+   vitest's parent of the scheduling it needs to answer a worker's RPC inside the
+   60,000 ms birpc default. The fix is a `step`-driven twin at 0.45-0.73 s a run
+   against 2.4-3.9 s, with the two drivers' agreement asserted on the shipped
+   seed. **M1g: a long test is an availability risk for the RUNNER, not only a
+   slow test.**
+3. **The offer path has no cost instrument at all.** `poolFor` is guarded by a
    **source scan over one function body** and by nothing else. **Assign a real
    per-tick time budget** — a treatment/control delta against a same-process
    reference workload, so machine speed cancels — or accept that the next
    regression of this class is found by a timeout again, at whatever moment the
    suite happens to be slowest.
-3. **The allocation harness says NOTHING about time**, and a per-frame 960-byte
+4. **The allocation harness says NOTHING about time**, and a per-frame 960-byte
    `Uint8Array` copy was **invisible to all three allocation windows** until Task
    10 caught it at 213.83 B/frame charged to a frame with no file. That hole is
    older than this milestone; the guard added for it is narrow.
