@@ -13,6 +13,7 @@ import { DEMO_DEATH_TICK } from './deathTicks'
 import { takeCardPolicy } from './cardPolicy'
 import { createGame, type GameContext } from '../src/main'
 import { DEMO_LAYOUT_ID } from '../src/layouts'
+import { DEMO_WARM_START_TICKS } from '../src/demoLayout'
 import { repoRelative } from './allocationPaths'
 
 /**
@@ -474,6 +475,31 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     expect(rig.cardsTaken, 'the rig crossed the week-1 boundary and resolved the offer').toBe(1)
     expect(offerPending(game.state), 'and left nothing pending behind it').toBe(false)
 
+    // ---------------------------------------------------------------------
+    // **CRITERION 1 OF M1f TASK 3'S TRIAGE, IN TICKS, ON THE RIG'S OWN
+    // `H_TICK`. This is the authoritative form and the knob test's is the
+    // early warning.**
+    // ---------------------------------------------------------------------
+    //
+    // The criterion is *"the profiled run ends at a tick at least 10 % below
+    // the arm's re-measured `DEMO_DEATH_TICK`"*, and it is a statement about
+    // TICKS. Task 3 first wrote it in the knob test as
+    // `1 - framesDriven / framesToDeath`, which is a statement about FRAMES and
+    // is NOT the same number: the 1,200-tick warm start costs 1,200 ticks and
+    // **zero frames**, so the frame form reads 12.86 % where the criterion reads
+    // 10.54 %. The gap is not cosmetic — for any death tick in
+    // **6,487 <= D < 6,620** the criterion is violated and the frame form stays
+    // green. Against the measured 6,660 that leaves **40 ticks** of margin to
+    // the criterion's edge, not the 173 the frame form implies.
+    //
+    // Asserted here as well as at the knobs because the two fail differently: a
+    // knob edit fires the static one before 9,000 frames are driven, and a move
+    // in `DEMO_DEATH_TICK` with the knobs untouched fires only this one.
+    expect(
+      1 - (game.state.header[H_TICK] as number) / DEMO_DEATH_TICK,
+      'CRITERION 1: the profiled run must end at least 10 % of the way short of the freeze',
+    ).toBeGreaterThan(0.1)
+
     const files = new Set<string>()
     for (const window of windows) {
       for (const file of window.keys()) {
@@ -650,8 +676,18 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     // frame/tick accumulator and not of the knobs, and the two measurements
     // agreeing to four digits is what says so).
     const framesDriven = WARMUP_FRAMES + WINDOW_COUNT * PROFILED_FRAMES
-    const TICKS_PER_FRAME = (5958 - 1200) / 9500
-    const framesToDeath = (DEMO_DEATH_TICK - 1200) / TICKS_PER_FRAME
+    const TICKS_PER_FRAME = (5958 - DEMO_WARM_START_TICKS) / 9500
+    const framesToDeath = (DEMO_DEATH_TICK - DEMO_WARM_START_TICKS) / TICKS_PER_FRAME
+    // **The tick the knobs land on, modelled — and the warm start is why this
+    // is not `framesDriven / framesToDeath`.** Those two are frame counts
+    // measured from the FIRST FRAME; the death tick is a tick measured from
+    // BOOT, and the 1,200-tick warm start sits between them costing ticks and
+    // no frames. Dividing frames by frames therefore answers a different
+    // question by 2.3 percentage points, in the optimistic direction. The
+    // profiling test above asserts the same criterion on the tick the rig
+    // actually reached, which is the authority; this is the model, and it is
+    // here only so a knob edit fails at the knob.
+    const endTickModelled = DEMO_WARM_START_TICKS + framesDriven * TICKS_PER_FRAME
     // **THE TWO BOUNDS FIRST, THE IDENTITY PIN LAST — and the pin has now
     // dominated something twice, so read this before reordering it again.**
     //
@@ -684,14 +720,18 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
       'these knobs now drive the demo rig past its death tick — see DEMO_DEATH_TICK',
     ).toBeLessThan(framesToDeath)
     // **CRITERION 1 of M1f Task 3's triage, as a number rather than as the
-    // strict inequality above.** The ceiling only says the rig stops before the
-    // board dies; this says it stops with room. 10 % was chosen before any arm
-    // was measured, precisely so the arm could not be chosen to fit it, and
-    // arm B clears it at 10.5 %. Both are here because they fail differently: a
-    // knob change that eats the margin without crossing the freeze fires this
-    // one alone.
+    // strict inequality above, and IN TICKS.** The ceiling only says the rig
+    // stops before the board dies; this says it stops with room. 10 % was
+    // chosen before any arm was measured, precisely so the arm could not be
+    // chosen to fit it, and arm B clears it at 10.54 %.
+    //
+    // **It was written as `1 - framesDriven / framesToDeath` and that is a
+    // different number** — 12.86 % — because the warm start costs ticks and no
+    // frames. The frame form is not kept alongside: it is looser than the
+    // criterion in the same direction, so it can only ever be green when this
+    // is, and a second bound that cannot fire first is decoration.
     expect(
-      1 - framesDriven / framesToDeath,
+      1 - endTickModelled / DEMO_DEATH_TICK,
       'the profiled run must end at least 10 % of the way short of the freeze',
     ).toBeGreaterThan(0.1)
     // The FLOORS, second: the sampler needs enough frames and enough windows for
