@@ -788,6 +788,21 @@ longer exist.
 
 ### Which digests move, and why — re-derived, not carried
 
+> **The digest column is the PRE-TASK-4 value, not the current one. Dated note added
+> at Task 4's fix round.** Task 4 landed the shape change and moved eight of the nine
+> exactly as the "Moves in" column predicts; Task 5 then moved the two this table marks
+> as its own. **Every literal in the left column below is now historical.**
+>
+> Deliberately NOT re-listing today's values here: this table would go stale again at
+> Task 5, Task 7 and Task 9, and a ledger that has to be re-edited every task is the
+> defect rather than the fix. **The source of truth is the assertion**, and each one
+> carries an `spliceM1fInsertions` proof against its own prior digest, so the chain
+> from this table's value to the current one is running code rather than prose. To read
+> the current digest, grep the fixture named in the middle column.
+>
+> The "Moves in" column is unchanged and still correct — it is a claim about WHICH task
+> owns each move, which is the part of this table that was worth writing down.
+
 | Golden | Fixture | Moves in |
 |---|---|---|
 | `1058753394` **state** | `determinism.test.ts`, 4×4 map, no buildings, 13,499 ticks | **Task 4** (layout), and **Task 5** — it is one of only two golden fixtures that cross a week boundary, so it is one of only two the offer phase can reach |

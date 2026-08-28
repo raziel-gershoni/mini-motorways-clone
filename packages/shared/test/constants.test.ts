@@ -434,13 +434,36 @@ describe('rule constants', () => {
     // task cites this cap as a binding constraint the arithmetic is on the
     // record. `Math.floor` is fine in a test — the determinism scan covers
     // `src`, not `test`.
-    const SHIPPED_ARM_DEATH_TICK = 21783
-    const boundaries = Math.floor(SHIPPED_ARM_DEATH_TICK / TICKS_PER_WEEK)
-    expect(boundaries, 'four week boundaries before the shipped arm dies').toBe(4)
-    expect(2 * boundaries, 'so 8 upgrades are obtainable against a cap of 24').toBe(8)
-    expect(2 * boundaries, 'the cap is not binding on the board that ships').toBeLessThan(
-      MAX_UPGRADES,
-    )
+    // **Stated as the BOUND rather than as the shipped arm's death tick, and
+    // that is a correction.** The first version of this test hard-coded
+    // `SHIPPED_ARM_DEATH_TICK = 21783` — a disconnected COPY of a figure four
+    // sites in `packages/game` obtain by MEASURING it. `packages/shared` cannot
+    // import from `packages/game`, so the copy could not be shared; and M1f
+    // Task 7 re-bases the death tick, at which point those four go red and this
+    // one would not, leaving "the cap is not binding" asserted from a stale
+    // number. A figure that nothing runs is a figure that comes back.
+    //
+    // The invariant that does not depend on it: at 2 items per card and one card
+    // per week, exhausting `MAX_UPGRADES` takes `MAX_UPGRADES / 2` = 12 whole
+    // weeks. So the cap is not binding on ANY run shorter than that, whatever
+    // the death tick turns out to be.
+    const weeksToExhaustCap = MAX_UPGRADES / 2
+    expect(weeksToExhaustCap, '2 items per card, one card per week').toBe(12)
+    expect(Number.isInteger(weeksToExhaustCap), 'the grant rate divides the cap').toBe(true)
+    expect(
+      weeksToExhaustCap * TICKS_PER_WEEK,
+      'a run must last 54,000 ticks before the cap can bind',
+    ).toBe(54000)
+    // The shipped arm is far below that. The tick is quoted as an ILLUSTRATION
+    // and is deliberately NOT the thing asserted — `integration.test.ts`,
+    // `junctionArms.test.ts`, `startingCity.test.ts` and `allocation.test.ts`
+    // measure it, and Task 7 moves it. What is asserted is the comparison, which
+    // holds for any arm shorter than 12 weeks.
+    const SHIPPED_ARM_DEATH_TICK_ILLUSTRATIVE = 21783
+    expect(
+      Math.floor(SHIPPED_ARM_DEATH_TICK_ILLUSTRATIVE / TICKS_PER_WEEK),
+      'four boundaries — measured in packages/game, not here',
+    ).toBeLessThan(weeksToExhaustCap)
   })
 
   it('names the millisecond conversion so a /1000 cannot be misread as DENOM', () => {

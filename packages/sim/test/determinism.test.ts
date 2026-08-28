@@ -727,12 +727,25 @@ describe('the seed word is read, never consumed', () => {
     // would swallow the spawner falling to zero.
     expect(rig.s.header[H_HOUSE_COUNT], 'and the spawner really ran: 2 seeded + 5 spawned').toBe(7)
     expect(rig.s.header[H_DEST_COUNT], 'with the destination cap holding at 2').toBe(2)
-    // And the word was genuinely READ rather than merely left alone.
-    // `spawnScanStart` is the reader — a pure function of the word and the tick,
-    // reached on every house-spawn attempt — so this recomputes what it returned.
-    expect(spawnScanStart(rig.s, 97), 'the word is on a live read path').toBe(
-      ((before >>> 0) + ticks) % 97,
-    )
+    // **What establishes that `step` READ the word is the line above, not the
+    // line below**, and the first version of this comment had it backwards.
+    //
+    // `H_HOUSE_COUNT` is 7 against 2 seeded, so `attemptHouseSpawn` succeeded
+    // five times; it calls `spawnScanStart` (spawn.ts) before its scan, and
+    // `spawnScanStart` reads `state.rng[0]`. That chain is the evidence.
+    //
+    // The assertion below is a post-hoc call made by this test, so it says
+    // nothing about what happened during the run — and it recomputes
+    // `spawnScanStart`'s own formula, which is the catalogue's "a test that
+    // reimplements the thing it checks". It is kept for the one narrow thing it
+    // does do: pin that the reader is a pure function of the word and the tick,
+    // so a future `spawnScanStart` that ADVANCED the word would fail here as
+    // well as in the invariance assertion. Labelled rather than deleted, and
+    // labelled accurately.
+    expect(
+      spawnScanStart(rig.s, 97),
+      'the reader is a pure function of the word and the tick (NOT evidence that step read it)',
+    ).toBe(((before >>> 0) + ticks) % 97)
   }, 60000)
 })
 
