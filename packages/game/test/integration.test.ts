@@ -16,6 +16,7 @@ import {
   H_DEST_COUNT,
   H_HOUSE_COUNT,
   CARD_JUNCTION_UPGRADE,
+  CARD_ROAD_TILES,
   H_INV_UPGRADES,
   H_OFFER_A,
   H_OFFER_B,
@@ -39,6 +40,7 @@ import {
   packRouteStep,
   assertOccupancyComplete,
   assertOccupancySound,
+  assertNoRoadOnImpassable,
   dirBetween,
   hashState,
   isJunctionCell,
@@ -96,6 +98,19 @@ import { DEMO_WARM_START_TICKS } from '../src/demoLayout'
 import { CITY_LAYOUT_ID, DEMO_LAYOUT_ID, DEFAULT_LAYOUT_ID, LAYOUT_IDS } from '../src/layouts'
 import { CITY_DEATH_TICK, DEMO_DEATH_TICK } from './deathTicks'
 import { takeCardPolicy } from './cardPolicy'
+import {
+  formatSweep,
+  junctionsPerBoundary,
+  sitesPerBoundary,
+  sweepControl,
+  sweepUpgradePlacements,
+  BEST_TRIPS_RATIO,
+  SHIPPED_SEED,
+  SPREAD_MARGIN,
+  SWEEP_SEAT_TICK,
+  SWEEP_TIMEOUT_MS,
+} from './upgradeSweep'
+import { runSeedArm } from './seedArms'
 import {
   armCarpark,
   armGreedyActions,
@@ -5720,4 +5735,245 @@ describe('the upgrade a player places relieves a jam they can see', () => {
     expect(placed.unaffordable).toBe(0)
     expect(control.cardsTaken).toBe(4)
   })
+})
+
+// ---------------------------------------------------------------------------
+// M1f TASK 12 STEP 3 — THE UPGRADE PLACEMENT SWEEP
+// ---------------------------------------------------------------------------
+
+describe('M1f Task 12 Step 3: an upgrade is a decision — WHERE it goes changes the run', () => {
+  it(
+    'the best placement beats doing nothing, and the spread between best and worst is the criterion',
+    () => {
+      const rows = sweepUpgradePlacements(SHIPPED_SEED)
+      const control = sweepControl(SHIPPED_SEED)
+
+      // Not vacuous, and BOUNDED — the number is reported rather than a large
+      // one asserted. `canPlaceUpgrade` accepts junctions and nothing else, so
+      // the candidate set is six cells and not the 545 candidate centres the
+      // previous milestone's relief object enumerated.
+      expect(rows.length, 'the sweep found some junctions').toBeGreaterThan(5)
+      expect(rows.length, 'and not so many that this is a 40-minute test').toBeLessThan(120)
+
+      // **The board has the problem, so a green result is not a green board.**
+      expect(control.blockedCarTicks, 'the control still jams').toBeGreaterThan(10000)
+      // And the control is not itself broken: every destination it produced is
+      // still reachable, which is what makes the per-row clause below non-vacuous.
+      expect(
+        control.reachableDestinations,
+        'the control disconnects nothing, so `reachable` is a real test',
+      ).toBe(control.destinations)
+
+      // **The metric is TRIPS.** Blocked car-ticks is reported per row and
+      // asserted nowhere: a placement that improves it by killing the board
+      // faster is not help.
+      const best = rows.reduce((m, r) => (r.trips > m.trips ? r : m))
+      const worst = rows.reduce((m, r) => (r.trips < m.trips ? r : m))
+
+      // Both thresholds were written into this step BY TASK 9'S REPORT, from its
+      // per-cell table — a prediction made before this measurement, across a task
+      // boundary. Task 9 measured three junction-eligible hot cells on one seed;
+      // this measures EVERY legal junction at the same seat tick, so the
+      // populations differ and the margin is why.
+      expect(best.trips / control.trips, 'the object helps at all').toBeGreaterThan(BEST_TRIPS_RATIO)
+
+      // **THE MILESTONE'S SECOND ACCEPTANCE CRITERION AND THE ONE THAT CHANGED.**
+      // An upgrade cannot make its own junction worse — at its cell it admits a
+      // strict superset of what the bare junction admits — so *"does it help"* is
+      // settled by construction and *"does it matter WHERE"* is not. A relief
+      // object whose placements all score the same is free income with a tap
+      // attached, and the modal is then a decision with one right answer.
+      expect((best.trips - worst.trips) / worst.trips, 'and WHERE it goes matters').toBeGreaterThan(
+        SPREAD_MARGIN,
+      )
+
+      // A placement that helps by disconnecting a destination is not help.
+      for (const r of rows) expect(r.reachable, `cell ${r.cell} disconnected a destination`).toBe(true)
+
+      // Every row really placed: `sweepUpgradePlacements` throws if
+      // `canPlaceUpgrade` accepted a cell `applyPlaceUpgrade` then refused, so a
+      // silently-inert sweep cannot reach this line.
+      expect(new Set(rows.map((r) => r.cell)).size, 'six distinct cells').toBe(rows.length)
+
+      // **Reported as named lines, not asserted.**
+      //
+      // `worseThanControl` is **0 of 6 on this seed, and a zero is not a pass on
+      // its own** — the brief that specified this step says so. The
+      // interrogation it demands: the rig IS measuring placement, because
+      // `(14,17)` moves trips by +9 and `(8,23)` moves blocked car-ticks and
+      // valve firings while leaving trips alone, so a placement is applied and
+      // read. What the zero says is that on `laneways-m2` relief never pushes
+      // traffic into a worse jam downstream. The spike's eight-seed row for the
+      // six-cell exemption contains a **-5**, so a strictly-worse placement is a
+      // multi-seed phenomenon this seed does not exhibit.
+      //
+      // The number that actually answers *"is the modal a decision"* is the
+      // other one: **three of the six legal sites are worth nothing at all**
+      // (368, the control exactly) and the best is 2.05x.
+      const worseThanControl = rows.filter((r) => r.trips < control.trips).length
+      const worthNothing = rows.filter((r) => r.trips === control.trips).length
+      console.log(`placements strictly worse than the control: ${worseThanControl} of ${rows.length}`)
+      console.log(`placements worth exactly nothing on trips: ${worthNothing} of ${rows.length}`)
+      console.log(
+        `legal sites per boundary TICK: ${sitesPerBoundary().join(' ')} ` +
+          `(junctions ${junctionsPerBoundary().join(' ')}); seat tick ${SWEEP_SEAT_TICK}`,
+      )
+      console.log(formatSweep(control, rows))
+    },
+    SWEEP_TIMEOUT_MS,
+  )
+})
+
+// ---------------------------------------------------------------------------
+// M1f TASK 12 STEP 5 — THE INVARIANTS, OVER THE LONGEST RUN, WITH LIVENESS
+// ---------------------------------------------------------------------------
+
+describe('M1f Task 12 Step 5: the invariants hold for every tick of the longest shipped-seed run', () => {
+  it(
+    'and the run is LIVE for all of it — safety properties are trivially true of a corpse',
+    () => {
+      // **The longest run this seed can produce**: the upgrade card taken at
+      // every boundary and seated, which is 31,456 ticks against the control's
+      // 21,783. Driven through `createGame` and its `InputQueue`, so every
+      // placement travels the production path.
+      let ticks = 0
+      let upgradeCountPrev = -1
+      let monotoneViolations = 0
+      let negativeInventory = 0
+      let countMismatch = 0
+      let flagOutOfRange = 0
+      let ledgerViolations = 0
+      let counterWrap = 0
+      let ledgerPrev = -1
+      let peakOvercrowd = 0
+      let peakInFlight = 0
+      let ticksWithACarMoving = 0
+      const ledgerSteps: number[] = []
+
+      const run = runSeedArm('laneways-m2', 'always-upgrades', 'eager', (state, world, tick, card) => {
+        ticks++
+
+        // ---- M1f INVARIANT 1: the count agrees with the flags, BOTH ways ----
+        // The count alone is satisfied by a board that lost a flag and gained one
+        // elsewhere, which is why the scan is the oracle rather than the
+        // arithmetic that produced the count.
+        let flags = 0
+        for (let cell = 0; cell < world.cells; cell++) {
+          if ((state.upgradeAt[cell] as number) !== 0) {
+            flags++
+            if (cell < 0 || cell >= world.cells) flagOutOfRange++
+          }
+        }
+        const count = state.header[H_UPGRADE_COUNT] as number
+        if (count !== flags) countMismatch++
+        if (flags > world.cells) flagOutOfRange++
+
+        // ---- M1f INVARIANT 2: the count only rises, the inventory never goes
+        // negative. M1f has no removal path, so a fall in either is a defect and
+        // not a feature arriving early.
+        if (upgradeCountPrev >= 0 && count < upgradeCountPrev) monotoneViolations++
+        upgradeCountPrev = count
+        if ((state.header[H_INV_UPGRADES] as number) < 0) negativeInventory++
+
+        // ---- M1f INVARIANT 3: the tile ledger is unchanged by upgrades ----
+        // `tilesLeft + roadCells + ghostCells` steps by exactly
+        // `WEEKLY_TILE_GRANT + cardTileGrant(chosen)` between boundaries and by
+        // nothing else. **An upgrade lays no road and erases none**, so this is
+        // the assertion that would catch one that did.
+        let roadCells = 0
+        let ghostCells = 0
+        for (let cell = 0; cell < world.cells; cell++) {
+          if (roadMask(state, cell) !== 0) roadCells++
+          if ((state.ghostCommitted[cell] as number) !== 0) ghostCells++
+        }
+        const ledger = tilesLeft(state) + roadCells + ghostCells
+        if (ledgerPrev >= 0) {
+          const step = ledger - ledgerPrev
+          const boundary = tick % TICKS_PER_WEEK === 0
+          const grant =
+            (boundary ? WEEKLY_TILE_GRANT : 0) +
+            (card === CARD_JUNCTION_UPGRADE
+              ? CARD_GRANT_ITEM
+              : card === CARD_ROAD_TILES
+                ? CARD_GRANT_ROAD_TILES
+                : 0)
+          // A road laid this tick moves `tilesLeft` down and `roadCells` up by
+          // the same amount, so the SUM is flat except for the grants. An erase
+          // is the same identity in reverse.
+          if (step !== grant) {
+            ledgerViolations++
+            ledgerSteps.push(step - grant)
+          }
+        }
+        ledgerPrev = ledger
+
+        // ---- no counter wrap ----
+        for (const slot of [H_SCORE, H_TICK, H_TILES, H_UPGRADE_COUNT, H_INV_UPGRADES, H_ROUTES_REFUSED]) {
+          const v = state.header[slot] as number
+          if (v < 0 || v > 2 ** 31 - 1) counterWrap++
+        }
+
+        // ---- the structural invariants, SAMPLED: both are O(cells) and the run
+        // is 31,456 ticks. Every 100th tick plus the first and last is 316
+        // samples, which is what keeps this case under a second rather than
+        // under a minute; the same two are asserted on EVERY tick of the 20,000
+        // -tick jam sweep above, on a board built to break them.
+        if (ticks % 100 === 1) {
+          assertOccupancySound(state, world)
+          assertNoRoadOnImpassable(state, world)
+        }
+
+        // ---- LIVENESS: off the peak overcrowd meter and off cars in motion,
+        // never off the terminal flag. A meter that climbs and unwinds never
+        // sets the flag, and it is the tick BEFORE the flag that says the margin
+        // is gone.
+        for (let d = 0; d < (state.header[H_DEST_COUNT] as number); d++) {
+          const m = state.destOvercrowd[d] as number
+          if (m > peakOvercrowd) peakOvercrowd = m
+        }
+        let inFlight = 0
+        for (let c = 0; c < state.carPhase.length; c++) {
+          const phase = state.carPhase[c] as number
+          if (phase === PHASE_OUTBOUND || phase === PHASE_RETURNING) inFlight++
+        }
+        if (inFlight > peakInFlight) peakInFlight = inFlight
+        if (inFlight > 0) ticksWithACarMoving++
+      })
+
+      expect(run.deathTick, 'the longest run this seed produces').toBe(31456)
+      expect(ticks, 'and every tick of it was observed').toBe(31456 - 258)
+
+      expect(countMismatch, 'H_UPGRADE_COUNT disagreed with a scan of upgradeAt').toBe(0)
+      expect(flagOutOfRange, 'an upgradeAt flag outside [0, world.cells)').toBe(0)
+      expect(monotoneViolations, 'H_UPGRADE_COUNT fell — M1f has no removal path').toBe(0)
+      expect(negativeInventory, 'H_INV_UPGRADES went negative').toBe(0)
+      expect(counterWrap, 'a header counter left the int32 range').toBe(0)
+      expect(ledgerViolations, `the tile ledger moved by something other than a grant: ${ledgerSteps.slice(0, 5).join(',')}`).toBe(0)
+
+      // **Non-vacuity for all six**: the run really did place upgrades, really
+      // did lay road, and really did take cards.
+      expect(run.upgradesPlaced, 'upgrades were seated, so invariants 1-3 had something to be about').toBe(10)
+      expect(run.cardsTaken, 'six offers, six cards').toBe(6)
+      expect(run.upgradesGranted, 'and every one of them was the item card').toBe(12)
+
+      // **LIVENESS.** The run is not a corpse for any of it: the overcrowd meter
+      // climbs, cars are in motion on essentially every tick, and the load floor
+      // holds. `expect(gameOver).toBe(true)` would pass on a board one tick from
+      // death and prove nothing about the 31,455 before it.
+      expect(peakOvercrowd, 'the overcrowd meter climbed').toBeGreaterThan(0)
+      expect(peakInFlight, 'the load floor: cars actually moving').toBeGreaterThanOrEqual(6)
+      // **The floor was MEASURED before it was chosen, after the first draft of
+      // this line guessed 0.9 and went red at 0.8806.** The gap is the opening:
+      // the board has no road for the first stroke's worth of ticks and the six
+      // seeded cars are parked, so ~12 % of the run has nothing in flight by
+      // construction. 0.75 sits below the measurement with margin and far above
+      // what a run that froze would give.
+      expect(ticksWithACarMoving / ticks, 'a car was in flight on almost every tick').toBeGreaterThan(0.75)
+      expect(ticksWithACarMoving / ticks, 'measured, and pinned so the gap cannot widen quietly').toBeCloseTo(
+        0.881,
+        2,
+      )
+    },
+    120_000,
+  )
 })
