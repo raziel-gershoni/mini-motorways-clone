@@ -775,12 +775,17 @@ export interface UpgradeArmRun {
   /** Everything demand ever fired — `cityArms.ts`'s `firesSoFar`, the denominator of the delivery fraction. */
   readonly fires: number
   /**
-   * `trips / fires`. **The number two shipped tripwires are written against**:
+   * `trips / fires`. **The number two shipped tripwires were written against**:
    * `startingCity.test.ts`'s GATE B and `integration.test.ts`'s per-week block
-   * both assert `< 0.9` on the arm with no upgrade, as an allowance for a known
-   * regression that must FAIL when the regression is fixed. They are green today
-   * because no production driver places an upgrade; this field is what says what
-   * the number becomes when one does.
+   * both asserted `< 0.9` on the arm with no upgrade, as an allowance for a
+   * known regression that must FAIL when the regression is fixed.
+   *
+   * **Both were DELETED at M1f Task 10, which landed the gesture** — not
+   * widened, and with 0.891 still pinned exactly at each site as the control's
+   * measured value. The restored `>= 0.9` gate is asserted on the two arms that
+   * exercise the object: this one (a seated `TickAction` at tick 13,500) and
+   * `integration.test.ts`'s production-pointer arm (two taps at tick 16,337).
+   * Both measure **0.973**.
    */
   readonly deliveryFraction: number
 }

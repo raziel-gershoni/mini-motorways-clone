@@ -1931,6 +1931,29 @@ describe('the survivability gate the default board is flipped behind', () => {
     // board has to come here and delete it rather than inheriting a gate that
     // silently stopped asking. The floor underneath it is what still catches a
     // FURTHER collapse in the meantime.
+    //
+    // -----------------------------------------------------------------------
+    // **M1f TASK 10 SHIPPED THE THING THAT PAYS THIS BACK, AND THIS LINE STAYS.
+    // THE TWO `< 0.9` DELIVERY ALLOWANCES BESIDE IT DID NOT, AND THE DIFFERENCE
+    // IS WORTH STATING SO THE INCONSISTENCY IS NOT MISTAKEN FOR AN OVERSIGHT.**
+    // -----------------------------------------------------------------------
+    //
+    // Task 10 landed §7.2's inventory chip, the placement gesture and the board
+    // marker, so the restoration is now something a PLAYER reaches. Measured on
+    // the production wiring, through two taps at 8:56 on the corner at (9, 22):
+    // this arm goes **368 -> 755 trips**, which is above `M1E_TRIPS_GATE`
+    // (`integration.test.ts`, *"makes the run measurably longer"*).
+    //
+    // **`gateRun('greedy')` places nothing and never will** — it is a
+    // step-driven no-gesture arm and it is the control every figure in this
+    // block is measured against. The two delivery allowances were deleted
+    // because each named Task 10 explicitly and each had a restored `>= 0.9`
+    // gate to move to, on an arm that exercises the object. This one has no such
+    // home in this file: restoring `>= 400` here would need a FOURTH `gateRun`
+    // arm that places an upgrade, which is a change to this file's gate
+    // structure rather than to a line. **Owner: whoever adds that arm.** Until
+    // then the allowance is honest — 368 really is below 400 on the board this
+    // arm drives.
     const M1E_TRIPS_GATE = 400
     expect(greedy.trips, 'completed trips — a further collapse below the M1f measurement').toBeGreaterThanOrEqual(300)
     expect(
@@ -2017,23 +2040,33 @@ describe('the survivability gate the default board is flipped behind', () => {
     // rather than absorbed — the allowance is one percentage point of relief
     // away from going red, and that is the polarity it was written for.
     //
-    // **THE RECIPIENT WAS WRONG AND IS CORRECTED HERE: it is TASK 10, not Task
-    // 9.** Task 9 landed the junction upgrade and this line stayed green,
-    // correctly — that task ships the MECHANISM and no observability, so nothing
-    // in `game/src` enqueues an `'upgrade'` action and this arm still drives an
-    // un-upgraded board. **Measured, so the next owner does not have to guess:**
-    // `junctionArms.test.ts`'s upgrade arm puts the same greedy run's fraction at
-    // **0.973** with ONE upgrade seated at tick 13,500 (pre-M1f was 0.975), so
-    // this line goes red the day a gesture places one. **Delete it then. Do not
-    // widen it** — an allowance authored to fire at a known moment, quietly
-    // relaxed instead, leaves a bound that permits everything.
-    const M1E_DELIVERY_GATE = 0.9
+    // -----------------------------------------------------------------------
+    // **THE `< 0.9` ALLOWANCE THAT STOOD HERE IS DELETED — M1f TASK 10, WHICH IT
+    // NAMED. IT WAS NOT WIDENED, AND 0.891 IS STILL PINNED EXACTLY.**
+    // -----------------------------------------------------------------------
+    //
+    // The deleted line read: *"M1f INTERIM: delivery is back at or above the M1e
+    // gate of 0.9 — DELETE THIS LINE and restore the >= 0.9 assertion. Owner:
+    // TASK 10 (Task 9 landed the mechanism, not the gesture)"*, asserting
+    // `< 0.9` against `M1E_DELIVERY_GATE`.
+    //
+    // **Task 9 was right to leave it standing and it is right to go now**, and
+    // the difference is the object rather than the number: that task shipped the
+    // mechanism with no observability, so nothing in `game/src` enqueued an
+    // `'upgrade'` and the restoration was still owed. Task 10 ships the chip,
+    // the gesture and the marker, and **two taps at 8:56 on the corner at
+    // (9, 22) take this same greedy run from 0.891 to 0.973**, against 0.975
+    // before the junction rule existed.
+    //
+    // **The restored `>= 0.9` gate is asserted on the arm that exercises the
+    // object, on two independent drivers**: `junctionArms.test.ts`'s upgrade arm
+    // (step-driven, seating a `TickAction`) and `integration.test.ts`'s *"the
+    // upgrade a player places relieves a jam they can see"* (the production
+    // pointer and the production loop, from a screen coordinate). `gateRun`
+    // here is step-driven and places nothing — it is the CONTROL, and 0.891 is
+    // kept as its measured value rather than as an allowance.
     expect(cumulative, 'a further collapse below the M1f measurement').toBeGreaterThanOrEqual(0.8)
-    expect(
-      cumulative,
-      'M1f INTERIM: delivery is back at or above the M1e gate of 0.9 — DELETE THIS LINE and restore ' +
-        'the >= 0.9 assertion. Owner: TASK 10 (Task 9 landed the mechanism, not the gesture)',
-    ).toBeLessThan(M1E_DELIVERY_GATE)
+    expect(cumulative, "Task 3's figure, on the arm that places nothing").toBeCloseTo(0.891, 3)
     expect(cumulative, 'and not completely — some demand is always in flight').toBeLessThan(1)
     // ...and it keeps up without ever dropping a pin, which is the other half
     // of "the player was not beaten by something they could not control". Both

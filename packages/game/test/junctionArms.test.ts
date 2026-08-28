@@ -736,26 +736,31 @@ describe('M1f Task 9: one upgrade per junction-eligible jam cell, against the sa
   )
 
   it(
-    'the two `< 0.9` delivery tripwires are green because nothing PLACES one, and here is what would turn them red',
+    'the delivery fraction the junction rule cost, restored by ONE upgrade — the step-driven half',
     () => {
       // **Task 3 left two allowances written to FAIL when the board is restored**
       // — `startingCity.test.ts`'s GATE B and `integration.test.ts`'s per-week
       // block, both `trips / fires < 0.9`, both saying in as many words that the
-      // milestone still owes a restoration. Task 9 lands the MECHANISM and
-      // deliberately no observability: nothing in `game/src` enqueues an
-      // `'upgrade'`, so both arms still measure 0.891 and both lines are green.
+      // milestone still owed a restoration. Task 9 landed the MECHANISM and
+      // deliberately no observability: nothing in `game/src` enqueued an
+      // `'upgrade'`, so both arms still measured 0.891, both lines were green,
+      // and neither was widened or deleted — a tripwire authored to fire at a
+      // known moment must be removed AT that moment and not before. What was
+      // wrong at both sites was the RECIPIENT, and that was corrected in place
+      // to name Task 10.
       //
-      // **Neither is widened and neither is deleted, and this case is why.** A
-      // tripwire authored to fire at a known moment must be removed AT that
-      // moment and not before; deleting it here would drop the only standing
-      // statement that the restoration is still owed, and widening it would be
-      // the inversion this project has caught before. What was wrong at both
-      // sites is the RECIPIENT — they name Task 9 — and that is corrected in
-      // place.
+      // **M1f Task 10 landed the chip, the gesture and the marker, and BOTH
+      // LINES ARE NOW DELETED** — not widened, and with 0.891 still pinned
+      // exactly at each site as the control's measured value. The restored
+      // `>= 0.9` gate lives on the arms that exercise the object: this one, and
+      // `integration.test.ts`'s *"restores the delivery fraction the junction
+      // rule cost"*, which reaches the same 0.973 through two taps on the
+      // production pointer instead of through a seated `TickAction`.
       //
-      // This case hands the eventual owner the number. It is not an assertion
-      // about those two files; it is the measurement they will be re-derived
-      // from.
+      // **Two instruments, one number**, which is the reason this case survives
+      // its own tripwires rather than being deleted with them: a rig that seats
+      // an action on tick 13,500 and a player who taps a chip at 8:56 produce
+      // the same 755 trips, the same 31,672-tick death and the same 0.973.
       const arm = runJunctionArm(SHIPPED_ARM)
       const hot = cellsCarryingAtLeast(arm.junctionRefusalsByCell, 5)
       const control = runUpgradeArm({ upgrades: [], seatTick: SEAT_TICK })
@@ -764,10 +769,12 @@ describe('M1f Task 9: one upgrade per junction-eligible jam cell, against the sa
 
       const best = runUpgradeArm({ upgrades: [hot[2]!], seatTick: SEAT_TICK })
       expect(best.deliveryFraction, 'one upgrade puts it back above the M1e gate').toBeGreaterThan(0.9)
+      expect(best.deliveryFraction, 'measured — and 0.975 is the pre-M1f figure').toBeCloseTo(0.973, 3)
+      expect(best.deliveryFraction, 'not all the way back, and that is the honest reading').toBeLessThan(0.975)
       console.log(
         `delivery fraction: control ${control.deliveryFraction.toFixed(3)} / ` +
           `one upgrade at ${cellName(hot[2]!, arm.w)} ${best.deliveryFraction.toFixed(3)} — ` +
-          'the two `< 0.9` tripwires go red the day a gesture places one',
+          'the two `< 0.9` tripwires were deleted at Task 10, not widened',
       )
     },
     UPGRADE_TIMEOUT_MS,

@@ -39,12 +39,19 @@ import {
   packRouteStep,
   assertOccupancyComplete,
   assertOccupancySound,
+  dirBetween,
   hashState,
+  isJunctionCell,
+  isUpgraded,
+  occupancySlot,
+  otherLane,
   roadMask,
   tilesLeft,
   weekOfTick,
+  FREE,
   H_FAILED_DEST,
   H_ROUTES_REFUSED,
+  H_UPGRADE_COUNT,
   type TickAction,
 } from '@laneways/sim'
 import {
@@ -57,7 +64,10 @@ import {
 } from '@laneways/shared'
 import {
   PALETTE,
+  UPGRADE_SIZE_FRACTION,
+  createHudRects,
   createOfferRects,
+  hudRects,
   offerRects,
   type AtlasContext,
   type AtlasSurface,
@@ -4370,6 +4380,54 @@ interface ArmRun {
    * table. Each arm below checks its own ledger against that identity.
    */
   readonly upgradesHeld: number
+  /**
+   * What the player's two taps did, when `driveArm` was given a placement —
+   * M1f Task 10. `null` on every arm that places nothing, which is all three of
+   * the arms above.
+   */
+  readonly placement: ArmPlacementReport | null
+}
+
+/**
+ * A junction upgrade placed **through the shipped gesture**: the player taps
+ * §7.2's inventory chip and then a junction, on the production wiring, at a
+ * named tick — M1f Task 10.
+ */
+interface ArmPlacement {
+  /** The tick the two taps happen on. The action is drained by that same tick. */
+  readonly tick: number
+  /** The board cell the second tap lands on. */
+  readonly cell: number
+}
+
+interface ArmPlacementReport {
+  /** `PointerOutcome` of the chip tap and of the board tap, in order. */
+  readonly outcomes: readonly [number, number]
+  /** Was the cell a junction when the player tapped it? */
+  readonly wasJunction: boolean
+  /** `H_INV_UPGRADES` immediately before the two taps, and after the tick. */
+  readonly heldBefore: number
+  readonly heldAfter: number
+  /** `H_UPGRADE_COUNT` after the tick. */
+  readonly placedCount: number
+  /** Did the flag land on the cell the player tapped? */
+  readonly flagSet: boolean
+  /** `tilesLeft` before the taps and after the tick — §5.6: an upgrade costs 0 tiles. */
+  readonly tilesBefore: number
+  readonly tilesAfter: number
+  /** Was a marker DRAWN at that cell on the frame after the placement? */
+  readonly markerDrawn: boolean
+  /** How many markers the same frame drew anywhere. */
+  readonly markersOnFrame: number
+  /**
+   * The first tick after the placement on which a car ENTERED the upgraded cell
+   * while the OTHER lane of that cell was occupied by a different car — the
+   * crossing spec §5.5's junction rule refuses and §5.6's upgrade gives back.
+   * -1 if it never happened.
+   */
+  readonly firstCrossTick: number
+  /** How many such crossings the rest of the run carried. */
+  readonly crossings: number
 }
 
 /** Twelve weeks, which is 54,000 ticks — long enough for every arm to end. */
@@ -4383,7 +4441,7 @@ const ARM_WEEKS = 12
  * parameters opens — not `city` named explicitly. `buildRig`'s own note
  * explains why `in` rather than `??` is what makes that expressible.
  */
-function driveArm(arm: CityArm): ArmRun {
+function driveArm(arm: CityArm, place: ArmPlacement | null = null): ArmRun {
   const rig = buildRig({ layoutId: undefined })
   const { state, world } = rig.game
   const startTick = state.header[H_TICK] as number
@@ -4399,6 +4457,23 @@ function driveArm(arm: CityArm): ArmRun {
   let maxBlockedTicks = 0
   let valveFirings = 0
   let openingSpend = 0
+
+  // **M1f Task 10's two taps, and the instrument that watches what they buy.**
+  //
+  // The crossing detector is deliberately NOT a second copy of `canEnter`: it
+  // reads `state.occupancy` — the region `claimCell`/`releaseCell` own — and the
+  // pre-tick `carCell` array, and asks the only question a person could see.
+  // A car ENTERED the cell this tick, it was not released by the 45 s valve
+  // (`carBlockedTicks` below `MAX_BLOCKED_TICKS` when it asked), and the cell's
+  // OTHER lane is held by a different car. Under §5.5's junction rule that is
+  // exactly the state `junctionAdmitsOne` refuses; §5.6's upgrade is the clause
+  // that stops refusing it.
+  let placement: ArmPlacementReport | null = null
+  let firstCrossTick = -1
+  let crossings = 0
+  const carSlots = state.carPhase.length
+  const preCell = new Int32Array(carSlots)
+  const preBlocked = new Int32Array(carSlots)
 
   // **Both censuses, two `prev` buffers and two tallies, one pass each per
   // tick.** They share nothing but the run, which is the point: the two counts
@@ -4505,7 +4580,82 @@ function driveArm(arm: CityArm): ArmRun {
     if (actions !== undefined) {
       for (const a of actions) rig.game.queue.enqueue(a.kind, a.a, a.b)
     }
+    if (place !== null && tick > place.tick) {
+      for (let c = 0; c < carSlots; c++) {
+        preCell[c] = state.carCell[c] as number
+        preBlocked[c] = state.carBlockedTicks[c] as number
+      }
+    }
+    // **THE TWO TAPS, on the production pointer, at a screen coordinate.** The
+    // chip first — which arms the mode and queues nothing — then the junction,
+    // which queues the `'upgrade'` the tick below drains.
+    let taps: readonly [number, number] | null = null
+    let heldBefore = 0
+    let tilesAtTap = 0
+    let wasJunction = false
+    if (place !== null && tick === place.tick) {
+      heldBefore = state.header[H_INV_UPGRADES] as number
+      tilesAtTap = tilesLeft(state)
+      wasJunction = isJunctionCell(state, place.cell)
+      const chip = hudRects(rig.game.shell.camera, createHudRects()).upgrades
+      const armed = rig.game.pointer.down(
+        1,
+        CANVAS_LEFT + chip.x + chip.w / 2,
+        CANVAS_TOP + chip.y + chip.h / 2,
+      )
+      const placed = rig.game.pointer.down(
+        2,
+        rig.cx(place.cell % world.w),
+        rig.cy(Math.floor(place.cell / world.w)),
+      )
+      taps = [armed, placed]
+    }
     oneTick()
+    if (taps !== null && place !== null) {
+      // **The frame the player is actually looking at.** `rig.oneTick` clears the
+      // recorder before each frame and the driver draws AFTER it drains, so this
+      // log is exactly one frame's worth of drawing, taken on the first frame
+      // whose state carries the placement. No extra frame is run: one would
+      // desynchronise this loop's own per-tick accounting.
+      const tile = rig.game.shell.camera.tileSize
+      const size = tile * UPGRADE_SIZE_FRACTION
+      const markers = rig.ctx.log.filter(
+        (c): c is FillCommand => c.op === 'fill' && c.style === PALETTE.upgrade && c.w === size,
+      )
+      const mx = rig.cx(place.cell % world.w) - CANVAS_LEFT - tile / 2
+      const my = rig.cy(Math.floor(place.cell / world.w)) - CANVAS_TOP - tile / 2
+      placement = {
+        outcomes: taps,
+        wasJunction,
+        heldBefore,
+        heldAfter: state.header[H_INV_UPGRADES] as number,
+        placedCount: state.header[H_UPGRADE_COUNT] as number,
+        flagSet: isUpgraded(state, place.cell),
+        tilesBefore: tilesAtTap,
+        tilesAfter: tilesLeft(state),
+        markersOnFrame: markers.length,
+        markerDrawn: markers.some(
+          (c) => Math.abs(c.x - (mx + size)) < 1e-9 && Math.abs(c.y - (my + size)) < 1e-9,
+        ),
+        firstCrossTick: -1,
+        crossings: 0,
+      }
+    }
+    if (place !== null && tick > place.tick) {
+      for (let c = 0; c < carSlots; c++) {
+        if ((state.carCell[c] as number) !== place.cell) continue
+        if ((preCell[c] as number) === place.cell) continue
+        if ((preBlocked[c] as number) >= MAX_BLOCKED_TICKS) continue
+        const dir = dirBetween(preCell[c] as number, place.cell, world.w, world.h)
+        if (dir < 0) continue
+        const other = state.occupancy[
+          occupancySlot(place.cell, otherLane(LANE_OF_DIR[dir] as number))
+        ] as number
+        if (other === FREE || other === c) continue
+        crossings++
+        if (firstCrossTick < 0) firstCrossTick = tick
+      }
+    }
     if ((state.header[H_TICK] as number) !== tick) {
       throw new Error(`driveArm: expected tick ${tick}, state says ${state.header[H_TICK]}`)
     }
@@ -4588,6 +4738,8 @@ function driveArm(arm: CityArm): ArmRun {
     ruleEventCells: censusCellTable(ruleTally),
     cardsTaken: rig.cardsTaken,
     upgradesHeld: state.header[H_INV_UPGRADES] as number,
+    placement:
+      placement === null ? null : { ...placement, firstCrossTick, crossings },
   }
 }
 
@@ -4640,6 +4792,41 @@ function armRun(arm: CityArm): ArmRun {
   if (cached !== undefined) return cached
   const run = driveArm(arm)
   armRuns.set(arm, run)
+  return run
+}
+
+/**
+ * **The corner, and the minute — M1f Task 10, and both are measurements rather
+ * than choices.**
+ *
+ * `(9, 22)` = cell 537 is the corner. It is one of the six cells that ever reach
+ * degree 3 on this arm, it is **third** by junction-caused refusals (1,418, 21.7
+ * %), and it is the one worth taking: seated at any legal tick up to 8:56 it
+ * takes the run from 368 trips to **755**. The cell that carries **39.5 %** of
+ * the same refusals — `(12, 19)` = 468, the one that looks worst — buys **394**,
+ * `+7.1 %`. **The refusal ranking inverts the payoff**, which is M1f Task 9's
+ * headline finding and the reason criterion B is written around WHICH corner
+ * rather than around whether an upgrade helps.
+ *
+ * **Tick 16,337 is 8:56.0**, the first tick on which three cars are stopped at
+ * once anywhere on this board — the plan's own "first tick a person can SEE a
+ * difference", and therefore the first moment a player could act on what the
+ * board is showing them. Measured on this seed: seating at 16,337 still buys the
+ * whole 755, seating at 16,500 buys 744, at 17,000 buys 639, at 17,500 buys 542,
+ * and at 18,000 — the next card — buys **368**, the control to the trip. So the
+ * window is open for the whole of the visible jam and closes before the next
+ * boundary.
+ */
+const B_CELL = 537
+const B_TICK = 16337
+
+const upgradedArms = new Map<string, ArmRun>()
+function upgradedArm(cell: number = B_CELL, tick: number = B_TICK): ArmRun {
+  const key = `${cell}@${tick}`
+  const cached = upgradedArms.get(key)
+  if (cached !== undefined) return cached
+  const run = driveArm('greedy', { cell, tick })
+  upgradedArms.set(key, run)
   return run
 }
 
@@ -4980,22 +5167,44 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     // it red. That is the correct polarity — it is an allowance for a known
     // regression and it must fail when the regression is fixed.
     //
-    // **THE RECIPIENT WAS WRONG AND IS CORRECTED HERE: it is TASK 10, not Task
-    // 9.** Task 9 landed the upgrade and this line stayed green, correctly: that
-    // task ships the mechanism and no observability, so no production driver
-    // enqueues an `'upgrade'` and this arm still drives an un-upgraded board.
-    // **Measured:** one upgrade seated at tick 13,500 takes this same run's
-    // fraction to **0.973** (`junctionArms.test.ts`), against 0.975 pre-M1f — so
-    // the line goes red the day a gesture places one. **Delete it then, do not
-    // widen it.**
-    expect(r.trips / r.fires, 'the delivery fraction still falls').toBeCloseTo(0.891, 3)
-    expect(
-      r.trips / r.fires,
-      'M1f INTERIM — pre-M1f this was >= 0.9; TASK 10 restores it (Task 9 landed the mechanism, ' +
-        'not the gesture). DELETE this line then; do not widen it',
-    ).toBeLessThan(0.9)
+    // ---------------------------------------------------------------------
+    // **THE `< 0.9` ALLOWANCE THAT STOOD HERE IS DELETED — M1f TASK 10, WHICH
+    // IT NAMED. IT WAS NOT WIDENED, AND 0.891 IS STILL PINNED EXACTLY.**
+    // ---------------------------------------------------------------------
+    //
+    // The deleted line read: *"M1f INTERIM — pre-M1f this was >= 0.9; TASK 10
+    // restores it (Task 9 landed the mechanism, not the gesture). DELETE this
+    // line then; do not widen it"*, asserting `< 0.9`.
+    //
+    // **Task 9 was right to leave it standing and it is right to go now, and
+    // the difference is the object rather than the number.** Task 9 shipped the
+    // mechanism and no observability, so nothing in `game/src` enqueued an
+    // `'upgrade'` and the restoration was still owed; deleting it then would
+    // have dropped the only standing statement of that debt. Task 10 ships the
+    // gesture, and the debt is paid by something a player does: **two taps at
+    // 8:56 on the corner at (9, 22) take this same arm from 0.891 to 0.973**,
+    // against 0.975 before the junction rule existed.
+    //
+    // **The restored `>= 0.9` gate is asserted on the arm that exercises the
+    // object, in two places and on two drivers** — *"restores the delivery
+    // fraction the junction rule cost"* in this file (the production pointer,
+    // the production loop) and `junctionArms.test.ts`'s upgrade arm (a
+    // step-driven rig seating an action). This arm places nothing and never
+    // will: it is the CONTROL, and its 0.891 is kept below as a measured fact
+    // rather than as an allowance.
+    expect(r.trips / r.fires, 'the delivery fraction still falls WITHOUT an upgrade').toBeCloseTo(
+      0.891,
+      3,
+    )
     expect(r.trips / r.fires, 'but it has not collapsed').toBeGreaterThan(0.8)
     expect(r.trips / r.fires).toBeLessThan(1)
+    // The control is BELOW the M1e gate, stated positively rather than as an
+    // allowance: this arm places nothing, so 0.891 is what it measures and what
+    // it is for. The PAIR — this control against the arm that places one — is
+    // asserted in *"restores the delivery fraction the junction rule cost"*,
+    // in that block rather than here, so this case keeps its own `beforeAll`
+    // and stays inside the 5 s default.
+    expect(r.trips / r.fires, 'the control, below the gate it is the control for').toBeLessThan(0.9)
 
     // Task 10's per-week series, reproduced by the other driver, exactly.
     // **Weeks 0 to 2 are BYTE-IDENTICAL to pre-M1f and weeks 3 and 4 are not**,
@@ -5248,5 +5457,193 @@ describe('the run can be lost end to end, on the board a plain load opens', () =
     // buys three and a half minutes, keeping up buys fourteen more.
     expect(none.deathTick).toBeLessThan(opening.deathTick)
     expect(opening.deathTick).toBeLessThan(greedy.deathTick)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// §5.6's junction upgrade, from a screen coordinate to a jam that clears —
+// M1f Task 10, and the milestone's acceptance criterion B
+// ---------------------------------------------------------------------------
+
+describe('the upgrade a player places relieves a jam they can see', () => {
+  /**
+   * **One drive per case would be four drives; the hook pays for them once**,
+   * exactly as the arm block above does and for its reasons. The control is the
+   * greedy arm itself — the SAME driver, the same board, the same inputs, and
+   * the only difference is two taps — which is what makes the comparison a
+   * measurement rather than two experiments.
+   */
+  beforeAll(() => {
+    armRun('greedy')
+    upgradedArm()
+    upgradedArm(468, B_TICK)
+  }, 120000)
+
+  it('goes from a SCREEN COORDINATE to a sim region and back to a pixel', () => {
+    // ---------------------------------------------------------------------
+    // **THE MILESTONE'S ACCEPTANCE CRITERION B, DRIVEN END TO END.**
+    // ---------------------------------------------------------------------
+    //
+    // Task 8's card case is the first test in the repo that runs a player
+    // decision from a screen coordinate to a header slot. This is the first that
+    // goes from a screen coordinate to a **per-cell sim region** and back out to
+    // a **drawn pixel**, and it is the one that would catch a rect/draw/hit-test
+    // mismatch all three packages' own tests miss: `render` only ever asserts it
+    // DREW at `hudRects().upgrades`, `game` only ever asserts it HIT-TESTS
+    // `hudRects().upgrades`, and only a rig with a real camera, a real pointer
+    // and a real sim can say the two are the same rectangle on the same screen.
+    const r = upgradedArm()
+    const p = r.placement as ArmPlacementReport
+
+    // The two taps, on the production pointer.
+    expect(p.outcomes[0], 'the chip armed the mode').toBe(PointerOutcome.UPGRADE_ARMED)
+    expect(p.outcomes[1], 'and the board tap placed one').toBe(PointerOutcome.UPGRADE_PLACED)
+
+    // **The placement is asserted directly rather than inferred from a later
+    // effect**, which is the trap the brief names: the board's first junction is
+    // born at tick 4,530, thirty ticks AFTER the week-1 boundary, so a test that
+    // taps at 4,500 taps bare ground and gets `not-a-junction` with every
+    // downstream assertion still passing for the wrong reason.
+    expect(p.wasJunction, 'the cell was a junction when it was tapped').toBe(true)
+    expect(p.flagSet, "sim's upgradeAt carries the flag at that cell").toBe(true)
+    expect(p.placedCount, 'H_UPGRADE_COUNT').toBe(1)
+
+    // The inventory spent one, and only one. `heldBefore` is 6 because three of
+    // the four boundaries before 8:56 drew the JUNCTION UPGRADE into slot A.
+    expect(p.heldBefore).toBe(6)
+    expect(p.heldAfter, 'exactly one item left the inventory').toBe(p.heldBefore - 1)
+
+    // **§5.6: "cost 0 tiles."** The tile counter is the number the player is
+    // watching after a card, and an upgrade must not move it.
+    expect(p.tilesAfter, 'an upgrade costs no tiles').toBe(p.tilesBefore)
+
+    // ...and back to a pixel: the frame the player sees on the very next draw
+    // carries exactly one marker, at exactly that cell.
+    expect(p.markerDrawn, 'no marker was drawn at the cell that was tapped').toBe(true)
+    expect(p.markersOnFrame, 'one upgrade placed, one marker drawn').toBe(1)
+  })
+
+  it('and a car crosses that corner again, with another car already in it', () => {
+    // **The behaviour rather than the flag, and the only thing that proves the
+    // loop reached the movement path.** A car entered the upgraded cell on a
+    // tick when the other lane of that cell was held by a different car, and it
+    // was not the 45 s valve that let it in. Spec §5.5's junction rule refuses
+    // exactly that; §5.6's upgrade is the one clause that stops refusing it.
+    const r = upgradedArm()
+    const p = r.placement as ArmPlacementReport
+    expect(p.firstCrossTick, 'no car ever crossed the upgraded corner').toBeGreaterThan(0)
+    expect(p.crossings).toBe(81)
+
+    // **The brief asked for this within 300 ticks of the placement and it cannot
+    // be, on any cell and at any seat tick.** The first crossing is at tick
+    // **16,704**, 367 ticks (12.2 s) after the taps — and the earliest crossing
+    // this board can produce ANYWHERE is tick 15,001, which is the same
+    // `firstConflictTick` the arm block above already pins from a completely
+    // different instrument. Traffic at these corners is sparse: two cars are
+    // simultaneously present at a junction cell 232 times in a 21,783-tick run.
+    expect(p.firstCrossTick).toBe(16704)
+    expect(p.firstCrossTick - B_TICK, 'ticks after the taps').toBe(367)
+    expect(armRun('greedy').firstConflictTick, 'the earliest this board can do it at all').toBe(15001)
+  })
+
+  it('makes the run measurably longer — 368 trips to 755, on the same driver', () => {
+    // **Criterion B's second half, and the control is the arm itself.** Same
+    // board, same opening, same greedy connector on the same 30-tick cadence,
+    // same card policy — and two taps.
+    const control = armRun('greedy')
+    const placed = upgradedArm()
+    expect(control.trips).toBe(368)
+    expect(placed.trips).toBe(755)
+    expect(placed.trips / control.trips, 'the ratio Task 12 quotes as BEST_MARGIN').toBeCloseTo(
+      2.05,
+      2,
+    )
+    expect(control.deathTick).toBe(21783)
+    expect(placed.deathTick, 'the city lives 9,889 ticks — 5:29.6 — longer').toBe(31672)
+    expect(placed.weeks.length, 'and reaches week 7 instead of week 4').toBe(8)
+  })
+
+  it('the corner that LOOKS worst is not the corner to fix', () => {
+    // **M1f Task 9's headline, reproduced through the shipped gesture rather
+    // than through a rig that seats an action.** `(12,19)` carries 39.5 % of the
+    // junction-caused refusals on this run and is the top of every ranking in
+    // this repo; `(9,22)` carries 21.7 %. The payoff INVERTS the ranking.
+    const control = armRun('greedy')
+    const best = upgradedArm(537, B_TICK) // (9, 22) — THIRD by refusals
+    const worst = upgradedArm(468, B_TICK) // (12,19) — FIRST by refusals
+    expect(best.trips).toBe(755)
+    expect(worst.trips).toBe(394)
+
+    // **The middle row is deliberately not driven here.** `(8, 21)` = 512 is
+    // second by refusals and buys 679, and `junctionArms.test.ts`'s per-cell
+    // table already pins all three on a step-driven rig. What this file adds is
+    // that the GESTURE reaches the same numbers, and the two extreme rows carry
+    // that; a third production arm costs 3.4 s of suite time for a row that is
+    // already asserted twice.
+    //
+    // Both are legal placements made by the same two taps, so the spread is
+    // about WHERE and not about whether the gesture worked.
+    for (const arm of [best, worst]) {
+      expect((arm.placement as ArmPlacementReport).flagSet).toBe(true)
+      expect((arm.placement as ArmPlacementReport).outcomes[1]).toBe(PointerOutcome.UPGRADE_PLACED)
+      // **Neither is worse than the control** — Task 12's third threshold, 0 of
+      // 3 on the step-driven rig and 0 of 2 here.
+      expect(arm.trips).toBeGreaterThanOrEqual(control.trips)
+    }
+    // `SPREAD_MARGIN`, the number that says the placement is a decision:
+    // (755 - 394) / 394 = 0.916, handed to Task 12 with a floor of 0.50.
+    expect((best.trips - worst.trips) / worst.trips).toBeCloseTo(0.916, 3)
+    // And the ranking that a UI must NOT hint by: the top-ranked corner buys
+    // 7.1 %, the third-ranked one 105.2 %.
+    expect((worst.trips - control.trips) / control.trips).toBeCloseTo(0.071, 3)
+    expect((best.trips - control.trips) / control.trips).toBeCloseTo(1.052, 3)
+  })
+
+  it('restores the delivery fraction the junction rule cost — 0.891 to 0.973', () => {
+    // ---------------------------------------------------------------------
+    // **THE TWO `< 0.9` TRIPWIRES' CONDITION, MET. See `startingCity.test.ts`'s
+    // GATE B and the per-week block above for the other halves.**
+    // ---------------------------------------------------------------------
+    //
+    // M1f Task 2 took this arm's `trips / fires` from **0.975** to 0.837 and
+    // Task 3's narrower rule to **0.891**, and both allowances were written to
+    // FAIL when the board was restored — an allowance for a known regression
+    // must fail when the regression is fixed. Task 9 landed the mechanism and
+    // both lines stayed green, correctly: nothing in `game/src` enqueued an
+    // `'upgrade'`, so the arm still drove an un-upgraded board.
+    //
+    // **This is the gesture, and this is the restoration.** One upgrade, placed
+    // by two taps at 8:56, on the same arm: 0.891 -> **0.973**, against 0.975
+    // before the junction rule existed. The `< 0.9` lines are deleted rather
+    // than widened, and the `>= 0.9` gate they were an allowance against is
+    // restored here — on the arm that exercises the object, with the
+    // un-upgraded arm's 0.891 kept beside it as the control it is.
+    const control = armRun('greedy')
+    const placed = upgradedArm()
+    expect(control.trips / control.fires, 'the control still measures what it measured').toBeCloseTo(
+      0.891,
+      3,
+    )
+    expect(placed.trips / placed.fires, 'the M1e gate of 0.9, restored').toBeGreaterThanOrEqual(0.9)
+    expect(placed.trips / placed.fires, 'measured').toBeCloseTo(0.973, 3)
+    // Not all the way back, and saying so is the honest reading: one upgrade at
+    // one corner recovers most of the junction rule's cost, not all of it.
+    expect(placed.trips / placed.fires).toBeLessThan(0.975)
+  })
+
+  it('is not vacuous: the two arms are two runs, and the taps are what separates them', () => {
+    const control = armRun('greedy')
+    const placed = upgradedArm()
+    expect(control.placement, 'the control places nothing').toBeNull()
+    expect(placed.placement).not.toBeNull()
+    // Every headline figure differs, so this cannot be one drive reported twice.
+    expect(new Set([control.trips, placed.trips]).size).toBe(2)
+    expect(new Set([control.deathTick, placed.deathTick]).size).toBe(2)
+    expect(new Set([control.fires, placed.fires]).size).toBe(2)
+    // And the inputs are otherwise identical: both take four cards before 8:56
+    // and neither is ever refused a connection for money.
+    expect(control.unaffordable).toBe(0)
+    expect(placed.unaffordable).toBe(0)
+    expect(control.cardsTaken).toBe(4)
   })
 })
