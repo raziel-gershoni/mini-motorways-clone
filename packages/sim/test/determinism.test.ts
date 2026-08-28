@@ -39,6 +39,7 @@ import { hashBytes } from '../src/hash'
 import { drawOfferPair, offerSeedFor, poolFor, popCountCards } from '../src/cards'
 import { m1eInsertedRanges, spliceM1eInsertions } from './m1eSplice'
 import { assertM1fShapeIsLayoutPlusOffer, spliceM1fInsertions } from './m1fSplice'
+import { GOLDEN_MAP } from './mapFixtures'
 
 /**
  * The determinism boundary is the sim *plus everything it depends on*. Spec §4
@@ -752,9 +753,9 @@ describe('the seed word is read, never consumed', () => {
 describe('golden replay', () => {
   const NO_INPUT: TickInputs = { actions: [] }
 
-  // A small map defined here, not `firstCity()` — that fixture is level-design
-  // data that will keep changing through this milestone, and every edit to it
-  // would otherwise churn this golden for no reason connected to sim
+  // A small map defined in `./mapFixtures`, not `firstCity()` — that fixture is
+  // level-design data that will keep changing through this milestone, and every
+  // edit to it would otherwise churn this golden for no reason connected to sim
   // correctness. `firstCity()`'s own content hash is pinned separately, in
   // `world.test.ts`, which is the assertion that SHOULD fire when it changes.
   //
@@ -765,7 +766,13 @@ describe('golden replay', () => {
   // ever placed on it, so `pinAccum`/`rotationCursor` never advance and no
   // car ever exists — that is what makes M1c's Task 1 the only task that
   // re-blesses this golden, per the plan's "Why one re-bless is now true".
-  const GOLDEN_MAP = parseMap('golden-fixture-v1', ['....', '.~^.', '.T..', '....'], 12, 8, 4, 2)
+  //
+  // **It moved OUT of this describe in M1f Task 11 and nowhere else**: the
+  // arguments are unchanged, and the digest below is the proof — `mapIdHash`
+  // folds every one of them into the buffer this test hashes. It moved because
+  // `cards.test.ts` has to name this exact board in its pool-non-emptiness
+  // guard, this being the fixture whose pool the first capability design
+  // collapsed to one card.
   const GOLDEN_WORLD = createWorld(GOLDEN_MAP)
 
   it('reproduces a known hash', () => {

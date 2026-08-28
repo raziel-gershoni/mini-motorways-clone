@@ -80,6 +80,7 @@ import {
   spliceM1fInsertions,
 } from './m1fSplice'
 import { junctionRace, ORTHO_THRESHOLD } from './junctionRigs'
+import { DEMAND_PIN_MAP } from './mapFixtures'
 import { roadDegree } from '../src/graph'
 
 /**
@@ -306,8 +307,7 @@ interface Rig {
   readonly fields: FlowField[]
 }
 
-function makeRig(id: string, rows: readonly string[], tiles: number, groupCount = 5): Rig {
-  const map = parseMap(id, rows as string[], tiles, 40, 16, groupCount)
+function makeRigFromMap(map: MapData): Rig {
   const world = createWorld(map)
   return {
     state: createState('loop', map),
@@ -316,6 +316,10 @@ function makeRig(id: string, rows: readonly string[], tiles: number, groupCount 
     scratch: createScratch(world.cells, map.groupCount, map.maxDestinations, createFieldInputRanges(map)),
     fields: createFlowFields(map.groupCount, world.cells),
   }
+}
+
+function makeRig(id: string, rows: readonly string[], tiles: number, groupCount = 5): Rig {
+  return makeRigFromMap(parseMap(id, rows as string[], tiles, 40, 16, groupCount))
 }
 
 /**
@@ -2518,7 +2522,21 @@ const DG_EXPECTED_FIRE_TICKS: readonly number[] = [
 ]
 
 function buildDemandGoldenRig(): Rig {
-  const r = makeRig('demand-golden', allLandRows(DG_W, DG_H), STARTING_TILES)
+  // **The map comes from `./mapFixtures` rather than from `makeRig`'s inline
+  // `parseMap`, and there is still exactly one definition of it.** M1f Task 11's
+  // pool-non-emptiness guard has to name this board — it is one of only two
+  // golden fixtures driven past a week boundary — and a fixture built inside a
+  // `.test.ts` cannot be imported without vitest re-collecting that file's whole
+  // suite (measured: an importing file reports the exporting file's tests as its
+  // own). `DEMAND_PIN_MAP` is `parseMap('demand-golden', allLandRows(20, 9), 999,
+  // 40, 16, 5)` — byte-for-byte what this call site used to build — and the two
+  // digests below are the watcher: `mapIdHash` folds every argument into the
+  // buffer they hash.
+  const r = makeRigFromMap(DEMAND_PIN_MAP)
+  expect([DEMAND_PIN_MAP.w, DEMAND_PIN_MAP.h], 'the shared fixture is still this board').toEqual([
+    DG_W,
+    DG_H,
+  ])
   expect(placeDestination(r.state, r.world, DG_DEST_ORIGIN, ORIENTATION_S, 0, DEST_KIND_SQUARE)).toBe(true)
   expect(placeHouse(r.state, r.world, DG_HOUSE, 0)).toBe(true)
   expect(r.state.header[H_DEST_COUNT]).toBe(1)
