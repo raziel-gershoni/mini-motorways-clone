@@ -703,18 +703,33 @@ describe('the frame loop on the demo board allocates nothing, measured', () => {
     // after every bound that fires for one KIND of edit.** Three specific
     // guards, then the catch-all.
     //
-    // Measured to discriminate — **every row re-run at M1f Task 3 against the
-    // new knobs rather than scaled from the old ones** — five edits and five
-    // different first reds, in the order the guards sit in:
-    //   WINDOW_COUNT 3 -> 4      -> 'past its death tick'      (the ceiling)
-    //   WARMUP_FRAMES  -> 900    -> 'at least 10 % short'      (criterion 1)
-    //   PROFILED_FRAMES -> 2000  -> 'shrunk below the length'  (the floor)
-    //   WARMUP_FRAMES  -> 400    -> 'starts on a cold engine'  (the warm-up floor)
-    //   PROFILED_FRAMES -> 3100  -> 'the measured frame count' (the pin)
-    // The three that leave the rig ALIVE also turn the dynamic end-tick pin in
-    // the profiling test above red, which is a different test and is the point
-    // of having both: the static bounds say WHICH knob is wrong, the dynamic
-    // one says the rig no longer ends where its budgets were measured.
+    // Measured to discriminate — **every row re-run against the knobs as they
+    // stand, never scaled from an older row** — seven edits, in the order the
+    // guards sit in:
+    //   WINDOW_COUNT 3 -> 4       -> 'past its death tick'      (the ceiling)
+    //   WARMUP_FRAMES   -> 900    -> 'at least 10 % short'      (criterion 1)
+    //   PROFILED_FRAMES -> 2000   -> 'shrunk below the length'  (the window floor)
+    //   WARMUP_FRAMES   -> 400    -> 'starts on a cold engine'  (the warm-up floor)
+    //   PROFILED_FRAMES -> 3100   -> 'at least 10 % short'      (criterion 1)
+    //   PROFILED_FRAMES -> 3010   -> 'the measured frame count' (the catch-all pin)
+    //   DEMO_DEATH_TICK -> 6,600  -> 'at least 10 % short'      (criterion 1)
+    //
+    // **The 3100 row changed when criterion 1 was restated in ticks, and that
+    // is the ordering working rather than a lost detector.** Under the old
+    // frame form it reached the catch-all pin; the tick form is 2.3 points
+    // tighter, so it now fires first — which is what a specific bound is FOR.
+    // The pin is not dead and the 3010 row proves it: that edit clears every
+    // bound above and is caught by the catch-all alone.
+    //
+    // **The 6,600 row is the regression test for the frame/tick confusion
+    // itself, and it was run under the defect rather than argued.** With the
+    // frame form restored AND `DEMO_DEATH_TICK` set to 6,600 this test PASSES,
+    // while the criterion it is named for reads 9.73 %. The tick form fails it.
+    //
+    // Every row except 2000 and 6,600 also turns the dynamic end-tick pin in the
+    // profiling test above red, which is a different test and is the point of
+    // having both: the static bounds say WHICH knob is wrong, the dynamic one
+    // says the rig no longer ends where its budgets were measured.
     expect(
       framesDriven,
       'these knobs now drive the demo rig past its death tick — see DEMO_DEATH_TICK',
